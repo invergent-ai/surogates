@@ -53,6 +53,9 @@ class _Slot:
     snapshot_cache: dict[str, dict[str, Any]]
 
 
+# How often a reused browser's last use is written to the shared registry.
+_TOUCH_EVERY_SECONDS = 60.0
+
 # A session idle this long has its typed secrets dropped even if its browser
 # was never destroyed here (it timed out on its own, or the session moved on).
 _TYPED_SECRET_TTL = 3600.0
@@ -121,6 +124,7 @@ class BrowserPool:
         self.browser_profile_store = browser_profile_store
         self.typed_secrets = TypedSecrets()
         self._profile_notes: dict[str, str] = {}
+        self._touched: dict[str, float] = {}
         self._mapping: dict[str, _Slot] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._global_lock = asyncio.Lock()
@@ -166,6 +170,8 @@ class BrowserPool:
                     # "no browser" for the rest of the session.
                     if not registered and await self._registry.get(session_id) is None:
                         await self._publish(session_id, org_id, user_id, slot)
+                    else:
+                        await self._touch(session_id)
                     return EnsureResult(
                         browser_id=slot.browser_id,
                         endpoint=slot.endpoint,
@@ -262,6 +268,7 @@ class BrowserPool:
         return self._profile_notes.pop(session_id, None)
 
     async def _publish(self, session_id: str, org_id: str, user_id: str, slot: _Slot) -> None:
+        now = datetime.now(timezone.utc)
         await self._registry.set(
             BrowserEntry(
                 session_id=session_id,
@@ -270,10 +277,23 @@ class BrowserPool:
                 rest_url=slot.endpoint.rest_url,
                 cdp_url=slot.endpoint.cdp_url,
                 live_view_url=slot.endpoint.live_view_url,
-                provisioned_at=datetime.now(timezone.utc),
+                provisioned_at=now,
                 browser_id=slot.browser_id,
+                last_used_at=now,
             )
         )
+        self._touched[session_id] = time.monotonic()
+
+    async def _touch(self, session_id: str) -> None:
+        """Record a use in the shared registry, at most once a minute per session."""
+        now = time.monotonic()
+        if now - self._touched.get(session_id, 0.0) < _TOUCH_EVERY_SECONDS:
+            return
+        self._touched[session_id] = now
+        entry = await self._registry.get(session_id)
+        if entry is not None:
+            entry.last_used_at = datetime.now(timezone.utc)
+            await self._registry.set(entry)
 
     async def destroy_for_session(self, session_id: str) -> None:
         lock = await self._session_lock(session_id)
@@ -293,6 +313,10 @@ class BrowserPool:
                 )
                 if callable(destroy_for_session):
                     await destroy_for_session(session_id)
+                elif registry_entry is not None and registry_entry.browser_id:
+                    # A backend that tears down only by its own handle
+                    # (fleet): the entry another worker wrote carries it.
+                    await self._backend.destroy(registry_entry.browser_id)
                 await self._registry.delete(session_id)
                 if registry_entry is not None:
                     await self._emit_event(
@@ -311,6 +335,7 @@ class BrowserPool:
 
         async with self._global_lock:
             self._locks.pop(session_id, None)
+            self._touched.pop(session_id, None)
 
     async def destroy_all(self) -> None:
         async with self._global_lock:

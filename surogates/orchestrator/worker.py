@@ -2406,6 +2406,7 @@ async def run_worker(settings: Settings) -> None:
             registry=browser_registry,
             redis=redis_client,
             emit=_emit_browser_event,
+            close=browser_pool.destroy_for_session,
         ),
         name="browser-registry-reaper",
     )

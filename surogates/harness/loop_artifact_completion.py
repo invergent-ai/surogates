@@ -37,6 +37,7 @@ from surogates.harness.loop_messages import (
 )
 from surogates.harness.message_utils import extract_final_response
 from surogates.session.events import EventType
+from surogates.session.execution_context import is_unattended
 from surogates.session.files import HARNESS_WITHIN_S, gave_up_level, session_files
 from surogates.devices.workspace import WALK_MARGIN_NS
 from surogates.tools.builtin.case_item import report_item_failed, report_item_no_outcome
@@ -969,6 +970,20 @@ class ArtifactCompletionMixin:
                 out.append(TurnArtifact(kind="file", label=rel, ref=rel))
         return out, entries_by_path
 
+    async def _release_unattended_browser(self, session: Any) -> None:
+        """Close the browser of a routine's run or a helper whose turn ended.
+
+        Nobody comes back to it: left alone it held a pod (and its saved
+        login) until its deadline.  A chat keeps its browser between turns.
+        """
+        pool = getattr(self, "_browser_pool", None)
+        if pool is None or not is_unattended(session):
+            return
+        try:
+            await pool.destroy_for_session(str(session.id))
+        except Exception:
+            logger.warning("Failed to close the browser of ended session %s", session.id, exc_info=True)
+
     async def _settle_commerce_reservation(
         self,
         session: Session,
@@ -1376,6 +1391,7 @@ class ArtifactCompletionMixin:
                 session.id,
                 exc_info=True,
             )
+        await self._release_unattended_browser(session)
 
         # Notify parent session if this is a worker (child) session.
         # Scheduled loop runs use parent_id for traceability in the session
@@ -1728,6 +1744,7 @@ class ArtifactCompletionMixin:
                 "Failed to update session status to failed for %s",
                 session.id, exc_info=True,
             )
+        await self._release_unattended_browser(session)
 
         if _should_notify_parent_on_completion(session):
             from surogates.harness.worker_notify import notify_parent_on_failure

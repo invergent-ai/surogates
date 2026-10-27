@@ -368,3 +368,45 @@ class TestEvents:
         assert destroy_event[1]["browser_id"] == "b1"
         # The new provisioned event carries the fresh browser_id.
         assert events[-1][1]["browser_id"] == "b2"
+
+
+class _HandleOnlyBackend(FakeBackend):
+    """A backend that tears down only by its own handle, as the fleet does."""
+
+    destroy_for_session = None  # type: ignore[assignment]
+
+
+async def test_a_browser_another_worker_started_is_closed_by_its_handle() -> None:
+    backend = _HandleOnlyBackend()
+    registry = FakeRegistry()
+    registry.entries["sess-1"] = BrowserEntry(
+        session_id="sess-1", org_id="o", user_id="u", rest_url="http://x:1",
+        cdp_url="ws://x:2", live_view_url="ws://x:3",
+        provisioned_at=datetime.now(timezone.utc), browser_id="pod-7",
+    )
+    pool = BrowserPool(backend=backend, registry=registry)  # type: ignore[arg-type]
+
+    await pool.destroy_for_session("sess-1")
+
+    assert backend.destroys == ["pod-7"]
+    assert "sess-1" not in registry.entries
+
+
+async def test_a_reused_browser_records_its_use_at_most_once_a_minute(monkeypatch) -> None:
+    import surogates.browser.pool as pool_module
+
+    clock = [1000.0]
+    monkeypatch.setattr(pool_module.time, "monotonic", lambda: clock[0])
+    registry = FakeRegistry()
+    pool = BrowserPool(backend=FakeBackend(), registry=registry)  # type: ignore[arg-type]
+    await pool.ensure("s", "o", "u", BrowserSpec())
+    first = registry.entries["s"].last_used_at
+    assert first is not None
+
+    clock[0] += 30
+    await pool.ensure("s", "o", "u", BrowserSpec())
+    assert registry.entries["s"].last_used_at == first
+
+    clock[0] += 61
+    await pool.ensure("s", "o", "u", BrowserSpec())
+    assert registry.entries["s"].last_used_at > first

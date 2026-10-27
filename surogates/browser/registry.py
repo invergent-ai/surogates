@@ -29,10 +29,14 @@ class BrowserEntry:
     # reattach to — or tear down — an existing browser from a worker that did
     # not provision it; defaulted for backwards-compat with older entries.
     browser_id: str = ""
+    # When a tool last used it, at most a minute stale (``BrowserPool``):
+    # what an idle browser is closed by.  None on entries written before it.
+    last_used_at: datetime | None = None
 
     def to_json(self) -> str:
         payload = asdict(self)
         payload["provisioned_at"] = self.provisioned_at.isoformat()
+        payload["last_used_at"] = self.last_used_at.isoformat() if self.last_used_at else None
         return json.dumps(payload)
 
     @classmethod
@@ -49,6 +53,9 @@ class BrowserEntry:
             live_view_url=payload["live_view_url"],
             provisioned_at=datetime.fromisoformat(payload["provisioned_at"]),
             browser_id=payload.get("browser_id", ""),
+            last_used_at=(
+                datetime.fromisoformat(payload["last_used_at"]) if payload.get("last_used_at") else None
+            ),
         )
 
 
