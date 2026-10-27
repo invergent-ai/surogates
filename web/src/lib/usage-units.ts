@@ -16,7 +16,7 @@ const COMPACT = new Intl.NumberFormat("en-US", {
 });
 
 /** "300K tokens", "2.5M tokens", "0 tokens". */
-export function formatTokens(tokens: number): string {
+function formatTokens(tokens: number): string {
   const n = Number.isFinite(tokens) && tokens > 0 ? tokens : 0;
   return `${COMPACT.format(n)} tokens`;
 }
@@ -26,7 +26,7 @@ function usable(perTurn: number | null | undefined): perTurn is number {
 }
 
 /** Whole turns a balance pays for, floored: 1.9 turns is 1 turn. */
-export function tokensToTurns(tokens: number, perTurn: number): number {
+function tokensToTurns(tokens: number, perTurn: number): number {
   if (!Number.isFinite(tokens) || tokens <= 0 || !usable(perTurn)) {
     return 0;
   }
@@ -54,17 +54,4 @@ export function approxTurnsLabel(
     return "under 1 turn";
   }
   return `~${turns.toLocaleString("en-US")} ${turns === 1 ? "turn" : "turns"}`;
-}
-
-/** Authoring label: the stored amount first, what it buys after, so
- * preset choices stay distinguishable even below one turn:
- * "50K tokens · under 1 turn". */
-export function tokensWithTurnsLabel(
-  tokens: number,
-  perTurn: number | null | undefined,
-): string {
-  if (!usable(perTurn)) {
-    return formatTokens(tokens);
-  }
-  return `${formatTokens(tokens)} · ${approxTurnsLabel(tokens, perTurn)}`;
 }
