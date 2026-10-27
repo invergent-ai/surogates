@@ -24,6 +24,7 @@
     "test:projects": "node --experimental-strip-types --test ../scripts/web-projects.test.mjs",
     "test:local-thread": "node --experimental-strip-types --test ../scripts/web-local-thread.test.mjs",
     "test:push-offer": "node --experimental-strip-types --test ../scripts/web-push-offer.test.mjs",
+    "test:copy": "node --test ../scripts/no-em-dash.test.mjs",
     "typecheck": "tsc -b --pretty false",
     "biome:check": "biome check .",
     "biome:fix": "biome check . --write"

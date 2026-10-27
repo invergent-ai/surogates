@@ -462,7 +462,7 @@ function deriveTaskOutcome({
         timestamp: liveOutput?.createdAt ?? null,
         text: liveOutput
           ? missionEventSummary(liveOutput)
-          : "Working — no output yet.",
+          : "Working, no output yet.",
       };
     case "blocked": {
       // worker_block writes a one-sentence reason into a task.blocked
@@ -478,7 +478,7 @@ function deriveTaskOutcome({
         timestamp: blockedEvent?.createdAt ?? null,
         text: blockedEvent
           ? missionEventSummary(blockedEvent)
-          : "Blocked — awaiting input.",
+          : "Blocked, awaiting input.",
       };
     }
     default: {
@@ -490,7 +490,7 @@ function deriveTaskOutcome({
           ? `Waiting on ${pending
               .map((p) => missionTaskTitle(p.goal, 40))
               .join(" · ")} to complete.`
-          : "Queued — waiting for a worker slot.";
+          : "Queued, waiting for a worker slot.";
       return {
         label: "Waiting",
         tone: "bg-muted/30 ring-border",

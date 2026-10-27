@@ -44,7 +44,7 @@ export function BrowserProfilesTab() {
       await createBrowserProfile(name || `Profile ${profiles.length + 1}`);
       refresh();
     } catch {
-      toast.error("Couldn't create profile — that name may already exist.");
+      toast.error("Couldn't create profile. That name may already exist.");
     }
   }
 

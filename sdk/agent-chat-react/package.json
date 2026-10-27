@@ -39,6 +39,7 @@
     "test": "vitest run -t '^(?!.*\\[slow\\])'",
     "test:slow": "vitest run -t '\\[slow\\]'",
     "test:watch": "vitest",
+    "test:copy": "node --test ../../scripts/no-em-dash.test.mjs",
     "typecheck": "tsc --noEmit",
     "prepublishOnly": "pnpm run typecheck && pnpm run build"
   },

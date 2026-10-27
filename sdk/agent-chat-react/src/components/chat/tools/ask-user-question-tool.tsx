@@ -489,7 +489,7 @@ function BatchAsk({
             size="icon-xs"
             onClick={handleCancel}
             aria-label="Cancel clarification and stop chat"
-            title="Esc — cancel and stop the chat"
+            title="Esc: cancel and stop the chat"
           >
             <XIcon className="size-4" />
           </Button>
@@ -670,7 +670,7 @@ function BatchAskLocked({
                 </div>
               ) : (
                 <div className="ml-5 text-muted-foreground/60 italic">
-                  — no answer —
+                  (no answer)
                 </div>
               )}
             </li>

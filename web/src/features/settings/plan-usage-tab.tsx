@@ -223,8 +223,8 @@ export function PlanUsageTab() {
         <CardContent className="flex flex-col gap-2 text-sm">
           {ent === null ? (
             <p className="text-muted-foreground">
-              Purchases aren't available for this account — it was created by
-              the agent's operator, so your access is managed for you.
+              Purchases aren't available for this account. It was created by the
+              agent's operator, so your access is managed for you.
             </p>
           ) : (
             <>

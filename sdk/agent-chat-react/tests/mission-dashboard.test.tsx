@@ -170,7 +170,7 @@ describe("MissionDashboard", () => {
     clickTab("Workers");
     expect(container!.textContent).toContain("Completed");
     clickTab("Metadata");
-    expect(container!.textContent).toContain("Last verdict — needs_revision");
+    expect(container!.textContent).toContain("Last verdict: needs_revision");
   });
 
   it("hides the Activity tab when the adapter lacks listMissionEvents", async () => {
