@@ -107,16 +107,15 @@ def _get_session_store(request: Request) -> SessionStore:
     return store
 
 
-async def _wait_for_publish(pubsub, timeout: float) -> float:
-    """Wait up to *timeout* seconds for a publish on *pubsub*: the seconds waited.
+async def _wait_for_publish(pubsub, timeout: float) -> None:
+    """Wait up to *timeout* seconds for a publish on *pubsub*.
 
     Subscribe replies wake nothing. A subscription that fails waits as a
     stream without Redis does, a poll interval, so that the caller reads on
     and misses nothing.
     """
     loop = asyncio.get_event_loop()
-    started = loop.time()
-    deadline = started + timeout
+    deadline = loop.time() + timeout
     while (remaining := deadline - loop.time()) > 0:
         try:
             message = await asyncio.wait_for(
@@ -130,7 +129,6 @@ async def _wait_for_publish(pubsub, timeout: float) -> float:
             break
         if message is not None:
             break
-    return loop.time() - started
 
 
 def _require_service_account_api_route(
@@ -321,15 +319,21 @@ async def session_event_stream(
     Without *watch*, a ``completed`` session ends the stream; with it, only
     ``archived``, a session gone, or the stream's time running out does.
     Redis comes from ``request.app.state``; without it, the stream polls.
+    A ``Last-Event-ID`` header past *after* moves the cursor up to it.
 
     ``session_event_stream`` does no access check: each caller checks first.
     """
     # Try to get Redis for pub/sub notifications (faster than polling).
     redis = getattr(request.app.state, "redis", None)
+    # A browser's EventSource reconnects to the URL it first opened, whose
+    # ``after`` is stale by then; the id it last received rides along as
+    # ``Last-Event-ID``, and resuming there replays nothing twice.
+    last_event_id = request.headers.get("last-event-id", "")
+    if last_event_id.isdigit():
+        after = max(after, int(last_event_id))
     # after=-1: from the session's newest event on, with nothing to replay.
     from_now = after < 0
     cursor = await asyncio.shield(store.last_event_id(session_id)) if from_now else after
-    elapsed = 0.0
     # Drop llm.delta events while draining the backlog.  Deltas are
     # per-token chunks that exist only to animate live streaming; the
     # corresponding llm.response carries the final content.  For a long
@@ -384,9 +388,14 @@ async def session_event_stream(
         # wait for executors -> harvest); without a periodic keepalive
         # the proxy (Cloudflare / ingress, ~100s idle cap) silently
         # drops the connection and the live thread freezes until reload.
-        last_emit = asyncio.get_event_loop().time()
+        loop = asyncio.get_event_loop()
+        last_emit = loop.time()
+        # Wall clock, not a count of waits: a busy turn publishes every token,
+        # each publish ends a wait at once, and counting waits closed a live
+        # stream after a few hundred tokens.
+        deadline = last_emit + _MAX_STREAM_DURATION
 
-        while elapsed < _MAX_STREAM_DURATION:
+        while loop.time() < deadline:
             # Check if client disconnected.
             if await request.is_disconnected():
                 return
@@ -418,7 +427,7 @@ async def session_event_stream(
                 if event.id is not None:
                     cursor = event.id
             if events:
-                last_emit = asyncio.get_event_loop().time()
+                last_emit = loop.time()
 
             if not events:
                 if in_replay:
@@ -454,10 +463,9 @@ async def session_event_stream(
                     # loop would collapse our grace window to zero on the
                     # very first call after subscribe.
                     if pubsub is not None:
-                        loop = asyncio.get_event_loop()
-                        deadline = loop.time() + _POLL_INTERVAL
-                        while loop.time() < deadline:
-                            remaining = max(0.0, deadline - loop.time())
+                        grace_end = loop.time() + _POLL_INTERVAL
+                        while loop.time() < grace_end:
+                            remaining = max(0.0, grace_end - loop.time())
                             try:
                                 msg = await asyncio.wait_for(
                                     pubsub.get_message(
@@ -495,7 +503,6 @@ async def session_event_stream(
                         return
                     # Status flipped to active during grace window -- loop
                     # back so the next iteration fetches the new events.
-                    elapsed += _POLL_INTERVAL
                     continue
 
                 # Wait for a Redis notification or fall back to polling.
@@ -504,10 +511,10 @@ async def session_event_stream(
                     # chat again only when a publish wakes it (every
                     # emit_event publishes after its commit), or at the
                     # keepalive, or as the stream ends.
-                    now = asyncio.get_event_loop().time()
-                    elapsed += await _wait_for_publish(
+                    now = loop.time()
+                    await _wait_for_publish(
                         pubsub,
-                        min(last_emit + _KEEPALIVE_INTERVAL - now, _MAX_STREAM_DURATION - elapsed),
+                        min(last_emit + _KEEPALIVE_INTERVAL - now, deadline - now),
                     )
                 else:
                     if pubsub is not None:
@@ -521,10 +528,8 @@ async def session_event_stream(
                     else:
                         await asyncio.sleep(_POLL_INTERVAL)
 
-                    elapsed += _POLL_INTERVAL
-
                 # Keep the connection warm through proxy idle timeouts.
-                now = asyncio.get_event_loop().time()
+                now = loop.time()
                 if now - last_emit >= _KEEPALIVE_INTERVAL:
                     yield {"comment": "keepalive"}
                     last_emit = now
