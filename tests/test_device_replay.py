@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -98,3 +99,46 @@ async def test_a_call_with_no_operations_in_the_journal_is_not_resumed(monkeypat
         session_factory=None, run_tool=run_tool,
     )
     assert ran == []
+
+
+def typing(call_id: str, text: str) -> dict:
+    return {"id": call_id, "type": "function", "function": {
+        "name": "browser_type", "arguments": json.dumps({"ref": "@e5", "text": text}),
+    }}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("recorded", "resumed_with"), [("Waalhaven-2026", "Waalhaven-2026"), (None, None)])
+async def test_a_typing_call_resumes_with_what_the_computer_recorded_never_the_mask(
+    monkeypatch, recorded, resumed_with,
+):
+    # The event log keeps typed text masked; resuming with the mask would
+    # type the bullets.  The journal's own record of the typing is the text.
+    async def journaled(session_factory, calling_session_id, invocations):
+        return set(invocations)
+
+    async def typed_in_journal(session_factory, calling_session_id, invocation):
+        assert invocation == "2:a"
+        return recorded
+
+    monkeypatch.setattr("surogates.harness.device_replay._journaled", journaled)
+    monkeypatch.setattr("surogates.harness.device_replay._typed_in_journal", typed_in_journal)
+    events = [
+        event(1, "llm.response", message={"tool_calls": [typing("a", "•" * 14)]}),
+        event(2, "tool.call", tool_call_id="a"),
+    ]
+    ran: list[dict] = []
+
+    async def run_tool(resumed: dict, event_id: int) -> dict:
+        ran.append(resumed)
+        return {"role": "tool", "tool_call_id": resumed["id"], "content": "resumed"}
+
+    await replay_unanswered(
+        session=SimpleNamespace(id=uuid4()), events=events, messages=[],
+        session_factory=None, run_tool=run_tool,
+    )
+    if resumed_with is None:
+        # Only the locate ran: nothing was typed, so the call is left to the stub.
+        assert ran == []
+    else:
+        assert [json.loads(call["function"]["arguments"])["text"] for call in ran] == [resumed_with]

@@ -31,6 +31,7 @@ from typing import Any, Literal
 
 from surogates.harness.streaming_executor import _is_error_result
 from surogates.harness.message_utils import content_as_text
+from surogates.harness.redact import mask_tool_arguments, mask_typed_text, typed_texts
 from surogates.harness.auxiliary_llm import (
     reasoning_disabled_extra_body,
     rejects_reasoning_controls,
@@ -480,6 +481,13 @@ class TurnSummarizer:
         ]
 
         tool_lines = self._format_tool_calls(caption_calls, caption_results)
+        # A caption leads with the step's most distinctive detail, and what
+        # the agent typed (a password, more often than not, on a login form)
+        # is exactly that.  The model never sees it, and a caption that
+        # names it anyway, from the reasoning or a result, is discarded.
+        typed = typed_texts(tool_calls)
+        for value in typed:
+            reasoning = reasoning.replace(value, mask_typed_text(value))
         user_block_parts: list[str] = []
         if prior_iteration_summaries:
             prior = "\n".join(f"- {s}" for s in prior_iteration_summaries)
@@ -547,6 +555,9 @@ class TurnSummarizer:
             return None
         caption = _extract_caption(content)
         text = _normalize_caption(caption.strip().strip('"').rstrip("."))
+        if any(value.lower() in text.lower() for value in typed):
+            logger.warning("discarding iteration summary for %s: it repeats typed text", iteration_id)
+            return None
         if not _valid_iteration_summary(text):
             logger.warning(
                 "discarding malformed iteration summary for %s: %r",
@@ -740,7 +751,7 @@ class TurnSummarizer:
         for index, tc in enumerate(tool_calls, 1):
             fn = tc.get("function") or {}
             name = fn.get("name") or tc.get("name") or "?"
-            args = fn.get("arguments") or tc.get("arguments") or ""
+            args = mask_tool_arguments(name, fn.get("arguments") or tc.get("arguments") or "")
             args_snippet = (args or "")[:200]
             call_id = str(tc.get("id") or "")
             result = results_by_id.get(call_id, "")

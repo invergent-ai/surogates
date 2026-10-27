@@ -12,6 +12,7 @@ computer and is left to the usual "result unavailable" stub.
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -20,6 +21,7 @@ from sqlalchemy import select
 
 from surogates.db.models import DeviceOperation
 from surogates.devices.binding import device_of
+from surogates.harness.redact import TYPED_TEXT_MASK, TYPED_TEXT_TOOLS
 from surogates.session.events import EventType
 
 logger = logging.getLogger(__name__)
@@ -92,6 +94,40 @@ async def _journaled(session_factory: Any, calling_session_id: Any, invocations:
     return set(rows.scalars())
 
 
+async def _typed_in_journal(session_factory: Any, calling_session_id: Any, invocation: str) -> str | None:
+    """The text the typing operation of *invocation* sent the computer, or None when it sent none yet."""
+    async with session_factory() as db:
+        rows = await db.execute(
+            select(DeviceOperation.args).where(
+                DeviceOperation.calling_session_id == calling_session_id,
+                DeviceOperation.invocation_id == invocation,
+                DeviceOperation.kind == "browser.keyboard",
+            )
+        )
+    for args in rows.scalars():
+        if isinstance(args, dict) and args.get("action") == "type" and isinstance(args.get("text"), str):
+            return args["text"]
+    return None
+
+
+def _masked_text(call: dict[str, Any]) -> bool:
+    """Whether *call* is a typing call whose text the event log holds masked."""
+    fn = call.get("function") or {}
+    if fn.get("name") not in TYPED_TEXT_TOOLS:
+        return False
+    try:
+        text = json.loads(fn.get("arguments") or "{}").get("text")
+    except (ValueError, AttributeError):
+        return False
+    return isinstance(text, str) and bool(text) and not text.strip(TYPED_TEXT_MASK)
+
+
+def _with_text(call: dict[str, Any], text: str) -> dict[str, Any]:
+    fn = call["function"]
+    arguments = {**json.loads(fn["arguments"]), "text": text}
+    return {**call, "function": {**fn, "arguments": json.dumps(arguments, ensure_ascii=False)}}
+
+
 async def replay_unanswered(
     *,
     session: Any,
@@ -106,5 +142,15 @@ async def replay_unanswered(
         return
     journaled = await _journaled(session_factory, session.id, list(calls))
     for invocation, (event_id, call) in calls.items():
-        if invocation in journaled:
-            place(messages, await run_tool(call, event_id))
+        if invocation not in journaled:
+            continue
+        if _masked_text(call):
+            # The log keeps typed text masked, so the computer's own record of
+            # the operation is the only copy of what was typed.  A call that
+            # never reached its typing typed nothing: running it again with
+            # the mask would type the bullets, so it is left to the stub.
+            typed = await _typed_in_journal(session_factory, session.id, invocation)
+            if typed is None:
+                continue
+            call = _with_text(call, typed)
+        place(messages, await run_tool(call, event_id))
