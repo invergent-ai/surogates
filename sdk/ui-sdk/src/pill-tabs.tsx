@@ -30,9 +30,13 @@ export interface PillTab<T extends string> {
 // bare strip for a page that swaps its own content by id.
 //
 // A dozen tabs never fit a phone, so the strip scrolls horizontally there. Two
-// things make that usable: the active tab scrolls itself into view (a
+// things make that usable: the strip scrolls the active tab into view (a
 // deep-linked `?tab=monetize` would otherwise land off-screen with nothing to
 // hint it exists), and a fade on the trailing edge advertises the overflow.
+//
+// Only the strip moves. `scrollIntoView` would scroll every ancestor too, the
+// page included, so a page opened on a phone would land below its own header
+// and a pick on a desktop would jump the page to the tabs.
 export function PillTabs<T extends string>({
   tabs,
   activeId,
@@ -53,22 +57,42 @@ export function PillTabs<T extends string>({
    * relative to everything above and below them. */
   flush?: boolean;
 }) {
+  const stripRef = useRef<HTMLDivElement | null>(null);
   const activeRef = useRef<HTMLButtonElement | null>(null);
+  // The tab the strip was last placed for; null before the first placement.
+  const placedFor = useRef<T | null>(null);
   // Scrolled past the first tab: a matching fade on the leading edge says
   // there is more that way, instead of a word cut in half.
   const [scrolled, setScrolled] = useState(false);
 
   useEffect(() => {
-    activeRef.current?.scrollIntoView({
-      behavior: "smooth",
-      inline: "center",
-      block: "nearest",
+    const strip = stripRef.current;
+    const pill = activeRef.current;
+    if (placedFor.current === activeId) return;
+    const first = placedFor.current === null;
+    placedFor.current = activeId;
+    if (!strip || !pill) return;
+
+    const stripBox = strip.getBoundingClientRect();
+    const pillBox = pill.getBoundingClientRect();
+    // The pill's span in the strip's own scrolling coordinates.
+    const start = pillBox.left - stripBox.left + strip.scrollLeft;
+    const end = start + pillBox.width;
+    // A tab chosen on the first paint needs no motion unless it is cut off or
+    // out of sight.
+    if (first && start >= strip.scrollLeft && end <= strip.scrollLeft + stripBox.width) {
+      return;
+    }
+    strip.scrollTo({
+      left: Math.max(0, start - (stripBox.width - pillBox.width) / 2),
+      behavior: first ? "instant" : "smooth",
     });
   }, [activeId]);
 
   return (
     <div data-slot="pill-tabs" className="relative shrink-0 border-b border-line">
       <div
+        ref={stripRef}
         role="tablist"
         aria-label={label}
         onScroll={(e) => setScrolled(e.currentTarget.scrollLeft > 4)}
