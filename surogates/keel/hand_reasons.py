@@ -13,6 +13,7 @@ The model sees each hand by a number of its own, never by Keel's id.
 from __future__ import annotations
 
 import json
+import logging
 from typing import Annotated, Any
 from uuid import UUID
 
@@ -21,10 +22,16 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from surogates.keel.analysis import (
     ANSWER_PROMPT_CHARS,
     GIST_CHARS,
+    NO_USAGE,
     REASON_CHARS,
+    identifiers_in,
     one_line,
+    repeats_one,
     run_analysis,
+    screened_out,
 )
+
+logger = logging.getLogger(__name__)
 
 HAND_BATCH = 25
 VOCABULARY_MAX = 200
@@ -113,14 +120,20 @@ def _spelled_as_known(reason: str, known: dict[str, str]) -> str:
     return known.get(reason.casefold(), reason)
 
 
-def _usable(label: _Label, hand: HandIn, known: dict[str, str]) -> dict[str, Any] | None:
+def _usable(
+    label: _Label, hand: HandIn, known: dict[str, str], identifiers: frozenset[str],
+) -> dict[str, Any] | None:
     reason = one_line(label.reason)
     if reason is None or len(reason) > REASON_CHARS:
+        return None
+    # A reason the project already uses was kept before; any other must not
+    # repeat what a hand names.
+    if reason.casefold() not in known and repeats_one(reason, identifiers):
         return None
     gist = None
     if hand.answer is not None:
         gist = one_line(label.answer_gist)
-        if gist is None or len(gist) > GIST_CHARS:
+        if gist is None or len(gist) > GIST_CHARS or repeats_one(gist, identifiers):
             return None
     return {
         "id": hand.id,
@@ -130,22 +143,43 @@ def _usable(label: _Label, hand: HandIn, known: dict[str, str]) -> dict[str, Any
     }
 
 
+def _screened(hand: HandIn) -> bool:
+    return screened_out({"question": hand.question, "choices": hand.choices, "answer": hand.answer})
+
+
 async def label_hands(request: HandReasonsRequest, agent: dict[str, Any], *, vault: Any) -> dict[str, Any]:
     """The answer to Keel: ``{"labels", "usage"}``.
 
-    The labels follow the order of the hands, one at most for each: the
-    model's first label for a number names a hand sent, and is kept only
-    when its reason is 1 to 120 characters on one line and, for an answered
-    hand, so is its gist.  A reason that equals one of the vocabulary
-    ignoring case takes the vocabulary's spelling.
+    A hand or a vocabulary entry the prompt-injection screen blocks is left
+    out of the call: a blocked hand gets no label, and when every hand is
+    blocked nothing is asked of the model.  The labels follow the order of
+    the hands, one at most for each: the model's first label for a number
+    names a hand sent, and is kept only when its reason is 1 to 120
+    characters on one line and, for an answered hand, so is its gist, and
+    neither repeats an identifier of any hand of the request (a reason the
+    project already uses is not checked).  A reason that equals a vocabulary
+    entry ignoring case takes the entry's spelling.
     """
-    numbered = list(enumerate(request.hands, start=1))
-    known = {key.casefold(): key for key in (one_line(entry) for entry in request.vocabulary) if key}
+    agent_id = str(agent.get("agent_id"))
+    sent = [hand for hand in request.hands if not _screened(hand)]
+    if len(sent) < len(request.hands):
+        logger.warning(
+            "keel-link: agent %s: %d of %d hands were blocked", agent_id, len(request.hands) - len(sent),
+            len(request.hands),
+        )
+    if not sent:
+        return {"labels": [], "usage": dict(NO_USAGE)}
+    vocabulary = [entry for entry in request.vocabulary if not screened_out(entry)]
+    identifiers = identifiers_in(*(
+        text for hand in request.hands for text in (hand.question, *(hand.choices or ()), hand.answer)
+    ))
+    numbered = list(enumerate(sent, start=1))
+    known = {key.casefold(): key for key in (one_line(entry) for entry in vocabulary) if key}
     analysis = await run_analysis(
         agent,
         vault=vault,
         org_id=request.org_id,
-        messages=_prompt(numbered, request.vocabulary),
+        messages=_prompt(numbered, vocabulary),
         output_model=_Labels,
         max_tokens=140 * len(numbered) + 200,
     )
@@ -156,7 +190,7 @@ async def label_hands(request: HandReasonsRequest, agent: dict[str, Any], *, vau
         if label.n not in by_number or label.n in seen:
             continue
         seen.add(label.n)
-        usable = _usable(label, by_number[label.n], known)
+        usable = _usable(label, by_number[label.n], known, identifiers)
         if usable is not None:
             kept[label.n] = usable
     return {"labels": [kept[n] for n in sorted(kept)], "usage": analysis.usage}

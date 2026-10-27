@@ -14,7 +14,9 @@ hand or the model said: hands are case content.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any, Generic, TypeVar
 from uuid import UUID
@@ -42,6 +44,13 @@ GIST_CHARS = 120
 
 #: How much of one answer reaches the model.
 ANSWER_PROMPT_CHARS = 2000
+
+#: What replaces an identifier of a hand in a passage.
+OMITTED = "[omitted]"
+
+#: The characters stripped from the ends of a word before it is tested as an identifier.
+_WORD_ENDS = ".,;:!?()[]{}<>\"'«»“”‘’$€£¥%"
+_LONG_NUMBER = re.compile(r"\d{4,}")
 
 #: What a call that reached no model used.
 NO_USAGE: dict[str, Any] = {"input_tokens": 0, "output_tokens": 0, "cost_usd": "0.000000"}
@@ -130,6 +139,49 @@ def one_line(value: object) -> str | None:
     if text.endswith("."):
         text = text[:-1].rstrip()
     return text or None
+
+
+def identifiers_in(*texts: str | None) -> frozenset[str]:
+    """What the texts name that belongs to one case alone, casefolded.
+
+    Each whitespace-separated word, once the punctuation and currency signs
+    are stripped from its ends, that is 4 characters or more and holds a
+    digit or an ``@`` (a reference number, an e-mail address, an amount),
+    and each run of 4 or more digits.  Names cannot be told apart from other
+    words: only a prompt keeps them out.
+    """
+    found: set[str] = set()
+    for text in texts:
+        if not text:
+            continue
+        for word in text.split():
+            word = word.strip(_WORD_ENDS)
+            if len(word) >= 4 and (any(ch.isdigit() for ch in word) or "@" in word):
+                found.add(word.casefold())
+        found.update(_LONG_NUMBER.findall(text))
+    return frozenset(found)
+
+
+def repeats_one(text: str, identifiers: frozenset[str]) -> bool:
+    """Whether the text holds one of the identifiers, without regard to case."""
+    folded = text.casefold()
+    return any(identifier in folded for identifier in identifiers)
+
+
+def with_identifiers_omitted(text: str, identifiers: frozenset[str]) -> str:
+    """The text with each identifier replaced by :data:`OMITTED`, the longest first, without regard to case."""
+    if not identifiers:
+        return text
+    pattern = "|".join(re.escape(identifier) for identifier in sorted(identifiers, key=len, reverse=True))
+    return re.sub(pattern, OMITTED, text, flags=re.IGNORECASE)
+
+
+def screened_out(value: object) -> bool:
+    """Whether the prompt-injection screen blocks the value: hand text is case content and can carry instructions."""
+    from surogates.session.attachment_ingest import get_injection_detector
+
+    text = json.dumps(value, sort_keys=True, ensure_ascii=False)
+    return bool(get_injection_detector().detect(text, source="keel_analysis").is_injection)
 
 
 async def run_analysis(
