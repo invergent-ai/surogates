@@ -61,6 +61,7 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "apply_outreach_status",
     "deliver_pending",
+    "answer_withdrawn",
     "record_outreach_delivery",
     "record_outreach_text",
     "send_queued_outreach",
@@ -129,6 +130,9 @@ DEFAULT_TEXTS = {
     "why_setup": "the channel is not set up correctly for this business",
     "why_stopped": "the step was stopped before it was sent",
     "why_undelivered": "it could not be delivered",
+    "withdrawn_alert_notice": "That alert was withdrawn before you opened it: {why}.",
+    "why_resolved": "the case was already resolved",
+    "why_removed": "the person is no longer followed",
     # Off unless the business words it.
     "busy_safety_line": "",
 }
@@ -307,6 +311,78 @@ async def is_opener(
                 .limit(1)
             )
         ).first() is not None
+
+
+#: Why a held text was given up, as the reason key of the team's notice.
+_WITHDRAWN_WHY = {
+    followup_store.REMOVED_FROM_AGENT: "why_removed",
+    followup_store.RESOLVED_BEFORE_READ: "why_resolved",
+}
+
+
+async def answer_withdrawn(
+    session_factory: Any,
+    session_store: Any,
+    *,
+    org_id: uuid.UUID,
+    agent_id: str,
+    provider_message_id: str,
+    session_id: uuid.UUID,
+    now: datetime | None = None,
+) -> bool:
+    """Say so when a tapped template's alert was withdrawn before it was read.
+
+    Runs after :func:`deliver_pending`, so whatever was still live behind
+    the template has gone out and nothing is said.  When the alert was given
+    up instead (its case resolved, its person removed), the tap would get
+    silence.  The note names nobody: the template disclosed nothing and the
+    alert never arrived.  True when the note was written.
+    """
+    now = now or datetime.now(timezone.utc)
+    async with session_factory() as db:
+        opener = (
+            await db.execute(
+                sa.select(OutreachMessageRow)
+                .where(OutreachMessageRow.org_id == org_id)
+                .where(OutreachMessageRow.agent_id == agent_id)
+                .where(OutreachMessageRow.provider_message_id == provider_message_id)
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if opener is None:
+            return False
+        rows = [opener, *(
+            await db.execute(
+                sa.select(OutreachMessageRow).where(OutreachMessageRow.rides_on == opener.id)
+            )
+        ).scalars()]
+    withdrawn = [
+        r for r in rows
+        if r.kind == "alert" and r.state == "replaced" and r.reason in _WITHDRAWN_WHY
+    ]
+    if not withdrawn or any(r.state in ("delivered", "sent", *_HELD) for r in rows):
+        return False
+    if await _busy(session_factory, session_id, now):
+        return False
+    why = (
+        "why_removed"
+        if any(r.reason == followup_store.REMOVED_FROM_AGENT for r in withdrawn)
+        else "why_resolved"
+    )
+    settings = await followup_store.get_settings(
+        session_factory, org_id=org_id, agent_id=agent_id,
+    )
+    text = wording(settings, "withdrawn_alert_notice", why=wording(settings, why))
+    data = {
+        "message": {"role": "assistant", "content": text},
+        "synthetic": "outreach",
+        "outreach_id": str(opener.id),
+        "outreach_kind": "withdrawn",
+    }
+    await session_store.emit_event(
+        session_id, EventType.LLM_RESPONSE, data, delivery_data=data,
+    )
+    return True
 
 
 async def deliver_pending(

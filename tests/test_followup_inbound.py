@@ -211,11 +211,66 @@ async def test_a_tap_on_the_reopening_template_delivers_and_does_not_wake_the_ag
 
     assert result == InboundOutcome.DROPPED
     types = [e[1] for e in deps.session_store.events]
-    assert EventType.LLM_RESPONSE in types
     assert EventType.USER_MESSAGE not in types
     assert base._enqueued == []
+    # The alert itself and nothing else: no withdrawal note beside it.
+    said = [d["message"]["content"] for _, t, d in deps.session_store.events if t == EventType.LLM_RESPONSE]
+    assert said == ["Ion, day 1: «fever: yes»"]
     async with sf() as db:
         assert (await db.get(OutreachMessageRow, held.id)).state == "delivered"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("reason", "why"), [
+    (store.RESOLVED_BEFORE_READ, "the case was already resolved"),
+    (store.REMOVED_FROM_AGENT, "the person is no longer followed"),
+])
+async def test_a_tap_on_a_withdrawn_alerts_template_is_told_why(sf, reason, why):
+    """A doctor tapped "Send the alert" for an alert retired when its case
+    was resolved or its person removed, and got silence."""
+    held = await _held_alert_behind(sf, "wamid.OPENER")
+    async with sf() as db:
+        row = await db.get(OutreachMessageRow, held.id)
+        row.state, row.reason = "replaced", reason
+        await db.commit()
+    base = _make_deps()
+    deps = dataclasses.replace(base, session_factory=sf)
+
+    result = await ChannelInboundPipeline().handle(
+        _tap("wamid.OPENER"), routing=_whatsapp_routing(), config=_make_config(), deps=deps,
+    )
+
+    assert result == InboundOutcome.DROPPED
+    assert base._enqueued == []
+    events = deps.session_store.events
+    assert [t for _, t, _ in events] == [EventType.LLM_RESPONSE]
+    note = events[0][2]
+    assert note["message"]["content"] == f"That alert was withdrawn before you opened it: {why}."
+    assert "Ion" not in note["message"]["content"]
+    async with sf() as db:
+        assert (await db.get(OutreachMessageRow, held.id)).state == "replaced"
+
+
+@pytest.mark.asyncio
+async def test_the_withdrawal_note_is_in_the_business_wording(sf):
+    await store.update_settings(
+        sf, org_id=AGENT_ORG_ID, agent_id=_whatsapp_routing().agent_id, channel_identifier="pn1",
+        texts={"withdrawn_alert_notice": "Alerta a fost retrasă: {why}.",
+               "why_resolved": "cazul era deja rezolvat"},
+    )
+    held = await _held_alert_behind(sf, "wamid.OPENER")
+    async with sf() as db:
+        row = await db.get(OutreachMessageRow, held.id)
+        row.state, row.reason = "replaced", store.RESOLVED_BEFORE_READ
+        await db.commit()
+    deps = dataclasses.replace(_make_deps(), session_factory=sf)
+
+    await ChannelInboundPipeline().handle(
+        _tap("wamid.OPENER"), routing=_whatsapp_routing(), config=_make_config(), deps=deps,
+    )
+
+    [(_, _, note)] = deps.session_store.events
+    assert note["message"]["content"] == "Alerta a fost retrasă: cazul era deja rezolvat."
 
 
 @pytest.mark.asyncio
