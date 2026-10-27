@@ -12,7 +12,6 @@ of literals scattered per file.
 from __future__ import annotations
 
 from surogates.channels.capabilities import BUILTIN
-from surogates.channels.memory_boundary import is_case_agent_session, is_case_session
 
 __all__ = [
     "ADAPTER_CHANNELS",
@@ -26,6 +25,7 @@ __all__ = [
     "OUTBOUND_DM_CHANNELS",
     "SERVICE_ACCOUNT_CHANNELS",
     "STUDIO_CHANNEL",
+    "WEBSITE_CHANNEL",
     "multi_session_disabled",
     "outbound_dm",
     "session_queue_priority",
@@ -53,6 +53,9 @@ STUDIO_CHANNEL = "studio"
 #: create one (``create_api_session``), and only the buy page, which
 #: meters every turn, may post into it.
 BUY_PAGE_CHANNEL = "buy_page"
+
+#: An anonymous visitor chatting in the widget embedded on a public website.
+WEBSITE_CHANNEL = "website"
 
 
 def multi_session_disabled(config: dict) -> bool:
@@ -92,6 +95,9 @@ def session_queue_priority(session: object) -> float:
     session (:func:`queue_priority`).  A row read without its channel or
     config scores as ordinary work.
     """
+    # Imported here: memory_boundary imports this module's channel names.
+    from surogates.channels.memory_boundary import is_case_agent_session, is_case_session
+
     if is_case_session(session) and not is_case_agent_session(session):
         return CASE_STEP_PRIORITY
     return queue_priority(getattr(session, "channel", None))

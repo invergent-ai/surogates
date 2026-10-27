@@ -12,6 +12,8 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Mapping
 
+from surogates.channels.constants import WEBSITE_CHANNEL
+
 __all__ = [
     "MANAGED_CHANNELS",
     "BUYER_BOUNDARY_PREFIX",
@@ -58,7 +60,6 @@ BUYER_BOUNDARY_PREFIX = "buyer:"
 # derived by :func:`visitor_boundary` from who the server knows the visitor
 # to be; nothing the browser sends names it directly.
 VISITOR_BOUNDARY_PREFIX = "visitor:"
-WEBSITE_CHANNEL = "website"
 
 # Every session of a Keel case, the step's own and each child it makes,
 # carries ``case:<case id>``: its memory is per agent and case, and the case's

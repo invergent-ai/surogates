@@ -79,7 +79,7 @@ from surogates.runtime.platform_client import (
     PlatformAuthError,
 )
 from surogates.runtime.resolver import resolve_agent_id_soft
-from surogates.channels.constants import multi_session_disabled, session_queue_priority
+from surogates.channels.constants import WEBSITE_CHANNEL, multi_session_disabled, session_queue_priority
 from surogates.session.events import EventType
 from surogates.session.models import REUSABLE_SESSION_STATUSES
 from surogates.session.store import SessionNotFoundError, SessionStore
@@ -95,7 +95,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-WEBSITE_CHANNEL = "website"
 # The visitor's own id on this API's domain, outliving any one session so a
 # returning visitor finds the memory their earlier visits left. Partitioned,
 # so a browser keeps a separate id per embedding site.
@@ -929,7 +928,7 @@ async def send_website_message(
         )
 
     await authorize_commerce_turn(
-        request, session, body.content, channel="website",
+        request, session, body.content, channel=WEBSITE_CHANNEL,
     )
 
     # Per-buyer embed: when the widget key was minted by a buyer, this
@@ -945,7 +944,7 @@ async def send_website_message(
             body.content,
             end_user_id=str(embed_end_user_id),
             always=True,
-            channel="website",
+            channel=WEBSITE_CHANNEL,
         )
 
     if session.status in ("failed", "paused", "completed"):
