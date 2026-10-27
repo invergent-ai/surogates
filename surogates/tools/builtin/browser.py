@@ -1608,9 +1608,9 @@ def register(registry: ToolRegistry) -> None:
             description=(
                 "Type text at focus or into a specific @eN ref. For a field the "
                 "page outline marks [secret] (a password, a one-time code, a card "
-                "number), pass secret_ref naming a stored credential instead of "
-                "text whenever the user has stored one, so the value never enters "
-                "the conversation. Pass exactly one of text or secret_ref."
+                "number), pass its ref with secret_ref naming a stored credential "
+                "instead of text whenever one is stored for that site, so the value "
+                "never enters the conversation. Pass exactly one of text or secret_ref."
             ),
             parameters=TYPE_SCHEMA,
         ),
