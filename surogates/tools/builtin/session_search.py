@@ -22,9 +22,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from datetime import datetime
 from shlex import split as shlex_split
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Union
 from uuid import UUID
 
 from surogates.channels.memory_boundary import CASE_BOUNDARY_PREFIX
@@ -46,22 +47,19 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-MAX_SESSION_CHARS = 100_000
-# Summaries run in parallel under one SUMMARY_TIMEOUT_SECONDS budget, so
-# the output allowance is sized for a recap a fast model finishes in
-# seconds, not a transcript rewrite.
-MAX_SUMMARY_TOKENS = 1200
+# A session's excerpt in the one summary request, centred on its first match.
+MAX_SESSION_CHARS = 20_000
+# One request recaps every matched session in a short paragraph each, so the
+# output allowance is a few recaps a fast model finishes in seconds.
+MAX_SUMMARY_TOKENS = 1000
 SUMMARY_TIMEOUT_SECONDS = 60.0
 # Without a summarizer each result shows a window of the transcript centred
 # on the first match; a fixed head would mostly show the greeting.
 RAW_PREVIEW_CHARS = 3000
-# Without a summary slot the summaries run on the agent's main model, which
+# Without a summary slot the summary runs on the agent's main model, which
 # may be the most expensive one it has: the whole search then shares this
-# transcript budget (about 4k tokens) instead of up to 100k chars a session.
+# transcript budget (about 4k tokens) instead of MAX_SESSION_CHARS a session.
 MAIN_MODEL_TRANSCRIPT_CHARS = 16_000
-# Summary calls in flight at once for one search; the rest queue inside the
-# same SUMMARY_TIMEOUT_SECONDS and fall back to their preview if it runs out.
-MAX_PARALLEL_SUMMARIES = 2
 
 # Sources excluded from session browsing/searching by default.
 # Third-party integrations tag their sessions with specific channels
@@ -302,80 +300,67 @@ def _summarizer_from_clients(
     return _summarize, budget
 
 
-async def _summarize_session(
-    conversation_text: str,
-    query: str,
-    session_meta: Dict[str, Any],
-    auxiliary_fn: Any | None = None,
-) -> Optional[str]:
-    """Summarize a single session conversation focused on the search query.
+_RECAP_SYSTEM_PROMPT = (
+    "You are reviewing excerpts of past conversations to help recall what happened. "
+    "Each excerpt is numbered. For each one write a short factual recap, in past tense, "
+    "focused on the search topic: what the user wanted, what was done and how it ended, "
+    "key decisions, and any specific commands, files, URLs or errors worth recalling. "
+    "Start each recap on its own line with the excerpt's number in brackets, like [1], "
+    "and recap every excerpt."
+)
+_RECAP_MARKER = re.compile(r"^[\s*#>]*(?:session\s*)?\[(\d+)\][\s*:.\-]*", re.IGNORECASE | re.MULTILINE)
 
-    Uses an auxiliary LLM function if provided, otherwise returns None
-    to fall back to raw preview mode.
+
+def _parse_recaps(content: str, count: int) -> dict[int, str]:
+    """Recap text by excerpt number (1-based); an unnumbered answer about one excerpt is its recap."""
+    markers = list(_RECAP_MARKER.finditer(content))
+    if not markers:
+        return {1: content.strip()} if count == 1 and content.strip() else {}
+    recaps: dict[int, str] = {}
+    for marker, following in zip(markers, [*markers[1:], None]):
+        number = int(marker.group(1))
+        text = content[marker.end():following.start() if following else len(content)].strip()
+        if 1 <= number <= count and text and number not in recaps:
+            recaps[number] = text
+    return recaps
+
+
+async def _summarize_sessions(
+    excerpts: list[tuple[str, Any]], query: str, auxiliary_fn: Any | None,
+) -> dict[int, str]:
+    """One recap per excerpt (each its transcript and its Session row), from one request.
+
+    Excerpts the answer leaves out, or every one when the request fails or
+    times out, are missing from the result.
     """
-    if auxiliary_fn is None:
-        return None
-
-    system_prompt = (
-        "You are reviewing a past conversation transcript to help recall what happened. "
-        "Summarize the conversation with a focus on the search topic. Include:\n"
-        "1. What the user asked about or wanted to accomplish\n"
-        "2. What actions were taken and what the outcomes were\n"
-        "3. Key decisions, solutions found, or conclusions reached\n"
-        "4. Any specific commands, files, URLs, or technical details that were important\n"
-        "5. Anything left unresolved or notable\n\n"
-        "Be thorough but concise. Preserve specific details (commands, paths, error messages) "
-        "that would be useful to recall. Write in past tense as a factual recap."
-    )
-
-    channel = session_meta.get("channel", "unknown")
-    started = _format_timestamp(session_meta.get("created_at"))
-
+    if auxiliary_fn is None or not excerpts:
+        return {}
+    blocks = []
+    for number, (text, row) in enumerate(excerpts, start=1):
+        channel = getattr(row, "channel", None) or "unknown"
+        started = _format_timestamp(getattr(row, "created_at", None))
+        blocks.append(f"=== [{number}] channel: {channel}, date: {started} ===\n{text}")
     user_prompt = (
-        f"Search topic: {query}\n"
-        f"Session channel: {channel}\n"
-        f"Session date: {started}\n\n"
-        f"CONVERSATION TRANSCRIPT:\n{conversation_text}\n\n"
-        f"Summarize this conversation with focus on: {query}"
+        f"Search topic: {query}\n\n" + "\n\n".join(blocks)
+        + f"\n\nRecap each excerpt above with focus on: {query}"
     )
-
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            content = await auxiliary_fn(
+    try:
+        content = await asyncio.wait_for(
+            auxiliary_fn(
                 task="session_search",
                 messages=[
-                    {"role": "system", "content": system_prompt},
+                    {"role": "system", "content": _RECAP_SYSTEM_PROMPT},
                     {"role": "user", "content": user_prompt},
                 ],
                 temperature=0.1,
                 max_tokens=MAX_SUMMARY_TOKENS,
-            )
-            if content:
-                return content
-            # Empty response -- let the retry loop handle it
-            logger.warning(
-                "Session search LLM returned empty content (attempt %d/%d)",
-                attempt + 1, max_retries,
-            )
-            if attempt < max_retries - 1:
-                await asyncio.sleep(1 * (attempt + 1))
-                continue
-            return content
-        except RuntimeError:
-            logger.warning("No auxiliary model available for session summarization")
-            return None
-        except Exception as e:
-            if attempt < max_retries - 1:
-                await asyncio.sleep(1 * (attempt + 1))
-            else:
-                logger.warning(
-                    "Session summarization failed after %d attempts: %s",
-                    max_retries,
-                    e,
-                    exc_info=True,
-                )
-                return None
+            ),
+            timeout=SUMMARY_TIMEOUT_SECONDS,
+        )
+    except Exception as e:
+        logger.warning("Session search summary failed: %s", e, exc_info=True)
+        return {}
+    return _parse_recaps(content or "", len(excerpts))
 
 
 # ---------------------------------------------------------------------------
@@ -692,21 +677,14 @@ async def session_search(
 
         # Resolve child sessions to their parent -- delegation stores detailed
         # content in child sessions, but the user's conversation is the parent.
-        async def _resolve_to_parent(session_id: UUID) -> UUID:
-            """Walk delegation chain to find the root parent session ID."""
+        async def _resolve_to_parent(session_id: UUID) -> tuple[UUID, Any]:
+            """The root of *session_id*'s delegation chain, and its Session row when it was read."""
             visited: set[UUID] = set()
             sid = session_id
             while sid and sid not in visited:
                 visited.add(sid)
                 try:
                     s = await session_store.get_session(sid)
-                    if not s:
-                        break
-                    parent = s.parent_id
-                    if parent:
-                        sid = parent
-                    else:
-                        break
                 except Exception as e:
                     logger.debug(
                         "Error resolving parent for session %s: %s",
@@ -714,11 +692,16 @@ async def session_search(
                         e,
                         exc_info=True,
                     )
-                    break
-            return sid
+                    return sid, None
+                if not s:
+                    return sid, None
+                if not s.parent_id:
+                    return sid, s
+                sid = s.parent_id
+            return sid, None
 
         current_lineage_root = (
-            await _resolve_to_parent(current_session_id)
+            (await _resolve_to_parent(current_session_id))[0]
             if current_session_id
             else None
         )
@@ -726,10 +709,10 @@ async def session_search(
         # Group by resolved (parent) session_id, dedup, skip the current
         # session lineage. Compression and delegation create child sessions
         # that still belong to the same active conversation.
-        seen_sessions: dict[UUID, dict[str, Any]] = {}
+        seen_sessions: dict[UUID, tuple[dict[str, Any], Any]] = {}
         for result_row in raw_results:
             raw_sid = result_row["session_id"]
-            resolved_sid = await _resolve_to_parent(raw_sid)
+            resolved_sid, root_row = await _resolve_to_parent(raw_sid)
             # Skip the current session lineage -- the agent already has that
             # context, even if older turns live in parent fragments.
             if current_lineage_root and resolved_sid == current_lineage_root:
@@ -739,41 +722,26 @@ async def session_search(
             if resolved_sid not in seen_sessions:
                 entry = dict(result_row)
                 entry["session_id"] = resolved_sid
-                seen_sessions[resolved_sid] = entry
+                seen_sessions[resolved_sid] = (entry, root_row)
             if len(seen_sessions) >= limit:
                 break
 
-        # Prepare all sessions for parallel summarization
-        tasks: list[tuple[UUID, dict[str, Any], str, dict[str, Any]]] = []
-        for sid, match_info in seen_sessions.items():
+        found: list[tuple[UUID, dict[str, Any], str, Any]] = []
+        for sid, (match_info, root_row) in seen_sessions.items():
             try:
                 # Deltas are ~90% of the log and carry no text the transcript
                 # does not already get from ``llm.response``; excluding them
                 # in SQL keeps a long session from being loaded into memory
                 # almost entirely as token fragments.
-
                 events = await session_store.get_events(
                     sid, exclude_types=[EventType.LLM_DELTA],
                 )
                 if not events:
                     continue
-                # Convert Event pydantic models to dicts for formatting
-                event_dicts = [
-                    {"type": e.type, "data": e.data, "created_at": e.created_at}
-                    for e in events
-                ]
-                session_obj = await session_store.get_session(sid)
-                session_meta: dict[str, Any] = {}
-                if session_obj:
-                    session_meta = {
-                        "channel": session_obj.channel,
-                        "created_at": session_obj.created_at,
-                        "title": session_obj.title,
-                        "model": session_obj.model,
-                    }
-                conversation_text = _format_conversation(event_dicts)
-                conversation_text = _truncate_around_matches(conversation_text, query)
-                tasks.append((sid, match_info, conversation_text, session_meta))
+                conversation_text = _format_conversation(
+                    [{"type": e.type, "data": e.data} for e in events],
+                )
+                found.append((sid, match_info, conversation_text, root_row))
             except Exception as e:
                 logger.warning(
                     "Failed to prepare session %s: %s",
@@ -783,41 +751,20 @@ async def session_search(
                 )
 
         per_session_chars = (
-            transcript_budget // len(tasks)
-            if transcript_budget is not None and tasks
+            min(MAX_SESSION_CHARS, transcript_budget // len(found))
+            if transcript_budget is not None and found
             else MAX_SESSION_CHARS
         )
-        in_flight = asyncio.Semaphore(MAX_PARALLEL_SUMMARIES)
-
-        async def _summarize_bounded(text: str, meta: dict[str, Any]) -> str | None:
-            async with in_flight:
-                return await _summarize_session(
-                    _truncate_around_matches(text, query, max_chars=per_session_chars),
-                    query, meta, auxiliary_fn,
-                )
-
-        # The timeout covers queueing too, so the whole search ends within
-        # it; a session whose summary is late falls back to its raw preview
-        # instead of failing the search.
-        results = await asyncio.gather(
-            *(
-                asyncio.wait_for(
-                    _summarize_bounded(text, meta), timeout=SUMMARY_TIMEOUT_SECONDS,
-                )
-                for _, _, text, meta in tasks
-            ),
-            return_exceptions=True,
+        recaps = await _summarize_sessions(
+            [
+                (_truncate_around_matches(text, query, max_chars=per_session_chars), row)
+                for _, _, text, row in found
+            ],
+            query, auxiliary_fn,
         )
 
         summaries: list[dict[str, Any]] = []
-        for (sid, match_info, conversation_text, _), result_val in zip(tasks, results):
-            if isinstance(result_val, Exception):
-                logger.warning(
-                    "Failed to summarize session %s: %s",
-                    sid, result_val, exc_info=True,
-                )
-                result_val = None
-
+        for number, (sid, match_info, conversation_text, _) in enumerate(found, start=1):
             entry: dict[str, Any] = {
                 "session_id": str(sid),
                 "when": _format_timestamp(match_info.get("session_started")),
@@ -827,8 +774,8 @@ async def session_search(
             }
             _attach_session_user(entry, match_info.get("user_id"), owner_scope)
 
-            if result_val:
-                entry["summary"] = result_val
+            if number in recaps:
+                entry["summary"] = recaps[number]
             else:
                 # Fallback: raw preview so matched sessions aren't silently
                 # dropped when the summarizer is unavailable.
