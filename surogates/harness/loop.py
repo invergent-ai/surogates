@@ -196,13 +196,16 @@ from surogates.harness.loop_attachments import (
 )
 from surogates.harness.loop_conclusion import conclude_from_transcript
 from surogates.harness.loop_deliverables import (
+    SAVE_CLAIM_NUDGE,
     deliverable_nudge,
     missing_deliverables,
+    unbacked_save_claim,
 )
 from surogates.harness.loop_constants import (
     _DYNAMIC_LOOP_EXCLUDED_TOOLS,
     _EMPTY_RESPONSE_NUDGE,
     _MAX_DELIVERABLE_RETRIES,
+    _MAX_SAVE_CLAIM_RETRIES,
     _UNFINISHED_RESPONSE_NUDGE,
     _LEASE_RENEWAL_INTERVAL_SECONDS,
     _LEASE_TTL_SECONDS,
@@ -2863,6 +2866,7 @@ class AgentHarness(
         empty_response_retries = 0  # retries for empty LLM responses (no content, no tools, no reasoning)
         unfinished_retries = 0    # nudges for a turn that trails off without acting
         deliverable_retries = 0   # nudges for a named file that was never written
+        save_claim_retries = 0    # nudges for "noted it" with no memory call
         provider_error_retries = 0  # bounded retries for finish_reason='error'
         partial_tool_call_retries = 0  # retries for truncated tool-call arguments
         # One-shot safety net for the deep-research planner.  Fires when
@@ -3842,6 +3846,25 @@ class AgentHarness(
                             "content": deliverable_nudge(absent),
                         })
                         continue
+
+                # "Noted it" with no memory call: the person believes the fact
+                # will be there next session and it will not.  Nudged once on
+                # the same terms as the guards above.
+                if (
+                    save_claim_retries < _MAX_SAVE_CLAIM_RETRIES
+                    and "memory" in offered_tools
+                    and unbacked_save_claim(visible_content, messages)
+                ):
+                    save_claim_retries += 1
+                    logger.info(
+                        "Session %s: reply claims a memory save with no "
+                        "memory call; nudging (%d/%d)",
+                        session.id, save_claim_retries, _MAX_SAVE_CLAIM_RETRIES,
+                    )
+                    await _persist_response()
+                    messages.append({"role": "assistant", "content": final_content})
+                    messages.append({"role": "user", "content": SAVE_CLAIM_NUDGE})
+                    continue
 
                 # The nudge is spent and the model is still trailing off. Its
                 # own text is not an answer, but the work it did may contain

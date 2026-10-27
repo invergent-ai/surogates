@@ -52,6 +52,11 @@ _MAX_UNFINISHED_RETRIES: int = 1
 #: guard is, and a second nudge would just argue with it.
 _MAX_DELIVERABLE_RETRIES: int = 1
 
+#: Nudges for a reply claiming a memory save the turn never made. One: the
+#: claim regex can misread a reply, so a model that keeps its wording after
+#: the nudge is taken at its word.
+_MAX_SAVE_CLAIM_RETRIES: int = 1
+
 #: Retries for a provider that returns finish_reason="error" and no content.
 #: Low because the common cause is not transient -- an over-sized request
 #: fails identically however many times it is re-sent -- so the value of the

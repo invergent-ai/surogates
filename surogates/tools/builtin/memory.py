@@ -43,7 +43,9 @@ def register(registry: ToolRegistry) -> None:
                 "- 'memory': your notes -- environment facts, project conventions, tool quirks, lessons learned\n\n"
                 "ACTIONS: add (new entry; an entry whose first line is a short title, e.g. a record headed with the person's name, replaces the existing entry with that same first line), replace (update existing -- old_text identifies it), "
                 "remove (delete -- old_text identifies it).\n\n"
-                "SKIP: trivial/obvious info, things easily re-discovered, raw data dumps, and temporary task state."
+                "SKIP: trivial/obvious info, things easily re-discovered, raw data dumps, and temporary task state.\n\n"
+                "Only a successful call to this tool saves anything. Never reply that you saved, noted or will "
+                "remember something unless this tool succeeded in the same turn."
             ),
             parameters={
                 "type": "object",
