@@ -266,6 +266,25 @@ async def test_emit_synthetic_outcome_user_message_marks_event(
     assert event.data["outcome_id"] == "outc_test"
 
 
+async def test_a_buyers_own_listing_leaves_out_their_buy_page_chat(
+    session_store, session_factory,
+):
+    """The buy page meters that conversation; the buyer's web app login
+    must not list it as a chat it could continue unmetered."""
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    web = await session_store.create_session(
+        user_id=user_id, org_id=org_id, agent_id="test-agent", channel="web",
+    )
+    await session_store.create_session(
+        user_id=user_id, org_id=org_id, agent_id="test-agent", channel="buy_page",
+    )
+
+    listed = await session_store.list_sessions(org_id, user_id, "test-agent")
+
+    assert [s.id for s in listed] == [web.id]
+
+
 async def test_list_sessions(session_store, session_factory):
     """Listing sessions for a user returns the correct count with pagination."""
     org_id = await create_org(session_factory)

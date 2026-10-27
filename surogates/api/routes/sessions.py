@@ -22,6 +22,7 @@ from fastapi import (
     status,
 )
 from pydantic import BaseModel, Field, StringConstraints, field_validator, model_validator
+from sqlalchemy import select
 from sqlalchemy import text as _sql_text
 
 from surogates.api.routes.workspace import (
@@ -41,6 +42,7 @@ from surogates.api.session_guards import (
 from surogates.whiteboard.session import SURFACE_KEY, surface_rejection
 from surogates.channels.constants import (
     API_CHANNEL,
+    BUY_PAGE_CHANNEL,
     SERVICE_ACCOUNT_CHANNELS,
     STUDIO_CHANNEL,
     outbound_dm,
@@ -143,6 +145,10 @@ class DeviceExecution(BaseModel):
         return v
 
 
+#: What a service-account client may name as its session's channel.
+_CREATABLE_API_CHANNELS = SERVICE_ACCOUNT_CHANNELS | {BUY_PAGE_CHANNEL}
+
+
 class CreateSessionRequest(BaseModel):
     system: str | None = None
     config: dict = Field(default_factory=dict)
@@ -153,6 +159,11 @@ class CreateSessionRequest(BaseModel):
     #: as an operator's.  Absent means :data:`API_CHANNEL`, which keeps
     #: every existing third-party client working unchanged.
     channel: str | None = None
+    #: The buyer's user account a :data:`BUY_PAGE_CHANNEL` session is
+    #: created on behalf of.  Honoured only on the service-account route,
+    #: only for the agent's own principal, and only together with that
+    #: channel and a ``public_buyer_id``.
+    on_behalf_of_user_id: UUID | None = None
     #: A pre-written transcript to seed the session with. Honoured only by
     #: :func:`create_api_session`, and only for an evaluation session — see
     #: :func:`emit_seed_turns`.
@@ -177,8 +188,8 @@ class CreateSessionRequest(BaseModel):
     @field_validator("channel")
     @classmethod
     def _validate_channel(cls, v: str | None) -> str | None:
-        if v is not None and v not in SERVICE_ACCOUNT_CHANNELS:
-            allowed = ", ".join(sorted(SERVICE_ACCOUNT_CHANNELS))
+        if v is not None and v not in _CREATABLE_API_CHANNELS:
+            allowed = ", ".join(sorted(_CREATABLE_API_CHANNELS))
             raise ValueError(
                 f"channel must be one of: {allowed} (got {v!r})"
             )
@@ -647,7 +658,7 @@ def apply_eval_isolation(
     resolved.pop(CASE_ITEM_KEY, None)
     resolved.pop(CASE_SCOPE_KEY, None)
     resolved.pop(CASE_AGENT_KEY, None)
-    if channel != API_CHANNEL:
+    if channel not in (API_CHANNEL, BUY_PAGE_CHANNEL):
         return resolved
     if buyer_principal and resolved.get("public_buyer_id"):
         key, prefix = "public_buyer_id", BUYER_BOUNDARY_PREFIX
@@ -671,6 +682,74 @@ def apply_eval_isolation(
         )
     resolved["memory_boundary"] = f"{prefix}{partition_id}"
     return resolved
+
+
+def _require_metered_door(session: Session, tenant: TenantContext) -> None:
+    """409 a person starting a turn in their buy-page conversation.
+
+    The buy page meters every turn of it; the buyer's own login reaching it
+    here (send, resume, retry) would run turns nothing charges.
+    """
+    if session.channel == BUY_PAGE_CHANNEL and tenant.user_id is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This conversation continues on the agent's buy page.",
+        )
+
+
+async def _buy_page_buyer(
+    body: CreateSessionRequest,
+    request: Request,
+    tenant: TenantContext,
+    agent_id: str,
+    *,
+    channel: str,
+) -> UUID | None:
+    """The buyer a :data:`BUY_PAGE_CHANNEL` session is created for, or None.
+
+    Only the agent's own principal (the account its buy page forwards
+    through) may open one, naming a ``public_buyer_id`` (the buyer's
+    memory partition) and a user of this organisation.  Anyone else
+    naming a user would file sessions, and their spend, under a person
+    who never had them.
+    """
+    if channel != BUY_PAGE_CHANNEL and body.on_behalf_of_user_id is None:
+        return None
+    if channel != BUY_PAGE_CHANNEL or body.on_behalf_of_user_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"channel={BUY_PAGE_CHANNEL!r} and on_behalf_of_user_id "
+                "go together."
+            ),
+        )
+    if not body.config.get("public_buyer_id") or not await _is_agent_principal(
+        request, tenant, agent_id, tenant.service_account_id,
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                f"channel={BUY_PAGE_CHANNEL!r} is reserved for the agent's "
+                "own buy page."
+            ),
+        )
+    if not await _org_has_user(request, tenant.org_id, body.on_behalf_of_user_id):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found.",
+        )
+    return body.on_behalf_of_user_id
+
+
+async def _org_has_user(request: Request, org_id: UUID, user_id: UUID) -> bool:
+    """Whether *user_id* is a home user of *org_id*."""
+    from surogates.db.models import User
+
+    async with request.app.state.session_factory() as db:
+        found = await db.scalar(
+            select(User.id).where(User.id == user_id, User.org_id == org_id)
+        )
+    return found is not None
 
 
 async def _is_agent_principal(
@@ -861,9 +940,9 @@ async def _create_session(
         )
 
     buyer_principal = (
-        channel == API_CHANNEL
+        channel in (API_CHANNEL, BUY_PAGE_CHANNEL)
         and bool(body.config.get("public_buyer_id"))
-        and await _is_agent_principal(request, tenant, agent_id, service_account_id)
+        and await _is_agent_principal(request, tenant, agent_id, tenant.service_account_id)
     )
     config = apply_eval_isolation(
         body.config.copy(), channel=channel, buyer_principal=buyer_principal,
@@ -1018,14 +1097,20 @@ async def create_api_session(
     if body.seed_turns:
         await _require_eval_seeding(body, channel=channel, request=request, tenant=tenant)
         _screen_seed_turns(body.seed_turns)
+    buyer_user_id = await _buy_page_buyer(
+        body, request, tenant, agent_runtime.agent_id, channel=channel,
+    )
     session = await _create_session(
         body,
         request,
         tenant,
         agent_runtime.agent_id,
         channel=channel,
-        user_id=None,
-        service_account_id=service_account_id,
+        # A buyer's conversation is theirs, shaped like a channel session:
+        # the person on user_id, no service-account owner (the worker runs
+        # the agent as itself on this channel).
+        user_id=buyer_user_id,
+        service_account_id=None if buyer_user_id is not None else service_account_id,
         whiteboard_enabled=agent_runtime.whiteboard_enabled,
     )
     await emit_seed_turns(
@@ -1115,6 +1200,7 @@ async def deliver_message(
     store = _get_session_store(request)
     session = await _get_session_for_tenant(request, session_id, tenant, agent_runtime)
     require_user_writable_session(session)
+    _require_metered_door(session, tenant)
     await require_device_access(request, session, tenant)
 
     if session.status not in ("active", "idle", "failed", "paused", "completed"):
@@ -1841,6 +1927,7 @@ async def resume_session(
     store = _get_session_store(request)
     session = await _get_session_for_tenant(request, session_id, tenant, agent_runtime)
     require_user_writable_session(session)
+    _require_metered_door(session, tenant)
     await require_device_access(request, session, tenant)
 
     if session.status != "paused":
@@ -1887,6 +1974,7 @@ async def retry_session(
     store = _get_session_store(request)
     session = await _get_session_for_tenant(request, session_id, tenant, agent_runtime)
     require_user_writable_session(session)
+    _require_metered_door(session, tenant)
     await require_device_access(request, session, tenant)
 
     if session.status not in ("failed", "paused"):

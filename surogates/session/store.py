@@ -29,6 +29,7 @@ from surogates.browser.control import BROWSER_HAND_BACK, RESUMES, TAKEN_OVER_FRO
 from surogates.channels.capabilities import capabilities_for
 from surogates.channels.constants import (
     ADAPTER_CHANNELS,
+    BUY_PAGE_CHANNEL,
     INTERACTIVE_PROMPT_CHANNELS,
     outbound_dm,
 )
@@ -1473,7 +1474,12 @@ class SessionStore:
             principal_filter = (
                 SessionRow.service_account_id == service_account_id
                 if service_account_id is not None
-                else SessionRow.user_id == user_id
+                # A buyer's buy-page conversation is theirs but runs only
+                # on the buy page, which meters it: never a chat to list.
+                else and_(
+                    SessionRow.user_id == user_id,
+                    SessionRow.channel != BUY_PAGE_CHANNEL,
+                )
             )
         marker_filter = _SINGLE_SESSION_MARKER if single_session_only else true()
         master_filter = (

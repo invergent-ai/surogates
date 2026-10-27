@@ -7,6 +7,8 @@ buyer was told facts from another's chat.
 """
 from __future__ import annotations
 
+from uuid import uuid4
+
 import pytest
 from fastapi import HTTPException
 
@@ -157,3 +159,111 @@ def test_a_visitor_keeps_the_memory_tool_but_never_skill_manage():
 
     assert "memory" in tools
     assert "skill_manage" not in tools
+
+
+async def _buy_page_session(monkeypatch, buyer_id: str, *, known_user=True, **body):
+    store, request, tenant, agent_runtime = _route_fixtures(
+        "/v1/api/sessions", service_account=True,
+    )
+    user_id = uuid4()
+
+    async def fake_org_has_user(_request, org_id, candidate):
+        return known_user and org_id == tenant.org_id and candidate == user_id
+
+    monkeypatch.setattr(sessions_route, "_org_has_user", fake_org_has_user)
+    session = await sessions_route.create_api_session(
+        sessions_route.CreateSessionRequest(
+            config={"public_buyer_id": buyer_id},
+            **{"channel": "buy_page", "on_behalf_of_user_id": user_id, **body},
+        ),
+        request, tenant, agent_runtime,
+    )
+    return session, store.created[-1], user_id
+
+
+async def test_a_buy_page_session_is_the_buyers_and_keeps_their_partition(monkeypatch):
+    _caller(monkeypatch, KIND_AGENT_PRINCIPAL)
+
+    session, created, user_id = await _buy_page_session(monkeypatch, "buyer-ida")
+
+    # The buyer's account, so the agent's Users page counts the chat.
+    assert created["channel"] == "buy_page"
+    assert created["user_id"] == user_id
+    assert created["service_account_id"] is None
+    # Their memory is still theirs alone, and the workspace per session.
+    assert session_memory_boundary(session) == "buyer:buyer-ida"
+    assert workspace_boundary(session) is None
+
+
+async def test_only_the_agent_principal_opens_a_buy_page_session(monkeypatch):
+    _caller(monkeypatch, KIND_API_KEY)
+
+    with pytest.raises(HTTPException) as exc:
+        await _buy_page_session(monkeypatch, "buyer-ida")
+    assert exc.value.status_code == 403
+
+
+async def test_a_buy_page_session_needs_a_user_of_the_org(monkeypatch):
+    _caller(monkeypatch, KIND_AGENT_PRINCIPAL)
+
+    with pytest.raises(HTTPException) as exc:
+        await _buy_page_session(monkeypatch, "buyer-ida", known_user=False)
+    assert exc.value.status_code == 404
+
+
+async def test_a_user_is_named_only_on_the_buy_page_channel(monkeypatch):
+    _caller(monkeypatch, KIND_AGENT_PRINCIPAL)
+
+    with pytest.raises(HTTPException) as exc:
+        await _buy_page_session(monkeypatch, "buyer-ida", channel=None)
+    assert exc.value.status_code == 422
+
+
+def test_the_buyers_own_login_cannot_start_a_turn_in_it():
+    from types import SimpleNamespace
+
+    buyer_session = SimpleNamespace(channel="buy_page")
+    _, _, user_tenant, _ = _route_fixtures("/v1/sessions", service_account=False)
+    _, _, agent_tenant, _ = _route_fixtures("/v1/api/sessions", service_account=True)
+
+    with pytest.raises(HTTPException) as exc:
+        sessions_route._require_metered_door(buyer_session, user_tenant)
+    assert exc.value.status_code == 409
+    sessions_route._require_metered_door(buyer_session, agent_tenant)
+
+
+def test_on_the_buy_page_the_agent_still_acts_as_itself():
+    """The buyer's account is on the session for attribution; tools and
+    connections stay the agent's, as they were before buyers had one."""
+    from types import SimpleNamespace
+
+    from surogates.orchestrator.worker import resolve_credential_principal
+    from surogates.session.acting_principal import ActingPrincipal
+
+    agent = SimpleNamespace(id=uuid4())
+    buyer = ActingPrincipal(user_id=uuid4(), service_account_id=None)
+    credential = resolve_credential_principal(
+        session=SimpleNamespace(channel="buy_page"), acting=buyer, agent_principal=agent,
+    )
+    assert credential.user_id is None
+    assert credential.service_account_id == agent.id
+
+
+async def test_a_buy_page_reply_is_never_judged_into_a_question():
+    """The buy page shows the turn's last reply and cannot answer a widget."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from surogates.harness.loop import AgentHarness
+
+    judge = AsyncMock(return_value={"action_kind": "ask_user_question"})
+    harness = SimpleNamespace(_judge_final_response_user_action=judge)
+    session = SimpleNamespace(
+        channel="buy_page", user_id=uuid4(), service_account_id=None, parent_id=None, id=uuid4(),
+    )
+    out = await AgentHarness._maybe_route_final_response_to_inbox(
+        harness, session=session, messages=[],
+        assistant_message={"role": "assistant", "content": "Which plan do you want?"},
+        model="m", tool_filter=None,
+    )
+    assert out is None and judge.await_count == 0

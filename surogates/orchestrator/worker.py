@@ -89,7 +89,7 @@ ANONYMOUS_CHANNELS: frozenset[str] = frozenset({"website"})
 #: service-account principal (when the agent has one) instead of the end user.
 #: One source of truth with the memory-boundary set so credential-switching and
 #: conversation-scoped memory isolation can never drift to different channels.
-from surogates.channels.constants import REALTIME_CHANNELS
+from surogates.channels.constants import BUY_PAGE_CHANNEL, REALTIME_CHANNELS
 from surogates.channels.memory_boundary import (
     MANAGED_CHANNELS as MANAGED_CREDENTIAL_CHANNELS,
     VISITOR_BOUNDARY_PREFIX,
@@ -97,6 +97,12 @@ from surogates.channels.memory_boundary import (
     is_eval_session,
     session_memory_boundary,
 )  # noqa: E402
+
+#: Channels whose sessions belong to a person while the agent acts as
+#: itself: the managed channels, plus the buy page, whose sessions carry the
+#: buyer's account for attribution but always ran under the agent's own
+#: principal (its tools, its connections), never the buyer's.
+AGENT_CREDENTIAL_CHANNELS = MANAGED_CREDENTIAL_CHANNELS | {BUY_PAGE_CHANNEL}
 
 
 # Platform ceiling on iterations per wake.  Agent-supplied configuration may
@@ -139,7 +145,7 @@ def resolve_credential_principal(
     session: Any,
     acting: Any,
     agent_principal: Any | None,
-    managed_channels: frozenset[str] = MANAGED_CREDENTIAL_CHANNELS,
+    managed_channels: frozenset[str] = AGENT_CREDENTIAL_CHANNELS,
 ):
     """The principal external secrets/tools mint under for this wake.
 

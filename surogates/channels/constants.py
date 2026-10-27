@@ -17,6 +17,7 @@ from surogates.channels.memory_boundary import is_case_agent_session, is_case_se
 __all__ = [
     "ADAPTER_CHANNELS",
     "API_CHANNEL",
+    "BUY_PAGE_CHANNEL",
     "CASE_STEP_PRIORITY",
     "DIRECT_UI_CHANNELS",
     "END_USER_CHANNELS",
@@ -43,6 +44,15 @@ API_CHANNEL = "api"
 #: Reporting the two as one channel made every operator chat look like a
 #: third-party integration.
 STUDIO_CHANNEL = "studio"
+
+#: A buyer chatting on the agent's hosted buy page.  The control plane
+#: forwards each message with the agent's own principal, on behalf of the
+#: buyer's user account (the same Firebase identity the agent's web app
+#: signs them in with), so the conversation is the buyer's for the Users
+#: page while the agent still acts as itself.  Only that principal may
+#: create one (``create_api_session``), and only the buy page, which
+#: meters every turn, may post into it.
+BUY_PAGE_CHANNEL = "buy_page"
 
 
 def multi_session_disabled(config: dict) -> bool:
@@ -122,7 +132,7 @@ INTERACTIVE_PROMPT_CHANNELS = frozenset({"slack", "telegram", "whatsapp"})
 #: end-user activity — ``studio`` in particular is the operator talking
 #: to their own agent, not a customer of it.
 END_USER_CHANNELS = frozenset(
-    {"web", "website", "slack", "telegram", "teams", "whatsapp", "voice", "discord"}
+    {"web", "website", "slack", "telegram", "teams", "whatsapp", "voice", "discord", BUY_PAGE_CHANNEL}
 )
 
 #: Channels created by a service-account token rather than a logged-in

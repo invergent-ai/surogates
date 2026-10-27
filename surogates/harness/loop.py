@@ -31,6 +31,7 @@ from uuid import UUID, uuid4
 from surogates.api.routes._commerce_turn import AllowanceReserveError, CommerceReserveError
 from surogates.channels.constants import (
     ADAPTER_CHANNELS,
+    BUY_PAGE_CHANNEL,
     END_USER_CHANNELS,
     REALTIME_CHANNELS,
     STUDIO_CHANNEL,
@@ -5059,6 +5060,10 @@ class AgentHarness(
             session.channel not in END_USER_CHANNELS
             and session.channel != STUDIO_CHANNEL
         ):
+            return None
+        # The buy page reads the turn's last reply and has no widget to
+        # answer a question with.
+        if session.channel == BUY_PAGE_CHANNEL:
             return None
         # A phone caller has already heard the answer: there is no widget to
         # rescue it into, and the judge's blocking calls would hold their next
