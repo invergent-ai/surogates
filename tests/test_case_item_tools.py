@@ -35,6 +35,7 @@ from tests.test_case_step_tools import (  # noqa: F401 - fake_keel is a fixture
     CASE,
     OTHER_PAGE,
     PAGE,
+    reported,
     USAGE,
     _calls,
     _ended_with,
@@ -386,7 +387,7 @@ async def test_an_items_completion_carries_its_usage_pages_read_and_bundle_versi
 
     assert result == "Item ended: Keel recorded it."
     [body] = fake_keel.bodies("/item/complete")
-    assert body["pages_read"] == [OTHER_PAGE, PAGE]
+    assert body["pages_read"] == [reported(OTHER_PAGE), reported(PAGE)]
     assert body["usage"] == used
     assert body["bundle_version"] == "v7"
 

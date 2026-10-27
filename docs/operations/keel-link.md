@@ -433,7 +433,7 @@ A report Keel would refuse whole is never sent, and the model is told what to fi
 
 What each report carries. Besides what the model gave, `complete_step` and `raise_hand` carry:
 
-- `pages_read`: the knowledge pages the case's sessions read, each once, sorted, at most 500.
+- `pages_read`: the knowledge pages the case's sessions read, each once for each compile that wrote the text read, sorted, at most 500. Each entry is `{"kb_id", "path", "sha256", "compile_id"}`. `compile_id` is the knowledge base compile that last wrote the text of the page read: a later compile that leaves the page unchanged does not change it. It is null when the page was published before compiles kept versions, or the read was recorded before reads named their compile. A passage read is recorded as its page. The same page can be listed once under each compile id its reads named, and once under null.
 - `usage`: `{"input_tokens", "output_tokens", "cache_read_tokens", "estimated_cost_usd"}`, what the step's session and every helper under it, at any depth, used so far. The tokens and the cost are those the sessions' rows count; the cache reads are those their model calls' responses name. Counts are at most 2^63−1, and the cost is a plain decimal in USD, never with an exponent. Each report carries the total so far, so a later one is never below an earlier one; Keel replaces what it kept, and does not add them. A helper still working after the last report spends what Keel is not told.
 - `bundle_version`: the agent's bundle version that the session's latest wake ran with, null when no wake recorded one (an agent with no bundle, or a session whose wakes came before wakes recorded it), and at most 200 characters.
 
@@ -466,7 +466,7 @@ A report Keel would refuse whole is never sent, as a step's is not: one over 256
 
 What each report carries. Besides what the model gave:
 
-- `item/complete` carries `pages_read`: the knowledge pages the item's session and its helpers read, each once, sorted, at most 500, for a step, a vote and a raised hand's answer alike. `item/return` carries none.
+- `item/complete` carries `pages_read` as a step's report does (`{"kb_id", "path", "sha256", "compile_id"}`): the knowledge pages the item's session and its helpers read, each once for each compile, sorted, at most 500, for a step, a vote and a raised hand's answer alike. `item/return` carries none.
 - `item/complete` and `item/return` carry `usage`: `{"input_tokens", "output_tokens", "cache_read_tokens", "estimated_cost_usd"}`, what the item's session and every helper under it, at any depth, used so far. It is counted as a step's is: each report carries the total so far, and Keel replaces what it kept, and does not add them. A helper still working after the last report spends what Keel is not told.
 - Both also carry `bundle_version`: the agent's bundle version that the session's latest wake ran with, null when no wake recorded one (an agent with no bundle, or a session whose wakes came before wakes recorded it), and at most 200 characters.
 

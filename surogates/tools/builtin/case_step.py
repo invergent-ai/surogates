@@ -65,7 +65,7 @@ from surogates.keel.case_files import CaseFileError, case_path
 from surogates.keel.client import BodyNotJSON, BodyTooLarge, KeelAnswer, KeelClient, keel_client
 from surogates.keel.files import case_file_value, workspace_path
 from surogates.keel.items import ItemContract, is_case_item
-from surogates.keel.run_facts import wake_bundle_version, work_usage, work_usage_or_none
+from surogates.keel.run_facts import compile_id_in, wake_bundle_version, work_usage, work_usage_or_none
 from surogates.keel.steps import (
     CASE_ITEM_KEY,
     CASE_STEP_KEY,
@@ -277,9 +277,14 @@ def _error(message: str, **extra: Any) -> str:
     return json.dumps({"error": message, **extra})
 
 
-async def _pages_read(store: Any, session: Any) -> list[dict[str, str]]:
-    """The pages the case's sessions read, from the case root's log: each once, sorted by knowledge base id,
-    path and digest, the first :data:`MAX_PAGES_READ` of them.
+async def _pages_read(store: Any, session: Any) -> list[dict[str, str | None]]:
+    """The pages the case's sessions read, from the case root's log: each once for each compile that wrote the
+    text read, sorted by knowledge base id, path, digest and compile, the first :data:`MAX_PAGES_READ` of them.
+
+    An entry always carries ``compile_id``: the compile that last wrote the
+    text of the page read, None when the read did not name one (an event
+    written before reads named their compile, or anything that is not a
+    compile id).  One page can so be listed under more than one compile.
 
     A page whose digest is not a SHA-256 hex digest, or whose knowledge base
     id or path is empty or longer than Keel takes, is left out: Keel refuses
@@ -287,7 +292,7 @@ async def _pages_read(store: Any, session: Any) -> list[dict[str, str]]:
     """
     events = await store.get_events(UUID(workspace_root_id(session)), types=[EventType.KB_PAGE_READ])
     pages = {
-        (data["kb_id"], data["path"], data["sha256"])
+        (data["kb_id"], data["path"], data["sha256"], compile_id_in(data.get("compile_id")))
         for data in (event.data for event in events)
         if isinstance(data, dict)
         and all(isinstance(data.get(key), str) for key in ("kb_id", "path", "sha256"))
@@ -296,8 +301,10 @@ async def _pages_read(store: Any, session: Any) -> list[dict[str, str]]:
         and 0 < len(data["path"]) <= PAGE_PATH_CHARS
     }
     return [
-        {"kb_id": kb_id, "path": path, "sha256": sha256}
-        for kb_id, path, sha256 in sorted(pages)[:MAX_PAGES_READ]
+        {"kb_id": kb_id, "path": path, "sha256": sha256, "compile_id": compile_id}
+        for kb_id, path, sha256, compile_id in sorted(pages, key=lambda page: (*page[:3], page[3] or ""))[
+            :MAX_PAGES_READ
+        ]
     ]
 
 

@@ -29,6 +29,7 @@ __all__ = [
     "BUNDLE_VERSION_CHARS",
     "MAX_COUNT",
     "bundle_version_in",
+    "compile_id_in",
     "usage_report",
     "wake_bundle_version",
     "work_usage",
@@ -51,6 +52,20 @@ def bundle_version_in(value: object) -> str | None:
     if isinstance(value, str) and 1 <= len(value) <= BUNDLE_VERSION_CHARS:
         return value
     return None
+
+
+def compile_id_in(value: object) -> str | None:
+    """*value* when it is a knowledge base compile id as ops writes one: a lowercase hyphenated UUID.  None otherwise.
+
+    A page read before reads named their compile, or whose compile left
+    anything else, reports no compile rather than a wrong one.
+    """
+    if not isinstance(value, str):
+        return None
+    try:
+        return value if value == str(UUID(value)) else None
+    except ValueError:
+        return None
 
 
 def _count(value: int) -> int:
