@@ -482,6 +482,27 @@ def _senders(ctx: Any, settings: Any) -> dict[str, str]:
     return {**own, **followup_store.senders_of(settings)}
 
 
+def _when(at: datetime, zone: str, fmt: str = "%m-%d %H:%M") -> str:
+    """*at* read in *zone*, the zone named, so a time is never taken for
+    the reader's own."""
+    return f"{as_utc(at).astimezone(ZoneInfo(zone)):{fmt} %Z}"
+
+
+def _agent_zone(configs: list[dict]) -> str:
+    """The zone every active Program of the agent shares, else UTC."""
+    zones = {str((c or {}).get("timezone") or "UTC") for c in configs}
+    return zones.pop() if len(zones) == 1 else "UTC"
+
+
+def _person_zone(person: _Person, zones: dict[str, str], fallback: str) -> str:
+    """Where *person* lives, as the Programs reach them: their own zone,
+    else the zone of a Program following them, else *fallback*."""
+    for row in person.rows:
+        if row.timezone:
+            return row.timezone
+    return next((zones[r.protocol] for r in person.rows if r.protocol in zones), fallback)
+
+
 def _ago(at: datetime | None, now: datetime) -> str:
     if at is None:
         return "never"
@@ -695,12 +716,12 @@ def _unanswered_streak(invitations: list) -> int:
     return count
 
 
-def _last_checkin(invitations: list) -> str:
+def _last_checkin(invitations: list, zone: str) -> str:
     for inv in invitations:
         if inv.delivery_state in ("skipped", "canceled"):
             continue
         text = (
-            f"{as_utc(inv.created_at):%Y-%m-%d}: delivery {inv.delivery_state}, "
+            f"{_when(inv.created_at, zone, '%Y-%m-%d')}: delivery {inv.delivery_state}, "
             f"response {inv.response_state}"
         )
         if inv.escalation_state != "none":
@@ -713,8 +734,9 @@ def _last_checkin(invitations: list) -> str:
     return "none"
 
 
-async def _conversation(sf, org_id, agent_id, user_id) -> list[str]:
-    """The person's latest messages and the agent's replies, oldest first."""
+async def _conversation(sf, org_id, agent_id, user_id, zone: str) -> list[str]:
+    """The person's latest messages and the agent's replies, oldest first,
+    timed in *zone*."""
     async with sf() as db:
         rows = (
             await db.execute(
@@ -740,7 +762,7 @@ async def _conversation(sf, org_id, agent_id, user_id) -> list[str]:
             content = (data.get("message") or {}).get("content")
         if not isinstance(content, str) or not content.strip():
             continue
-        lines.append(f"  [{as_utc(at):%m-%d %H:%M}] {who}: {content.strip()[:300]}")
+        lines.append(f"  [{_when(at, zone)}] {who}: {content.strip()[:300]}")
         if len(lines) == CONVERSATION_LINES:
             break
     return lines[::-1]
@@ -863,6 +885,7 @@ async def handle_team_overview(arguments: dict, **kwargs: Any) -> str:
     zones = await followup_store.protocol_timezones(
         sf, org_id=ctx.org_id, agent_id=ctx.agent_id, configs=configs,
     )
+    agent_zone = _agent_zone(configs)
 
     new, changed, silent = [], [], []
     for person in people:
@@ -882,6 +905,7 @@ async def handle_team_overview(arguments: dict, **kwargs: Any) -> str:
 
     async def block(person: _Person) -> str:
         wrote = last_in.get(person.user_id)
+        zone = _person_zone(person, zones, agent_zone)
         head = person.label
         head += f" · {person.contact}"
         lines = [f"• {head}"]
@@ -909,16 +933,16 @@ async def handle_team_overview(arguments: dict, **kwargs: Any) -> str:
             ))
         invs = invitations.get(person.user_id, [])
         lines.append(
-            f"  last wrote {_ago(wrote, now)}; last step {_last_checkin(invs)}; "
+            f"  last wrote {_ago(wrote, now)}; last step {_last_checkin(invs, zone)}; "
             f"unanswered messages in a row: {_unanswered_streak(invs)}"
         )
         for at, reason, was_reminded in alerts.get(person.user_id, []):
             lines.append(
-                f"  alert {as_utc(at):%m-%d %H:%M}: {reason[:300]}"
+                f"  alert {_when(at, zone)}: {reason[:300]}"
                 + (" (reminded)" if was_reminded else "")
             )
         if fragment and len(people) == 1:
-            convo = await _conversation(sf, ctx.org_id, ctx.agent_id, person.user_id)
+            convo = await _conversation(sf, ctx.org_id, ctx.agent_id, person.user_id, zone)
             lines.append("  latest conversation:" if convo else "  no conversation yet")
             lines.extend(convo)
             lines.extend(_memory_lines(
@@ -928,7 +952,7 @@ async def handle_team_overview(arguments: dict, **kwargs: Any) -> str:
 
     header = [
         (
-            f"Follow-up overview at {now:%Y-%m-%d %H:%M} UTC, {len(people)} "
+            f"Follow-up overview at {_when(now, agent_zone, '%Y-%m-%d %H:%M')}, {len(people)} "
             f"{'person' if len(people) == 1 else 'people'}. Raw records: quote, "
             "do not interpret."
         ),
