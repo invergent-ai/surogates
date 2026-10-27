@@ -51,6 +51,7 @@ from surogates.keel.items import (
     render_item_kickoff,
     render_item_message,
 )
+from surogates.keel.run_facts import bundle_version_in
 from surogates.keel.steps import ITEM_KICKOFF_MARKER, MESSAGE_MARKER, sleeps_through_a_plain_message
 from surogates.session.store import SessionNotFoundError, StepFinishedError
 
@@ -106,7 +107,7 @@ async def create_item_session(request: Request) -> JSONResponse:
     require_link(request)
     body = await read_body(request, ItemSessionRequest)
     agent_id = agent_id_of(request)
-    await resolve_agent(request, agent_id, body.org_id)
+    agent = await resolve_agent(request, agent_id, body.org_id)
     contract = body.contract
     screen(contract.model_dump(mode="json", include=_SCREENED), case_id=contract.case_id)
 
@@ -144,7 +145,7 @@ async def create_item_session(request: Request) -> JSONResponse:
         ) from None
     await note_case_org(request, contract.case_id, body.org_id)
     return JSONResponse(
-        {"session_id": str(session.id)},
+        {"session_id": str(session.id), "bundle_version": bundle_version_in(agent.get("bundle_version"))},
         status_code=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
     )
 

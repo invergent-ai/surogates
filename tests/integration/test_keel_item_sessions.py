@@ -143,7 +143,7 @@ async def test_keel_creates_an_item_session(link, org, session_store, session_fa
     created = await post(link, request)
 
     assert created.status_code == 201, created.text
-    assert created.json() == {"session_id": request["session_id"]}
+    assert created.json() == {"session_id": request["session_id"], "bundle_version": "v12"}
     session = await session_store.get_session(UUID(request["session_id"]))
     assert session.channel == API_CHANNEL
     assert session.user_id is None
@@ -163,6 +163,17 @@ async def test_keel_creates_an_item_session(link, org, session_store, session_fa
     assert await queue_score(redis_client, session) == 1.0
 
 
+async def test_an_item_create_answers_the_agents_bundle_version(link, org):
+    request = item_body(org)
+
+    made = await post(link, request)
+    assert (made.status_code, made.json()["bundle_version"]) == (201, "v12")
+
+    # An agent whose runtime config names none.
+    none = await post(link, item_body(org, "keel:c:1:item:2", item_id="item-2"), agent="second-agent")
+    assert (none.status_code, none.json()["bundle_version"]) == (201, None)
+
+
 async def test_a_retry_makes_one_item_session_and_one_kickoff(link, org, session_store, redis_client):
     request = item_body(org)
 
@@ -170,7 +181,7 @@ async def test_a_retry_makes_one_item_session_and_one_kickoff(link, org, session
     again = await post(link, request)
 
     assert first.status_code == 201, first.text
-    assert (again.status_code, again.json()) == (200, {"session_id": request["session_id"]})
+    assert (again.status_code, again.json()) == (200, {"session_id": request["session_id"], "bundle_version": "v12"})
     messages = await user_messages(session_store, UUID(request["session_id"]))
     assert [m.data.get("synthetic") for m in messages] == ["keel_item"]
 

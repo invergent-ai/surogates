@@ -41,6 +41,7 @@ from tests.test_case_step_tools import (
     DRAFTED,
     GIVEN_BACK,
     HAND_RAISED,
+    USAGE,
     _batch,
     _calls,
     _ended_with,
@@ -58,7 +59,6 @@ NUDGE = (
     "This session works one step of a case. Finish it now: call complete_step "
     "with one of its outcomes, or raise_hand if you cannot."
 )
-USAGE = {"input_tokens": 1200, "output_tokens": 340, "estimated_cost_usd": "0.0123"}
 # What the model said before its provider cut the answer off: the case's own data.
 CUT_OFF = "Ioana's declared income of 182000.00 does not match the"
 
@@ -124,7 +124,9 @@ async def test_a_turn_without_an_outcome_is_nudged_once_then_reported(fake_keel,
     assert nudge["synthetic"]
     assert _ended_with(store) == "completed"
     assert store.row.status == "completed"
-    assert fake_keel.bodies("/ended") == [{"reason": "no-outcome", "detail": "completed", "usage": USAGE}]
+    assert fake_keel.bodies("/ended") == [
+        {"reason": "no-outcome", "detail": "completed", "usage": USAGE, "bundle_version": None},
+    ]
     assert len(fake_keel.requests) == 1
     # Keel decides what comes of the step: it is still the session's to take up.
     assert not store.redacted()
@@ -136,11 +138,13 @@ async def test_a_failed_turn_is_reported_as_failed(fake_keel, monkeypatch, store
     assert len(sent) == 3
     assert _failed_with(store) == "provider_error"
     assert store.row.status == "failed"
-    assert fake_keel.bodies("/ended") == [{"reason": "failed", "detail": "provider_error"}]
+    assert fake_keel.bodies("/ended") == [
+        {"reason": "failed", "detail": "provider_error", "usage": USAGE, "bundle_version": None},
+    ]
     # Nothing of the error, nor of the case, reaches Keel.
     for request in fake_keel.requests:
         body = request.content.decode()
-        for fragment in ("Ioana", "182000", "does not match", "attempts", "input_tokens"):
+        for fragment in ("Ioana", "182000", "does not match", "attempts"):
             assert fragment not in body
     assert store.redacted()
     assert store.redactions == 1
@@ -150,7 +154,7 @@ async def test_a_failed_turn_is_reported_as_failed(fake_keel, monkeypatch, store
     ((200, ACCEPTED), "alone", "case_step_ended", []),
     ((200, ACCEPTED), "halted", "tool_loop_halt", []),
     ((403, {"code": "forbidden", "message": "Not this agent's step."}), "halted", "tool_loop_halt",
-     [{"reason": "failed", "detail": "keel-403", "usage": USAGE}]),
+     [{"reason": "failed", "detail": "keel-403", "usage": USAGE, "bundle_version": None}]),
     ((200, ACCEPTED), "answered", "completed", []),
 ], ids=["accepted", "accepted-then-halted", "stopped-then-halted", "accepted-then-answered"])
 async def test_a_step_ended_turn_reports_nothing(fake_keel, monkeypatch, store, door, turn, ends, ended):
@@ -316,7 +320,9 @@ async def test_a_session_the_dispatcher_fails_is_reported_as_failed(
         assert fake_keel.requests == []
         assert store.redactions == (1 if session == "completed-step" else 0)
         return
-    assert fake_keel.bodies("/ended") == [{"reason": "failed", "detail": code}]
+    assert fake_keel.bodies("/ended") == [
+        {"reason": "failed", "detail": code, "usage": USAGE, "bundle_version": None},
+    ]
     for request in fake_keel.requests:
         for fragment in ("Ioana", "182000", "rejected", "Refused"):
             assert fragment not in request.content.decode()
@@ -341,7 +347,9 @@ async def test_a_step_the_sweeper_gives_up_is_reported_as_failed(fake_keel, tmp_
     await _orchestrator(store, None)._abandon_unrecoverable_session(store.row, attempts=3, reason="no progress")
 
     assert _failed_with(store) == "recovery_loop"
-    assert fake_keel.bodies("/ended") == [{"reason": "failed", "detail": "recovery_loop"}]
+    assert fake_keel.bodies("/ended") == [
+        {"reason": "failed", "detail": "recovery_loop", "usage": USAGE, "bundle_version": None},
+    ]
     assert store.redacted()
 
 
@@ -438,7 +446,9 @@ async def test_a_tool_call_between_two_answers_does_not_rearm_the_nudge(fake_kee
     assert len(sent) == 3
     assert json.dumps(sent[2]["messages"]).count("Finish it now") == 1
     assert _ended_with(store) == "completed"
-    assert fake_keel.bodies("/ended") == [{"reason": "no-outcome", "detail": "completed", "usage": USAGE}]
+    assert fake_keel.bodies("/ended") == [
+        {"reason": "no-outcome", "detail": "completed", "usage": USAGE, "bundle_version": None},
+    ]
 
 
 async def test_a_child_of_a_step_is_never_nudged_or_reported(fake_keel, monkeypatch, tmp_path):
@@ -512,7 +522,9 @@ async def test_a_turn_keel_takes_as_a_raised_hand_is_left_to_the_person(fake_kee
     fake_keel.answer(200, HAND_RAISED)
     await _wake(monkeypatch, store, [_says("I read the checklist."), _says("It looks complete.")])
 
-    assert fake_keel.bodies("/ended") == [{"reason": "no-outcome", "detail": "completed", "usage": USAGE}]
+    assert fake_keel.bodies("/ended") == [
+        {"reason": "no-outcome", "detail": "completed", "usage": USAGE, "bundle_version": None},
+    ]
     assert store.reported() == "hand-raised"
     assert not store.redacted()
 

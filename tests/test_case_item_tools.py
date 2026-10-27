@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from copy import deepcopy
+from decimal import Decimal
 from uuid import uuid4
 
 import pytest
@@ -27,16 +29,22 @@ from surogates.keel.steps import CASE_ITEM_KEY, CASE_STEP_KEY
 from surogates.session.events import EventType
 from surogates.session.models import Session
 from surogates.storage.backend import LocalBackend
+from surogates.tools.builtin.case_item import report_item_failed, report_item_no_outcome
 from tests.test_case_step_isolation import CONTRACT
 from tests.test_case_step_tools import (  # noqa: F401 - fake_keel is a fixture
     CASE,
+    OTHER_PAGE,
+    PAGE,
+    USAGE,
     _calls,
     _ended_with,
     _FakeKeel,
     _registry,
     _step,
     _StepStore,
+    _UsageDown,
     _wake,
+    _woken_with,
     fake_keel,
     kwargs,
 )
@@ -74,7 +82,10 @@ STEP_COMPLETION = {
     "output": {"amount": "12000"},
     "sources": {"amount": [{"input": "amount"}]},
 }
+VOTE = {"outcome": "against", "output": {}, "sources": {}}
 REASON = "The applicant's ID is missing."
+#: What each report of an item whose log holds no page read, no wake and no helper carries besides what it says.
+FACTS = {"usage": USAGE, "bundle_version": None}
 
 
 def _item(contract: dict) -> Session:
@@ -106,7 +117,7 @@ async def test_a_completed_step_item_reaches_keel_and_ends_the_item(fake_keel: _
     assert request.method == "POST"
     assert request.url.path == _item_route(store, "complete")
     assert request.headers["authorization"] == "Bearer door-key"
-    assert json.loads(request.content) == {**STEP_COMPLETION, "call_id": "c3"}
+    assert json.loads(request.content) == {**STEP_COMPLETION, "call_id": "c3", "pages_read": [], **FACTS}
     assert result == "Item ended: Keel recorded it."
     assert store.reported() == "completed"
     assert store.redacted()
@@ -114,16 +125,15 @@ async def test_a_completed_step_item_reaches_keel_and_ends_the_item(fake_keel: _
 
 async def test_a_vote_item_casts_the_vote(fake_keel: _FakeKeel, tmp_path):
     store = _store(tmp_path, VOTE_ITEM)
-    vote = {"outcome": "against", "output": {}, "sources": {}}
 
-    result = await _call("complete_item", vote, store)
+    result = await _call("complete_item", VOTE, store)
 
-    assert fake_keel.bodies("/item/complete") == [{**vote, "call_id": "c1"}]
+    assert fake_keel.bodies("/item/complete") == [{**VOTE, "call_id": "c1", "pages_read": [], **FACTS}]
     assert result == "Item ended: Keel recorded it."
     assert store.reported() == "completed"
 
     # A vote is cast with one of its outcomes alone.
-    assert "error" in json.loads(await _call("complete_item", {**vote, "outcome": "abstain"}, _store(tmp_path, VOTE_ITEM)))
+    assert "error" in json.loads(await _call("complete_item", {**VOTE, "outcome": "abstain"}, _store(tmp_path, VOTE_ITEM)))
     assert len(fake_keel.requests) == 1
 
 
@@ -133,7 +143,10 @@ async def test_a_raised_hand_item_answers_with_a_choice_or_in_words(fake_keel: _
 
     assert result == "Item ended: Keel recorded it."
     assert fake_keel.bodies("/item/complete") == [
-        {"choice": "Accept", "note": "The March payslip is the latest.", "sources": [], "call_id": "c4"},
+        {
+            "choice": "Accept", "note": "The March payslip is the latest.", "sources": [], "call_id": "c4",
+            "pages_read": [], **FACTS,
+        },
     ]
     assert chosen.reported() == "completed"
 
@@ -143,7 +156,7 @@ async def test_a_raised_hand_item_answers_with_a_choice_or_in_words(fake_keel: _
 
     assert result == "Item ended: Keel recorded it."
     assert fake_keel.bodies("/item/complete")[-1] == {
-        "answer": "Use June's payslip", "note": None, "sources": sources, "call_id": "c5",
+        "answer": "Use June's payslip", "note": None, "sources": sources, "call_id": "c5", "pages_read": [], **FACTS,
     }
 
     # A choice the hand does not offer, both a choice and an answer, neither, or sources that are no list of
@@ -248,7 +261,7 @@ async def test_a_refusal_for_good_stops_the_item(fake_keel: _FakeKeel, tmp_path,
     status = door[0]
     assert result == f"Item stopped: Keel refused this item's report ({status}); people take the item."
     assert [r.url.path for r in fake_keel.requests] == [_item_route(store, "complete"), _item_route(store, "ended")]
-    assert fake_keel.bodies("/item/ended") == [{"status": "failed", "detail": f"keel-{status}"}]
+    assert fake_keel.bodies("/item/ended") == [{"status": "failed", "detail": f"keel-{status}", **FACTS}]
     assert store.reported() == "stopped"
     assert store.redacted()
 
@@ -272,7 +285,7 @@ async def test_return_item_gives_the_item_back_with_its_reason(fake_keel: _FakeK
 
     result = await _call("return_item", {"reason": f"  {REASON}  "}, store, "c6")
 
-    assert fake_keel.bodies("/item/return") == [{"reason": REASON, "call_id": "c6"}]
+    assert fake_keel.bodies("/item/return") == [{"reason": REASON, "call_id": "c6", **FACTS}]
     assert result == "Item ended: the item went back."
     assert store.reported() == "returned"
     assert store.redacted()
@@ -338,4 +351,126 @@ async def test_the_schema_offers_the_items_outcomes_or_choices(fake_keel: _FakeK
         assert set(properties) == {"answer", "note", "sources"}
     # Its report ends the item, and the turn with it.
     assert _ended_with(store) == "case_step_ended"
+    assert store.reported() in ("completed", "returned")
+
+
+def _with_a_helper(store: _StepStore) -> dict:
+    """A helper the item's session started, and the cache reads of both their model calls: the work's use that
+    a report carries, which is returned."""
+    helper = _step({}).model_copy(update={
+        "id": uuid4(), "parent_id": store.row.id,
+        "input_tokens": 300, "output_tokens": 30, "estimated_cost_usd": Decimal("0.002"),
+    })
+    store.helpers.append(helper)
+    store.write(EventType.LLM_RESPONSE, {"cache_read_tokens": 400})
+    store.write(EventType.LLM_RESPONSE, {"cache_read_tokens": 150}, session_id=helper.id)
+    return {"input_tokens": 1500, "output_tokens": 370, "cache_read_tokens": 550, "estimated_cost_usd": "0.0143"}
+
+
+@pytest.mark.parametrize(("contract", "completion"), [
+    (STEP_ITEM, STEP_COMPLETION),
+    (VOTE_ITEM, VOTE),
+    (HAND_ITEM, {"choice": "Accept"}),
+], ids=["step", "vote", "raised-hand"])
+async def test_an_items_completion_carries_its_usage_pages_read_and_bundle_version(
+    fake_keel: _FakeKeel, tmp_path, contract, completion,
+):
+    store = _store(tmp_path, contract)
+    _woken_with(store, "v7")
+    used = _with_a_helper(store)
+    # Two reads of one page, and another page.
+    for page in (PAGE, OTHER_PAGE, PAGE):
+        store.write(EventType.KB_PAGE_READ, page)
+
+    result = await _call("complete_item", completion, store)
+
+    assert result == "Item ended: Keel recorded it."
+    [body] = fake_keel.bodies("/item/complete")
+    assert body["pages_read"] == [OTHER_PAGE, PAGE]
+    assert body["usage"] == used
+    assert body["bundle_version"] == "v7"
+
+
+async def test_a_returned_item_carries_its_usage_and_bundle_version_and_no_pages(fake_keel: _FakeKeel, tmp_path):
+    store = _store(tmp_path, STEP_ITEM)
+    _woken_with(store, "v7")
+    used = _with_a_helper(store)
+    store.write(EventType.KB_PAGE_READ, PAGE)
+
+    result = await _call("return_item", {"reason": REASON}, store)
+
+    assert result == "Item ended: the item went back."
+    assert fake_keel.bodies("/item/return") == [
+        {"reason": REASON, "call_id": "c1", "usage": used, "bundle_version": "v7"},
+    ]
+
+
+@pytest.mark.parametrize("end", ["no-outcome", "failed", "refused"])
+async def test_an_item_that_ends_tells_keel_what_it_used(fake_keel: _FakeKeel, tmp_path, end):
+    store = _store(tmp_path, STEP_ITEM)
+    _woken_with(store, "v7")
+    used = _with_a_helper(store)
+
+    if end == "no-outcome":
+        await report_item_no_outcome(store, store.row, reason="completed")
+        told = {"status": "no-outcome", "detail": "completed"}
+    elif end == "failed":
+        await report_item_failed(store, store.row, code="harness_crash")
+        told = {"status": "failed", "detail": "harness_crash"}
+    else:
+        # A report Keel refuses for good: the item fails with the use the report carried.
+        fake_keel.answer(403, {"code": "forbidden", "message": "Not this agent's item."})
+        await _call("complete_item", STEP_COMPLETION, store)
+        told = {"status": "failed", "detail": "keel-403"}
+
+    assert fake_keel.bodies("/item/ended") == [{**told, "usage": used, "bundle_version": "v7"}]
+
+
+@pytest.mark.parametrize("end", ["no-outcome", "failed"])
+async def test_an_item_end_whose_usage_cannot_be_read_is_still_told(fake_keel: _FakeKeel, tmp_path, caplog, end):
+    # Keel hears how the item ended whatever the database says of its use; it keeps the last usage it saw.
+    store = _UsageDown(_item(deepcopy(STEP_ITEM)), LocalBackend(str(tmp_path)))
+    _woken_with(store, "v7")
+
+    with caplog.at_level(logging.WARNING):
+        if end == "failed":
+            await report_item_failed(store, store.row, code="harness_crash")
+        else:
+            await report_item_no_outcome(store, store.row, reason="completed")
+
+    detail = "harness_crash" if end == "failed" else "completed"
+    assert fake_keel.bodies("/item/ended") == [{"status": end, "detail": detail, "bundle_version": "v7"}]
+    assert store.redacted()
+    # Said by the session's id and the error's class, never in the database's words.
+    assert str(store.row.id) in caplog.text and "RuntimeError" in caplog.text
+    assert "secret-body" not in caplog.text
+
+
+@pytest.mark.parametrize(("name", "contract", "arguments"), [
+    ("complete_item", STEP_ITEM, STEP_COMPLETION),
+    ("complete_item", HAND_ITEM, {"choice": "Accept"}),
+    ("return_item", STEP_ITEM, {"reason": REASON}),
+], ids=["step", "raised-hand", "return"])
+async def test_a_report_whose_usage_cannot_be_read_is_made_again(
+    fake_keel: _FakeKeel, tmp_path, name, contract, arguments,
+):
+    # A report must carry the use of the work, so the call fails before it reaches Keel; the model calls again
+    # in the same wake, and the repeat reports.
+    store = _UsageDown(_item(deepcopy(contract)), LocalBackend(str(tmp_path)), failing=1)
+    lease = uuid4()
+
+    failed = json.loads(await _call(name, arguments, store, "c1", lease_token=lease))
+
+    assert failed["error"].startswith("Tool execution failed")
+    assert fake_keel.requests == []
+    assert store.reported() is None
+    assert not store.redacted()
+
+    result = await _call(name, arguments, store, "c2", lease_token=lease)
+
+    assert result.startswith("Item ended: ")
+    [request] = fake_keel.requests
+    body = json.loads(request.content)
+    assert body["call_id"] == "c2" and body["usage"] == USAGE
+    assert fake_keel.bodies("/item/ended") == []
     assert store.reported() in ("completed", "returned")

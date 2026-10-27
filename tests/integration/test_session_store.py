@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from decimal import Decimal
 from unittest.mock import AsyncMock
 
 import pytest
@@ -11,8 +12,9 @@ from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 
 from surogates.db.models import DeliveryOutbox, Event, InboxItem
+from surogates.keel.run_facts import wake_bundle_version
 from surogates.session.events import EventType
-from surogates.session.store import LeaseNotHeldError, SessionNotFoundError, SessionStore
+from surogates.session.store import LeaseNotHeldError, SessionNotFoundError, SessionStore, TreeUsage
 
 from .conftest import create_org, create_user, issue_service_account_token
 
@@ -1107,6 +1109,72 @@ async def test_a_session_tree_holds_the_session_and_everything_under_it(session_
     other = await session_store.create_session(user_id=user_id, org_id=org_id, agent_id="test-agent")
     assert set(await session_store.session_tree_ids(root.id)) == {root.id, child.id, grandchild.id}
     assert await session_store.session_tree_ids(other.id) == [other.id]
+
+
+async def _respond(session_store, session_id, input_tokens, output_tokens, cost, **more):
+    """One model response of a session, written as the worker writes it: the row's counters move with it."""
+    await session_store.emit_event(
+        session_id,
+        EventType.LLM_RESPONSE,
+        {"input_tokens": input_tokens, "output_tokens": output_tokens, "cost_usd": cost, **more},
+    )
+
+
+async def test_a_session_trees_usage_sums_its_helpers_and_their_cache_reads(session_store, session_factory):
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+
+    async def new(parent_id=None):
+        return (await session_store.create_session(
+            user_id=user_id, org_id=org_id, agent_id="test-agent", parent_id=parent_id,
+        )).id
+
+    root = await new()
+    child = await new(root)
+    grandchild = await new(child)
+    other = await new()
+    other_child = await new(other)
+
+    await _respond(session_store, root, 1000, 100, 0.01, cache_read_tokens=400)
+    await _respond(session_store, root, 500, 50, 0.005, cache_read_tokens=0)
+    await _respond(session_store, child, 200, 20, 0.002, cache_read_tokens=150)
+    await _respond(session_store, grandchild, 100, 10, 0.001)
+    # No provider promised a number: a string (numeric or not), a negative and a fraction never fail
+    # the read, and only a positive number counts, by its integer part.
+    for odd in ("12", "n/a", -5, 2.7):
+        await _respond(session_store, grandchild, 0, 0, 0, cache_read_tokens=odd)
+    await _respond(session_store, other, 9999, 9999, 1.0, cache_read_tokens=9999)
+    await _respond(session_store, other_child, 9999, 9999, 1.0, cache_read_tokens=9999)
+
+    assert await session_store.session_tree_usage(root) == TreeUsage(1800, 180, 552, Decimal("0.018"))
+    assert await session_store.session_tree_usage(child) == TreeUsage(300, 30, 152, Decimal("0.003"))
+
+
+async def test_an_unknown_sessions_tree_used_nothing(session_store):
+    assert await session_store.session_tree_usage(uuid.uuid4()) == TreeUsage(0, 0, 0, Decimal(0))
+
+
+async def test_the_bundle_version_is_read_from_the_newest_wake_that_records_one(session_store, session_factory):
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    session = (await session_store.create_session(user_id=user_id, org_id=org_id, agent_id="test-agent")).id
+
+    assert await wake_bundle_version(session_store, session) is None
+
+    async def wake(**more):
+        await session_store.emit_event(
+            session, EventType.HARNESS_WAKE, {"worker_id": "w", "cursor": 0, **more},
+        )
+
+    await wake(bundle_version="v1")
+    await wake(bundle_version=None)
+    assert await wake_bundle_version(session_store, session) is None
+
+    await wake(bundle_version="v3")
+    # A review event reuses the type and names no bundle; a message is no wake at all.
+    await session_store.emit_event(session, EventType.HARNESS_WAKE, {"worker_id": "w", "review_memory": True})
+    await session_store.emit_event(session, EventType.USER_MESSAGE, {"content": "hello"})
+    assert await wake_bundle_version(session_store, session) == "v3"
 
 
 # ---------------------------------------------------------------------------
