@@ -814,7 +814,7 @@ async def handle_escalate(arguments: dict, **kwargs: Any) -> str:
         sf, settings, org_id=ctx.org_id, session_id=ctx.session_id, service_account_id=target_id,
         event_type="checkin.escalation" if invitation is not None else "followup.escalation",
         name=await ctx.person_label(sf, settings), reason=reason,
-        payload={**payload, "escalation": escalation, "user_id": str(ctx.user_id)},
+        payload={**payload, "escalation": escalation, "user_id": str(ctx.user_id) if ctx.user_id is not None else None},
     )
     team = [uuid.UUID(str(u)) for u in (settings.alert_recipient_user_ids if settings else [])]
     to = _chosen(settings, await followup_store.display_names(sf, team), arguments.get("to"))

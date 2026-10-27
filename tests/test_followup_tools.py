@@ -342,6 +342,23 @@ async def test_escalate_reaches_inbox_and_phone(sf, patient, care_team):
 
 
 @pytest.mark.asyncio
+async def test_escalate_from_a_chat_with_no_person_names_nobody(sf, care_team):
+    """An owner's own Studio chat has no end user: the Inbox must not
+    offer a person called "None"."""
+    _, inbox_sa = care_team
+    session_id = uuid.uuid4()
+    async with sf() as db:
+        db.add(SessionRow(id=session_id, org_id=ORG, agent_id=AGENT, channel="web"))
+        await db.commit()
+    await followup.handle_escalate({"reason": "Needs a human."}, **_kw(sf, session_id))
+    async with sf() as db:
+        item = (await db.execute(sa.select(InboxItem))).scalar_one()
+    assert item.service_account_id == inbox_sa
+    assert item.title == "Needs your attention: someone without a name on record"
+    assert item.payload["user_id"] is None
+
+
+@pytest.mark.asyncio
 async def test_escalate_marks_red_when_an_emergency_script_was_sent(sf, patient, care_team):
     _, session_id = patient
     await followup.handle_escalate({"reason": "Durere în piept"}, **_kw(sf, session_id))

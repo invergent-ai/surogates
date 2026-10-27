@@ -402,6 +402,7 @@ TEAM_TEXTS = {
     "label_answered_by": "via {answered_by}",
     "label_reported_by": "reported by {contact} ({relation})",
     "label_contact": "contact",
+    "label_unnamed": "someone without a name on record",
     "label_footer": "About: {label}",
     "inbox_attention_title": "Needs your attention: {name}",
     "label_contact_for": "{contact} ({relation}), for {name}",
