@@ -214,11 +214,11 @@ describe("conversational ask answers become user messages", () => {
   });
 
   it("leaves a failed send standing instead of adopting it", () => {
-    // markSendError keeps the local- id and appends the failure to the
-    // body. Adopting it would erase the notice and attach the answer to
-    // a message that never reached the server.
+    // markSendError keeps the local- id and marks it failed. Adopting it
+    // would erase the failure and attach the answer to a message that
+    // never reached the server.
     const failed = {
-      ...optimisticUserMessage("computers\n\n*Failed to send: network*"),
+      ...optimisticUserMessage("computers"),
       status: "error" as const,
     };
     const state = withMessages([askTurn(ONE_QUESTION), failed]);
@@ -232,7 +232,7 @@ describe("conversational ask answers become user messages", () => {
 
     expect(next.messages).toHaveLength(3);
     expect(next.messages[1]?.status).toBe("error");
-    expect(next.messages[1]?.content).toContain("Failed to send");
+    expect(next.messages[1]?.id).toMatch(/^local-/);
     expect(next.messages[2]?.content).toBe("sports");
   });
 
@@ -262,7 +262,7 @@ describe("conversational ask answers become user messages", () => {
 
   it("steps over a failed send to adopt the retry", () => {
     const failed = {
-      ...optimisticUserMessage("computers\n\n*Failed to send: network*"),
+      ...optimisticUserMessage("computers"),
       status: "error" as const,
     };
     const state = withMessages([

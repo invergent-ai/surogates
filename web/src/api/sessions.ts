@@ -3,7 +3,7 @@
 //
 import { browserRelease } from "@/lib/local-chat";
 import { authFetch } from "./auth";
-import { errorDetailMessage, paywallErrorMessage } from "./_errors";
+import { errorDetailMessage, paywallError } from "./_errors";
 import type {
   Session,
   SessionChildrenResponse,
@@ -125,9 +125,9 @@ export async function sendMessage(
       const body = (await response.json().catch(() => null)) as {
         detail?: unknown;
       } | null;
-      const paywall = paywallErrorMessage(body?.detail);
+      const paywall = paywallError(body?.detail);
       if (paywall) {
-        throw new Error(paywall);
+        throw paywall;
       }
     }
     throw new Error("Failed to send message");

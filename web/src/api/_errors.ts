@@ -4,6 +4,8 @@
 // Shared error unwrapping for REST responses: tries to lift ``detail``
 // from the JSON body, falling back to a caller-supplied message.
 
+import { AgentChatPaywallError } from "@invergent/agent-chat-react";
+
 /**
  * FastAPI error bodies carry either a plain string or a structured object
  * in ``detail`` (e.g. the 402 insufficient-credits payload with ``error``,
@@ -91,12 +93,13 @@ const PAYWALL_LEADS: Record<string, string> = {
 };
 
 /**
- * Turn a 402 paywall detail (``{code, buy_url}``) into a user-facing
- * message, appending the agent's buy link when there is a buyer action to
- * take. Returns ``undefined`` when the detail is not a recognised paywall
- * payload so callers fall back to their generic handling.
+ * Turn a 402 paywall detail (``{code, buy_url}``) into the typed error the
+ * chat renders as a buy-access card. The buy link is only kept when the
+ * visitor has an action to take. Returns ``undefined`` when the detail is
+ * not a recognised paywall payload so callers fall back to their generic
+ * handling.
  */
-export function paywallErrorMessage(detail: unknown): string | undefined {
+export function paywallError(detail: unknown): AgentChatPaywallError | undefined {
   if (!detail || typeof detail !== "object") {
     return undefined;
   }
@@ -108,8 +111,9 @@ export function paywallErrorMessage(detail: unknown): string | undefined {
   const lead =
     PAYWALL_LEADS[code] ?? "You need to buy access to keep chatting.";
   const buyUrl = nonEmptyString(record.buy_url);
-  if (buyUrl && code !== "operator_subscription_exhausted") {
-    return `${lead} Get more access here: ${buyUrl}`;
-  }
-  return lead;
+  return new AgentChatPaywallError(
+    lead,
+    code,
+    buyUrl && code !== "operator_subscription_exhausted" ? buyUrl : undefined,
+  );
 }

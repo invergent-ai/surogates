@@ -21,6 +21,7 @@ import {
   applyAgentChatEvent,
   createInitialAgentChatState,
 } from "./reducer";
+import { sendErrorInfo } from "../send-errors";
 
 // ---------------------------------------------------------------------------
 // Reconciliation cadence
@@ -578,25 +579,27 @@ export function useAgentChatRuntime({
     [],
   );
 
-  const markSendError = useCallback((errorText: string) => {
+  const markSendError = useCallback((error: unknown) => {
+    const errorInfo = sendErrorInfo(error);
     setState((prev) => {
-      for (let i = prev.messages.length - 1; i >= 0; i--) {
-        const message = prev.messages[i];
+      const messages = [...prev.messages];
+      for (let i = messages.length - 1; i >= 0; i--) {
+        const message = messages[i];
         if (message?.role === "user" && message.id.startsWith("local-")) {
-          const messages = [...prev.messages];
-          messages[i] = {
-            ...message,
-            status: "error",
-            content: `${message.content}\n\n*Failed to send: ${errorText}*`,
-          };
-          return {
-            ...prev,
-            isRunning: false,
-            messages,
-          };
+          messages[i] = { ...message, status: "error" };
+          break;
         }
       }
-      return { ...prev, isRunning: false };
+      messages.push({
+        id: `send-error-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        role: "system",
+        systemKind: "error",
+        content: "",
+        createdAt: new Date(),
+        status: "error",
+        errorInfo,
+      });
+      return { ...prev, isRunning: false, messages };
     });
   }, []);
 
@@ -703,7 +706,7 @@ export function useAgentChatRuntime({
           onSessionChange?.(session.id);
           await runUploadsAndSend(session.id);
         } catch (error) {
-          markSendError(error instanceof Error ? error.message : "send failed");
+          markSendError(error);
           throw error;
         }
         return;
@@ -713,7 +716,7 @@ export function useAgentChatRuntime({
         ensureStreamForNewTurn(sessionId);
         await runUploadsAndSend(sessionId);
       } catch (error) {
-        markSendError(error instanceof Error ? error.message : "send failed");
+        markSendError(error);
         throw error;
       }
     },
