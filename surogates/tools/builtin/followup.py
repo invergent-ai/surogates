@@ -857,9 +857,17 @@ async def handle_escalate(arguments: dict, **kwargs: Any) -> str:
     )
 
     if not inboxed and not queued:
+        inbox = (
+            "this agent has no Studio inbox for escalations" if target_id is None
+            else "the Studio inbox set for escalations is not a valid account"
+        )
         return (
-            "Could not escalate: nobody is configured to receive this "
-            f"({why_not}). Tell the person to contact the business directly."
+            f"Could not escalate: nobody was told ({inbox}; {why_not}). The "
+            "business has to finish setting this agent up: in Studio, on the "
+            "agent's Programs page, add a team member under Team or send "
+            "escalations to a Studio inbox. Tell the person you could not reach "
+            "the team and that they should contact the business directly; do "
+            "not say anyone was told."
         )
     told = []
     if inboxed:

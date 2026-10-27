@@ -390,6 +390,10 @@ async def test_escalate_with_nobody_configured_fails_visibly(sf, patient):
     )
     assert result.startswith("Could not escalate")
     assert "contact the business directly" in result
+    # The agent is told what is missing and where it is fixed, never "(None)".
+    assert "no Studio inbox" in result and "no team members are configured" in result
+    assert "Programs page" in result
+    assert "None" not in result
 
 
 @pytest.mark.asyncio
@@ -403,7 +407,23 @@ async def test_the_care_team_member_is_not_alerted_about_themselves(sf, patient)
     )
     result = await followup.handle_escalate({"reason": "x"}, **_kw(sf, session_id))
     assert result.startswith("Could not escalate")
+    assert "the only team member is the person in this conversation" in result
     assert await _outreach(sf) == []
+
+
+@pytest.mark.asyncio
+async def test_a_shared_place_without_a_sender_is_named_as_the_reason(sf, patient):
+    _, session_id = patient
+    await store.update_settings(
+        sf, org_id=ORG, agent_id=AGENT, escalation_service_account_id=None,
+        channel_identifier="pn1", alert_recipient_user_ids=[],
+        team_destinations=[{"platform": "slack", "channel_id": "C1", "name": "#care"}],
+        alert_template_name=None, alert_template_language=None,
+        message_template_name=None, message_template_language=None,
+    )
+    result = await followup.handle_escalate({"reason": "x"}, **_kw(sf, session_id))
+    assert result.startswith("Could not escalate")
+    assert "none of the team's shared places" in result
 
 
 async def _escalations(sf):

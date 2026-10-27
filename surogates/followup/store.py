@@ -893,7 +893,14 @@ async def notify_team(
         return queued, missed
     if ids:
         return 0, missed or "no team member can be reached on a channel this agent has a sender for"
-    return 0, "the only configured recipient is this person"
+    if destinations:
+        return 0, "none of the team's shared places is on a channel this agent has a sender for"
+    if exclude_user_id is not None and str(exclude_user_id) in {str(r) for r in recipients}:
+        return 0, (
+            "the only team member is the person in this conversation, and nobody is "
+            "alerted about their own conversation"
+        )
+    return 0, "no team members are configured"
 
 
 def default_team_order() -> list[str]:
