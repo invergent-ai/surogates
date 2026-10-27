@@ -5,43 +5,64 @@ from __future__ import annotations
 import uuid
 from types import SimpleNamespace
 
+import pytest
+
+from surogates.db.models import ProgramScheduleRow
+from surogates.followup import store as followup_store
 from surogates.harness.tool_schemas import channel_tool_flags, drop_unusable_tools
-from surogates.orchestrator.worker import _filter_effective_tools
 from surogates.runtime.resolver import build_agent_runtime_context
-from surogates.tenant.context import TenantContext
-from surogates.tools.builtin.followup import FOLLOWUP_TOOL_NAMES
+from surogates.tools.builtin.followup import FOLLOWUP_TOOL_NAMES, followup_tool_exclusions
+
+ORG = uuid.uuid4()
+AGENT = "agent-1"
+SESSION = SimpleNamespace(org_id=ORG, agent_id=AGENT)
+NOT_ESCALATE = FOLLOWUP_TOOL_NAMES - {"escalate"}
 
 
-def _tenant():
-    return TenantContext(
-        org_id=uuid.uuid4(), user_id=uuid.uuid4(), org_config={},
-        user_preferences={}, permissions=frozenset(), asset_root="/tmp",
+async def _excluded(sf, programs_enabled: bool) -> frozenset[str]:
+    return await followup_tool_exclusions(sf, SESSION, programs_enabled=programs_enabled)
+
+
+@pytest.mark.asyncio
+async def test_nothing_ships_when_nobody_could_receive_an_escalation(sf):
+    assert await _excluded(sf, False) == FOLLOWUP_TOOL_NAMES
+    assert await _excluded(sf, True) == frozenset({"escalate"})
+
+
+@pytest.mark.asyncio
+async def test_an_operator_inbox_offers_escalate_without_programs(sf):
+    await followup_store.update_settings(
+        sf, org_id=ORG, agent_id=AGENT, escalation_service_account_id=str(uuid.uuid4()),
     )
+    assert await _excluded(sf, False) == NOT_ESCALATE
+    assert await _excluded(sf, True) == frozenset()
 
 
-def _session():
-    return SimpleNamespace(config={}, channel="whatsapp")
-
-
-def _effective(programs_enabled: bool) -> set[str]:
-    return _filter_effective_tools(
-        tools=set(FOLLOWUP_TOOL_NAMES) | {"checkin_outcome"},
-        tenant=_tenant(),
-        session=_session(),
-        use_api_for_harness_tools=False,
-        programs_enabled=programs_enabled,
+@pytest.mark.asyncio
+async def test_a_team_only_reaches_anyone_with_programs_on(sf):
+    await followup_store.update_settings(
+        sf, org_id=ORG, agent_id=AGENT, alert_recipient_user_ids=[str(uuid.uuid4())],
     )
+    assert await _excluded(sf, True) == frozenset()
+    assert await _excluded(sf, False) == FOLLOWUP_TOOL_NAMES
 
 
-def test_tools_ship_only_with_the_programs_capability():
-    assert FOLLOWUP_TOOL_NAMES <= _effective(True)
-    assert not FOLLOWUP_TOOL_NAMES & _effective(False)
-
-
-def test_checkin_outcome_is_not_gated():
-    # Unchanged from before the capability existed: an agent mid-check-in
-    # must always be able to close it.
-    assert "checkin_outcome" in _effective(False)
+@pytest.mark.asyncio
+async def test_a_programs_own_inbox_counts_while_it_is_active(sf):
+    async with sf() as db:
+        db.add(ProgramScheduleRow(
+            program_id=uuid.uuid4(), org_id=ORG, agent_id=AGENT, active=False,
+            config={"escalation_service_account_id": str(uuid.uuid4())},
+        ))
+        await db.commit()
+    assert "escalate" in await _excluded(sf, True)
+    async with sf() as db:
+        db.add(ProgramScheduleRow(
+            program_id=uuid.uuid4(), org_id=ORG, agent_id=AGENT, active=True,
+            config={"escalation_service_account_id": str(uuid.uuid4())},
+        ))
+        await db.commit()
+    assert await _excluded(sf, True) == frozenset()
 
 
 def test_runtime_config_reads_the_capability_and_defaults_off():

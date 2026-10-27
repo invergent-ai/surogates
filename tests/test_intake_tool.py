@@ -158,7 +158,7 @@ def _prompt_tools(session: Session, intake: list[dict]) -> set[str]:
     """The tools the worker tells the model about."""
     return _filter_effective_tools(
         tools=set(_registry().tool_names), tenant=_tenant(session), session=session,
-        use_api_for_harness_tools=True, whiteboard_enabled=True, programs_enabled=True, intake=intake,
+        use_api_for_harness_tools=True, whiteboard_enabled=True, intake=intake,
     )
 
 

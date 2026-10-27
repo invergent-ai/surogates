@@ -103,7 +103,6 @@ def _prompt_tools(session, registry: ToolRegistry, *, gate: GovernanceGate | Non
         session=session,
         use_api_for_harness_tools=True,
         whiteboard_enabled=True,
-        programs_enabled=True,
         allow_listed=gate.allow_listed(DESIGNER_TOOLS) if gate is not None else frozenset(),
     )
 
