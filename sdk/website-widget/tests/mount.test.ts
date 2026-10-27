@@ -221,12 +221,56 @@ describe('mount() — send and stream', () => {
     // The agent opens an SSE stream for the run; drive a minimal turn.
     await waitFor(() => FakeEventSource.lastInstance !== undefined);
     const src = FakeEventSource.lastInstance as FakeEventSource;
-    src.emit(SURG_EVENT.LLM_DELTA, { delta: 'Click ' }, 1);
-    src.emit(SURG_EVENT.LLM_DELTA, { delta: '“Forgot password”.' }, 2);
-    src.emit(SURG_EVENT.LLM_RESPONSE, { content: 'Click “Forgot password”.', finish_reason: 'stop' }, 3);
+    src.emit(SURG_EVENT.LLM_DELTA, { delta: 'Click ' }, 2);
+    src.emit(SURG_EVENT.LLM_DELTA, { delta: '“Forgot password”.' }, 3);
+    src.emit(
+      SURG_EVENT.LLM_RESPONSE,
+      { message: { content: 'Click “Forgot password”.' }, finish_reason: 'stop' },
+      4,
+    );
 
     await waitFor(() => /Forgot password/.test(sr.querySelector('.surg-assistant')?.textContent ?? ''));
     expect(sr.querySelector('.surg-assistant')?.textContent).toContain('Forgot password');
+    handle.destroy();
+  });
+
+  it('shows no empty bubble while the agent works through tool calls', async () => {
+    globalThis.fetch = happyFetch();
+    const handle = mount({ apiUrl: 'https://a.test', publishableKey: 'surg_wk_x', inline: true });
+    const sr = shadowOf();
+
+    const input = sr.querySelector('.surg-input') as HTMLTextAreaElement;
+    input.value = 'Find my order';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    const sendBtn = sr.querySelector('.surg-send') as HTMLButtonElement;
+    await waitFor(() => !sendBtn.disabled);
+    sendBtn.click();
+    await waitFor(() => FakeEventSource.lastInstance !== undefined);
+    const src = FakeEventSource.lastInstance as FakeEventSource;
+
+    const replies = () =>
+      Array.from(sr.querySelectorAll('.surg-assistant:not(.surg-typing)')).map((el) => el.textContent ?? '');
+
+    // A call with no text before it, then one after a footer-only reply.
+    src.emit(SURG_EVENT.TOOL_CALL, { tool_call_id: 'tc-1', name: 'lookup', arguments: {} }, 2);
+    src.emit(SURG_EVENT.TOOL_RESULT, { tool_call_id: 'tc-1', name: 'lookup', content: 'ok' }, 3);
+    src.emit(SURG_EVENT.LLM_DELTA, { delta: '<next_action complexity="low" summary="x">y</next_action>' }, 4);
+    src.emit(
+      SURG_EVENT.LLM_RESPONSE,
+      { message: { content: '<next_action complexity="low" summary="x">y</next_action>', tool_calls: [{}] }, finish_reason: 'tool_calls' },
+      5,
+    );
+    src.emit(SURG_EVENT.TOOL_CALL, { tool_call_id: 'tc-2', name: 'lookup', arguments: {} }, 6);
+    await waitFor(() => !!sr.querySelector('.surg-typing'));
+    // Only the welcome bubble: nothing empty, and the typing dots stay up.
+    expect(replies()).toHaveLength(1);
+    expect(replies().every((text) => text.trim() !== '')).toBe(true);
+
+    src.emit(SURG_EVENT.TOOL_RESULT, { tool_call_id: 'tc-2', name: 'lookup', content: 'ok' }, 7);
+    src.emit(SURG_EVENT.LLM_RESPONSE, { message: { content: 'Your order ships today.' }, finish_reason: 'stop' }, 8);
+    await waitFor(() => replies().some((text) => text.includes('ships today')));
+    expect(replies().every((text) => text.trim() !== '')).toBe(true);
+    expect(sr.querySelector('.surg-typing')).toBeNull();
     handle.destroy();
   });
 });

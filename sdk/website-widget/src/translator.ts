@@ -58,8 +58,13 @@ export interface SurogatesFrame {
   data: unknown;
 }
 
-/** Payload keys we pull off ``llm.response`` events to detect end-of-turn. */
+/**
+ * Payload keys we pull off ``llm.response`` events to detect end-of-turn.
+ * The harness nests the assistant turn under ``message``; the flat
+ * ``content`` / ``tool_calls`` are read as a fallback.
+ */
 interface LlmResponsePayload {
+  message?: { content?: string | null; tool_calls?: unknown[] | null };
   content?: string;
   tool_calls?: unknown[];
   finish_reason?: string;
@@ -148,6 +153,14 @@ export class Translator {
    * accidentally merge into the assistant content stream.
    */
   private currentReasoningId: string | undefined;
+
+  /**
+   * The assistant message the last ``llm.response`` closed, if it had
+   * text.  The tool calls that response makes belong to it; without a
+   * parent each call would open an assistant message of its own with
+   * no text, which a chat UI renders as an empty bubble.
+   */
+  private respondedMessageId: string | undefined;
 
   /**
    * Tool calls that have been announced (``TOOL_CALL_CHUNK`` emitted)
@@ -267,6 +280,7 @@ export class Translator {
 
   private handleLlmResponse(frame: SurogatesFrame): BaseEvent[] {
     const payload = (frame.data ?? {}) as LlmResponsePayload;
+    const content = payload.message?.content ?? payload.content;
     const events: BaseEvent[] = [];
 
     // Close any open assistant message by resetting the current id.
@@ -274,15 +288,17 @@ export class Translator {
     // targets a new messageId (or the stream completes).  If no delta
     // was seen but the response carries content, emit a single chunk
     // so downstream consumers get something to render.
-    if (!this.currentMessageId && payload.content) {
-      const messageId = payload.message_id ?? payload.id ?? this.mintMessageId(frame.id);
+    let closedMessageId = this.currentMessageId;
+    if (!closedMessageId && content) {
+      closedMessageId = payload.message_id ?? payload.id ?? this.mintMessageId(frame.id);
       events.push({
         type: EventType.TEXT_MESSAGE_CHUNK,
-        messageId,
+        messageId: closedMessageId,
         role: 'assistant',
-        delta: payload.content,
+        delta: content,
       } as BaseEvent);
     }
+    this.respondedMessageId = closedMessageId;
     this.currentMessageId = undefined;
 
     // End-of-turn detection is the conjunction of three guards:
@@ -300,7 +316,8 @@ export class Translator {
     //      a ``tool.result``.  Belt-and-suspenders: if the server sends
     //      ``llm.response`` before all tool results drain, we keep the
     //      stream open until they do.
-    const toolCalls = Array.isArray(payload.tool_calls) ? payload.tool_calls : [];
+    const rawToolCalls = payload.message?.tool_calls ?? payload.tool_calls;
+    const toolCalls = Array.isArray(rawToolCalls) ? rawToolCalls : [];
     const finish = payload.finish_reason ?? payload.stop_reason ?? '';
     if (CONTINUATION_FINISH_REASONS.has(finish)) {
       return events;
@@ -348,10 +365,11 @@ export class Translator {
     const toolCallId = payload.tool_call_id ?? `tc-${frame.id}`;
     const toolCallName = payload.name ?? 'unknown_tool';
 
-    // Close any running reasoning/text message first so the tool call
-    // slots in cleanly between them.  We don't emit explicit END
-    // events because transformChunks handles that when messageId
-    // switches to undefined; we just clear our running ids.
+    // The call belongs to the assistant message whose text preceded it:
+    // still streaming if the response has not landed, else the one the
+    // response just closed.  Then clear the running ids so the next
+    // text starts a new message (transformChunks emits the END events).
+    const parentMessageId = this.currentMessageId ?? this.respondedMessageId;
     this.currentMessageId = undefined;
     this.currentReasoningId = undefined;
 
@@ -370,6 +388,7 @@ export class Translator {
         type: EventType.TOOL_CALL_CHUNK,
         toolCallId,
         toolCallName,
+        ...(parentMessageId !== undefined && { parentMessageId }),
         delta: args,
       } as BaseEvent,
     ];
