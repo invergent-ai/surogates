@@ -50,12 +50,18 @@ const ACTION_SUMMARIES: Record<string, (args: Record<string, unknown>) => string
     if (x !== null && y !== null) return `click (${x}, ${y})`;
     return "click";
   },
+  // Never the text: what the agent typed is often a password, and events
+  // stored before the server masked it still carry it in the clear.
   browser_type: (args) => {
-    const text = stringValue(args.text);
     const ref = stringValue(args.ref);
-    const quoted = text ? `"${truncateText(text)}"` : "";
-    if (!quoted) return ref ? `type into ${ref}` : "type";
-    return ref ? `type ${quoted} into ${ref}` : `type ${quoted}`;
+    const text = stringValue(args.text);
+    const what = stringValue(args.secret_ref)
+      ? "a stored secret"
+      : text
+        ? `${[...text].length} ${[...text].length === 1 ? "char" : "chars"}`
+        : "";
+    const typed = what ? `type ${what}` : "type";
+    return ref ? `${typed} into ${ref}` : typed;
   },
   browser_press_key: (args) => {
     const keys = Array.isArray(args.keys) ? args.keys.map(String) : [];
@@ -86,10 +92,6 @@ const ACTION_SUMMARIES: Record<string, (args: Record<string, unknown>) => string
   browser_screenshot: (args) =>
     args.annotate === true ? "screenshot (annotated)" : "screenshot",
 };
-
-function truncateText(text: string, max = 32): string {
-  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
-}
 
 function asNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;

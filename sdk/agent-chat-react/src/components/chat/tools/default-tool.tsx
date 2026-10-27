@@ -7,7 +7,7 @@
 import { CheckCircle2Icon, Loader2Icon, XCircleIcon } from "lucide-react";
 import { Collapsible, CollapsibleContent } from "@invergent/ui-sdk/collapsible";
 import { CollapsibleHeader } from "@invergent/ui-sdk/collapsible-header";
-import { formatArgs, truncate, effectiveStatus } from "./shared";
+import { formatArgs, shownArgs, truncate, effectiveStatus } from "./shared";
 import type { ToolCallInfo } from "../../../types";
 
 const TOOL_LABELS: Record<string, string> = {
@@ -66,7 +66,7 @@ export function DefaultToolBlock({ tc }: { tc: ToolCallInfo }) {
 
       <CollapsibleContent className="space-y-2 border-t border-foreground/[0.08] px-3 py-2">
         <pre className="overflow-x-auto rounded-md bg-muted/50 px-3 py-2 text-xs text-muted-foreground font-mono whitespace-pre-wrap break-all">
-          {formatArgs(tc.args)}
+          {formatArgs(shownArgs(tc.toolName, tc.args))}
         </pre>
         {tc.result && (
           <pre className="overflow-x-auto rounded-md bg-muted/50 px-3 py-2 text-xs font-mono whitespace-pre-wrap break-all max-h-48 overflow-y-auto">

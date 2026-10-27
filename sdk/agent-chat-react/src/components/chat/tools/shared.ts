@@ -38,6 +38,18 @@ export function effectiveStatus(tc: {
   return "complete";
 }
 
+const TYPED_TEXT = /("text"\s*:\s*")((?:[^"\\]|\\.)*)/g;
+
+/**
+ * A tool call's arguments as they may be shown: the text browser_type typed
+ * (a password, often) becomes one bullet per character. The server stores it
+ * masked, but events stored before it did still carry it in the clear.
+ */
+export function shownArgs(toolName: string, args: string): string {
+  if (toolName !== "browser_type") return args;
+  return args.replace(TYPED_TEXT, (_, key: string, text: string) => key + "\u2022".repeat(text.length));
+}
+
 export function formatArgs(args: string): string {
   try {
     return JSON.stringify(JSON.parse(args), null, 2);
