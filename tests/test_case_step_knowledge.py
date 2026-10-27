@@ -222,8 +222,9 @@ async def test_a_step_reads_a_granted_kb_and_records_the_page(ops, hub, pinned):
     (None, None),
     ("wiki/.versions/published/manual", None),
     (f"wiki/{PAGE_PATH}", None),
+    (f"wiki/policies/{COMPILE}/x/{PAGE_PATH}", None),
     (f"wiki/.versions/{COMPILE.upper()}/x/{PAGE_PATH}", None),
-], ids=["a-compiles-object", "no-object", "not-a-uuid", "outside-versions", "not-lowercase"])
+], ids=["a-compiles-object", "no-object", "not-a-uuid", "outside-versions", "not-in-versions", "not-lowercase"])
 async def test_a_read_names_the_compile_that_wrote_its_page(ops, hub, hub_object_path, compile_id):
     async with ops() as db:
         await db.execute(

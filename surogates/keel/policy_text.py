@@ -102,13 +102,13 @@ async def draft_policy_text(request: PolicyTextRequest, agent: dict[str, Any], *
     A blocked reason or gist, or every hand blocked, is
     :class:`InputsBlocked`; one blocked hand is left out.  A model that gave
     no valid object, or a text that is empty or longer than
-    :data:`POLICY_TEXT_CHARS`, is :class:`~surogates.keel.analysis.ModelFailed`.
-    Every identifier of a hand of the request is replaced in the text.
+    :data:`POLICY_TEXT_CHARS` once every identifier of a hand of the request is
+    replaced in it, is :class:`~surogates.keel.analysis.ModelFailed`.
     """
     agent_id = str(agent.get("agent_id"))
-    if screened_out(request.reason) or screened_out(request.gist):
+    if screened_out(request.reason, request.gist):
         raise InputsBlocked
-    sent = [hand for hand in request.hands if not screened_out({"question": hand.question, "answer": hand.answer})]
+    sent = [hand for hand in request.hands if not screened_out(hand.question, hand.answer)]
     if len(sent) < len(request.hands):
         logger.warning(
             "keel-link: agent %s: %d of %d answers were blocked", agent_id, len(request.hands) - len(sent),
@@ -125,8 +125,10 @@ async def draft_policy_text(request: PolicyTextRequest, agent: dict[str, Any], *
         max_tokens=POLICY_TEXT_TOKENS,
     )
     text = "" if analysis.value is None else analysis.value.text.strip()
+    identifiers = identifiers_in(*(said for hand in request.hands for said in (hand.question, hand.answer)))
+    # Cut after the replacements: each identifier of 4 characters or more becomes the longer OMITTED.
+    text = with_identifiers_omitted(text, identifiers)
     if not text or len(text) > POLICY_TEXT_CHARS:
         logger.warning("keel-link: agent %s: the model gave no usable passage", agent_id)
         raise ModelFailed
-    identifiers = identifiers_in(*(text for hand in request.hands for text in (hand.question, hand.answer)))
-    return {"text": with_identifiers_omitted(text, identifiers), "usage": analysis.usage}
+    return {"text": text, "usage": analysis.usage}

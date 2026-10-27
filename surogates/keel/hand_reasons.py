@@ -144,7 +144,7 @@ def _usable(
 
 
 def _screened(hand: HandIn) -> bool:
-    return screened_out({"question": hand.question, "choices": hand.choices, "answer": hand.answer})
+    return screened_out(hand.question, *(hand.choices or ()), hand.answer)
 
 
 async def label_hands(request: HandReasonsRequest, agent: dict[str, Any], *, vault: Any) -> dict[str, Any]:

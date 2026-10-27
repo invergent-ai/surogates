@@ -14,7 +14,6 @@ hand or the model said: hands are case content.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import re
 from dataclasses import dataclass
@@ -48,8 +47,10 @@ ANSWER_PROMPT_CHARS = 2000
 #: What replaces an identifier of a hand in a passage.
 OMITTED = "[omitted]"
 
-#: The characters stripped from the ends of a word before it is tested as an identifier.
-_WORD_ENDS = ".,;:!?()[]{}<>\"'«»“”‘’$€£¥%"
+#: A run of the characters a reference number, an e-mail address or an amount is written with: whatever clings to it
+#: (quotes, markdown, an apostrophe, a dash, a colon) is not part of the run.
+_RUN = re.compile(r"[\w@.,\-/+]+")
+_RUN_ENDS = ".,-/+"
 _LONG_NUMBER = re.compile(r"\d{4,}")
 
 #: What a call that reached no model used.
@@ -100,12 +101,15 @@ def analysis_endpoint(agent: dict[str, Any]) -> LLMEndpoint:
     runtime config names.  A config that does not project, or names
     neither slot, raises :class:`ModelUnavailable`.
     """
+    agent_id = str(agent.get("agent_id"))
     try:
         context = build_agent_runtime_context(agent)
-    except (KeyError, TypeError, ValueError):
+    except (KeyError, TypeError, ValueError) as exc:
+        logger.warning("keel-link: agent %s: its runtime config does not project (%s)", agent_id, type(exc).__name__)
         raise ModelUnavailable from None
     endpoint = context.llm_summary or context.llm_main
     if endpoint is None:
+        logger.warning("keel-link: agent %s: its runtime config names no model", agent_id)
         raise ModelUnavailable
     return endpoint
 
@@ -119,10 +123,12 @@ def usage_answer(call: StructuredCall[Any], model: str) -> dict[str, Any]:
     """
     if call.completions == 0:
         return dict(NO_USAGE)
-    cost, priced = estimate_call_cost(
+    cost, _ = estimate_call_cost(
         model, call.served_by, call.input_tokens, call.output_tokens,
         cache_read_tokens=call.cache_read_tokens,
     )
+    # Whether any price is known for the model: a call that used nothing is no gap, but it names no price either.
+    _, priced = estimate_call_cost(model, call.served_by, 1, 0)
     return {
         "input_tokens": call.input_tokens,
         "output_tokens": call.output_tokens,
@@ -144,20 +150,22 @@ def one_line(value: object) -> str | None:
 def identifiers_in(*texts: str | None) -> frozenset[str]:
     """What the texts name that belongs to one case alone, casefolded.
 
-    Each whitespace-separated word, once the punctuation and currency signs
-    are stripped from its ends, that is 4 characters or more and holds a
-    digit or an ``@`` (a reference number, an e-mail address, an amount),
-    and each run of 4 or more digits.  Names cannot be told apart from other
-    words: only a prompt keeps them out.
+    Each run of letters, digits and ``@ . , - / +``, once those signs are
+    stripped from its ends, that is 4 characters or more and holds a digit or
+    an ``@`` (a reference number, an e-mail address, an amount), and each run
+    of 4 or more digits.  Quotes, markdown signs, apostrophes and colons end a
+    run, so ``**AB-12-34**`` and ``jane.doe@example.com's`` name what they
+    hold.  Names cannot be told apart from other words: only a prompt keeps
+    them out.
     """
     found: set[str] = set()
     for text in texts:
         if not text:
             continue
-        for word in text.split():
-            word = word.strip(_WORD_ENDS)
-            if len(word) >= 4 and (any(ch.isdigit() for ch in word) or "@" in word):
-                found.add(word.casefold())
+        for run in _RUN.findall(text):
+            run = run.strip(_RUN_ENDS)
+            if len(run) >= 4 and (any(ch.isdigit() for ch in run) or "@" in run):
+                found.add(run.casefold())
         found.update(_LONG_NUMBER.findall(text))
     return frozenset(found)
 
@@ -169,19 +177,50 @@ def repeats_one(text: str, identifiers: frozenset[str]) -> bool:
 
 
 def with_identifiers_omitted(text: str, identifiers: frozenset[str]) -> str:
-    """The text with each identifier replaced by :data:`OMITTED`, the longest first, without regard to case."""
+    """The text with each identifier replaced by :data:`OMITTED`, wherever it is found once case is folded.
+
+    Identifiers are casefolded, so the text is matched casefolded too, and
+    each match is mapped back to the characters of the original it came
+    from (folding ``ß`` gives ``ss``, so the two differ in length).
+    Overlapping matches are replaced as one.
+    """
     if not identifiers:
         return text
-    pattern = "|".join(re.escape(identifier) for identifier in sorted(identifiers, key=len, reverse=True))
-    return re.sub(pattern, OMITTED, text, flags=re.IGNORECASE)
+    folded: list[str] = []
+    origin: list[int] = []
+    for index, char in enumerate(text):
+        piece = char.casefold()
+        folded.append(piece)
+        origin.extend([index] * len(piece))
+    haystack = "".join(folded)
+    spans = sorted(
+        (origin[match.start()], origin[match.end() - 1] + 1)
+        for identifier in identifiers
+        for match in re.finditer(re.escape(identifier), haystack)
+    )
+    merged: list[list[int]] = []
+    for start, end in spans:
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    for start, end in reversed(merged):
+        text = text[:start] + OMITTED + text[end:]
+    return text
 
 
-def screened_out(value: object) -> bool:
-    """Whether the prompt-injection screen blocks the value: hand text is case content and can carry instructions."""
+def screened_out(*texts: str | None) -> bool:
+    """Whether the prompt-injection screen blocks any of the texts.
+
+    Hand text is case content and can carry instructions. Each text is
+    screened as written, on its own: wrapping it in JSON would turn a line
+    break into two characters, and an injection split across lines would
+    pass.
+    """
     from surogates.session.attachment_ingest import get_injection_detector
 
-    text = json.dumps(value, sort_keys=True, ensure_ascii=False)
-    return bool(get_injection_detector().detect(text, source="keel_analysis").is_injection)
+    detector = get_injection_detector()
+    return any(detector.detect(text, source="keel_analysis").is_injection for text in texts if text)
 
 
 async def run_analysis(
@@ -228,7 +267,7 @@ async def run_analysis(
                     temperature=0,
                 )
         except TimeoutError:
-            logger.warning("keel-link: agent %s: the model did not finish in time", agent_id)
+            logger.warning("keel-link: agent %s: the model did not finish in time (TimeoutError)", agent_id)
             raise ModelTimedOut from None
     finally:
         await slot.client.close()

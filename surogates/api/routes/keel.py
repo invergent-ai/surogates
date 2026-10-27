@@ -359,7 +359,7 @@ async def read_body(request: Request, model: type[_Body]) -> _Body:
 
 
 def agent_id_of(request: Request) -> str:
-    """The ``agent_id`` query parameter of a create: 422 ``invalid-request`` when it is missing."""
+    """The ``agent_id`` query parameter of a create or an analysis call: 422 ``invalid-request`` when it is missing."""
     agent_id = request.query_params.get("agent_id") or ""
     if not agent_id:
         raise refused(

@@ -503,3 +503,21 @@ async def test_a_failed_structured_attempt_logs_only_the_errors_class(function, 
 
     assert getattr(result, "value", result) is None
     assert "MARKER-7f3" not in caplog.text
+
+
+@pytest.mark.parametrize("function", [generate_structured, generate_structured_with_usage])
+async def test_a_provider_that_fails_is_logged_by_its_errors_class_only(function, caplog) -> None:
+    caplog.set_level(logging.DEBUG, logger="surogates.harness.structured_output")
+    llm_client = AsyncOpenAI(api_key="test-key")
+    llm_client.chat.completions.create = AsyncMock(side_effect=RuntimeError("MARKER-9z1 the provider quoted this"))
+
+    result = await function(
+        llm_client=llm_client,
+        model="m",
+        messages=[{"role": "user", "content": "Route this."}],
+        output_model=RoutingDecision,
+    )
+
+    assert getattr(result, "value", result) is None
+    assert "RuntimeError" in caplog.text
+    assert "MARKER-9z1" not in caplog.text

@@ -13,6 +13,9 @@ fails with the store.  A bundle version that cannot be read is none, and
 never fails a report.  The telling of an end never fails, since Keel must
 hear of the end whatever the database is doing: an end whose usage cannot be
 read goes without it.
+
+A page a session read is reported with the compile that last wrote its text,
+as ``compile_id_in`` reads it: a lowercase hyphenated UUID, else none.
 """
 
 from __future__ import annotations
