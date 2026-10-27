@@ -38,5 +38,13 @@ class ScheduledSession(BaseModel):
     locked_until: datetime | None = None
     expires_at: datetime | None = None
     created_from_session_id: UUID | None = None
+    kind: str | None = None
+    cadence: dict | None = None
+    context: dict | None = None
+    paused_at: datetime | None = None
+    ended_reason: str | None = None
+    ended_by: str | None = None
+    consecutive_failures: int = 0
+    max_run_seconds: int | None = None
     created_at: datetime
     updated_at: datetime

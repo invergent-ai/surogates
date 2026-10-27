@@ -843,6 +843,17 @@ class ScheduledSession(Base):
     locked_until: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     created_from_session_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), nullable=True)
+    # How the next run is computed (``scheduled.schedule.CADENCE_KINDS``) and
+    # its parameters; NULL on rows made before them, read from ``schedule``.
+    kind: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    cadence: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONB, nullable=True)
+    # What a run acts with, captured from the creating session when made.
+    context: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONB, nullable=True)
+    paused_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    ended_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    ended_by: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    consecutive_failures: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    max_run_seconds: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

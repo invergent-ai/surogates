@@ -907,11 +907,11 @@ class SessionStore:
         disappear with the parent; otherwise scheduled-loop runs and
         delegation children are left dangling in tree/list UIs.
 
-        Three categories of related rows are physically deleted in the same
-        transaction (they have no value once the owning session is gone):
+        Related rows go in the same transaction:
 
-        * **Schedules** (``scheduled_sessions``) — job definitions whose
-          ``created_from_session_id`` or ``last_session_id`` is in the tree.
+        * **Schedules** (``scheduled_sessions``) whose
+          ``created_from_session_id`` or ``last_session_id`` is in the tree
+          are cancelled, keeping their history.
         * **Missions** (``missions``) — orchestrated objectives whose
           ``session_id`` is in the tree.  Mission tasks (``tasks``) and the
           DAG edges (``task_links``) cascade with them; any
@@ -967,15 +967,19 @@ class SessionStore:
                 select(SessionRow.id).where(SessionRow.id.in_(session_ids)).order_by(SessionRow.id).with_for_update()
             )
             await db.execute(
-                delete(ScheduledSessionRow).where(
+                update(ScheduledSessionRow).where(
                     ScheduledSessionRow.org_id == org_id,
                     ScheduledSessionRow.agent_id == agent_id,
+                    ScheduledSessionRow.status.in_(("active", "paused")),
                     or_(
                         ScheduledSessionRow.created_from_session_id.in_(
                             session_ids,
                         ),
                         ScheduledSessionRow.last_session_id.in_(session_ids),
                     ),
+                ).values(
+                    status="cancelled", ended_reason="cancelled", ended_by="session deleted",
+                    next_run_at=None, locked_by=None, locked_until=None, updated_at=func.now(),
                 )
             )
 
