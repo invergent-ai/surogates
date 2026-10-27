@@ -18,6 +18,67 @@ import httpx
 SNAPSHOT_COLLECTOR = (Path(__file__).parent / "observe" / "snapshot.js").read_text(encoding="utf-8").strip()
 
 
+class ClickTimeoutError(RuntimeError):
+    """A click did not finish in time: the page is busy, blocked or gone."""
+
+
+# How long one click may take in the browser, settling included.  A page whose
+# main thread is busy answers no CDP call at all, and an unbounded click held
+# the agent's turn (and every viewer attaching to that page) for over a
+# minute.  The execute budget and the HTTP read timeout sit above it so the
+# click's own deadline is the one that fires, with a result that says so.
+CLICK_TIMEOUT_MS = 20_000
+_CLICK_EXECUTE_TIMEOUT_SEC = 30
+
+
+def _bounded_click(body: str) -> str:
+    """*body* run with a deadline, answering any JS dialog it opens, its CDP session detached after.
+
+    *body* may assign the CDP session it opens to ``cdp``.  A dialog left
+    open blocks the page, and with it every later call, so each one is
+    answered (accepted: the agent clicked meaning to go on; a prompt is
+    dismissed, since there is no text to give it) and reported in the result.
+    """
+
+    return f"""
+let cdp = null;
+const __dialogs = [];
+const __onDialog = (d) => {{
+  __dialogs.push({{type: d.type(), message: d.message()}});
+  (d.type() === 'prompt' ? d.dismiss() : d.accept()).catch(() => null);
+}};
+page.on('dialog', __onDialog);
+let __timer = null;
+try {{
+  await Promise.race([
+    (async () => {{
+{body}
+    }})(),
+    new Promise((_, reject) => {{
+      __timer = setTimeout(() => reject(new Error('click_timeout')), {CLICK_TIMEOUT_MS});
+    }}),
+  ]);
+}} finally {{
+  clearTimeout(__timer);
+  page.off('dialog', __onDialog);
+  if (cdp) cdp.detach().catch(() => null);
+}}
+return {{dialogs: __dialogs}};
+"""
+
+
+class SecretFieldRefused(RuntimeError):
+    """A stored secret was not written: the field is not a secret one, or its page is not the credential's."""
+
+
+# Mirrors isSecret in observe/snapshot.js, checked again on the live node at
+# the moment of writing: the snapshot's mark can be stale by then.
+SECRET_AUTOCOMPLETE: tuple[str, ...] = (
+    "current-password", "new-password", "one-time-code", "cc-number", "cc-csc",
+)
+_SECRET_REFUSED_RE = re.compile(r"secret_refused: (\w+)(?: (\S+))?")
+
+
 class BrowserClientBase:
     """What the cloud's browser client and the computer's share: the ``@eN`` ref
     cache, the page tree built from a snapshot's frames, key names and screenshot
@@ -167,6 +228,8 @@ class BrowserClientBase:
             heading_level = node.get("heading_level")
             if heading_level is not None:
                 entry["heading_level"] = int(heading_level)
+            if node.get("secret"):
+                entry["secret"] = True
             tree.append(entry)
             cache_entry: dict[str, Any] = {
                 "x": center_x,
@@ -178,6 +241,8 @@ class BrowserClientBase:
             }
             if intent is not None:
                 cache_entry["intent"] = intent
+            if node.get("secret"):
+                cache_entry["secret"] = True
             cache[ref] = cache_entry
 
         return tree, cache
@@ -328,7 +393,9 @@ for (const __f of __targets) {
   __frames.push({x: __ox, y: __oy, nodes: __r.nodes});
 }
 const __cdp = await page.context().newCDPSession(page);
-const __doc = await __cdp.send('DOM.getDocument', {depth: -1, pierce: true});
+let __doc;
+try { __doc = await __cdp.send('DOM.getDocument', {depth: -1, pierce: true}); }
+finally { __cdp.detach().catch(() => null); }
 const __map = {};
 (function walk(n){ if(!n) return; const a=n.attributes||[]; for(let i=0;i<a.length;i+=2){ if(a[i]==='data-sg-i'){ __map[a[i+1]] = n.backendNodeId; } } for(const c of (n.children||[])) walk(c); if(n.contentDocument) walk(n.contentDocument); })(__doc.root);
 for (const __fr of __frames) { for (const node of __fr.nodes) { node.backend_node_id = (node.idx!=null && __map[String(node.idx)]!=null) ? __map[String(node.idx)] : null; } }
@@ -341,6 +408,11 @@ return {
 """
 
     _DEFAULT_TIMEOUT = httpx.Timeout(connect=5.0, read=60.0, write=10.0, pool=5.0)
+    _CLICK_TIMEOUT_DETAIL = (
+        f"The click did not finish within {CLICK_TIMEOUT_MS // 1000} s: the page is "
+        "busy or blocked. Call browser_get_state or browser_screenshot to see "
+        "where it is before trying again."
+    )
 
     def __init__(
         self,
@@ -476,14 +548,14 @@ return {
         button: str = "left",
         click_type: str = "click",
         num_clicks: int = 1,
-    ) -> None:
-        """Click at viewport coordinates."""
+    ) -> list[dict[str, str]]:
+        """Click at viewport coordinates; returns the JS dialogs the click opened and answered."""
 
         options: dict[str, Any] = {"button": button}
         if num_clicks != 1:
             options["clickCount"] = num_clicks
         if click_type == "click":
-            code = (
+            return await self._click(_bounded_click(
                 "let __reqSeen = false;\n"
                 "const __reqHandler = () => { __reqSeen = true; };\n"
                 "page.on('request', __reqHandler);\n"
@@ -498,8 +570,7 @@ return {
                 "} finally {\n"
                 "  page.off('request', __reqHandler);\n"
                 "}\n"
-                "return true;"
-            )
+            ))
         elif click_type == "down":
             code = (
                 f"await page.mouse.move({int(x)}, {int(y)});\n"
@@ -515,8 +586,9 @@ return {
         else:
             raise ValueError(f"unsupported click_type: {click_type}")
         await self._playwright_execute(code)
+        return []
 
-    async def click_ref(self, ref: str, **kwargs: Any) -> None:
+    async def click_ref(self, ref: str, **kwargs: Any) -> list[dict[str, str]]:
         """Re-locate a `browser_get_state` ref and click its live center.
 
         Refs are two-tier: a CDP backend node id is tried first, then a
@@ -526,7 +598,7 @@ return {
         """
 
         entry = self._resolve_ref(ref)
-        await self._act_click_on_entry(
+        return await self._act_click_on_entry(
             entry,
             button=kwargs.get("button", "left"),
             num_clicks=kwargs.get("num_clicks", 1),
@@ -556,6 +628,64 @@ return {
 
         await self._act_click_on_entry(self._resolve_ref(ref))
         await self.type_text(text, **kwargs)
+
+    async def fill_secret(self, ref: str, secret: str, *, origins: list[str]) -> None:
+        """Write a stored secret into the secret field *ref* names, on one of *origins* only.
+
+        One call in the page does the check and the write together, against
+        the node itself: the field must be a password, one-time-code or card
+        field now, and its own document (a frame's, when the form sits in
+        one) must be served from an allowed origin, so a page that changed
+        since the snapshot, or a page the agent was steered to, never
+        receives the value.  The value is set through the element's native
+        setter with input and change events, as frameworks expect, without
+        moving the keyboard focus anywhere else.  Raises
+        :class:`SecretFieldRefused` when either check fails.
+        """
+
+        entry = self._resolve_ref(ref)
+        code = _bounded_click(self._ref_object_js(entry) + f"""
+const written = await cdp.send('Runtime.callFunctionOn', {{
+  objectId: objectId,
+  returnByValue: true,
+  arguments: [{{value: {json.dumps(secret)}}}, {{value: {json.dumps(list(origins))}}}, {{value: {json.dumps(list(SECRET_AUTOCOMPLETE))}}}],
+  functionDeclaration: function (secret, origins, secretAutocomplete) {{
+    const tag = this.tagName ? this.tagName.toLowerCase() : '';
+    const tokens = (this.getAttribute('autocomplete') || '').toLowerCase().split(/\\s+/);
+    const isSecret = (tag === 'input' || tag === 'textarea') && (
+      (tag === 'input' && (this.getAttribute('type') || '').toLowerCase() === 'password')
+      || tokens.some((t) => secretAutocomplete.includes(t)));
+    if (!isSecret) return {{refused: 'not_secret'}};
+    const origin = this.ownerDocument.location.origin;
+    if (!origins.includes(origin)) return {{refused: 'origin', origin: origin}};
+    const view = this.ownerDocument.defaultView;
+    const proto = tag === 'textarea' ? view.HTMLTextAreaElement.prototype : view.HTMLInputElement.prototype;
+    this.focus();
+    Object.getOwnPropertyDescriptor(proto, 'value').set.call(this, secret);
+    this.dispatchEvent(new Event('input', {{bubbles: true}}));
+    this.dispatchEvent(new Event('change', {{bubbles: true}}));
+    return {{written: true}};
+  }}.toString(),
+}});
+const outcome = (written && written.result && written.result.value) ? written.result.value : {{}};
+if (outcome.refused === 'not_secret') throw new Error('secret_refused: not_secret');
+if (outcome.refused === 'origin') throw new Error('secret_refused: origin ' + outcome.origin);
+if (!outcome.written) throw new Error('secret_refused: not_written');
+""")
+        try:
+            await self._click(code)
+        except RuntimeError as exc:
+            refused = _SECRET_REFUSED_RE.search(str(exc))
+            if refused is None:
+                raise
+            if refused.group(1) == "origin":
+                raise SecretFieldRefused(
+                    f"this credential may only be typed on {', '.join(origins)}, "
+                    f"not on {refused.group(2) or 'this page'}"
+                ) from None
+            raise SecretFieldRefused(
+                f"{ref} is not a password, one-time-code or card field on the page now"
+            ) from None
 
     async def press_key(self, *keys: str, duration_ms: int = 0) -> None:
         """Press one key or key chord (e.g. ``Enter`` or ``Control+a``).
@@ -702,40 +832,40 @@ return await page.evaluate(() => ({{
         *,
         button: str = "left",
         num_clicks: int = 1,
-    ) -> None:
+    ) -> list[dict[str, str]]:
         """Resolve a cache entry two-tier and click its live center."""
 
-        code = self._build_ref_click_js(entry, button, num_clicks)
-        await self._playwright_execute(code)
+        return await self._click(self._build_ref_click_js(entry, button, num_clicks))
 
-    def _build_ref_click_js(
-        self,
-        entry: dict[str, Any],
-        button: str,
-        num_clicks: int,
-    ) -> str:
-        """Build the JS that re-locates a cached ref and clicks it.
+    async def _click(self, code: str) -> list[dict[str, str]]:
+        """Run a :func:`_bounded_click` script; its dialogs, or :class:`ClickTimeoutError`."""
+
+        try:
+            result = await self._playwright_execute(code, timeout_sec=_CLICK_EXECUTE_TIMEOUT_SEC)
+        except httpx.TimeoutException as exc:
+            raise ClickTimeoutError(self._CLICK_TIMEOUT_DETAIL) from exc
+        except RuntimeError as exc:
+            if "click_timeout" in str(exc):
+                raise ClickTimeoutError(self._CLICK_TIMEOUT_DETAIL) from exc
+            raise
+        dialogs = result.get("dialogs") if isinstance(result, dict) else None
+        return list(dialogs) if isinstance(dialogs, list) else []
+
+    def _ref_object_js(self, entry: dict[str, Any]) -> str:
+        """JS that opens ``cdp`` and sets ``objectId`` to the live node a cached ref names.
 
         Tier one is a CDP ``DOM.resolveNode`` on the snapshot's backend node id;
         tier two heals the ref by matching role + normalized name + nth in the
-        accessibility tree. The clicked center is computed at action time, after
-        ``scrollIntoView``, with a covering-element guard.
+        accessibility tree.  Throws when neither finds it.
         """
 
-        backend_node_id = entry.get("backend_node_id")
-        bid_lit = json.dumps(backend_node_id)
+        bid_lit = json.dumps(entry.get("backend_node_id"))
         role_lit = json.dumps(str(entry.get("role", "")))
         name_lit = json.dumps(str(entry.get("name", "")))
         nth_lit = json.dumps(int(entry.get("nth", 0)))
         ref_lit = json.dumps(str(entry.get("ref", "")))
-        button_lit = json.dumps(button)
-        click_opts = (
-            f"{{button: {button_lit}, clickCount: {int(num_clicks)}}}"
-            if num_clicks != 1
-            else f"{{button: {button_lit}}}"
-        )
         return f"""
-const cdp = await page.context().newCDPSession(page);
+cdp = await page.context().newCDPSession(page);
 let objectId = null;
 const __bid = {bid_lit};
 if (__bid !== null) {{
@@ -769,6 +899,28 @@ if (!objectId) {{
 if (!objectId) {{
   throw new Error("Unknown ref " + {ref_lit} + "; the element is gone — call browser_get_state to refresh refs");
 }}
+"""
+
+    def _build_ref_click_js(
+        self,
+        entry: dict[str, Any],
+        button: str,
+        num_clicks: int,
+    ) -> str:
+        """Build the JS that re-locates a cached ref and clicks it.
+
+        The ref is found as :meth:`_ref_object_js` finds it. The clicked
+        center is computed at action time, after ``scrollIntoView``, with a
+        covering-element guard.
+        """
+
+        button_lit = json.dumps(button)
+        click_opts = (
+            f"{{button: {button_lit}, clickCount: {int(num_clicks)}}}"
+            if num_clicks != 1
+            else f"{{button: {button_lit}}}"
+        )
+        return _bounded_click(self._ref_object_js(entry) + f"""
 const probe = await cdp.send('Runtime.callFunctionOn', {{
   objectId: objectId,
   returnByValue: true,
@@ -814,8 +966,7 @@ const cx = Math.round((quad[0] + quad[2] + quad[4] + quad[6]) / 4);
 const cy = Math.round((quad[1] + quad[3] + quad[5] + quad[7]) / 4);
 await page.mouse.click(cx, cy, {click_opts});
 await page.waitForTimeout(150);
-return true;
-"""
+""")
 
     def _snapshot_script(self, selector: str | None) -> str:
         return self._SNAPSHOT_SCRIPT.replace(

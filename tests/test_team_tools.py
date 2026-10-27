@@ -263,6 +263,65 @@ async def test_overview_focus_shows_one_person_with_their_conversation(sf, pract
     assert "[Check-in]" not in out
 
 
+@pytest.mark.asyncio
+async def test_overview_times_read_in_each_persons_zone_and_say_which(sf, practice):
+    from zoneinfo import ZoneInfo
+
+    from surogates.db.models import FollowupEnrollmentRow
+
+    (ion, ion_session), (ioana, _) = practice.ion, practice.ioana
+    async with sf() as db:
+        await db.execute(
+            sa.update(FollowupEnrollmentRow)
+            .where(FollowupEnrollmentRow.user_id == ion)
+            .values(timezone="America/New_York")
+        )
+        await db.commit()
+    at = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(hours=1)
+    for person in (ion, ioana):
+        await store.queue_outreach(
+            sf, org_id=ORG, agent_id=AGENT, user_id=practice.doctor, platform="whatsapp",
+            channel_identifier="pn1", kind="alert", text="Febră",
+            template_name=None, template_language=None, subject_user_id=person,
+            dedupe_key=f"escalation:-:{person.hex}:{practice.doctor}", created_by="agent",
+            alert_reason="Febră",
+        )
+    async with sf() as db:
+        await db.execute(sa.update(OutreachMessageRow).values(created_at=at))
+        db.add(Event(
+            session_id=ion_session, org_id=ORG, type="user.message",
+            data={"content": "Am febră"}, created_at=at.replace(tzinfo=None),
+        ))
+        await db.commit()
+
+    def local(zone, fmt="%m-%d %H:%M %Z"):
+        return at.astimezone(ZoneInfo(zone)).strftime(fmt)
+
+    out = await team.handle_team_overview({}, **_kw(sf, practice.doctor_session))
+    alerts = sorted(line.strip() for line in out.splitlines() if line.strip().startswith("alert "))
+    assert alerts == sorted([
+        f"alert {local('America/New_York')}: Febră",
+        f"alert {local('Europe/Bucharest')}: Febră",
+    ])
+    bucharest_now = datetime.now(ZoneInfo("Europe/Bucharest")).strftime("%Z")
+    assert out.splitlines()[0].startswith("Follow-up overview at ")
+    assert f" {bucharest_now}, " in out.splitlines()[0]
+
+    focus = await team.handle_team_overview({"person": "Ion Popescu"}, **_kw(sf, practice.doctor_session))
+    assert f"[{local('America/New_York')}] them: Am febră" in focus
+
+    # Programs in different zones: the header has no one zone to use.
+    async with sf() as db:
+        db.add(ProgramScheduleRow(
+            program_id=uuid.uuid4(), org_id=ORG, agent_id=AGENT, active=True,
+            config={"audience": {"protocol": "knee"}, "timezone": "Asia/Tokyo",
+                    "weekdays": ["mon"], "times_local": ["08:30"]},
+        ))
+        await db.commit()
+    out = await team.handle_team_overview({}, **_kw(sf, practice.doctor_session))
+    assert " UTC, " in out.splitlines()[0]
+
+
 # --- message ------------------------------------------------------------------
 
 

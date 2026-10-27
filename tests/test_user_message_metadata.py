@@ -78,7 +78,7 @@ def patched_send_message(monkeypatch):
         )
         monkeypatch.setattr(
             "surogates.api.routes.sessions.require_user_writable_session",
-            lambda _s: None,
+            lambda _s, _t: None,
         )
 
         body = SendMessageRequest(content="hi", metadata=metadata)

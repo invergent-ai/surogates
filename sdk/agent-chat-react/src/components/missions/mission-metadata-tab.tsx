@@ -92,7 +92,7 @@ export function MissionMetadataTab({ mission }: MissionMetadataTabProps) {
           className={`space-y-2 rounded-[10px] p-4 ${TONE[missionVerdictTone(mission.lastEvaluationResult)]}`}
         >
           <div className="font-mono text-[10px] uppercase tracking-widest">
-            Last verdict — {mission.lastEvaluationResult}
+            Last verdict: {mission.lastEvaluationResult}
           </div>
           {mission.lastEvaluationFeedback ? (
             <p className="whitespace-pre-wrap text-sm font-medium text-foreground/90">

@@ -609,6 +609,130 @@ async def test_a_taken_or_resolved_escalation_is_not_reminded(sf, doctor_session
     assert open_.hex in reminder.dedupe_key
 
 
+async def _escalation(sf, escalation_id, **extra):
+    async with sf() as db:
+        db.add(EscalationRow(
+            id=escalation_id, org_id=ORG, agent_id=AGENT, kind="alert",
+            severity="red", reason="Faint", **extra,
+        ))
+        await db.commit()
+
+
+async def _held_alerts(sf, handled):
+    """One alert held behind its template for an escalation in each state of
+    *handled*, plus an open one; returns the escalation ids in that order.
+
+    The state is set straight on the record after the alert is held, as a
+    case resolved without the write-time retire (before it existed, or
+    racing a reminder) would leave it."""
+    ids = []
+    for _ in (*handled, {}):
+        escalation_id = uuid.uuid4()
+        await _escalation(sf, escalation_id)
+        await _red_alert(sf, [MEMBER], escalation_id=escalation_id)
+        ids.append(escalation_id)
+    await _send(sf, _Store(), _Delivery(), now=NOW - timedelta(minutes=5))
+    assert {r.state for r in await _alerts(sf, "agent")} == {"awaiting_reply"}
+    async with sf() as db:
+        for escalation_id, extra in zip(ids, handled):
+            if not extra:
+                continue
+            await db.execute(
+                sa.update(EscalationRow).where(EscalationRow.id == escalation_id).values(**extra)
+            )
+        await db.commit()
+    return ids
+
+
+MEMBER = uuid.uuid4()
+
+
+@pytest.mark.asyncio
+async def test_answering_a_template_does_not_deliver_a_resolved_case(sf, doctor_session):
+    resolved, taken, open_ = await _held_alerts(sf, [{"resolved_at": NOW}, {"owner": "Ana"}])
+    reply = _Store()
+    delivered = await outreach.deliver_pending(
+        sf, reply, org_id=ORG, agent_id=AGENT, user_id=MEMBER,
+        platform="whatsapp", channel_identifier=SENDER, session_id=uuid.uuid4(), now=NOW,
+    )
+    assert delivered == 2
+    states = {r.dedupe_key.split(":")[2]: r.state for r in await _alerts(sf, "agent")}
+    assert states == {resolved.hex: "replaced", taken.hex: "delivered", open_.hex: "delivered"}
+    assert len(reply.events) == 2
+
+
+@pytest.mark.asyncio
+async def test_the_send_pass_does_not_deliver_a_resolved_case_after_an_answer(sf, doctor_session):
+    resolved, open_ = await _held_alerts(sf, [{"resolved_at": NOW}])
+    await _wrote(sf, NOW - timedelta(minutes=1))
+    session_store = _Store()
+    await _send(sf, session_store, _Delivery())
+    states = {r.dedupe_key.split(":")[2]: r.state for r in await _alerts(sf, "agent")}
+    assert states[open_.hex] == "delivered"
+    assert states[resolved.hex] == "replaced"
+    assert len([e for e in session_store.events if e[1] == EventType.LLM_RESPONSE]) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("how", ["resolve", "handle"])
+async def test_resolving_an_escalation_retires_its_held_alerts(sf, doctor_session, how):
+    target, other = await _held_alerts(sf, [{}])
+    if how == "resolve":
+        await store.resolve_escalation(sf, org_id=ORG, agent_id=AGENT, escalation_id=target)
+    else:
+        await store.handle_escalations(
+            sf, org_id=ORG, agent_id=AGENT, take=[], resolve=[target], owner="Ana",
+        )
+    rows = {r.dedupe_key.split(":")[2]: r for r in await _alerts(sf, "agent")}
+    assert rows[target.hex].state == "replaced"
+    assert rows[target.hex].reason == "Escalation resolved before it was read"
+    assert rows[other.hex].state == "awaiting_reply"
+
+
+@pytest.mark.asyncio
+async def test_resolving_retires_a_held_reminder_and_a_missed_replies_alert(sf, doctor_session):
+    escalation_id = uuid.uuid4()
+    await _escalation(sf, escalation_id)
+    await _red_alert(sf, [MEMBER], escalation_id=uuid.uuid4())
+    settings = await store.get_settings(sf, org_id=ORG, agent_id=AGENT)
+    for prefix in (f"reminder:-:{escalation_id.hex}", f"missed:{escalation_id}"):
+        await store.notify_care_team(
+            sf, settings, org_id=ORG, agent_id=AGENT, kind="alert", text="Faint",
+            created_by="held", severity="red", dedupe_prefix=prefix,
+        )
+    await store.retire_escalation_alerts(sf, org_id=ORG, escalation_ids=[escalation_id])
+    assert {r.state for r in await _alerts(sf, "held")} == {"replaced"}
+    assert {r.state for r in await _alerts(sf, "agent")} == {"queued"}
+
+
+@pytest.mark.asyncio
+async def test_an_alert_queued_after_its_case_was_resolved_sends_no_template(sf, doctor_session):
+    escalation_id = uuid.uuid4()
+    await _escalation(sf, escalation_id, resolved_at=NOW)
+    await _red_alert(sf, [MEMBER], escalation_id=escalation_id)
+    delivery = _Delivery()
+    assert await _send(sf, _Store(), delivery) == 0
+    assert delivery.sent == []
+    [row] = await _alerts(sf, "agent")
+    assert (row.state, row.reason) == ("replaced", "Escalation resolved before it was read")
+
+
+@pytest.mark.parametrize("key, expected", [
+    ("escalation:-:{hex}:m1", True),
+    ("escalation:{inv}:{hex}:m1", True),
+    ("reminder:-:{hex}:m1", True),
+    ("missed:{dashed}:m1", True),
+    ("escalation:-:aaa:m1", False),
+    ("outcome:x:2026-10-12:m1", False),
+    (None, False),
+])
+def test_an_alerts_key_names_its_escalation(key, expected):
+    escalation_id = uuid.uuid4()
+    if key is not None:
+        key = key.format(hex=escalation_id.hex, dashed=escalation_id, inv=uuid.uuid4())
+    assert (store.escalation_id_of(key) == escalation_id) is expected
+
+
 @pytest.mark.asyncio
 async def test_an_opened_or_yellow_alert_is_not_reminded(sf, doctor_session):
     member = uuid.uuid4()

@@ -20,9 +20,11 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
-from surogates.api.routes._shared import require_not_channel_principal
 from surogates.api.session_guards import require_not_case_session
-from surogates.channels.memory_boundary import session_memory_boundary
+from surogates.channels.memory_boundary import (
+    is_visitor_boundary,
+    session_memory_boundary,
+)
 from surogates.memory.r2_store import (
     MEMORY_TARGETS, R2MemoryStore,
 )
@@ -30,7 +32,7 @@ from surogates.memory.store import merge_entry, scan_memory_content
 from surogates.runtime import AgentRuntimeContext, agent_runtime_context_dep
 from surogates.runtime.memory_protocol import memory_object_key
 from surogates.tenant.auth.middleware import get_current_tenant
-from surogates.tenant.context import TenantContext
+from surogates.tenant.context import PrincipalKind, TenantContext
 
 logger = logging.getLogger(__name__)
 
@@ -175,6 +177,14 @@ async def _build_store(
     boundary = await _session_boundary(
         request, tenant, agent_runtime, session_id,
     )
+    # An anonymous channel's token reaches only its own session, and only
+    # a website visitor's session has memory of its own: any other would
+    # key to the org-shared memory, the one store a channel must never touch.
+    if tenant.principal()[0] is PrincipalKind.CHANNEL and not is_visitor_boundary(boundary):
+        raise HTTPException(
+            status_code=403,
+            detail="This endpoint is not available to anonymous-channel sessions.",
+        )
     user_id = str(tenant.user_id) if tenant.user_id is not None else None
     keys = {
         target: memory_object_key(
@@ -212,7 +222,6 @@ async def get_memory(
     harness client always sends it so an agent reads the same partition it
     writes.  Absent (the Studio memory panel) keeps the per-user layout.
     """
-    require_not_channel_principal(tenant)
     store = await _build_store(request, tenant, agent_runtime, session_id)
 
     memory_entries = store.get_entries("memory")
@@ -240,7 +249,6 @@ async def mutate_memory(
     :func:`_session_boundary`.  Without it a boundary-scoped session's write
     lands in the agent's real per-user or org-shared memory.
     """
-    require_not_channel_principal(tenant)
     store = await _build_store(request, tenant, agent_runtime, session_id)
 
     limit = _char_limit(body.target)

@@ -8,7 +8,11 @@ from types import SimpleNamespace
 import pytest
 
 from surogates.session.events import EventType
-from surogates.tools.builtin.session_search import _session_search_handler
+from surogates.tools.builtin.session_search import (
+    MAIN_MODEL_TRANSCRIPT_CHARS,
+    MAX_SESSION_CHARS,
+    _session_search_handler,
+)
 
 from .conftest import create_org, create_user, issue_service_account_token
 
@@ -598,3 +602,196 @@ async def test_negation_excludes_a_term(session_store, session_factory):
     )
 
     assert {r["session_id"] for r in result["results"]} == {str(python_only.id)}
+
+
+class _FakeSummaryClient:
+    base_url = "http://summary.local/v1"
+
+    def __init__(self, text):
+        self.text = text
+        self.requests = []
+        self.chat = SimpleNamespace(
+            completions=SimpleNamespace(create=self._create),
+        )
+
+    async def _create(self, **request):
+        self.requests.append(request)
+        return SimpleNamespace(choices=[
+            SimpleNamespace(message=SimpleNamespace(content=self.text)),
+        ])
+
+
+async def test_results_carry_the_summary_model_text(session_store, session_factory):
+    """The dispatcher hands the tool the agent's summary client; the
+    result must be that model's recap, not a raw transcript preview."""
+    org_id = await create_org(session_factory)
+    issued, session = await _own_session(
+        session_store, session_factory, org_id, "agent-summary",
+    )
+    await session_store.emit_event(
+        session.id, EventType.USER_MESSAGE, {"content": "the invoice export broke"},
+    )
+    summary_client = _FakeSummaryClient("Fixed the invoice export by escaping commas.")
+    main_client = _FakeSummaryClient("main model must not be used")
+
+    result = json.loads(
+        await _session_search_handler(
+            {"query": "invoice"},
+            session_store=session_store,
+            tenant=SimpleNamespace(
+                org_id=org_id, user_id=None, service_account_id=issued.id,
+            ),
+            agent_id="agent-summary",
+            llm_client=main_client,
+            model="main-model",
+            summary_llm_client=summary_client,
+            summary_model="summary-model",
+        )
+    )
+
+    assert result["results"][0]["summary"] == "Fixed the invoice export by escaping commas."
+    assert summary_client.requests[0]["model"] == "summary-model"
+    assert main_client.requests == []
+
+
+async def test_raw_preview_is_centred_on_the_match(session_store, session_factory):
+    """Without any LLM client the preview must show the matching part of
+    a long session, not its opening lines."""
+    org_id = await create_org(session_factory)
+    issued, session = await _own_session(
+        session_store, session_factory, org_id, "agent-preview",
+    )
+    await session_store.emit_event(
+        session.id, EventType.USER_MESSAGE, {"content": "hello " * 2000},
+    )
+    await session_store.emit_event(
+        session.id, EventType.USER_MESSAGE, {"content": "the zebrafish assay failed"},
+    )
+
+    result = await _search(
+        session_store, org_id, "agent-preview", issued.id, query="zebrafish",
+    )
+
+    summary = result["results"][0]["summary"]
+    assert "zebrafish assay failed" in summary
+    assert len(summary) < 3500
+
+
+def _excerpts(request):
+    """The transcript excerpt of each numbered session in the one summary request."""
+    content = request["messages"][1]["content"]
+    blocks = content.split("=== [")[1:]
+    return [block.split("===\n", 1)[1].rsplit("\n\nRecap each excerpt", 1)[0] for block in blocks]
+
+
+def _numbered(text, count):
+    return "\n".join(f"[{n}] {text}" for n in range(1, count + 1))
+
+
+async def _seed_long_sessions(session_store, session_factory, org_id, agent_id, count):
+    issued = await issue_service_account_token(session_factory, org_id)
+    for _ in range(count):
+        session = await session_store.create_session(
+            user_id=None, service_account_id=issued.id, org_id=org_id,
+            agent_id=agent_id, channel="api",
+        )
+        await session_store.emit_event(
+            session.id, EventType.USER_MESSAGE, {"content": "padding words " * 3000},
+        )
+        await session_store.emit_event(
+            session.id, EventType.USER_MESSAGE, {"content": "the quokka migration stalled"},
+        )
+    return issued
+
+
+async def _search_with(session_store, org_id, agent_id, issued, **clients):
+    return json.loads(
+        await _session_search_handler(
+            {"query": "quokka", "limit": 5},
+            session_store=session_store,
+            tenant=SimpleNamespace(
+                org_id=org_id, user_id=None, service_account_id=issued.id,
+            ),
+            agent_id=agent_id,
+            **clients,
+        )
+    )
+
+
+async def test_main_model_fallback_shares_a_small_transcript_budget(
+    session_store, session_factory,
+):
+    """With no summary slot the main model still summarises, in one request
+    of a few thousand tokens, each excerpt a window around the match."""
+    org_id = await create_org(session_factory)
+    issued = await _seed_long_sessions(session_store, session_factory, org_id, "agent-main", 5)
+    main_client = _FakeSummaryClient(_numbered("Main model recap.", 5))
+
+    result = await _search_with(
+        session_store, org_id, "agent-main", issued,
+        llm_client=main_client, model="main-model",
+    )
+
+    assert [r["summary"] for r in result["results"]] == ["Main model recap."] * 5
+    assert len(main_client.requests) == 1
+    assert main_client.requests[0]["model"] == "main-model"
+    sent = _excerpts(main_client.requests[0])
+    assert len(sent) == 5
+    assert sum(len(t) for t in sent) <= MAIN_MODEL_TRANSCRIPT_CHARS + 500
+    assert all("quokka migration stalled" in t for t in sent)
+
+
+async def test_summary_slot_gets_the_full_window_and_main_model_is_unused(
+    session_store, session_factory,
+):
+    org_id = await create_org(session_factory)
+    issued = await _seed_long_sessions(session_store, session_factory, org_id, "agent-slot", 2)
+    summary_client = _FakeSummaryClient(_numbered("Summary slot recap.", 2))
+    main_client = _FakeSummaryClient("unused")
+
+    await _search_with(
+        session_store, org_id, "agent-slot", issued,
+        llm_client=main_client, model="main-model",
+        summary_llm_client=summary_client, summary_model="summary-model",
+    )
+
+    assert main_client.requests == []
+    assert [r["model"] for r in summary_client.requests] == ["summary-model"]
+    sent = _excerpts(summary_client.requests[0])
+    assert len(sent) == 2
+    assert all(MAIN_MODEL_TRANSCRIPT_CHARS < len(t) <= MAX_SESSION_CHARS + 100 for t in sent)
+
+
+async def test_a_session_the_recap_leaves_out_gets_its_preview(
+    session_store, session_factory,
+):
+    org_id = await create_org(session_factory)
+    issued = await _seed_long_sessions(session_store, session_factory, org_id, "agent-gap", 2)
+    summary_client = _FakeSummaryClient("[2] Only the second.")
+
+    result = await _search_with(
+        session_store, org_id, "agent-gap", issued,
+        summary_llm_client=summary_client, summary_model="summary-model",
+    )
+
+    first, second = (r["summary"] for r in result["results"])
+    assert first.startswith("[Raw preview") and "quokka migration stalled" in first
+    assert second == "Only the second."
+
+
+async def test_a_summary_client_without_a_model_falls_back_to_the_main_model(
+    session_store, session_factory,
+):
+    org_id = await create_org(session_factory)
+    issued = await _seed_long_sessions(session_store, session_factory, org_id, "agent-half", 1)
+    summary_client = _FakeSummaryClient("unused")
+    main_client = _FakeSummaryClient("Main model recap.")
+
+    await _search_with(
+        session_store, org_id, "agent-half", issued,
+        llm_client=main_client, model="main-model",
+        summary_llm_client=summary_client, summary_model="",
+    )
+
+    assert summary_client.requests == []
+    assert len(_excerpts(main_client.requests[0])[0]) <= MAIN_MODEL_TRANSCRIPT_CHARS + 100

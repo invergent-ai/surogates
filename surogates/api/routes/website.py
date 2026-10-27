@@ -36,16 +36,17 @@ sessions.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import time
 import uuid
+from http.cookies import SimpleCookie
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
+from surogates.channels.memory_boundary import visitor_boundary
 from surogates.channels.website_keys import (
     PUBLISHABLE_KEY_PREFIX,
     is_publishable_key,
@@ -66,6 +67,7 @@ from surogates.channels.website_session import (
     verify_csrf_token,
 )
 from surogates.config import Settings, enqueue_session
+from surogates.api.routes.events import session_event_stream
 from surogates.api.routes._commerce_turn import (
     authorize_allowance_turn,
     authorize_commerce_turn,
@@ -77,7 +79,7 @@ from surogates.runtime.platform_client import (
     PlatformAuthError,
 )
 from surogates.runtime.resolver import resolve_agent_id_soft
-from surogates.channels.constants import multi_session_disabled, session_queue_priority
+from surogates.channels.constants import WEBSITE_CHANNEL, multi_session_disabled, session_queue_priority
 from surogates.session.events import EventType
 from surogates.session.models import REUSABLE_SESSION_STATUSES
 from surogates.session.store import SessionNotFoundError, SessionStore
@@ -93,17 +95,15 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-WEBSITE_CHANNEL = "website"
+# The visitor's own id on this API's domain, outliving any one session so a
+# returning visitor finds the memory their earlier visits left. Partitioned,
+# so a browser keeps a separate id per embedding site.
+VISITOR_COOKIE_NAME = "surogates_website_visitor"
+_VISITOR_COOKIE_MAX_AGE = 365 * 24 * 3600
 # Upper bound on a single visitor message.  Website widgets are an
 # interactive surface; we cap much lower than the API channel so a
 # single misbehaving client cannot submit multi-megabyte prompts.
 _MAX_MESSAGE_LENGTH = 8_000
-# Terminal session statuses that close the SSE stream.  Mirrors the
-# interactive web channel so the visitor client can share event-handling
-# logic if it wants.
-_TERMINAL_STATUSES = frozenset({"completed", "archived"})
-_MAX_STREAM_DURATION = 300
-_POLL_INTERVAL = 0.5
 
 
 # ---------------------------------------------------------------------------
@@ -237,6 +237,42 @@ def _set_session_cookie(
         samesite="none",
         path="/",
     )
+
+
+def _visitor_id(request: Request, response: Response) -> str:
+    """The visitor's id from their cookie, minting one when it is missing or not a UUID.
+
+    The cookie is set again on every bootstrap so a visitor who keeps
+    returning keeps their id.
+    """
+    try:
+        visitor = str(UUID(request.cookies.get(VISITOR_COOKIE_NAME, "")))
+    except ValueError:
+        visitor = str(uuid.uuid4())
+    cookie = SimpleCookie()
+    cookie[VISITOR_COOKIE_NAME] = visitor
+    morsel = cookie[VISITOR_COOKIE_NAME]
+    morsel["max-age"] = _VISITOR_COOKIE_MAX_AGE
+    morsel["path"] = "/"
+    morsel["secure"] = True
+    morsel["httponly"] = True
+    morsel["samesite"] = "none"
+    # Written by hand: Starlette sets ``Partitioned`` only on Python 3.14+.
+    response.headers.append("set-cookie", f"{morsel.OutputString()}; Partitioned")
+    return visitor
+
+
+def _visitor_memory_boundary(
+    agent_id: str, config: dict, visitor_id: str,
+) -> str:
+    """The ``visitor:`` memory boundary for a session with *config*.
+
+    A verified buyer's Firebase uid follows them across devices; an
+    anonymous visitor is known by their cookie.
+    """
+    buyer = config.get("commerce_buyer") or {}
+    identity = buyer.get("firebase_uid") or visitor_id
+    return visitor_boundary(agent_id, config.get("embed_end_user_id"), identity)
 
 
 def _clear_session_cookie(response: Response) -> None:
@@ -698,6 +734,7 @@ async def bootstrap_website_session(
     normalized_origin = normalize_origin(request_origin)
 
     publishable_key = _extract_bearer(request) or ""
+    visitor_id = _visitor_id(request, response)
 
     single_session = multi_session_disabled(routing_config)
     if single_session:
@@ -714,26 +751,28 @@ async def bootstrap_website_session(
             # Firebase token expecting exactly that — so a reused session
             # must absorb the token too, or a signed-in buyer would 402
             # forever against their buyer-less canonical session.
+            current = dict(existing.config or {})
+            pinned: dict = {}
             if body is not None and body.firebase_id_token:
                 buyer = await _resolve_commerce_buyer(
                     request, agent_id, body.firebase_id_token,
                 )
-                if buyer is not None and (
-                    (existing.config or {}).get("commerce_buyer") != buyer
-                ):
-                    await store.update_session_config_key(
-                        existing.id, "commerce_buyer", buyer,
-                    )
+                if buyer is not None:
+                    pinned["commerce_buyer"] = buyer
             # Absorb the per-buyer embed identity onto a reused session too,
             # or a canonical session created before the key carried an
             # embed_end_user_id would skip the allowance gate on every turn.
             embed_eu = routing_config.get("embed_end_user_id")
-            if embed_eu and (existing.config or {}).get(
-                "embed_end_user_id",
-            ) != str(embed_eu):
-                await store.update_session_config_key(
-                    existing.id, "embed_end_user_id", str(embed_eu),
-                )
+            if embed_eu:
+                pinned["embed_end_user_id"] = str(embed_eu)
+            # The boundary follows whoever the visitor now is: signing in
+            # moves the conversation onto the buyer's own memory.
+            pinned["memory_boundary"] = _visitor_memory_boundary(
+                agent_id, {**current, **pinned}, visitor_id,
+            )
+            for key, value in pinned.items():
+                if current.get(key) != value:
+                    await store.update_session_config_key(existing.id, key, value)
             response.status_code = status.HTTP_200_OK
             return _issue_bootstrap_response(
                 response,
@@ -785,6 +824,8 @@ async def bootstrap_website_session(
         )
         if buyer is not None:
             config["commerce_buyer"] = buyer
+
+    config["memory_boundary"] = _visitor_memory_boundary(agent_id, config, visitor_id)
 
     session = await store.create_session(
         session_id=session_id,
@@ -887,7 +928,7 @@ async def send_website_message(
         )
 
     await authorize_commerce_turn(
-        request, session, body.content, channel="website",
+        request, session, body.content, channel=WEBSITE_CHANNEL,
     )
 
     # Per-buyer embed: when the widget key was minted by a buyer, this
@@ -903,7 +944,7 @@ async def send_website_message(
             body.content,
             end_user_id=str(embed_end_user_id),
             always=True,
-            channel="website",
+            channel=WEBSITE_CHANNEL,
         )
 
     if session.status in ("failed", "paused", "completed"):
@@ -955,166 +996,9 @@ async def stream_website_events(
             detail="Session not found.",
         )
 
-    # Pre-loop fast-close for terminal sessions used to live here, but it
-    # raced with concurrent POST /messages: a message landing between the
-    # ``after`` check and the close meant the SESSION_RESUME pubsub publish
-    # had no subscriber, and the new turn never reached the client.
-    # ``event_generator`` now subscribes to pubsub first and applies a brief
-    # grace window before declaring a terminal session done, so the single
-    # path is correct for both fresh and historical opens.
-
-    redis = getattr(request.app.state, "redis", None)
-
-    async def event_generator():  # noqa: ANN202
-        cursor = after
-        elapsed = 0.0
-        in_replay = True
-        REPLAY_LIMIT = 5000
-        LIVE_LIMIT = 50
-
-        pubsub = None
-        if redis is not None:
-            try:
-                pubsub = redis.pubsub()
-                await pubsub.subscribe(f"surogates:session:{session_id}")
-            except Exception:
-                pubsub = None
-
-        try:
-            yield {"comment": "connected"}
-
-            while elapsed < _MAX_STREAM_DURATION:
-                if await request.is_disconnected():
-                    return
-
-                if in_replay:
-                    events = await asyncio.shield(
-                        store.get_events(
-                            session_id,
-                            after=cursor,
-                            limit=REPLAY_LIMIT,
-                            exclude_types=[EventType.LLM_DELTA],
-                        )
-                    )
-                else:
-                    events = await asyncio.shield(
-                        store.get_events(session_id, after=cursor, limit=LIVE_LIMIT)
-                    )
-
-                for event in events:
-                    yield {
-                        "id": str(event.id),
-                        "event": event.type,
-                        "data": json.dumps(event.data, default=str),
-                    }
-                    if event.id is not None:
-                        cursor = event.id
-
-                if not events:
-                    in_replay = False
-                    try:
-                        session = await asyncio.shield(
-                            store.get_session(session_id)
-                        )
-                    except SessionNotFoundError:
-                        yield {
-                            "event": "session.done",
-                            "data": json.dumps({"reason": "session_not_found"}),
-                            "retry": 0,
-                        }
-                        return
-
-                    if session.status in _TERMINAL_STATUSES:
-                        # Race guard: a POST /messages currently in flight
-                        # commits SESSION_RESUME and publishes on
-                        # ``surogates:session:{id}``. We subscribed above so
-                        # any publish issued after that point is queued. Wait
-                        # briefly before declaring the session done, then
-                        # re-check status — the POST may have flipped it
-                        # back to active.
-                        #
-                        # Loop on get_message until a real publish or the
-                        # deadline: redis-py queues the subscribe-confirm
-                        # message and ``get_message(ignore_subscribe_messages=
-                        # True)`` consumes it returning None, which without a
-                        # loop would collapse our grace window to zero on the
-                        # very first call after subscribe.
-                        if pubsub is not None:
-                            sse_loop = asyncio.get_event_loop()
-                            deadline = sse_loop.time() + _POLL_INTERVAL
-                            while sse_loop.time() < deadline:
-                                remaining = max(0.0, deadline - sse_loop.time())
-                                try:
-                                    msg = await asyncio.wait_for(
-                                        pubsub.get_message(
-                                            ignore_subscribe_messages=True,
-                                            timeout=remaining,
-                                        ),
-                                        timeout=remaining + 0.2,
-                                    )
-                                except (asyncio.TimeoutError, Exception):
-                                    break
-                                if msg is not None:
-                                    break
-                            try:
-                                session = await asyncio.shield(
-                                    store.get_session(session_id)
-                                )
-                            except SessionNotFoundError:
-                                yield {
-                                    "event": "session.done",
-                                    "data": json.dumps(
-                                        {"reason": "session_not_found"},
-                                    ),
-                                    "retry": 0,
-                                }
-                                return
-
-                        if session.status in _TERMINAL_STATUSES:
-                            yield {
-                                "event": "session.done",
-                                "data": json.dumps(
-                                    {"reason": session.status, "status": session.status},
-                                ),
-                                "retry": 0,
-                            }
-                            return
-                        # Status flipped to active during grace window -- loop
-                        # back so the next iteration fetches the new events.
-                        elapsed += _POLL_INTERVAL
-                        continue
-
-                    if pubsub is not None:
-                        try:
-                            await asyncio.wait_for(
-                                pubsub.get_message(
-                                    ignore_subscribe_messages=True,
-                                    timeout=_POLL_INTERVAL,
-                                ),
-                                timeout=_POLL_INTERVAL + 0.5,
-                            )
-                        except (asyncio.TimeoutError, Exception):
-                            pass
-                    else:
-                        await asyncio.sleep(_POLL_INTERVAL)
-
-                    elapsed += _POLL_INTERVAL
-
-            yield {
-                "event": "stream.timeout",
-                "data": json.dumps({"reason": "max_duration_exceeded"}),
-            }
-        except asyncio.CancelledError:
-            return
-        finally:
-            if pubsub is not None:
-                try:
-                    await pubsub.unsubscribe()
-                    await pubsub.aclose()
-                except Exception:
-                    pass
-
-    return EventSourceResponse(event_generator())
+    return EventSourceResponse(
+        session_event_stream(request, store, session_id, after=after, watch=False),
+    )
 
 
 @router.post(

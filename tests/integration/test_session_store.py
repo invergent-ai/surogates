@@ -266,6 +266,25 @@ async def test_emit_synthetic_outcome_user_message_marks_event(
     assert event.data["outcome_id"] == "outc_test"
 
 
+async def test_a_buyers_own_listing_leaves_out_their_buy_page_chat(
+    session_store, session_factory,
+):
+    """The buy page meters that conversation; the buyer's web app login
+    must not list it as a chat it could continue unmetered."""
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    web = await session_store.create_session(
+        user_id=user_id, org_id=org_id, agent_id="test-agent", channel="web",
+    )
+    await session_store.create_session(
+        user_id=user_id, org_id=org_id, agent_id="test-agent", channel="buy_page",
+    )
+
+    listed = await session_store.list_sessions(org_id, user_id, "test-agent")
+
+    assert [s.id for s in listed] == [web.id]
+
+
 async def test_list_sessions(session_store, session_factory):
     """Listing sessions for a user returns the correct count with pagination."""
     org_id = await create_org(session_factory)
@@ -1224,3 +1243,37 @@ async def test_an_answer_in_a_channel_with_an_adapter_is_queued_for_delivery_and
     [(off_by, channel, status, destination)] = await queued("slack", slack_channel_id="C-1")
     assert (off_by, channel, status, destination["channel_id"]) == (0, "slack", "pending", "C-1")
     assert await queued("web") == []
+
+
+async def test_a_scheduled_run_delivers_only_its_final_answer_to_the_parent_channel(
+    session_store, session_factory,
+):
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    parent = await session_store.create_session(
+        user_id=user_id, org_id=org_id, agent_id="test-agent", channel="slack",
+        config={"slack_channel_id": "C-1"},
+    )
+    run = await session_store.create_session(
+        user_id=user_id, org_id=org_id, agent_id="test-agent", channel="scheduled",
+        parent_id=parent.id,
+    )
+
+    await session_store.emit_event(run.id, EventType.LLM_RESPONSE, {"message": {
+        "role": "assistant", "content": "Let me check the calendar first.",
+        "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "x", "arguments": "{}"}}],
+    }})
+    await session_store.emit_event(
+        run.id, EventType.CODE_RUN_CHANNEL_UPDATE, {"text": "still working", "run_id": "r1"},
+    )
+    await session_store.emit_event(run.id, EventType.LLM_RESPONSE, {"message": {
+        "role": "assistant", "content": "You have two meetings today.",
+    }})
+
+    async with session_factory() as db:
+        rows = (await db.execute(
+            select(DeliveryOutbox).where(DeliveryOutbox.session_id == run.id)
+        )).scalars().all()
+    assert [(row.channel, row.payload["content"]) for row in rows] == [
+        ("slack", "You have two meetings today."),
+    ]

@@ -31,10 +31,8 @@ from typing import Any, Literal
 
 from surogates.harness.streaming_executor import _is_error_result
 from surogates.harness.message_utils import content_as_text
-from surogates.harness.auxiliary_llm import (
-    reasoning_disabled_extra_body,
-    rejects_reasoning_controls,
-)
+from surogates.harness.redact import mask_tool_arguments, mask_values, typed_texts
+from surogates.harness.auxiliary_llm import create_without_reasoning
 from surogates.harness.structured_output import (
     iter_json_objects,
     parse_json_object,
@@ -480,6 +478,12 @@ class TurnSummarizer:
         ]
 
         tool_lines = self._format_tool_calls(caption_calls, caption_results)
+        # A caption leads with the step's most distinctive detail, and what
+        # the agent typed (a password, more often than not, on a login form)
+        # is exactly that.  The model never sees it, and a caption that
+        # names it anyway, from the reasoning or a result, is discarded.
+        typed = typed_texts(tool_calls)
+        reasoning = mask_values(reasoning, typed)
         user_block_parts: list[str] = []
         if prior_iteration_summaries:
             prior = "\n".join(f"- {s}" for s in prior_iteration_summaries)
@@ -547,6 +551,9 @@ class TurnSummarizer:
             return None
         caption = _extract_caption(content)
         text = _normalize_caption(caption.strip().strip('"').rstrip("."))
+        if any(value.lower() in text.lower() for value in typed):
+            logger.warning("discarding iteration summary for %s: it repeats typed text", iteration_id)
+            return None
         if not _valid_iteration_summary(text):
             logger.warning(
                 "discarding malformed iteration summary for %s: %r",
@@ -660,29 +667,10 @@ class TurnSummarizer:
         slow provider — a timeout never reraises, since retrying it
         without the parameter would blame the wrong thing.
         """
-        extra_body = reasoning_disabled_extra_body(
-            kwargs["model"], str(getattr(client, "base_url", "") or ""),
-        )
-        request_kwargs = dict(kwargs)
-        if extra_body is not None:
-            request_kwargs["extra_body"] = {
-                **kwargs.get("extra_body", {}), **extra_body,
-            }
-
-        async def request() -> Any:
-            try:
-                return await client.chat.completions.create(**request_kwargs)
-            except Exception as exc:
-                if extra_body is None or not rejects_reasoning_controls(exc):
-                    raise
-                # Keep response_format and the output bound on a gateway
-                # that rejects reasoning controls. Both attempts share
-                # the same timeout, and empty content still stays empty.
-                return await client.chat.completions.create(**kwargs)
-
         try:
+            # Both attempts, with and without the reasoning controls, share the timeout.
             response = await asyncio.wait_for(
-                request(),
+                create_without_reasoning(client, **kwargs),
                 timeout=timeout,
             )
         except asyncio.TimeoutError:
@@ -740,7 +728,7 @@ class TurnSummarizer:
         for index, tc in enumerate(tool_calls, 1):
             fn = tc.get("function") or {}
             name = fn.get("name") or tc.get("name") or "?"
-            args = fn.get("arguments") or tc.get("arguments") or ""
+            args = mask_tool_arguments(name, fn.get("arguments") or tc.get("arguments") or "")
             args_snippet = (args or "")[:200]
             call_id = str(tc.get("id") or "")
             result = results_by_id.get(call_id, "")

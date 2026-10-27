@@ -3,6 +3,10 @@ from __future__ import annotations
 
 NOTE_TYPES: tuple[str, ...] = ("FACT", "FAIL", "CLAIM", "RESULT")
 
+# Notes that state something happened must cite where it shows: the
+# verifier judges them against that source, not against their wording.
+CITED_TYPES: frozenset[str] = frozenset({"FACT", "FAIL", "RESULT"})
+
 # Content caps (characters). RESULT is larger because it carries the
 # structured ``outcome=…|evidence=…|risk=…`` payload.
 MAX_CONTENT_CHARS: dict[str, int] = {

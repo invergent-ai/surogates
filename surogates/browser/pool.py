@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
@@ -52,6 +53,47 @@ class _Slot:
     snapshot_cache: dict[str, dict[str, Any]]
 
 
+# A session idle this long has its typed secrets dropped even if its browser
+# was never destroyed here (it timed out on its own, or the session moved on).
+_TYPED_SECRET_TTL = 3600.0
+
+
+class TypedSecrets:
+    """The stored secrets each session's browser was given, kept while that browser lives.
+
+    Whatever a page does with one afterwards (echo it into its text, keep it
+    where a script reads it), it is cut out of every browser tool result
+    before the model sees it.
+    """
+
+    def __init__(self, ttl: float = _TYPED_SECRET_TTL) -> None:
+        self._ttl = ttl
+        self._by_session: dict[str, tuple[float, set[str]]] = {}
+
+    def add(self, session_id: str, value: str) -> None:
+        self._sweep()
+        _, secrets = self._by_session.get(session_id, (0.0, set()))
+        secrets.add(value)
+        self._by_session[session_id] = (time.monotonic(), secrets)
+
+    def of(self, session_id: str) -> list[str]:
+        """The session's secrets, longest first; reading them counts as the session's use."""
+        self._sweep()
+        entry = self._by_session.get(session_id)
+        if entry is None:
+            return []
+        self._by_session[session_id] = (time.monotonic(), entry[1])
+        return sorted(entry[1], key=len, reverse=True)
+
+    def forget(self, session_id: str) -> None:
+        self._by_session.pop(session_id, None)
+
+    def _sweep(self) -> None:
+        cutoff = time.monotonic() - self._ttl
+        for session_id in [sid for sid, (used, _) in self._by_session.items() if used < cutoff]:
+            del self._by_session[session_id]
+
+
 class BrowserPool:
     """Worker-local mapping from session id to provisioned browser."""
 
@@ -77,6 +119,7 @@ class BrowserPool:
         # state at provision; public so handlers reach it via the pool they
         # already hold (avoids threading the store through the executor chain).
         self.browser_profile_store = browser_profile_store
+        self.typed_secrets = TypedSecrets()
         self._mapping: dict[str, _Slot] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._global_lock = asyncio.Lock()
@@ -91,6 +134,7 @@ class BrowserPool:
         lock = await self._session_lock(session_id)
         async with lock:
             slot = self._mapping.get(session_id)
+            registered = False
             if slot is None:
                 # Shared-runtime sessions can move between workers, so this
                 # worker's local map may miss a browser another worker
@@ -111,9 +155,16 @@ class BrowserPool:
                         snapshot_cache={},
                     )
                     self._mapping[session_id] = slot
+                    registered = True
             if slot is not None:
                 status = await self._backend.status(slot.browser_id)
                 if status == BrowserStatus.RUNNING:
+                    # The entry is how viewers find this browser, and a viewer
+                    # that could not reach it in time may have pruned it; a
+                    # running browser nobody can find is a pane that says
+                    # "no browser" for the rest of the session.
+                    if not registered and await self._registry.get(session_id) is None:
+                        await self._publish(session_id, org_id, user_id, slot)
                     return EnsureResult(
                         browser_id=slot.browser_id,
                         endpoint=slot.endpoint,
@@ -129,6 +180,7 @@ class BrowserPool:
                 stale_browser_id = slot.browser_id
                 await self._backend.destroy(stale_browser_id)
                 self._mapping.pop(session_id, None)
+                self.typed_secrets.forget(session_id)
                 await self._registry.delete(session_id)
                 # The replaced pod is gone — surface that to consumers
                 # (UI, audit, billing) before the new provision so they
@@ -176,18 +228,7 @@ class BrowserPool:
                     await client.close()
             slot = _Slot(browser_id=browser_id, endpoint=endpoint, snapshot_cache={})
             self._mapping[session_id] = slot
-            await self._registry.set(
-                BrowserEntry(
-                    session_id=session_id,
-                    org_id=org_id,
-                    user_id=user_id,
-                    rest_url=endpoint.rest_url,
-                    cdp_url=endpoint.cdp_url,
-                    live_view_url=endpoint.live_view_url,
-                    provisioned_at=datetime.now(timezone.utc),
-                    browser_id=browser_id,
-                )
-            )
+            await self._publish(session_id, org_id, user_id, slot)
             await self._emit_event(
                 session_id,
                 EventType.BROWSER_PROVISIONED.value,
@@ -200,10 +241,25 @@ class BrowserPool:
                 snapshot_cache=slot.snapshot_cache,
             )
 
+    async def _publish(self, session_id: str, org_id: str, user_id: str, slot: _Slot) -> None:
+        await self._registry.set(
+            BrowserEntry(
+                session_id=session_id,
+                org_id=org_id,
+                user_id=user_id,
+                rest_url=slot.endpoint.rest_url,
+                cdp_url=slot.endpoint.cdp_url,
+                live_view_url=slot.endpoint.live_view_url,
+                provisioned_at=datetime.now(timezone.utc),
+                browser_id=slot.browser_id,
+            )
+        )
+
     async def destroy_for_session(self, session_id: str) -> None:
         lock = await self._session_lock(session_id)
         async with lock:
             slot = self._mapping.pop(session_id, None)
+            self.typed_secrets.forget(session_id)
             if slot is None:
                 # Cold path — the worker either restarted or never owned
                 # this session's slot. We still need to clean up the

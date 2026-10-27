@@ -70,7 +70,7 @@ export function readOnlyReasonForSession(
   if (isSubAgentSession(session)) {
     return {
       readOnly: true,
-      reason: "Sub-task started by parent session — read-only",
+      reason: "Sub-task started by its parent session, read-only",
     };
   }
   return { readOnly: false };

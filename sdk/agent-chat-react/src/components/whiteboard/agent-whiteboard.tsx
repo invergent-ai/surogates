@@ -272,9 +272,11 @@ export function WhiteboardSurface({
   // question, twice.
   const userSelected = useRef(false);
 
-  const repaintRef = useRef<() => void>(() => undefined);
+  // Bumped when a formula's glyphs land: its size changes from the
+  // character-count estimate to the truth, so the marks must re-measure.
+  const [formulaEpoch, setFormulaEpoch] = useState(0);
   const formulaCache = useMemo(
-    () => new FormulaCache(() => repaintRef.current()),
+    () => new FormulaCache(() => setFormulaEpoch((n) => n + 1)),
     [],
   );
 
@@ -519,7 +521,7 @@ export function WhiteboardSurface({
   const liveUnit = useMemo(() => inkHeight(doc, services) ?? 40, [doc, services]);
   const liveMarks = useMemo(
     () => boardMarks(doc, services, { unit: liveUnit }),
-    [doc, services, liveUnit],
+    [doc, services, liveUnit, formulaEpoch],
   );
 
   // An answer-sized box at a point: a line of handwriting tall, a few
@@ -648,8 +650,6 @@ export function WhiteboardSurface({
       ctx.stroke();
     }
   }, [doc, view, size, services, color, width, marquee, tool, gridRect, liveMarks]);
-
-  repaintRef.current = paint;
 
   // Repaint only when something changed. A permanent rAF loop would burn
   // a laptop battery on a board nobody is touching.

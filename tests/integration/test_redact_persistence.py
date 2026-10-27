@@ -69,3 +69,29 @@ async def test_delivery_data_reaches_the_outbox_but_never_the_event_log(
             select(DeliveryOutbox).where(DeliveryOutbox.event_id == event_id)
         )).scalar_one()
     assert outbox.payload["content"] == "Call +40 711 111 111"
+
+
+async def test_typed_text_is_masked_in_every_stored_copy_of_the_call(
+    session_store,
+    session_factory,
+) -> None:
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    session = await session_store.create_session(
+        user_id=user_id, org_id=org_id, agent_id="test-agent",
+    )
+    password = "Waalhaven-2026"
+
+    await session_store.emit_event(session.id, EventType.LLM_RESPONSE, {"message": {
+        "role": "assistant",
+        "tool_calls": [{"id": "c1", "type": "function", "function": {
+            "name": "browser_type", "arguments": json.dumps({"ref": "@e5", "text": password}),
+        }}],
+    }})
+    await session_store.emit_event(session.id, EventType.TOOL_CALL, {
+        "tool_call_id": "c1", "name": "browser_type", "arguments": {"ref": "@e5", "text": password},
+    })
+
+    events = await session_store.get_events(session.id)
+    assert password not in json.dumps([event.data for event in events])
+    assert events[1].data["arguments"] == {"ref": "@e5", "text": "\u2022" * len(password)}

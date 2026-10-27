@@ -92,19 +92,19 @@ const VIEW_MODE_SEGMENTS = [
     mode: "simple" as const,
     label: "Simple",
     icon: MessageSquareIcon,
-    tooltip: "Simple — just the conversation",
+    tooltip: "Simple: just the conversation",
   },
   {
     mode: "expert" as const,
     label: "Advanced",
     icon: ListTreeIcon,
-    tooltip: "Advanced — every step the agent took",
+    tooltip: "Advanced: every step the agent took",
   },
   {
     mode: "whiteboard" as const,
     label: "Whiteboard",
     icon: PenLineIcon,
-    tooltip: "Whiteboard — sketch with it on a shared canvas",
+    tooltip: "Whiteboard: sketch with it on a shared canvas",
   },
 ];
 
@@ -630,8 +630,8 @@ function ChatComposerInner({
       { value: "/loop 1h review the on-call dashboard and flag anomalies", label: "/loop 1h on-call check", description: "Hourly: review the on-call dashboard" },
       { value: "/loop 2h scan production error rates and alert if elevated", label: "/loop 2h error scan", description: "Every 2 hours: production error scan" },
       { value: "/loop every 5 minutes check whether CI on the current branch has finished", label: "/loop every 5 minutes (verbose)", description: "Verbose interval form" },
-      { value: "/loop watch the active deploy and notify me when it stabilises or rolls back", label: "/loop <prompt> (dynamic)", description: "Dynamic loop — model self-paces 1m–1h via loop_wait" },
-      { value: "/loop babysit the long-running data migration and only ping me on errors or completion", label: "/loop migration watcher (dynamic)", description: "Dynamic loop — best when cadence is unpredictable" },
+      { value: "/loop watch the active deploy and notify me when it stabilises or rolls back", label: "/loop <prompt> (dynamic)", description: "Dynamic loop: the model paces itself, 1m to 1h, via loop_wait" },
+      { value: "/loop babysit the long-running data migration and only ping me on errors or completion", label: "/loop migration watcher (dynamic)", description: "Dynamic loop: best when the cadence is unpredictable" },
     ],
     [],
   );

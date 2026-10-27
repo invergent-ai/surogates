@@ -246,6 +246,7 @@ export type AgentChatErrorCategory =
   | "storage_error"
   | "database_error"
   | "governance_denied"
+  | "paywall"
   | "unknown";
 
 export interface AgentChatErrorInfo {
@@ -258,6 +259,10 @@ export interface AgentChatErrorInfo {
    * renders a "buy credits / upgrade" card with a billing CTA instead of
    * the generic error bubble. */
   insufficientCredits?: boolean;
+  /** Set when a send was refused by the agent's paywall (HTTP 402 with
+   * ``{code, buy_url}``). The UI renders a buy-access card whose button
+   * opens ``buyUrl``, instead of pushing the text into the user's bubble. */
+  paywall?: { code: string; buyUrl?: string };
 }
 
 export interface AgentChatSession {
@@ -1298,7 +1303,9 @@ export interface AgentChatRuntimeApi {
   stop(): Promise<void>;
   retry(): Promise<void>;
   markSending(content: string): void;
-  markSendError(errorText: string): void;
+  /** Mark the pending send as failed. An ``AgentChatPaywallError`` becomes a
+   * buy-access card; anything else becomes a "not sent" notice. */
+  markSendError(error: unknown): void;
   /** Current Simple/Expert chat view mode. */
   viewMode: AgentChatViewMode;
   /** Update the chat view mode + persist via adapter / localStorage. */

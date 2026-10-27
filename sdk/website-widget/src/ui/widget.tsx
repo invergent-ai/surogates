@@ -38,12 +38,24 @@ function uid(): string {
   return `u-${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
 }
 
-/** Project ``agent.messages`` down to the renderable user/assistant turns. */
-function snapshot(messages: ReadonlyArray<{ id?: string; role?: string; content?: unknown }>): ChatMessage[] {
+/**
+ * Project ``agent.messages`` down to the renderable user/assistant turns,
+ * assistant text with its ``<next_action>`` footer stripped.  An assistant
+ * message with nothing left to show (one that only carries tool calls, or
+ * only the footer) is dropped here, so it neither renders an empty bubble
+ * nor counts as the reply that hides the typing indicator.
+ */
+function snapshot(
+  messages: ReadonlyArray<{ id?: string; role?: string; content?: unknown }>,
+): ChatMessage[] {
   const out: ChatMessage[] = [];
   for (const m of messages) {
     if (m.role !== 'user' && m.role !== 'assistant') continue;
-    const content = typeof m.content === 'string' ? m.content : '';
+    let content = typeof m.content === 'string' ? m.content : '';
+    if (m.role === 'assistant') {
+      content = stripNextAction(content);
+      if (content.trim() === '') continue;
+    }
     out.push({ id: m.id ?? uid(), role: m.role, content });
   }
   return out;
@@ -262,7 +274,7 @@ export function Widget({ agent, config, registerOpenControl, onOpenChange }: Wid
             <div
               key={m.id}
               class="surg-bubble surg-assistant"
-              dangerouslySetInnerHTML={{ __html: renderMarkdown(stripNextAction(m.content)) }}
+              dangerouslySetInnerHTML={{ __html: renderMarkdown(m.content) }}
             />
           ) : (
             <div key={m.id} class="surg-bubble surg-user">

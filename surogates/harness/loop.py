@@ -31,6 +31,7 @@ from uuid import UUID, uuid4
 from surogates.api.routes._commerce_turn import AllowanceReserveError, CommerceReserveError
 from surogates.channels.constants import (
     ADAPTER_CHANNELS,
+    BUY_PAGE_CHANNEL,
     END_USER_CHANNELS,
     REALTIME_CHANNELS,
     STUDIO_CHANNEL,
@@ -196,13 +197,16 @@ from surogates.harness.loop_attachments import (
 )
 from surogates.harness.loop_conclusion import conclude_from_transcript
 from surogates.harness.loop_deliverables import (
+    SAVE_CLAIM_NUDGE,
     deliverable_nudge,
     missing_deliverables,
+    unbacked_save_claim,
 )
 from surogates.harness.loop_constants import (
     _DYNAMIC_LOOP_EXCLUDED_TOOLS,
     _EMPTY_RESPONSE_NUDGE,
     _MAX_DELIVERABLE_RETRIES,
+    _MAX_SAVE_CLAIM_RETRIES,
     _UNFINISHED_RESPONSE_NUDGE,
     _LEASE_RENEWAL_INTERVAL_SECONDS,
     _LEASE_TTL_SECONDS,
@@ -1794,20 +1798,25 @@ class AgentHarness(
         sandbox spec builder can read ``session.config['repos']`` /
         ``session.config['ssh_targets']``.  Never written back to the persisted
         row; with nothing configured the session is returned unchanged.
+
+        The agent's service account rides along whenever it is known: the
+        agent's own credentials (its SSH keys, the browser secrets it may
+        type) are stored under it, whoever the session's principal is.
         """
-        if not self._coding_repos and not self._ssh_targets and not self._whatsapp_forms:
+        if (
+            not self._coding_repos and not self._ssh_targets and not self._whatsapp_forms
+            and not self._agent_service_account_id
+        ):
             return session
         config = dict(session.config or {})
+        if self._agent_service_account_id:
+            config["agent_service_account_id"] = self._agent_service_account_id
         if self._whatsapp_forms:
             config["whatsapp_forms"] = [dict(form) for form in self._whatsapp_forms]
         if self._coding_repos:
             config["repos"] = [dict(repo) for repo in self._coding_repos]
         if self._ssh_targets:
             config["ssh_targets"] = [dict(t) for t in self._ssh_targets]
-            # Carry the agent SA id so the spec builder resolves the agent-owned
-            # SSH keys under it (not the session's credential principal).
-            if self._agent_service_account_id:
-                config["agent_service_account_id"] = self._agent_service_account_id
         return session.model_copy(update={"config": config})
 
     def _slash_command_block_reason(
@@ -2863,6 +2872,7 @@ class AgentHarness(
         empty_response_retries = 0  # retries for empty LLM responses (no content, no tools, no reasoning)
         unfinished_retries = 0    # nudges for a turn that trails off without acting
         deliverable_retries = 0   # nudges for a named file that was never written
+        save_claim_retries = 0    # nudges for "noted it" with no memory call
         provider_error_retries = 0  # bounded retries for finish_reason='error'
         partial_tool_call_retries = 0  # retries for truncated tool-call arguments
         # One-shot safety net for the deep-research planner.  Fires when
@@ -3842,6 +3852,25 @@ class AgentHarness(
                             "content": deliverable_nudge(absent),
                         })
                         continue
+
+                # "Noted it" with no memory call: the person believes the fact
+                # will be there next session and it will not.  Nudged once on
+                # the same terms as the guards above.
+                if (
+                    save_claim_retries < _MAX_SAVE_CLAIM_RETRIES
+                    and "memory" in offered_tools
+                    and unbacked_save_claim(visible_content, messages)
+                ):
+                    save_claim_retries += 1
+                    logger.info(
+                        "Session %s: reply claims a memory save with no "
+                        "memory call; nudging (%d/%d)",
+                        session.id, save_claim_retries, _MAX_SAVE_CLAIM_RETRIES,
+                    )
+                    await _persist_response()
+                    messages.append({"role": "assistant", "content": final_content})
+                    messages.append({"role": "user", "content": SAVE_CLAIM_NUDGE})
+                    continue
 
                 # The nudge is spent and the model is still trailing off. Its
                 # own text is not an answer, but the work it did may contain
@@ -5036,6 +5065,10 @@ class AgentHarness(
             session.channel not in END_USER_CHANNELS
             and session.channel != STUDIO_CHANNEL
         ):
+            return None
+        # The buy page reads the turn's last reply and has no widget to
+        # answer a question with.
+        if session.channel == BUY_PAGE_CHANNEL:
             return None
         # A phone caller has already heard the answer: there is no widget to
         # rescue it into, and the judge's blocking calls would hold their next

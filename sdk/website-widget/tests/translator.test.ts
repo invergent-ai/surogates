@@ -66,7 +66,7 @@ describe('Translator -- text streaming', () => {
   it('resets messageId after llm.response so the next turn starts fresh', () => {
     const t = new Translator();
     const a = t.translate(frame(SURG_EVENT.LLM_DELTA, { delta: 'turn 1' }, 1));
-    t.translate(frame(SURG_EVENT.LLM_RESPONSE, { content: 'turn 1', finish_reason: 'stop' }, 2));
+    t.translate(frame(SURG_EVENT.LLM_RESPONSE, { message: { content: 'turn 1' }, finish_reason: 'stop' }, 2));
     // Second turn wouldn't normally happen inside one run, but the
     // translator must not leak messageId across turn boundaries.
     const b = t.translate(frame(SURG_EVENT.LLM_DELTA, { delta: 'turn 2' }, 3));
@@ -80,7 +80,7 @@ describe('Translator -- end-of-turn detection', () => {
     const t = new Translator();
     t.translate(frame(SURG_EVENT.LLM_DELTA, { delta: 'hi' }));
     expect(t.isTurnComplete).toBe(false);
-    t.translate(frame(SURG_EVENT.LLM_RESPONSE, { content: 'hi', finish_reason: 'stop' }));
+    t.translate(frame(SURG_EVENT.LLM_RESPONSE, { message: { content: 'hi' }, finish_reason: 'stop' }));
     expect(t.isTurnComplete).toBe(true);
   });
 
@@ -89,7 +89,7 @@ describe('Translator -- end-of-turn detection', () => {
     // to treat "no pending tool calls AND empty tool_calls array" as
     // end-of-turn.  This is the most common case in practice.
     const t = new Translator();
-    t.translate(frame(SURG_EVENT.LLM_RESPONSE, { content: 'done', tool_calls: [] }));
+    t.translate(frame(SURG_EVENT.LLM_RESPONSE, { message: { content: 'done', tool_calls: [] } }));
     expect(t.isTurnComplete).toBe(true);
   });
 
@@ -102,7 +102,7 @@ describe('Translator -- end-of-turn detection', () => {
         arguments: { q: 'x' },
       }),
     );
-    t.translate(frame(SURG_EVENT.LLM_RESPONSE, { content: '...', finish_reason: 'tool_calls' }));
+    t.translate(frame(SURG_EVENT.LLM_RESPONSE, { message: { content: '...' }, finish_reason: 'tool_calls' }));
     expect(t.isTurnComplete).toBe(false);
   });
 
@@ -115,7 +115,7 @@ describe('Translator -- end-of-turn detection', () => {
     // arrived.  Regression guard.
     const t = new Translator();
     t.translate(
-      frame(SURG_EVENT.LLM_RESPONSE, { content: null, tool_calls: [], finish_reason: 'tool_calls' }),
+      frame(SURG_EVENT.LLM_RESPONSE, { message: { content: null, tool_calls: [] }, finish_reason: 'tool_calls' }),
     );
     expect(t.isTurnComplete).toBe(false);
   });
@@ -126,9 +126,40 @@ describe('Translator -- end-of-turn detection', () => {
     // stays open until the tool.result + next llm.response arrive.
     const t = new Translator();
     t.translate(
-      frame(SURG_EVENT.LLM_RESPONSE, { content: null, tool_calls: [], stop_reason: 'tool_use' }),
+      frame(SURG_EVENT.LLM_RESPONSE, { message: { content: null, tool_calls: [] }, stop_reason: 'tool_use' }),
     );
     expect(t.isTurnComplete).toBe(false);
+  });
+
+  it('reads the harness shape: text under message.content renders', () => {
+    // No deltas precede a replayed llm.response (replay leaves them
+    // out), so its content is the only text the run gets.
+    const t = new Translator();
+    const out = t.translate(
+      frame(SURG_EVENT.LLM_RESPONSE, { message: { content: 'replayed' }, finish_reason: 'stop' }, 9),
+    );
+    expect(out).toEqual([
+      expect.objectContaining({ type: EventType.TEXT_MESSAGE_CHUNK, delta: 'replayed' }),
+    ]);
+    expect(t.isTurnComplete).toBe(true);
+  });
+
+  it('does NOT flip when message.tool_calls carries calls, whatever the finish_reason', () => {
+    const t = new Translator();
+    t.translate(
+      frame(SURG_EVENT.LLM_RESPONSE, {
+        message: { content: '', tool_calls: [{ id: 'tc-1', function: { name: 'web_search' } }] },
+        finish_reason: 'stop',
+      }),
+    );
+    expect(t.isTurnComplete).toBe(false);
+  });
+
+  it('still reads a flat content / tool_calls payload', () => {
+    const t = new Translator();
+    const out = t.translate(frame(SURG_EVENT.LLM_RESPONSE, { content: 'flat', tool_calls: [] }));
+    expect(field<string>(out[0]!, 'delta')).toBe('flat');
+    expect(t.isTurnComplete).toBe(true);
   });
 
   it('flips on session.done sentinel', () => {
@@ -169,6 +200,25 @@ describe('Translator -- tool calls', () => {
     expect(field<string>(out[0]!, 'delta')).toBe('{"query":"pythagoras"}');
   });
 
+  it('attaches a tool call to the assistant text that preceded it', () => {
+    const t = new Translator();
+    const [text] = t.translate(frame(SURG_EVENT.LLM_DELTA, { delta: 'Let me look.' }, 1));
+    t.translate(
+      frame(SURG_EVENT.LLM_RESPONSE, { message: { content: 'Let me look.', tool_calls: [{}] }, finish_reason: 'tool_calls' }, 2),
+    );
+    const [call] = t.translate(frame(SURG_EVENT.TOOL_CALL, { tool_call_id: 'tc-1', name: 'web_search', arguments: {} }, 3));
+    expect(field<string>(call!, 'parentMessageId')).toBe(field<string>(text!, 'messageId'));
+  });
+
+  it('gives a tool call no parent when no text preceded it', () => {
+    const t = new Translator();
+    t.translate(
+      frame(SURG_EVENT.LLM_RESPONSE, { message: { content: null, tool_calls: [{}] }, finish_reason: 'tool_calls' }, 1),
+    );
+    const [call] = t.translate(frame(SURG_EVENT.TOOL_CALL, { tool_call_id: 'tc-1', name: 'web_search', arguments: {} }, 2));
+    expect(field<string>(call!, 'parentMessageId')).toBeUndefined();
+  });
+
   it('emits TOOL_CALL_RESULT on tool.result', () => {
     const t = new Translator();
     const out = t.translate(
@@ -202,7 +252,7 @@ describe('Translator -- tool calls', () => {
       }),
     );
     // Now a final llm.response should flip the turn.
-    t.translate(frame(SURG_EVENT.LLM_RESPONSE, { content: 'done', tool_calls: [] }));
+    t.translate(frame(SURG_EVENT.LLM_RESPONSE, { message: { content: 'done', tool_calls: [] } }));
     expect(t.isTurnComplete).toBe(true);
   });
 });

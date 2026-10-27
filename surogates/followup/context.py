@@ -152,7 +152,11 @@ class Context:
             ))
         if self.channel == "whatsapp" and self.platform_user_id:
             parts.append(readable_phone(self.platform_user_id))
-        return " · ".join(parts) or f"user {self.user_id}"
+        if parts:
+            return " · ".join(parts)
+        if self.user_id is None:
+            return followup_store.wording(texts, "label_unnamed")
+        return f"user {self.user_id}"
 
 
 async def load_context(kwargs: dict) -> tuple[Context | None, Any]:

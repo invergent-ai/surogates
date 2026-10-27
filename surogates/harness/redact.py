@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import re
 from collections.abc import Mapping
 from typing import Any
@@ -210,12 +211,107 @@ def redact_sensitive_text(
     return text
 
 
+# Tools whose ``text`` argument is what the agent typed into a page.  Which
+# field it went into is known only to the live browser, and a password typed
+# into a plain text box is as secret as one typed into a password field, so
+# every copy that is stored or shown carries the length, never the text.
+TYPED_TEXT_TOOLS: frozenset[str] = frozenset({"browser_type"})
+TYPED_TEXT_MASK = "\u2022"
+# A truncated or otherwise unparseable arguments string still has its text
+# value cut out, up to the end of the string when the closing quote is missing.
+_TYPED_TEXT_FIELD_RE = re.compile(r'("text"\s*:\s*")((?:[^"\\]|\\.)*)')
+
+
+def mask_typed_text(text: str) -> str:
+    """*text* as the stored and shown copies carry it: its length, in bullets."""
+    return TYPED_TEXT_MASK * len(text)
+
+
+def mask_values(text: str, values: list[str] | set[str]) -> str:
+    """*text* with each of *values* masked, as written and as JSON escapes it, longest first."""
+    for value in sorted(values, key=len, reverse=True):
+        text = text.replace(value, mask_typed_text(value))
+        escaped = json.dumps(value)[1:-1]
+        if escaped != value:
+            text = text.replace(escaped, mask_typed_text(value))
+    return text
+
+
+def mask_tool_arguments(name: Any, arguments: Any) -> Any:
+    """*arguments* of tool *name* with typed text masked, in the same shape (dict or JSON string)."""
+    if name not in TYPED_TEXT_TOOLS:
+        return arguments
+    if isinstance(arguments, Mapping):
+        text = arguments.get("text")
+        masked = dict(arguments)
+        if isinstance(text, str):
+            masked["text"] = mask_typed_text(text)
+        return masked
+    if not isinstance(arguments, str):
+        return arguments
+    try:
+        parsed = json.loads(arguments)
+    except ValueError:
+        return _TYPED_TEXT_FIELD_RE.sub(
+            lambda m: m.group(1) + mask_typed_text(m.group(2)), arguments,
+        )
+    if not isinstance(parsed, dict):
+        return arguments
+    return json.dumps(mask_tool_arguments(name, parsed), ensure_ascii=False)
+
+
+def mask_typed_arguments(data: Any) -> Any:
+    """*data* with typed text masked in every tool call at any depth, nothing else redacted.
+
+    Events stored before typed text was masked on write still carry it; every
+    read masks it again, so no reader is shown it.
+    """
+    if isinstance(data, Mapping):
+        masked = {key: mask_typed_arguments(value) for key, value in data.items()}
+        if "arguments" in masked:
+            name = data.get("name") or data.get("tool_name")
+            masked["arguments"] = mask_tool_arguments(name, masked["arguments"])
+        return masked
+    if isinstance(data, list):
+        return [mask_typed_arguments(value) for value in data]
+    return data
+
+
+def typed_texts(tool_calls: list[dict[str, Any]]) -> list[str]:
+    """The text each typing call in *tool_calls* (OpenAI shape) typed, longest first."""
+    found: set[str] = set()
+    for call in tool_calls:
+        fn = call.get("function") or {}
+        name = fn.get("name") or call.get("name")
+        if name not in TYPED_TEXT_TOOLS:
+            continue
+        raw = fn.get("arguments") or call.get("arguments") or {}
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except ValueError:
+                raw = {}
+        text = raw.get("text") if isinstance(raw, dict) else None
+        if isinstance(text, str) and text.strip():
+            found.add(text)
+    return sorted(found, key=len, reverse=True)
+
+
 def redact_sensitive_data(data: Any) -> Any:
-    """Return a redacted copy of nested event/log data."""
+    """Return a redacted copy of nested event/log data.
+
+    Typed text is masked in any tool call found at any depth: a tool.call's
+    ``arguments``, an llm.response's ``tool_calls[].function`` and the
+    messages a compaction keeps all name the tool beside its arguments.
+    """
     if isinstance(data, str):
         return redact_sensitive_text(data)
     if isinstance(data, Mapping):
-        return {key: redact_sensitive_data(value) for key, value in data.items()}
+        redacted = {key: redact_sensitive_data(value) for key, value in data.items()}
+        if "arguments" in redacted:
+            name = data.get("name") or data.get("tool_name")
+            redacted["arguments"] = mask_tool_arguments(name, redacted["arguments"])
+        return redacted
     if isinstance(data, list):
         return [redact_sensitive_data(value) for value in data]
     if isinstance(data, tuple):

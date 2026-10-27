@@ -77,3 +77,43 @@ async def test_bootstrap_origin_not_allowlisted_returns_403():
     app = _app(rows, allowed="https://acme.com")
     r = await _post(app, key="surg_wk_ok", origin="https://evil.com")
     assert r.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_ignores_a_body_naming_a_memory_boundary():
+    """Nothing the browser sends names the boundary: it is derived server-side,
+    and a resold embed's visitors stay apart from the operator's own."""
+    import uuid
+
+    from surogates.channels.memory_boundary import visitor_boundary
+    from tests.api.test_website_multi_session import _Storage, _Store
+
+    org_id = str(uuid.uuid4())
+    row = {
+        "agent_id": "a1",
+        "org_id": org_id,
+        "api_web_url": "https://acme.com",
+        "config": {"embed_end_user_id": "eu-7"},
+    }
+    app = _app(rows={"website:surg_wk_k": row})
+    store = _Store()
+    app.state.session_store = store
+    app.state.storage = _Storage()
+    visitor = str(uuid.uuid4())
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(
+        transport=transport, base_url="https://widget",
+        cookies={website.VISITOR_COOKIE_NAME: visitor},
+    ) as c:
+        r = await c.post(
+            "/v1/website/sessions",
+            headers={"Authorization": "Bearer surg_wk_k", "Origin": "https://acme.com"},
+            json={"memory_boundary": "public", "config": {"memory_boundary": "public"}},
+        )
+
+    assert r.status_code == 201, r.text
+    boundary = store.created[0]["config"]["memory_boundary"]
+    assert boundary == visitor_boundary("a1", "eu-7", visitor)
+    assert boundary != visitor_boundary("a1", None, visitor)
+

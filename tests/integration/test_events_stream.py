@@ -683,3 +683,66 @@ async def test_the_stream_says_when_its_backlog_is_sent(session_factory, session
 
     types = [event_type for event_type, _ in events]
     assert types == ["user.message", "session.complete", "stream.live", "session.done"]
+
+
+async def test_a_busy_turn_keeps_the_stream_open_until_its_time_is_up(session_factory, app, client, monkeypatch):
+    """A stream lasts its duration on the clock, however many events a turn publishes.
+
+    Every token a turn streams is published, and each publish ends the stream's wait at
+    once. A stream that counted its waits as poll intervals closed after about 600
+    publishes, some 25 s into a reply, and the reply's end never reached the visitor.
+    """
+    import surogates.api.routes.events as events_module
+    monkeypatch.setattr(events_module, "_MAX_STREAM_DURATION", 3)
+
+    redis_store: SessionStore = app.state.session_store
+    org_id = await create_org(session_factory)
+    user_id = uuid.uuid4()
+    await create_user(session_factory, org_id, user_id=user_id)
+    token = create_access_token(org_id, user_id, {"sessions:read", "sessions:write"})
+    session = await redis_store.create_session(user_id=user_id, org_id=org_id, agent_id="test-agent")
+    loop = asyncio.get_running_loop()
+    reply_end: list[int] = []
+
+    async def _busy_turn():
+        await asyncio.sleep(0.3)
+        started = loop.time()
+        async with app.state.redis.pipeline(transaction=False) as pipe:
+            for token_index in range(700):
+                pipe.publish(f"surogates:session:{session.id}", f"{token_index}:llm.delta")
+            await pipe.execute()
+        assert loop.time() - started < 1.0
+        await asyncio.sleep(1.0)
+        reply_end.append(await redis_store.emit_event(session.id, EventType.LLM_RESPONSE, {"message": {"content": "done"}}))
+
+    turn = asyncio.create_task(_busy_turn())
+    opened = loop.time()
+    try:
+        async with client.stream(
+            "GET",
+            f"/v1/sessions/{session.id}/events?after=0",
+            headers={"Authorization": f"Bearer {token}"},
+        ) as response:
+            ids: list[str | None] = []
+            events = await _read_sse_events(response, until_types={"stream.timeout"}, deadline_s=8.0, ids=ids)
+    finally:
+        await turn
+
+    assert ("llm.response", '{"message": {"content": "done"}}') in events
+    assert str(reply_end[0]) in ids
+    assert events[-1][0] == "stream.timeout"
+    assert loop.time() - opened >= 2.5
+
+
+async def test_a_reconnect_resumes_at_its_last_event_id(session_factory, session_store, client):
+    """An EventSource reconnects to the URL it opened with; its Last-Event-ID moves the cursor on."""
+    session, token, last = await _completed_chat(session_factory, session_store)
+
+    async with client.stream(
+        "GET",
+        f"/v1/sessions/{session.id}/events?after=0",
+        headers={"Authorization": f"Bearer {token}", "Last-Event-ID": str(last - 1)},
+    ) as response:
+        events = await _read_sse_events(response, until_types={"session.done"}, deadline_s=2.0)
+
+    assert [event_type for event_type, _ in events] == ["session.complete", "stream.live", "session.done"]

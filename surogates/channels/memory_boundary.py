@@ -9,7 +9,10 @@ gets an isolated token.  Fail closed: when in doubt, isolate.
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Mapping
+
+from surogates.channels.constants import WEBSITE_CHANNEL
 
 __all__ = [
     "MANAGED_CHANNELS",
@@ -18,13 +21,16 @@ __all__ = [
     "CASE_BOUNDARY_PREFIX",
     "EVAL_BOUNDARY_PREFIX",
     "PROJECT_BOUNDARY_PREFIX",
+    "VISITOR_BOUNDARY_PREFIX",
     "boundary_token",
     "is_case_agent_config",
     "is_case_agent_session",
     "is_case_config",
     "is_case_session",
+    "is_visitor_boundary",
     "is_eval_session",
     "session_memory_boundary",
+    "visitor_boundary",
 ]
 
 # Channel platforms whose sessions are memory-partitioned by conversation.
@@ -48,6 +54,18 @@ PROJECT_BOUNDARY_PREFIX = "workstream:"
 # so without their own partition every buyer would share one memory. The
 # session route stamps ``buyer:<buyer id>`` only for that principal.
 BUYER_BOUNDARY_PREFIX = "buyer:"
+
+# A public website's visitors all arrive anonymously through the agent's
+# one website channel, so without their own partition every visitor would
+# read and write the agent's shared memory. Each gets ``visitor:<digest>``,
+# derived by :func:`visitor_boundary` from who the server knows the visitor
+# to be; nothing the browser sends names it directly.
+VISITOR_BOUNDARY_PREFIX = "visitor:"
+
+def is_visitor_boundary(boundary: str | None) -> bool:
+    """Whether *boundary* is a website visitor's own memory partition."""
+    return (boundary or "").startswith(VISITOR_BOUNDARY_PREFIX)
+
 
 # Every session of a Keel case, the step's own and each child it makes,
 # carries ``case:<case id>``: its memory is per agent and case, and the case's
@@ -112,6 +130,19 @@ def boundary_token(
 
     # Unknown platform → fail closed, isolated.
     return f"{platform}:iso:{fallback_id}"
+
+
+def visitor_boundary(agent_id: str, embed_end_user_id: str | None, identity: str) -> str:
+    """The memory boundary of one website visitor of *agent_id*.
+
+    *identity* is the most durable thing the server knows the visitor by: a
+    verified Firebase uid, else the visitor's own cookie, else the session
+    id. *embed_end_user_id* keeps a buyer's resold embed apart from the
+    operator's own. Hashed so the boundary, an object-key segment, is a
+    fixed alphabet and gives away none of its inputs.
+    """
+    seed = f"{agent_id}:{embed_end_user_id or ''}:{identity}"
+    return VISITOR_BOUNDARY_PREFIX + hashlib.sha256(seed.encode()).hexdigest()[:32]
 
 
 def is_eval_session(session: object) -> bool:
@@ -182,10 +213,22 @@ def session_memory_boundary(session: object) -> str | None:
     project's ``workstream:`` boundary, a buyer's session, which carries
     its ``buyer:`` boundary, and a case's session, which carries its case's
     ``case:`` boundary.
+
+    A website session always has a ``visitor:`` boundary: the one bootstrap
+    stamped, or, for a session that has none, one of its own session, so an
+    anonymous visitor never reaches the agent's shared memory.
     """
     channel = getattr(session, "channel", None)
     cfg = getattr(session, "config", None) or {}
     persisted = str(cfg.get("memory_boundary") or "").strip()
+    if channel == WEBSITE_CHANNEL:
+        if persisted.startswith(VISITOR_BOUNDARY_PREFIX):
+            return persisted
+        return visitor_boundary(
+            str(getattr(session, "agent_id", "") or ""),
+            cfg.get("embed_end_user_id"),
+            str(getattr(session, "id", "")),
+        )
     if channel not in MANAGED_CHANNELS:
         if is_eval_session(session) or persisted.startswith(
             (PROJECT_BOUNDARY_PREFIX, BUYER_BOUNDARY_PREFIX, CASE_BOUNDARY_PREFIX)

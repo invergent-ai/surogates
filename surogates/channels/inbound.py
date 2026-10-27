@@ -49,7 +49,7 @@ from surogates.channels.source import (
 from surogates.followup import store as followup_store
 from surogates.followup.people import honour_stop
 from surogates.followup.outreach import (
-    busy_line_for, deliver_pending, first_busy_line, is_opener,
+    answer_withdrawn, busy_line_for, deliver_pending, first_busy_line, is_opener,
 )
 from surogates.session.events import PLATFORM_NOTE, EventType, busy_line_note, disclosure_note
 
@@ -878,11 +878,20 @@ class ChannelInboundPipeline:
         # was held behind it, which has just gone out.  Handed to the agent,
         # the button's label ("Send the alert") read as an instruction and
         # the agent raised the same alert a second time.
-        if await self._taps_an_opener(deps, routing, msg):
+        tapped = await self._tapped_opener(deps, routing, msg)
+        if tapped is not None:
             logger.info(
                 "[followup] %s tapped a reopening template on %s; held messages "
                 "delivered, nothing for the agent", msg.platform_user_id, routing.agent_id,
             )
+            try:
+                await answer_withdrawn(
+                    deps.session_factory, deps.session_store,
+                    org_id=UUID(str(routing.org_id)), agent_id=routing.agent_id,
+                    opener_id=tapped, session_id=session_id,
+                )
+            except Exception:  # noqa: BLE001 — the tap is handled either way
+                logger.warning("[followup] could not answer a withdrawn alert's tap", exc_info=True)
             return InboundOutcome.DROPPED
 
         # ------------------------------------------------------------------
@@ -1221,11 +1230,12 @@ class ChannelInboundPipeline:
     # ------------------------------------------------------------------
 
     @staticmethod
-    async def _taps_an_opener(deps: Any, routing: Any, msg: InboundMessage) -> bool:
+    async def _tapped_opener(deps: Any, routing: Any, msg: InboundMessage) -> UUID | None:
+        """The row of the reopening template *msg* taps, if it taps one."""
         source = msg.source or {}
         reply_to = source.get("template_reply") and source.get("reply_to")
         if not reply_to or deps.session_factory is None:
-            return False
+            return None
         try:
             return await is_opener(
                 deps.session_factory, org_id=UUID(str(routing.org_id)),
@@ -1233,7 +1243,7 @@ class ChannelInboundPipeline:
             )
         except Exception:  # noqa: BLE001 — when unsure, the agent reads it
             logger.warning("[followup] could not check the tapped template", exc_info=True)
-            return False
+            return None
 
     @staticmethod
     async def _intercept_pending_input(

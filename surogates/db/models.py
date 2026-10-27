@@ -66,6 +66,31 @@ class GUID(TypeDecorator):
         return uuid.UUID(str(value))
 
 
+class EventData(TypeDecorator):
+    """An event's JSONB payload, read with typed browser text masked.
+
+    Typed text is masked on write, but events stored before that still hold
+    it in the clear. Masking on read here reaches every reader of the column,
+    the runtime's API and replay as well as the control plane, which selects
+    it directly.
+    """
+
+    impl = JSONB
+    cache_ok = True
+    # Without these the column loses JSONB's operators: has_key would bind
+    # its key as jsonb, which Postgres has no ``?`` for.
+    comparator_factory = JSONB.Comparator
+
+    def coerce_compared_value(self, op, value):
+        return self.impl.coerce_compared_value(op, value)
+
+    def process_result_value(self, value, dialect):
+        # Imported here: the harness package imports the database models.
+        from surogates.harness.redact import mask_typed_arguments
+
+        return None if value is None else mask_typed_arguments(value)
+
+
 class UTCDateTime(TypeDecorator):
     """A ``timestamptz`` column that is always UTC-aware in Python.
 
@@ -533,7 +558,7 @@ class Event(Base):
         UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
     )
     type: Mapped[str] = mapped_column(Text, nullable=False)
-    data: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=True)
+    data: Mapped[dict[str, Any]] = mapped_column(EventData, nullable=True)
     trace_id: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     span_id: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(

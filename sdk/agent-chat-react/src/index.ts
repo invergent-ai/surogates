@@ -1,5 +1,6 @@
 export { AgentChat } from "./agent-chat";
 export { ReadOnlyChatError, readOnlyAdapter } from "./read-only-adapter";
+export { AgentChatPaywallError } from "./send-errors";
 export type { AgentChatReadSource } from "./read-only-adapter";
 export {
   AgentWhiteboard,

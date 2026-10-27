@@ -1367,3 +1367,96 @@ def _wake_recorder(wakes: list[str]):
 
 async def _wake_noop(_session_id: str) -> None:
     return None
+
+
+class FakeUpstream:
+    """The browser's CDP socket: answers the calls a shell's start makes, and can die."""
+
+    def __init__(self) -> None:
+        import asyncio
+
+        self._replies: asyncio.Queue = asyncio.Queue()
+        self._loop = None
+        self.closed = False
+
+    async def send(self, raw: str) -> None:
+        import asyncio
+        import json
+
+        self._loop = asyncio.get_running_loop()
+        message = json.loads(raw)
+        result = {
+            "Target.getTargets": {"targetInfos": [{"type": "page", "targetId": "t1", "url": "https://a.test/"}]},
+            "Target.attachToTarget": {"sessionId": "s1"},
+        }.get(message["method"], {})
+        await self._replies.put(json.dumps({"id": message["id"], "result": result}))
+
+    async def recv(self) -> str:
+        reply = await self._replies.get()
+        if reply is None:
+            raise ConnectionError("browser went away")
+        return reply
+
+    async def close(self) -> None:
+        self.closed = True
+
+    def die(self) -> None:
+        self._loop.call_soon_threadsafe(self._replies.put_nowait, None)
+
+
+class TestShellUpstream:
+    @pytest.fixture()
+    def shell(self, app_factory, monkeypatch):
+        from surogates.api.routes import browser as browser_routes
+
+        build, resolver, _control = app_factory
+        sid = str(uuid4())
+        resolver.entries[sid] = _resolved(sid)
+
+        async def authenticated(*_: Any, **__: Any) -> TenantContext:
+            return _tenant()
+
+        async def devtools(_cdp_url: str, **_: Any) -> str:
+            return "ws://browser-x.svc:9222/devtools/browser/1"
+
+        monkeypatch.setattr(browser_routes, "authenticate_websocket_tenant", authenticated)
+        monkeypatch.setattr(browser_routes, "_cdp_browser_ws_url", devtools)
+
+        def connect_with(upstream):
+            async def connect(*_: Any, **__: Any):
+                if isinstance(upstream, BaseException):
+                    raise upstream
+                return upstream
+
+            monkeypatch.setattr(browser_routes.websockets, "connect", connect)
+            return TestClient(build()), f"/v1/sessions/{sid}/browser/shell"
+
+        return SimpleNamespace(sid=sid, resolver=resolver, connect_with=connect_with)
+
+    def _closed_with(self, client: TestClient, path: str) -> int:
+        with client, pytest.raises(WebSocketDisconnect) as closed:
+            with client.websocket_connect(path) as ws:
+                ws.receive_json()
+        return closed.value.code
+
+    def test_a_slow_handshake_keeps_the_browser_registered(self, shell) -> None:
+        # TimeoutError is an OSError: a busy browser answering late is not gone.
+        client, path = shell.connect_with(TimeoutError("timed out during opening handshake"))
+        assert self._closed_with(client, path) == 4502
+        assert shell.resolver.forgotten == [] and shell.sid in shell.resolver.entries
+
+    def test_a_refused_connection_forgets_the_browser(self, shell) -> None:
+        client, path = shell.connect_with(ConnectionRefusedError("refused"))
+        assert self._closed_with(client, path) == 4502
+        assert shell.resolver.forgotten == [shell.sid]
+
+    def test_the_browser_dying_under_a_viewer_closes_with_its_own_code(self, shell) -> None:
+        upstream = FakeUpstream()
+        client, path = shell.connect_with(upstream)
+        with client, pytest.raises(WebSocketDisconnect) as closed:
+            with client.websocket_connect(path) as ws:
+                assert ws.receive_json()["t"] == "tabs"
+                upstream.die()
+                ws.receive_json()
+        assert closed.value.code == 4503
+        assert upstream.closed

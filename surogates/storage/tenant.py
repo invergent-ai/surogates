@@ -146,13 +146,14 @@ def workspace_boundary(session: object) -> str | None:
     its own, and its workspace stays the per-session one, so a file written
     while answering one row cannot show up while answering the next. A
     buyer's boundary is memory-only too: each of their chats is its own
-    conversation. So is a person's case agent's, before anything else: it
+    conversation, and so is a website visitor's. So is a person's case agent's, before anything else: it
     keeps its memory of the case, works in a scratch workspace of its own,
     and reads the case's files only through Keel.
     """
     from surogates.channels.memory_boundary import (
         BUYER_BOUNDARY_PREFIX,
         EVAL_BOUNDARY_PREFIX,
+        VISITOR_BOUNDARY_PREFIX,
         is_case_agent_config,
         session_memory_boundary,
     )
@@ -165,7 +166,7 @@ def workspace_boundary(session: object) -> str | None:
         return pinned
 
     boundary = session_memory_boundary(session)
-    if (boundary or "").startswith((EVAL_BOUNDARY_PREFIX, BUYER_BOUNDARY_PREFIX)):
+    if (boundary or "").startswith((EVAL_BOUNDARY_PREFIX, BUYER_BOUNDARY_PREFIX, VISITOR_BOUNDARY_PREFIX)):
         return None
     return boundary
 

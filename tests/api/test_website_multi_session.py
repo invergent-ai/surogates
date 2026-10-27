@@ -25,6 +25,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from surogates.api.routes import website
+from surogates.channels.memory_boundary import visitor_boundary
 from surogates.channels.website_session import (
     COOKIE_NAME,
     create_website_session_token,
@@ -148,9 +149,11 @@ def _live_session(
     )
 
 
-async def _post(app, *, cookie=None):
+async def _post(app, *, cookie=None, visitor=None):
     transport = ASGITransport(app=app)
-    cookies = {COOKIE_NAME: cookie} if cookie else None
+    cookies = {COOKIE_NAME: cookie} if cookie else {}
+    if visitor:
+        cookies[website.VISITOR_COOKIE_NAME] = visitor
     async with AsyncClient(
         transport=transport, base_url="https://widget", cookies=cookies,
     ) as c:
@@ -291,7 +294,11 @@ async def test_single_session_reuse_pins_buyer_from_token():
     # re-bootstraps expecting the buyer to pin onto the session.
     assert r.status_code == 200
     assert r.json()["session_id"] == str(session_id)
-    assert store.config_writes == [(session_id, "commerce_buyer", buyer)]
+    # Signing in moves the conversation onto the buyer's own memory.
+    assert store.config_writes == [
+        (session_id, "commerce_buyer", buyer),
+        (session_id, "memory_boundary", visitor_boundary("hero-agent", None, "fb-1")),
+    ]
 
 
 async def test_multi_session_on_always_creates():
@@ -303,3 +310,68 @@ async def test_multi_session_on_always_creates():
 
     assert r.status_code == 201
     assert len(store.created) == 1
+
+
+async def test_a_new_visitor_gets_a_partitioned_visitor_cookie_and_its_own_memory():
+    org_id = uuid.uuid4()
+    store = _Store()
+    app = _app(org_id, store, multi_session=False)
+
+    r = await _post(app)
+
+    visitor = r.cookies[website.VISITOR_COOKIE_NAME]
+    uuid.UUID(visitor)
+    set_cookie = next(
+        header for header in r.headers.get_list("set-cookie")
+        if header.startswith(website.VISITOR_COOKIE_NAME)
+    )
+    for attribute in ("HttpOnly", "Secure", "SameSite=none", "Partitioned"):
+        assert attribute.lower() in set_cookie.lower()
+    assert store.created[0]["config"]["memory_boundary"] == visitor_boundary(
+        "hero-agent", None, visitor,
+    )
+
+
+async def test_a_returning_visitor_keeps_its_memory_and_two_visitors_never_share():
+    org_id = uuid.uuid4()
+    store = _Store()
+    app = _app(org_id, store, multi_session=True)
+    ida, other = str(uuid.uuid4()), str(uuid.uuid4())
+
+    await _post(app, visitor=ida)
+    await _post(app, visitor=ida)
+    await _post(app, visitor=other)
+
+    first, again, second = (created["config"]["memory_boundary"] for created in store.created)
+    assert first == again == visitor_boundary("hero-agent", None, ida)
+    assert second == visitor_boundary("hero-agent", None, other)
+    assert first != second
+
+
+async def test_a_visitor_cookie_that_is_not_a_uuid_is_replaced():
+    org_id = uuid.uuid4()
+    store = _Store()
+    app = _app(org_id, store, multi_session=True)
+
+    r = await _post(app, visitor="../shared")
+
+    visitor = r.cookies[website.VISITOR_COOKIE_NAME]
+    assert visitor != "../shared"
+    assert store.created[0]["config"]["memory_boundary"] == visitor_boundary(
+        "hero-agent", None, visitor,
+    )
+
+
+async def test_reuse_stamps_the_visitor_boundary_on_a_session_without_one():
+    org_id, session_id = uuid.uuid4(), uuid.uuid4()
+    store = _Store({session_id: _live_session(session_id)})
+    app = _app(org_id, store, multi_session=False)
+    visitor = str(uuid.uuid4())
+
+    r = await _post(app, cookie=_cookie(session_id, org_id), visitor=visitor)
+
+    assert r.status_code == 200
+    assert store.config_writes == [
+        (session_id, "memory_boundary", visitor_boundary("hero-agent", None, visitor)),
+    ]
+

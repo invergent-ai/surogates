@@ -133,7 +133,7 @@ async def respond_to_ask_user_question(
             detail=f"Session {session_id} not found.",
         )
     await require_session_visible(request, session, tenant=tenant)
-    require_user_writable_session(session)
+    require_user_writable_session(session, tenant)
     # The answer wakes the agent, on a local-folder chat in its user's folder: the chat's own user's to give.
     await require_device_access(request, session, tenant)
 

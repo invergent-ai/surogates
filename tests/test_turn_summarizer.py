@@ -128,3 +128,32 @@ async def test_a_failed_marker_alone_is_still_captioned():
     )
     assert out is not None
     assert create.await_count == 1
+
+
+PASSWORD = "Waalhaven-2026"
+LOGIN_CALLS = [{"id": "c1", "type": "function", "function": {
+    "name": "browser_type", "arguments": f'{{"text": "{PASSWORD}", "ref": "@e5"}}',
+}}]
+LOGIN_RESULTS = [{"tool_call_id": "c1", "content": '{"typed": true}'}]
+
+
+async def test_typed_text_never_reaches_the_caption_model():
+    create = AsyncMock(return_value=response('{"caption":"Filled the supplier login form"}'))
+    s = summarizer(create)
+    caption_ = await s.summarize_iteration(
+        iteration_id="turn-1:2", reasoning=f"I'll type the password {PASSWORD} into the field",
+        tool_calls=LOGIN_CALLS, prior_iteration_summaries=[], tool_results=LOGIN_RESULTS,
+    )
+    assert caption_ == "Filled the supplier login form"
+    prompt = create.await_args.kwargs["messages"][1]["content"]
+    assert PASSWORD not in prompt
+    assert "•" * len(PASSWORD) in prompt
+
+
+async def test_a_caption_that_repeats_typed_text_is_discarded():
+    # The model could still meet the value in a result snippet, or invent it.
+    s = summarizer(AsyncMock(return_value=response(f'{{"caption":"Typed supplier name {PASSWORD}"}}')))
+    assert await s.summarize_iteration(
+        iteration_id="turn-1:2", reasoning="", tool_calls=LOGIN_CALLS,
+        prior_iteration_summaries=[], tool_results=LOGIN_RESULTS,
+    ) is None

@@ -39,6 +39,7 @@ from surogates.runtime.governance import (
     build_governance_gate,
 )
 from surogates.tools.builtin.team import team_tool_exclusions
+from surogates.tools.owner_scope import is_ops_chat_service_account
 from surogates.tools.builtin.followup import FOLLOWUP_TOOL_NAMES
 from surogates.tools.builtin.whiteboard import WHITEBOARD_TOOL_NAMES
 from surogates.whiteboard.session import is_whiteboard_session
@@ -88,12 +89,19 @@ ANONYMOUS_CHANNELS: frozenset[str] = frozenset({"website"})
 #: service-account principal (when the agent has one) instead of the end user.
 #: One source of truth with the memory-boundary set so credential-switching and
 #: conversation-scoped memory isolation can never drift to different channels.
-from surogates.channels.constants import REALTIME_CHANNELS
+from surogates.channels.constants import BUY_PAGE_CHANNEL, REALTIME_CHANNELS
 from surogates.channels.memory_boundary import (
     MANAGED_CHANNELS as MANAGED_CREDENTIAL_CHANNELS,
     is_case_agent_config,
     is_eval_session,
+    session_memory_boundary,
 )  # noqa: E402
+
+#: Channels whose sessions belong to a person while the agent acts as
+#: itself: the managed channels, plus the buy page, whose sessions carry the
+#: buyer's account for attribution but always ran under the agent's own
+#: principal (its tools, its connections), never the buyer's.
+AGENT_CREDENTIAL_CHANNELS = MANAGED_CREDENTIAL_CHANNELS | {BUY_PAGE_CHANNEL}
 
 
 # Platform ceiling on iterations per wake.  Agent-supplied configuration may
@@ -136,7 +144,7 @@ def resolve_credential_principal(
     session: Any,
     acting: Any,
     agent_principal: Any | None,
-    managed_channels: frozenset[str] = MANAGED_CREDENTIAL_CHANNELS,
+    managed_channels: frozenset[str] = AGENT_CREDENTIAL_CHANNELS,
 ):
     """The principal external secrets/tools mint under for this wake.
 
@@ -250,8 +258,9 @@ def _filter_effective_tools(
        principal that :func:`_select_harness_token` will mint a token
        for.  Otherwise the LLM would call the tool and get the
        unhelpful "Artifacts require an API client" error.
-    2. Anonymous-channel sessions never see ``memory`` or
-       ``skill_manage``: the route gates refuse them anyway (see
+    2. Anonymous-channel sessions never see ``skill_manage``, nor
+       ``memory`` unless the session has a website visitor's own
+       ``visitor:`` partition: the route gates refuse them anyway (see
        ``api/routes/memory.py`` and the mutating ``/v1/skills``
        handlers), and exposing the schemas would invite the LLM to
        try.  Belt + braces: route gate is the hard boundary, tool-set
@@ -285,7 +294,8 @@ def _filter_effective_tools(
         and session.channel in ANONYMOUS_CHANNELS
     )
     if session_is_anonymous_channel:
-        result.discard("memory")
+        # Memory stays: a website session always has its visitor's own
+        # boundary (session_memory_boundary), never the agent's shared one.
         result.discard("skill_manage")
 
     # An evaluation row has no human behind it, and ``ask_user_question``
@@ -1273,6 +1283,36 @@ async def _stop_worker_invalidator(state: dict) -> None:
     state["runtime_invalidator_task"] = None
 
 
+async def _resolve_speaker(
+    session: Any, acting: Any, session_store: Any, session_factory: Any,
+) -> tuple[str, str] | None:
+    """(display name, email) of the signed-in person this session talks to.
+
+    The acting user, not the credential principal: a managed-channel
+    session runs as the agent's service account while the human is the
+    acting user.  An ops console chat runs as the operator's service
+    account, so the operator comes from the ``operator`` stamp that
+    surogate-ops writes at creation, trusted only on a session whose
+    account carries the ops-chat name proof.  A multi-party thread has no
+    single person to name.
+    """
+    config = getattr(session, "config", None) or {}
+    if config.get("multi_party"):
+        return None
+    if acting.user_id is not None:
+        from surogates.db.models import User
+
+        async with session_factory() as db:
+            user = await db.get(User, acting.user_id)
+        return (user.display_name, user.email) if user is not None else None
+    operator = config.get("operator")
+    if isinstance(operator, dict) and await is_ops_chat_service_account(
+        session_store, getattr(session, "service_account_id", None),
+    ):
+        return (str(operator.get("name") or ""), str(operator.get("email") or ""))
+    return None
+
+
 def _memory_user_id(session, tenant) -> str | None:
     """The user id whose personal memory this turn uses, or None for shared.
 
@@ -2048,9 +2088,9 @@ async def run_worker(settings: Settings) -> None:
         # Principal-aware tool-set filtering: ``create_artifact``
         # requires the harness API client (so the session must have a
         # principal AND ``use_api_for_harness_tools`` must be on), and
-        # anonymous-channel sessions never see ``memory`` /
-        # ``skill_manage`` (the routes refuse them, and exposing the
-        # schemas would invite the LLM to try).  ``_filter_effective_tools``
+        # anonymous-channel sessions never see ``skill_manage``, nor
+        # ``memory`` outside a website visitor's own partition (the routes
+        # refuse them, and exposing the schemas would invite the LLM to try).  ``_filter_effective_tools``
         # documents the rules.
         effective_tools = _filter_effective_tools(
             tools=effective_tools,
@@ -2131,6 +2171,9 @@ async def run_worker(settings: Settings) -> None:
             soul_md_content=soul_md_content,
             agent_md_content=agent_md_content,
             slash_commands=ctx.slash_commands,
+            speaker=await _resolve_speaker(
+                session, acting, session_store, session_factory,
+            ),
             # The gate is agent-level AND package-level: a plan without
             # the brainstorming capability turns the guidance off for
             # this sender even when the agent has it on.

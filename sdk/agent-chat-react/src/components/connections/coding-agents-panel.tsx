@@ -58,7 +58,7 @@ const PROVIDERS: ProviderMeta[] = [
     validateOauth: (value) =>
       value.startsWith("sk-ant-oat")
         ? null
-        : "That doesn't look like a setup token — it should start with `sk-ant-oat`.",
+        : "That doesn't look like a setup token. It should start with `sk-ant-oat`.",
   },
   {
     key: "codex",
@@ -75,7 +75,7 @@ const PROVIDERS: ProviderMeta[] = [
         JSON.parse(value);
         return null;
       } catch {
-        return "That doesn't look like valid JSON — paste the whole `~/.codex/auth.json` file.";
+        return "That doesn't look like valid JSON. Paste the whole `~/.codex/auth.json` file.";
       }
     },
   },

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { readableOutput, toolFailure } from "../src/components/chat/tools/shared";
+import { readableOutput, shownArgs, toolFailure } from "../src/components/chat/tools/shared";
 
 describe("readableOutput", () => {
   it("takes the text field of a JSON result", () => {
@@ -54,5 +54,23 @@ describe("toolFailure", () => {
 
   it("takes a result that is not JSON as the message", () => {
     expect(toolFailure("connection refused")).toEqual({ code: null, message: "connection refused" });
+  });
+});
+
+describe("shownArgs", () => {
+  it("masks what browser_type typed, one bullet per character", () => {
+    const shown = shownArgs("browser_type", '{"text": "Waalhaven-2026", "ref": "@e5"}');
+    expect(shown).not.toContain("Waalhaven");
+    expect(JSON.parse(shown)).toEqual({ text: "\u2022".repeat(14), ref: "@e5" });
+  });
+
+  it("masks the text of arguments cut off mid-string", () => {
+    expect(shownArgs("browser_type", '{"ref": "@e5", "text": "Waalha')).toBe(
+      `{"ref": "@e5", "text": "${"\u2022".repeat(6)}`,
+    );
+  });
+
+  it("leaves every other tool's arguments alone", () => {
+    expect(shownArgs("browser_navigate", '{"text": "x"}')).toBe('{"text": "x"}');
   });
 });

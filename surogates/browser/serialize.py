@@ -92,7 +92,8 @@ def _render_entry(entry: dict[str, Any]) -> str | None:
         return f"{'#' * _heading_level(entry)} {text}"
 
     if role in INTERACTIVE_ROLES:
-        return f'- {role} {entry.get("ref", "")} "{entry.get("name", "")}"'
+        line = f'- {role} {entry.get("ref", "")} "{entry.get("name", "")}"'
+        return f"{line} [secret]" if entry.get("secret") else line
 
     text = str(entry.get("text_block") or "").strip()
     return text or None

@@ -3,6 +3,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NO_BROWSER_ADAPTER } from "../src/adapter-context";
 import { useAgentChatRuntime } from "../src/runtime/use-agent-chat-runtime";
+import { AgentChatPaywallError } from "../src/send-errors";
 import type {
   AgentChatAdapter,
   AgentChatBrowserStateResponse,
@@ -978,9 +979,55 @@ describe("useAgentChatRuntime — attachment upload orchestration", () => {
     });
 
     expect(sent).toHaveLength(0);
-    const last = runtime.api.messages.at(-1)!;
-    expect(last.status).toBe("error");
-    expect(last.content).toMatch(/storage offline/i);
+    const user = runtime.api.messages.find((m) => m.role === "user")!;
+    expect(user.status).toBe("error");
+    expect(user.content).toBe("hi");
+    const notice = runtime.api.messages.at(-1)!;
+    expect(notice.systemKind).toBe("error");
+    expect(notice.errorInfo?.title).toBe("Your message was not sent");
+    expect(notice.errorInfo?.detail).toMatch(/storage offline/i);
+  });
+
+  it("turns a paywall refusal into a buy-access card, leaving the user's text alone", async () => {
+    const adapter: AgentChatAdapter = {
+      ...createFakeAdapter({
+        opened: [],
+        sent: [],
+        paused: [],
+        retried: [],
+        created: [],
+      }),
+      async sendMessage() {
+        throw new AgentChatPaywallError(
+          "You've reached your usage limit for this assistant.",
+          "allowance_exhausted",
+          "https://example.test/buy/agent",
+        );
+      },
+    };
+
+    const runtime = renderRuntime({ adapter, sessionId: "s-1" });
+
+    await act(async () => {
+      await expect(runtime.api.send("one more question")).rejects.toThrow(
+        AgentChatPaywallError,
+      );
+    });
+
+    const user = runtime.api.messages.find((m) => m.role === "user")!;
+    expect(user.content).toBe("one more question");
+    expect(user.status).toBe("error");
+    const card = runtime.api.messages.at(-1)!;
+    expect(card.systemKind).toBe("error");
+    expect(card.errorInfo).toMatchObject({
+      category: "paywall",
+      title: "You've reached your usage limit for this assistant.",
+      retryable: false,
+      paywall: {
+        code: "allowance_exhausted",
+        buyUrl: "https://example.test/buy/agent",
+      },
+    });
   });
 
   it("uploads on an existing session without calling createSession", async () => {

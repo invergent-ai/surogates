@@ -12,7 +12,7 @@ import pytest
 
 from surogates.browser.base import BrowserEndpoint, BrowserSpec
 from surogates.browser.control import ControlEntry
-from surogates.browser.pool import EnsureResult
+from surogates.browser.pool import BrowserPool, EnsureResult, TypedSecrets
 
 
 class FakePool:
@@ -26,6 +26,7 @@ class FakePool:
             live_view_url="ws://browser:32000",
         )
         self.snapshot_cache: dict[str, dict[str, Any]] = {}
+        self.typed_secrets = TypedSecrets()
 
     async def ensure(
         self,
@@ -440,6 +441,284 @@ class TestTypeHandler:
             _client_factory=lambda endpoint: client,
         )
         assert client.calls[0][0] == "type_text"
+
+
+class FakeVault:
+    """Credentials by (name, user_id, service_account_id); None for org-wide."""
+
+    def __init__(self, values: dict[tuple[str, Any, Any], str]) -> None:
+        self.values = values
+        self.asked: list[tuple[Any, str, Any, Any]] = []
+
+    async def retrieve(self, org_id, name, user_id=None, *, service_account_id=None):
+        self.asked.append((org_id, name, user_id, service_account_id))
+        return self.values.get((name, user_id, service_account_id))
+
+
+AGENT_SA = UUID("50000000-0000-0000-0000-000000000001")
+PASSWORD = "Waalhaven-2026"
+ACME = json.dumps({"value": PASSWORD, "origins": ["https://acme.example"]})
+
+
+class FillClient(FakeClickClient):
+    """A cloud browser whose secret field takes the value only on acme.example."""
+
+    def __init__(self, page_origin: str = "https://acme.example", secret_now: bool = True) -> None:
+        super().__init__()
+        self.page_origin = page_origin
+        self.secret_now = secret_now
+
+    async def fill_secret(self, ref: str, secret: str, *, origins: list[str]) -> None:
+        from surogates.browser.client import SecretFieldRefused
+
+        self.calls.append(("fill_secret", (ref, secret), {"origins": origins}))
+        if not self.secret_now:
+            raise SecretFieldRefused(f"{ref} is not a password, one-time-code or card field on the page now")
+        if self.page_origin not in origins:
+            raise SecretFieldRefused(f"not on {self.page_origin}")
+
+
+def secret_pool() -> FakePool:
+    pool = FakePool()
+    pool.snapshot_cache["@e5"] = {"role": "textbox", "name": "Password", "secret": True}
+    pool.snapshot_cache["@e2"] = {"role": "searchbox", "name": "Search"}
+    return pool
+
+
+class TestTypeSecrets:
+    async def _type(self, tenant, arguments, *, vault=None, pool=None, client=None,
+                    channel="studio", config=None, workspace_io=None):
+        from surogates.tools.builtin.browser import _browser_type_handler
+
+        client = client or FillClient()
+        result = await _browser_type_handler(
+            arguments,
+            tenant=tenant,
+            session_id=uuid4(),
+            browser_pool=pool or secret_pool(),
+            browser_control=FakeControlStore(),
+            credential_vault=vault,
+            channel=channel,
+            session_config=config if config is not None else {"agent_service_account_id": str(AGENT_SA)},
+            workspace_io=workspace_io,
+            _client_factory=lambda endpoint: client,
+        )
+        return json.loads(result), client
+
+    async def test_the_agents_own_credential_fills_a_secret_field_on_its_site(self, tenant) -> None:
+        vault = FakeVault({("browser_acme", None, AGENT_SA): ACME})
+        body, client = await self._type(
+            tenant, {"ref": "@e5", "secret_ref": "vault://browser_acme"}, vault=vault, channel="website",
+        )
+        assert body == {"typed": True}
+        assert client.calls == [("fill_secret", ("@e5", PASSWORD), {"origins": ["https://acme.example"]})]
+
+    async def test_an_org_credential_answers_only_the_operators_own_chat(self, tenant) -> None:
+        vault = FakeVault({("browser_acme", None, None): ACME})
+        body, client = await self._type(tenant, {"ref": "@e5", "secret_ref": "vault://browser_acme"}, vault=vault)
+        assert body == {"typed": True}
+        for channel in ("web", "website", "buy_page", "slack", "telegram", "api", "delegation", None):
+            vault.asked.clear()
+            body, client = await self._type(
+                tenant, {"ref": "@e5", "secret_ref": "vault://browser_acme"}, vault=vault, channel=channel,
+            )
+            assert body["error"] == "secret_not_found", channel
+            assert client.calls == []
+            # Only the agent's own scope was even asked.
+            assert [asked[2:] for asked in vault.asked] == [(None, AGENT_SA)]
+
+    async def test_a_users_personal_credential_never_answers(self, tenant) -> None:
+        vault = FakeVault({("browser_acme", tenant.user_id, None): ACME})
+        body, _client = await self._type(tenant, {"ref": "@e5", "secret_ref": "vault://browser_acme"}, vault=vault)
+        assert body["error"] == "secret_not_found"
+
+    async def test_a_secret_ref_needs_a_ref(self, tenant) -> None:
+        vault = FakeVault({("browser_acme", None, AGENT_SA): ACME})
+        body, client = await self._type(tenant, {"secret_ref": "vault://browser_acme"}, vault=vault)
+        assert body["error"] == "invalid_arguments"
+        assert client.calls == [] and vault.asked == []
+
+    async def test_a_field_not_marked_secret_is_refused_before_the_vault_is_read(self, tenant) -> None:
+        # A search box on the attacker's page would echo the value straight back.
+        vault = FakeVault({("browser_acme", None, AGENT_SA): ACME})
+        for ref in ("@e2", "@e9"):
+            body, client = await self._type(tenant, {"ref": ref, "secret_ref": "vault://browser_acme"}, vault=vault)
+            assert body["error"] == "not_a_secret_field"
+            assert client.calls == []
+        assert vault.asked == []
+
+    async def test_a_page_on_another_origin_never_receives_the_value(self, tenant) -> None:
+        vault = FakeVault({("browser_acme", None, AGENT_SA): ACME})
+        body, _client = await self._type(
+            tenant, {"ref": "@e5", "secret_ref": "vault://browser_acme"}, vault=vault,
+            client=FillClient(page_origin="https://attacker.example"),
+        )
+        assert body["error"] == "secret_refused"
+        assert PASSWORD not in json.dumps(body)
+
+    async def test_a_field_no_longer_secret_on_the_live_page_is_refused(self, tenant) -> None:
+        vault = FakeVault({("browser_acme", None, AGENT_SA): ACME})
+        body, _client = await self._type(
+            tenant, {"ref": "@e5", "secret_ref": "vault://browser_acme"}, vault=vault,
+            client=FillClient(secret_now=False),
+        )
+        assert body["error"] == "secret_refused"
+
+    @pytest.mark.parametrize("stored", [
+        PASSWORD,
+        json.dumps({"value": PASSWORD}),
+        json.dumps({"value": PASSWORD, "origins": []}),
+        json.dumps({"value": PASSWORD, "origins": ["acme.example"]}),
+        json.dumps({"value": PASSWORD, "origins": ["javascript:alert(1)"]}),
+        json.dumps({"value": PASSWORD, "origins": ["http://acme.example"]}),
+    ])
+    async def test_a_credential_not_bound_to_its_site_is_refused(self, tenant, stored) -> None:
+        vault = FakeVault({("browser_acme", None, AGENT_SA): stored})
+        body, client = await self._type(tenant, {"ref": "@e5", "secret_ref": "vault://browser_acme"}, vault=vault)
+        assert body["error"] == "secret_not_bound"
+        assert "Studio, Settings, Vault" in body["detail"]
+        assert PASSWORD not in json.dumps(body)
+        assert client.calls == []
+
+    async def test_origins_are_compared_as_the_page_reads_its_own(self, tenant) -> None:
+        stored = json.dumps({"value": PASSWORD, "origins": ["HTTPS://Acme.Example:443/login", "http://localhost:8080", "http://[::1]"]})
+        vault = FakeVault({("browser_acme", None, AGENT_SA): stored})
+        _body, client = await self._type(tenant, {"ref": "@e5", "secret_ref": "vault://browser_acme"}, vault=vault)
+        assert client.calls[0][2] == {"origins": ["https://acme.example", "http://localhost:8080", "http://[::1]"]}
+
+    async def test_only_credentials_named_for_the_browser_can_be_typed(self, tenant) -> None:
+        vault = FakeVault({("git_pat", None, AGENT_SA): "ghp_secret"})
+        body, client = await self._type(tenant, {"ref": "@e5", "secret_ref": "vault://git_pat"}, vault=vault)
+        assert body["error"] == "invalid_secret_ref"
+        assert client.calls == [] and vault.asked == []
+
+    async def test_no_vault_means_no_secret(self, tenant) -> None:
+        body, _client = await self._type(tenant, {"ref": "@e5", "secret_ref": "vault://browser_x"})
+        assert body["error"] == "secret_unavailable"
+
+    async def test_a_browser_on_the_users_computer_never_gets_a_stored_secret(self, tenant) -> None:
+        # Its operations are journaled in the clear for replay, and its app
+        # shows what it types: the vault is never read for it.
+        vault = FakeVault({("browser_acme", None, AGENT_SA): ACME})
+        body, client = await self._type(
+            tenant, {"ref": "@e5", "secret_ref": "vault://browser_acme"}, vault=vault,
+            config={"agent_service_account_id": str(AGENT_SA), "execution": {"kind": "device"}},
+        )
+        assert body["error"] == "secret_unavailable"
+        assert client.calls == [] and vault.asked == []
+
+    @pytest.mark.parametrize("arguments", [{}, {"text": "a", "secret_ref": "vault://browser_x", "ref": "@e5"}])
+    async def test_exactly_one_of_text_and_secret_ref(self, tenant, arguments) -> None:
+        body, client = await self._type(tenant, arguments, vault=FakeVault({}))
+        assert body["error"] == "invalid_arguments"
+        assert client.calls == []
+
+    async def test_text_typed_into_a_secret_field_points_at_secret_ref(self, tenant) -> None:
+        body, _client = await self._type(tenant, {"ref": "@e5", "text": "pw"})
+        assert body["typed"] is True
+        assert "secret_ref" in body["note"]
+        plain, _client = await self._type(tenant, {"ref": "@e2", "text": "hello"})
+        assert "note" not in plain
+
+
+class TestTypedSecretsNeverComeBack:
+    async def test_a_typed_secret_is_cut_out_of_every_later_browser_result(self, tenant) -> None:
+        from surogates.tools.builtin import browser as tools
+
+        sid = str(uuid4())
+        pool = secret_pool()
+        vault = FakeVault({("browser_acme", None, AGENT_SA): json.dumps(
+            {"value": 'pa"ss', "origins": ["https://acme.example"]},
+        )})
+        await tools._scrubbing(tools._browser_type_handler)(
+            {"ref": "@e5", "secret_ref": "vault://browser_acme"},
+            tenant=tenant, session_id=sid, browser_pool=pool, browser_control=FakeControlStore(),
+            credential_vault=vault, channel="studio",
+            session_config={"agent_service_account_id": str(AGENT_SA)},
+            _client_factory=lambda endpoint: FillClient(),
+        )
+
+        async def echoing(arguments, **kwargs):
+            # A page that copied the value into its text, read back by a script.
+            return json.dumps({"result": 'the field says pa"ss'})
+
+        echoed = await tools._scrubbing(echoing)({}, session_id=sid, browser_pool=pool)
+        assert "pa\\\"ss" not in echoed and 'pa"ss' not in json.loads(echoed)["result"]
+        assert json.loads(echoed)["result"] == "the field says " + "\u2022" * 5
+        # Another session's results are untouched.
+        assert await tools._scrubbing(echoing)({}, session_id=str(uuid4()), browser_pool=pool) == await echoing({})
+
+    async def test_typed_secrets_go_with_the_browser(self) -> None:
+        from tests.test_browser_pool import FakeBackend, FakeRegistry
+
+        pool = BrowserPool(backend=FakeBackend(), registry=FakeRegistry())
+        await pool.ensure("s1", "org", "user", BrowserSpec())
+        pool.typed_secrets.add("s1", "hunter2")
+        assert pool.typed_secrets.of("s1") == ["hunter2"]
+        await pool.destroy_for_session("s1")
+        assert pool.typed_secrets.of("s1") == []
+
+    def test_a_session_left_idle_loses_its_typed_secrets(self, monkeypatch) -> None:
+        from surogates.browser import pool as pool_module
+
+        now = [1000.0]
+        monkeypatch.setattr(pool_module.time, "monotonic", lambda: now[0])
+        secrets = TypedSecrets(ttl=60)
+        secrets.add("idle", "a")
+        secrets.add("busy", "b")
+        now[0] += 45
+        assert secrets.of("busy") == ["b"]
+        now[0] += 45
+        # Any session's use sweeps the ones idle past the TTL.
+        assert secrets.of("busy") == ["b"]
+        assert secrets.of("idle") == []
+
+    def test_every_browser_tool_is_registered_scrubbed(self) -> None:
+        from surogates.tools.builtin import browser as tools
+        from surogates.tools.registry import ToolRegistry
+
+        registry = ToolRegistry()
+        tools.register(registry)
+        handlers = {entry.name: entry.handler for entry in registry.get_all()}
+        assert handlers
+        for name, handler in handlers.items():
+            assert getattr(handler, "__wrapped__", None) is not None, name
+
+    def test_the_snapshot_never_reads_an_input_value(self) -> None:
+        from surogates.browser.client import SNAPSHOT_COLLECTOR
+
+        assert ".value" not in SNAPSHOT_COLLECTOR
+
+
+class TestClickOutcomes:
+    async def test_a_click_that_times_out_says_so(self, tenant) -> None:
+        from surogates.browser.client import ClickTimeoutError
+        from surogates.tools.builtin.browser import _browser_click_handler
+
+        class Stalled(FakeClickClient):
+            async def click_ref(self, ref: str, **kwargs: Any) -> None:
+                raise ClickTimeoutError("busy")
+
+        result = await _browser_click_handler(
+            {"ref": "@e3"}, tenant=tenant, session_id=uuid4(), browser_pool=FakePool(),
+            browser_control=FakeControlStore(), _client_factory=lambda endpoint: Stalled(),
+        )
+        assert json.loads(result) == {"error": "click_timeout", "detail": "busy"}
+
+    async def test_the_dialogs_a_click_answered_are_reported(self, tenant) -> None:
+        from surogates.tools.builtin.browser import _browser_click_handler
+
+        class Confirming(FakeClickClient):
+            async def click_ref(self, ref: str, **kwargs: Any) -> list[dict[str, str]]:
+                return [{"type": "confirm", "message": "Delete the supplier?"}]
+
+        result = await _browser_click_handler(
+            {"ref": "@e3"}, tenant=tenant, session_id=uuid4(), browser_pool=FakePool(),
+            browser_control=FakeControlStore(), _client_factory=lambda endpoint: Confirming(),
+        )
+        assert json.loads(result) == {
+            "clicked": True, "dialogs": [{"type": "confirm", "message": "Delete the supplier?"}],
+        }
 
 
 class TestPressKey:

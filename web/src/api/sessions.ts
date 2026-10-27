@@ -3,7 +3,7 @@
 //
 import { browserRelease } from "@/lib/local-chat";
 import { authFetch } from "./auth";
-import { errorDetailMessage, paywallErrorMessage } from "./_errors";
+import { errorDetailMessage, paywallError } from "./_errors";
 import type {
   Session,
   SessionChildrenResponse,
@@ -100,6 +100,7 @@ export async function sendMessage(
     mime_type?: string;
     size?: number;
   }[],
+  metadata?: Record<string, unknown>,
 ): Promise<{ event_id: number; status: string }> {
   const payload: Record<string, unknown> = { content };
   if (images?.length) {
@@ -107,6 +108,9 @@ export async function sendMessage(
   }
   if (attachments?.length) {
     payload.attachments = attachments;
+  }
+  if (metadata && Object.keys(metadata).length) {
+    payload.metadata = metadata;
   }
   const response = await authFetch(
     `/api/v1/sessions/${sessionId}/messages`,
@@ -121,9 +125,9 @@ export async function sendMessage(
       const body = (await response.json().catch(() => null)) as {
         detail?: unknown;
       } | null;
-      const paywall = paywallErrorMessage(body?.detail);
+      const paywall = paywallError(body?.detail);
       if (paywall) {
-        throw new Error(paywall);
+        throw paywall;
       }
     }
     throw new Error("Failed to send message");

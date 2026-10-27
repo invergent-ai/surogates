@@ -20,6 +20,7 @@ already holds.
 
 from __future__ import annotations
 
+import json
 import posixpath
 import re
 
@@ -102,3 +103,70 @@ def deliverable_nudge(names: list[str]) -> str:
         "names and extensions, then confirm. If one already exists under a "
         "different name, rename or re-save it to the name above.]"
     )
+
+
+#: A reply telling the person something was saved to memory. Narrow on
+#: purpose: "I saved the report" is about a file, and "noted" alone is an
+#: acknowledgement, so only phrasings that claim remembering are matched.
+_SAVE_CLAIM_RE = re.compile(
+    r"\bnoted (?:it|this|that down)\b"
+    r"|\bmade a note\b"
+    r"|\b(?:i've|i have|i'll|i will)\s+(?:remember|memori[sz]ed?)\b"
+    r"|\b(?:saved|stored|added|wrote|written)\b[^.\n]{0,40}\b(?:to|in|into)\s+(?:my\s+)?memory\b"
+    r"|\bam\s+(?:notat|re[țţt]inut|memorat)\b"
+    r"|\b(?:voi|o\s+s[ăa])\s+(?:re[țţt]ine|[țţt]ine?\s+minte)\b"
+    r"|\b(?:salvat|ad[ăa]ugat|stocat|notat)\b[^.\n]{0,40}\b[îi]n\s+memori[ea]\b",
+    re.IGNORECASE,
+)
+
+#: The harness's own nudges are user messages too; a turn starts at the
+#: last message a person wrote.
+_HARNESS_NUDGE_PREFIX = "[System:"
+
+
+def _current_turn(messages: list[dict]) -> list[dict]:
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        content = message.get("content")
+        if isinstance(content, str) and content.startswith(_HARNESS_NUDGE_PREFIX):
+            continue
+        return messages[index + 1:]
+    return messages
+
+
+def _saved_to_memory(turn: list[dict]) -> bool:
+    calls = {
+        call.get("id")
+        for m in turn if isinstance(m, dict)
+        for call in m.get("tool_calls") or []
+        if isinstance(call, dict)
+        and (call.get("function") or {}).get("name") == "memory"
+    }
+    for m in turn:
+        if not (isinstance(m, dict) and m.get("role") == "tool"):
+            continue
+        if m.get("tool_call_id") not in calls:
+            continue
+        try:
+            result = json.loads(m.get("content") or "")
+        except (TypeError, ValueError):
+            return True
+        if not (isinstance(result, dict) and result.get("success") is False):
+            return True
+    return False
+
+
+def unbacked_save_claim(final_text: str, messages: list[dict]) -> bool:
+    """The reply says something was saved to memory and this turn made no
+    successful memory call. The caller checks the tool is available."""
+    if not final_text or not _SAVE_CLAIM_RE.search(final_text.replace("’", "'")):
+        return False
+    return not _saved_to_memory(_current_turn(messages))
+
+
+SAVE_CLAIM_NUDGE = (
+    "[System: You said you saved this but made no memory call. Call memory "
+    "now, or correct your reply.]"
+)

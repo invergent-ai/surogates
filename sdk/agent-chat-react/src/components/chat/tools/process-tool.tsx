@@ -285,7 +285,7 @@ function ProcessLogView({ data }: { data: Record<string, unknown> }) {
         <DialogContent className="sm:max-w-[50vw] w-full h-[70vh] flex flex-col p-0 gap-0 overflow-hidden">
           <DialogHeader className="px-4 py-3 border-b border-border shrink-0">
             <DialogTitle className=" text-sm">
-              Process log — {sessionId}
+              Process log: {sessionId}
             </DialogTitle>
           </DialogHeader>
           <ScrollArea className="flex-1 min-h-0">

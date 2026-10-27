@@ -778,6 +778,21 @@ async def handle_escalate(arguments: dict, **kwargs: Any) -> str:
     ctx, settings = await load_context(kwargs)
     if ctx is None:
         return "Could not escalate: no conversation context."
+    if (
+        followup_store.is_team_member(settings, ctx.user_id)
+        and await ctx.person_user_id(sf) == ctx.user_id
+    ):
+        # An escalation is about the person in the conversation.  Raised
+        # here it named the team member as the patient, and re-raised an
+        # alert from this transcript whose case was already resolved.
+        return (
+            "Not escalated: this conversation is with a team member, who "
+            "receives the alerts. An escalation is about the person writing, "
+            "and a team member is not someone followed. Do not raise an alert "
+            "from earlier in this conversation again: its case may be resolved "
+            "or the person no longer followed; team_overview says who is "
+            "followed now, and team_escalation takes or resolves a case."
+        )
 
     invitation = await _open_invitation_for_session(sf, ctx.session_id)
     program_target = None
@@ -814,7 +829,7 @@ async def handle_escalate(arguments: dict, **kwargs: Any) -> str:
         sf, settings, org_id=ctx.org_id, session_id=ctx.session_id, service_account_id=target_id,
         event_type="checkin.escalation" if invitation is not None else "followup.escalation",
         name=await ctx.person_label(sf, settings), reason=reason,
-        payload={**payload, "escalation": escalation, "user_id": str(ctx.user_id)},
+        payload={**payload, "escalation": escalation, "user_id": str(ctx.user_id) if ctx.user_id is not None else None},
     )
     team = [uuid.UUID(str(u)) for u in (settings.alert_recipient_user_ids if settings else [])]
     to = _chosen(settings, await followup_store.display_names(sf, team), arguments.get("to"))
@@ -857,9 +872,17 @@ async def handle_escalate(arguments: dict, **kwargs: Any) -> str:
     )
 
     if not inboxed and not queued:
+        inbox = (
+            "this agent has no Studio inbox for escalations" if target_id is None
+            else "the Studio inbox set for escalations is not a valid account"
+        )
         return (
-            "Could not escalate: nobody is configured to receive this "
-            f"({why_not}). Tell the person to contact the business directly."
+            f"Could not escalate: nobody was told ({inbox}; {why_not}). The "
+            "business has to finish setting this agent up: in Studio, on the "
+            "agent's Programs page, add a team member under Team or send "
+            "escalations to a Studio inbox. Tell the person you could not reach "
+            "the team and that they should contact the business directly; do "
+            "not say anyone was told."
         )
     told = []
     if inboxed:

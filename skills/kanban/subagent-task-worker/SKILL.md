@@ -112,7 +112,7 @@ When to write (batch related notes into one `share_note` call):
 
 When to read: `[Board update]` messages arrive in your history automatically as peers post. Additionally call `read_board` at decision points — before committing to an approach, and before retrying anything that smells like a known dead end — because inline updates may be stale (superseded results, expired claims).
 
-Notes are admission-verified: vague or unevidenced notes are rejected with a reason. Write them anchored the first time. Sharing on the board does NOT replace `worker_complete` — the board is live coordination; the completion summary is your durable handoff.
+Notes are admission-verified against what they cite: every FACT, FAIL and RESULT needs a `ref` to its source, usually `{kind: "tool_result", tool: "<tool name>", contains: "<text from its output>"}` (your own latest result of that tool), and is admitted only if that source shows what the note says. A RESULT cites a check from your own session. Vague, uncited or unsupported notes are rejected with a reason. Write them anchored and cited the first time. Sharing on the board does NOT replace `worker_complete` — the board is live coordination; the completion summary is your durable handoff.
 
 ## Block reasons that get answered fast
 

@@ -7,6 +7,7 @@ from uuid import UUID
 
 from fastapi import HTTPException, Request, status
 
+from surogates.channels.constants import BUY_PAGE_CHANNEL
 from surogates.channels.memory_boundary import is_case_session
 from surogates.devices.binding import binding_of, device_of
 from surogates.sandbox.pool import sandbox_session_key
@@ -153,12 +154,21 @@ def is_scheduled_run_session(session: Session) -> bool:
     )
 
 
-def require_user_writable_session(session: Session) -> None:
-    """Reject user-initiated mutations against scheduler-owned run records."""
+def require_user_writable_session(session: Session, tenant: TenantContext) -> None:
+    """Reject user-initiated mutations against scheduler-owned run records and buy-page conversations.
+
+    The buy page meters every turn of its conversation; the buyer's own login
+    reaching it here would run turns nothing charges.
+    """
     if is_scheduled_run_session(session):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=SCHEDULED_RUN_READ_ONLY_DETAIL,
+        )
+    if session.channel == BUY_PAGE_CHANNEL and tenant.user_id is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This conversation continues on the agent's buy page.",
         )
 
 

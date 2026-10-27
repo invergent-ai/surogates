@@ -10,6 +10,7 @@ import pytest
 from fastapi import HTTPException
 
 from surogates.tenant.context import TenantContext
+from tests.test_memory_route_session_boundary import _fixtures, _mutate, _session
 
 
 def _channel_ctx(tmp_path: Path) -> TenantContext:
@@ -26,40 +27,77 @@ def _channel_ctx(tmp_path: Path) -> TenantContext:
     )
 
 
+def _channel_tenant(session) -> TenantContext:
+    """The context a worker-minted ``channel_session`` token gives *session*."""
+    return TenantContext(
+        org_id=session.org_id,
+        user_id=None,
+        org_config={},
+        user_preferences={},
+        permissions=frozenset(),
+        asset_root="/tmp/assets",
+        service_account_id=None,
+        session_scope_id=session.id,
+    )
+
+
 @pytest.mark.asyncio
 class TestMemoryRouteGate:
-    """Channel principals must not read or write memory.
+    """Channel principals reach only a website visitor's own memory.
 
-    Memory routes pass ``tenant.user_id`` straight to ``TenantStorage``,
-    which maps ``user_id=None`` to ``shared/memory/*``.  The gate is the
-    hard boundary that keeps channel JWTs out of shared memory while
-    leaving service-account contexts (also ``user_id=None``) intact.
+    Memory routes key a principal with no user and no boundary to
+    ``shared/*``, the agent's org-wide memory.  A channel token is refused
+    unless its session carries a ``visitor:`` partition, so it can never
+    read or write that shared store, while a website visitor's memory tool
+    reads and writes the visitor's own partition.
     """
 
-    async def test_get_memory_refuses_channel_principal(
-        self, tmp_path: Path,
-    ):
+    async def test_get_memory_refuses_channel_principal_without_visitor_partition(self):
         from surogates.api.routes import memory as memory_routes
+
+        org_id = uuid4()
+        session = _session(org_id, {})
+        _backend, request, _tenant, agent_runtime = _fixtures(session, org_id=org_id)
 
         with pytest.raises(HTTPException) as exc:
             await memory_routes.get_memory(
-                request=None,  # gate fires before request is read
-                tenant=_channel_ctx(tmp_path),
+                request, None, _channel_tenant(session), agent_runtime,
             )
         assert exc.value.status_code == 403
 
-    async def test_mutate_memory_refuses_channel_principal(
-        self, tmp_path: Path,
-    ):
-        from surogates.api.routes import memory as memory_routes
+    async def test_mutate_memory_refuses_channel_principal_without_visitor_partition(self):
+        org_id = uuid4()
+        # A visitor boundary on a session of any other channel is not honoured.
+        session = _session(org_id, {"memory_boundary": "visitor:" + "0" * 32})
+        backend, request, _tenant, agent_runtime = _fixtures(session, org_id=org_id)
 
         with pytest.raises(HTTPException) as exc:
-            await memory_routes.mutate_memory(
-                body=None,
-                request=None,
-                tenant=_channel_ctx(tmp_path),
-            )
+            await _mutate(request, _channel_tenant(session), agent_runtime, None)
         assert exc.value.status_code == 403
+        assert backend.written == []
+
+    async def test_a_website_visitor_writes_only_its_own_partition(self):
+        org_id = uuid4()
+        boundary = "visitor:" + "a" * 32
+        session = _session(org_id, {"memory_boundary": boundary})
+        session.channel = "website"
+        backend, request, _tenant, agent_runtime = _fixtures(session, org_id=org_id)
+
+        result = await _mutate(request, _channel_tenant(session), agent_runtime, None)
+
+        assert result.success is True
+        assert backend.written == [f"agents/support-bot/boundaries/{boundary}/memory.json"]
+
+    async def test_a_channel_token_cannot_name_another_session(self):
+        org_id = uuid4()
+        session = _session(org_id, {"memory_boundary": "visitor:" + "a" * 32})
+        session.channel = "website"
+        _backend, request, _tenant, agent_runtime = _fixtures(session, org_id=org_id)
+        other = _session(org_id, {})
+
+        with pytest.raises(HTTPException) as exc:
+            await _mutate(request, _channel_tenant(other), agent_runtime, session.id)
+        assert exc.value.status_code == 404
 
 
 _MUTATING_SKILL_HANDLERS = (

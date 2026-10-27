@@ -15,6 +15,7 @@ import {
   ChevronDown,
   ChevronRight,
   CreditCard,
+  ExternalLink,
   RefreshCw,
 } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@invergent/ui-sdk/alert";
@@ -43,6 +44,17 @@ export const ErrorMessage = memo(function ErrorMessage({
   const [detailOpen, setDetailOpen] = useState(false);
   const [retryPending, setRetryPending] = useState(false);
   const [retryError, setRetryError] = useState<string | null>(null);
+
+  if (errorInfo.paywall) {
+    return (
+      <PaywallCard
+        title={errorInfo.title}
+        buyUrl={errorInfo.paywall.buyUrl}
+        onDismiss={onDismiss}
+        className={className}
+      />
+    );
+  }
 
   if (errorInfo.insufficientCredits) {
     return (
@@ -174,6 +186,44 @@ const InsufficientCreditsCard = memo(function InsufficientCreditsCard({
           )}
         </div>
       </AlertDescription>
+    </Alert>
+  );
+});
+
+interface PaywallCardProps {
+  title: string;
+  buyUrl?: string;
+  onDismiss?: () => void;
+  className?: string;
+}
+
+const PaywallCard = memo(function PaywallCard({
+  title,
+  buyUrl,
+  onDismiss,
+  className,
+}: PaywallCardProps) {
+  return (
+    <Alert variant="warning" className={cn("gap-y-2", className)}>
+      <CreditCard />
+      <AlertTitle>{title}</AlertTitle>
+      {(buyUrl || onDismiss) && (
+        <AlertDescription className="flex flex-wrap gap-2 pt-1">
+          {buyUrl && (
+            <Button size="sm" asChild>
+              <a href={buyUrl} target="_blank" rel="noopener noreferrer">
+                <ExternalLink className="size-4" />
+                Get access
+              </a>
+            </Button>
+          )}
+          {onDismiss && (
+            <Button size="sm" variant="ghost" onClick={onDismiss}>
+              Dismiss
+            </Button>
+          )}
+        </AlertDescription>
+      )}
     </Alert>
   );
 });

@@ -20,6 +20,7 @@ from sqlalchemy.exc import IntegrityError
 from surogates.channels.capabilities import capabilities_for, initiating_platforms
 from surogates.channels.identity import mask_readable_phones
 from surogates.db.models import (
+    AgentUser,
     ChannelContactRow,
     ChannelIdentity,
     EscalationRow,
@@ -82,7 +83,11 @@ __all__ = [
     "record_inbound",
     "render_text",
     "resolve_escalation",
+    "escalation_id_of",
+    "is_resolved_escalation_alert",
+    "retire_escalation_alerts",
     "senders_of",
+    "stop_following",
     "update_enrollment",
     "update_settings",
     "upsert_enrollment",
@@ -167,12 +172,21 @@ async def enrollments(
 ) -> list[FollowupEnrollmentRow]:
     """An agent's enrollments, narrowed by whichever filters are given.
 
+    Never those of someone removed from the agent: their binding is
+    tombstoned, and they are no longer anyone the agent follows.  A person
+    with no binding at all (an account named by hand) still counts.
     Ordered oldest first, which is the order a roster and a history read.
     """
     query = (
         sa.select(FollowupEnrollmentRow)
         .where(FollowupEnrollmentRow.org_id == org_id)
         .where(FollowupEnrollmentRow.agent_id == agent_id)
+        .where(~sa.exists().where(
+            AgentUser.org_id == FollowupEnrollmentRow.org_id,
+            AgentUser.agent_id == FollowupEnrollmentRow.agent_id,
+            AgentUser.user_id == FollowupEnrollmentRow.user_id,
+            AgentUser.removed_at.isnot(None),
+        ))
         .order_by(FollowupEnrollmentRow.created_at)
     )
     for column, value in (
@@ -388,6 +402,7 @@ TEAM_TEXTS = {
     "label_answered_by": "via {answered_by}",
     "label_reported_by": "reported by {contact} ({relation})",
     "label_contact": "contact",
+    "label_unnamed": "someone without a name on record",
     "label_footer": "About: {label}",
     "inbox_attention_title": "Needs your attention: {name}",
     "label_contact_for": "{contact} ({relation}), for {name}",
@@ -881,7 +896,14 @@ async def notify_team(
         return queued, missed
     if ids:
         return 0, missed or "no team member can be reached on a channel this agent has a sender for"
-    return 0, "the only configured recipient is this person"
+    if destinations:
+        return 0, "none of the team's shared places is on a channel this agent has a sender for"
+    if exclude_user_id is not None and str(exclude_user_id) in {str(r) for r in recipients}:
+        return 0, (
+            "the only team member is the person in this conversation, and nobody is "
+            "alerted about their own conversation"
+        )
+    return 0, "no team members are configured"
 
 
 def default_team_order() -> list[str]:
@@ -1209,16 +1231,112 @@ async def resolve_escalation(
     )
     if row is not None and resolved:
         await close_escalation_inbox_items(session_factory, org_id=org_id, escalation_id=escalation_id)
+        await retire_escalation_alerts(session_factory, org_id=org_id, escalation_ids=[escalation_id])
     return row
 
 
 ESCALATION_PREFIX = "escalation:"
+#: A red alert's one reminder: ``reminder:<step or ->:<id hex>:<recipient>``.
+REMINDER_PREFIX = "reminder:"
+#: A missed-replies alert: ``missed:<escalation id>:<recipient>``.
+MISSED_PREFIX = "missed:"
+RESOLVED_BEFORE_READ = "Escalation resolved before it was read"
+
+
+def escalation_id_of(key: str | None) -> uuid.UUID | None:
+    """The escalation an outreach row's dedupe key names: an alert
+    (``escalation:<step or ->:<hex>:<recipient>``), its red alert's reminder
+    (``reminder:…`` alike) or a missed-replies alert
+    (``missed:<id>:<recipient>``); ``None`` for anything else."""
+    key = key or ""
+    if key.startswith(REMINDER_PREFIX):
+        key = ESCALATION_PREFIX + key.removeprefix(REMINDER_PREFIX)
+    escalation = escalation_of(key)
+    if escalation is not None:
+        raw = escalation_hex(escalation)
+    elif key.startswith(MISSED_PREFIX):
+        raw = key.split(":")[1]
+    else:
+        return None
+    try:
+        return uuid.UUID(raw)
+    except ValueError:
+        return None
+
+
+async def is_resolved_escalation_alert(session_factory: Any, row: Any) -> bool:
+    """Whether *row* is an alert about an escalation already resolved.
+
+    The write-time retire (:func:`retire_escalation_alerts`) keeps these out
+    of the held queue; this is the delivery-time check for one that slipped
+    in after it, e.g. a reminder queued while a colleague resolved the case.
+    A taken case still delivers: whoever took it may need what it says.
+    One primary-key read, and only for an alert about to go out.
+    """
+    if row.kind != "alert":
+        return False
+    escalation_id = escalation_id_of(row.dedupe_key)
+    if escalation_id is None:
+        return False
+    async with session_factory() as db:
+        escalation = await db.get(EscalationRow, escalation_id)
+    return (
+        escalation is not None
+        and escalation.org_id == row.org_id
+        and escalation.resolved_at is not None
+    )
+
+
+async def retire_escalation_alerts(
+    session_factory: Any, *, org_id: uuid.UUID, escalation_ids: Iterable[uuid.UUID],
+) -> int:
+    """Give up the alerts still held for resolved escalations, so the team's
+    next message does not deliver a case already dealt with: their alerts,
+    their red alert's reminder, their missed-replies alerts.  Each is matched
+    on its key's exact prefix, so the lookup stays on the key index."""
+    ids = list(escalation_ids)
+    if not ids:
+        return 0
+    async with session_factory() as db:
+        found = (
+            await db.execute(
+                sa.select(EscalationRow.id, EscalationRow.invitation_id)
+                .where(EscalationRow.org_id == org_id)
+                .where(EscalationRow.id.in_(ids))
+            )
+        ).all()
+        prefixes = [
+            prefix
+            for escalation_id, invitation_id in found
+            for prefix in (
+                f"{escalation_key(escalation_id, invitation_id)}:",
+                f"{reminder_key(escalation_key(escalation_id, invitation_id))}:",
+                f"{MISSED_PREFIX}{escalation_id}:",
+            )
+        ]
+        if not prefixes:
+            return 0
+        result = await db.execute(
+            sa.update(OutreachMessageRow)
+            .where(OutreachMessageRow.org_id == org_id)
+            .where(OutreachMessageRow.state.in_(("queued", "awaiting_reply")))
+            .where(sa.or_(*(OutreachMessageRow.dedupe_key.startswith(p, autoescape=True) for p in prefixes)))
+            .values(state="replaced", reason=RESOLVED_BEFORE_READ)
+            .execution_options(synchronize_session=False)
+        )
+        await db.commit()
+    return int(result.rowcount or 0)
 
 
 def escalation_key(escalation_id: uuid.UUID, invitation_id: uuid.UUID | None = None) -> str:
     """``escalation:<step or ->:<id hex>``: what groups one escalation's
     alerts, its Inbox item and its reminder."""
     return f"{ESCALATION_PREFIX}{invitation_id or '-'}:{escalation_id.hex}"
+
+
+def reminder_key(escalation: str) -> str:
+    """``reminder:<step or ->:<id hex>``: the red alert reminder of the escalation key *escalation*."""
+    return REMINDER_PREFIX + escalation.removeprefix(ESCALATION_PREFIX)
 
 
 def escalation_of(key: str | None) -> str | None:
@@ -1276,6 +1394,7 @@ async def handle_escalations(
         await db.commit()
     for escalation_id in resolve:
         await close_escalation_inbox_items(session_factory, org_id=org_id, escalation_id=escalation_id)
+    await retire_escalation_alerts(session_factory, org_id=org_id, escalation_ids=resolve)
 
 
 async def raise_escalation_inbox_item(
@@ -1348,18 +1467,91 @@ async def close_escalation_inbox_items(
     the conversation, and an escalation's conversation is the person's own.
     The item names its escalation as ``escalation:<step or ->:<id hex>``.
     """
-    now = _utcnow()
     async with session_factory() as db:
-        result = await db.execute(
-            sa.update(InboxItem)
-            .where(InboxItem.org_id == org_id)
-            .where(InboxItem.status == "pending")
-            .where(InboxItem.payload["escalation"].as_string().like(f"%:{escalation_id.hex}"))
-            .values(status="acknowledged", responded_at=now, updated_at=now)
-            .execution_options(synchronize_session=False)
-        )
+        result = await db.execute(_close_inbox_items(org_id, [escalation_id]))
         await db.commit()
     return int(result.rowcount or 0)
+
+
+def _close_inbox_items(org_id: uuid.UUID, escalation_ids: Iterable[uuid.UUID]) -> Any:
+    now = _utcnow()
+    named = InboxItem.payload["escalation"].as_string()
+    return (
+        sa.update(InboxItem)
+        .where(InboxItem.org_id == org_id)
+        .where(InboxItem.status == "pending")
+        .where(sa.or_(*(named.like(f"%:{i.hex}") for i in escalation_ids)))
+        .values(status="acknowledged", responded_at=now, updated_at=now)
+        .execution_options(synchronize_session=False)
+    )
+
+
+REMOVED_FROM_AGENT = "Removed from the agent"
+
+
+async def stop_following(
+    db: Any, *, org_id: uuid.UUID, user_id: uuid.UUID, agent_id: str | None = None,
+) -> None:
+    """Stop everything follow-up does for *user_id* on *agent_id*, or on
+    every agent of *org_id* when it is ``None``: someone taken off the agent
+    is no longer followed.
+
+    Their enrollments end (kept, so the history still reads), their open
+    escalations are resolved and leave the Inbox, what is still held for or
+    about them is given up, and their links to and from other people go.
+    Runs in the caller's transaction on *db*; the caller commits.
+    """
+    def scoped(model: Any) -> list[Any]:
+        where = [model.org_id == org_id]
+        if agent_id is not None:
+            where.append(model.agent_id == agent_id)
+        return where
+
+    now = _utcnow()
+    await db.execute(
+        sa.update(FollowupEnrollmentRow)
+        .where(*scoped(FollowupEnrollmentRow))
+        .where(FollowupEnrollmentRow.user_id == user_id)
+        .where(FollowupEnrollmentRow.status != "ended")
+        .values(status="ended", status_reason=REMOVED_FROM_AGENT, updated_at=now)
+        .execution_options(synchronize_session=False)
+    )
+    open_ids = list((
+        await db.execute(
+            sa.select(EscalationRow.id)
+            .where(*scoped(EscalationRow))
+            .where(EscalationRow.user_id == user_id)
+            .where(EscalationRow.resolved_at.is_(None))
+        )
+    ).scalars())
+    if open_ids:
+        await db.execute(
+            sa.update(EscalationRow)
+            .where(EscalationRow.id.in_(open_ids))
+            .values(resolved_at=now)
+            .execution_options(synchronize_session=False)
+        )
+        await db.execute(_close_inbox_items(org_id, open_ids))
+    await db.execute(
+        sa.update(OutreachMessageRow)
+        .where(*scoped(OutreachMessageRow))
+        .where(OutreachMessageRow.state.in_(("queued", "awaiting_reply")))
+        .where(sa.or_(
+            OutreachMessageRow.user_id == user_id,
+            OutreachMessageRow.subject_user_id == user_id,
+        ))
+        .values(state="replaced", reason=REMOVED_FROM_AGENT)
+        .execution_options(synchronize_session=False)
+    )
+    await db.execute(
+        sa.delete(FollowupContactRow)
+        .where(*scoped(FollowupContactRow))
+        .where(sa.or_(
+            FollowupContactRow.person_user_id == user_id,
+            FollowupContactRow.contact_user_id == user_id,
+        ))
+        .execution_options(synchronize_session=False)
+    )
 
 
 # ---------------------------------------------------------------------------

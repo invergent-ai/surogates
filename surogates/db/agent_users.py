@@ -32,11 +32,14 @@ from surogates.db.models import (
     ChannelIdentity,
     Credential,
     Device,
+    EscalationRow,
     Event,
+    FollowupEnrollmentRow,
     InboxItem,
     McpServer,
     Mission,
     OAuthRefreshToken,
+    OutreachMessageRow,
     ScheduledSession,
     Session,
     Skill,
@@ -176,6 +179,21 @@ async def clear_user_rows(db: AsyncSession, *, org_id: UUID, user_id: UUID) -> N
         await db.execute(
             update(model).where(*scoped(model)).values(user_id=None)
         )
+    # Follow-up names people by bare id, with no FK to cover: stop
+    # following them on every agent first, then drop what they own.
+    # Imported here: the follow-up store sits above the session layer,
+    # which imports this module.
+    from surogates.followup.store import stop_following
+
+    await stop_following(db, org_id=org_id, user_id=user_id)
+    for model in (FollowupEnrollmentRow, OutreachMessageRow):
+        await db.execute(delete(model).where(*scoped(model)))
+    await db.execute(update(EscalationRow).where(*scoped(EscalationRow)).values(user_id=None))
+    await db.execute(
+        update(OutreachMessageRow)
+        .where(OutreachMessageRow.org_id == org_id, OutreachMessageRow.subject_user_id == user_id)
+        .values(subject_user_id=None)
+    )
 
 
 async def purge_user_account(db: AsyncSession, *, org_id: UUID, user_id: UUID) -> None:
@@ -219,7 +237,9 @@ async def remove_user_from_agent(
     account and its history survive, other agents' bindings are
     untouched, and neither the backfill nor an automatic login/session
     re-enroll can bring the user back (ON CONFLICT hits the surviving
-    row). Orphan (no binding rows at all): hard account delete via
+    row) — and the agent stops following them
+    (:func:`surogates.followup.store.stop_following`), so no Program
+    reaches them and no roster counts them. Orphan (no binding rows at all): hard account delete via
     :func:`purge_user_account`, which raises :class:`MembershipsRemain`
     while that user still belongs to other organisations. Returns False
     when the user isn't visible from this tab. Stages writes only — the
@@ -237,6 +257,9 @@ async def remove_user_from_agent(
         .values(removed_at=func.now())
     )
     if result.rowcount:
+        from surogates.followup.store import stop_following
+
+        await stop_following(db, org_id=org_id, agent_id=agent_id, user_id=user_id)
         return True
     if (
         await user_visibility(
