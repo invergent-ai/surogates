@@ -22,7 +22,7 @@ from pydantic import BaseModel
 
 from surogates.api.session_guards import require_not_case_session
 from surogates.channels.memory_boundary import (
-    VISITOR_BOUNDARY_PREFIX,
+    is_visitor_boundary,
     session_memory_boundary,
 )
 from surogates.memory.r2_store import (
@@ -180,9 +180,7 @@ async def _build_store(
     # An anonymous channel's token reaches only its own session, and only
     # a website visitor's session has memory of its own: any other would
     # key to the org-shared memory, the one store a channel must never touch.
-    if tenant.principal()[0] is PrincipalKind.CHANNEL and not (
-        boundary or ""
-    ).startswith(VISITOR_BOUNDARY_PREFIX):
+    if tenant.principal()[0] is PrincipalKind.CHANNEL and not is_visitor_boundary(boundary):
         raise HTTPException(
             status_code=403,
             detail="This endpoint is not available to anonymous-channel sessions.",

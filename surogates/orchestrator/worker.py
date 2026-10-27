@@ -92,7 +92,6 @@ ANONYMOUS_CHANNELS: frozenset[str] = frozenset({"website"})
 from surogates.channels.constants import BUY_PAGE_CHANNEL, REALTIME_CHANNELS
 from surogates.channels.memory_boundary import (
     MANAGED_CHANNELS as MANAGED_CREDENTIAL_CHANNELS,
-    VISITOR_BOUNDARY_PREFIX,
     is_case_agent_config,
     is_eval_session,
     session_memory_boundary,
@@ -295,8 +294,8 @@ def _filter_effective_tools(
         and session.channel in ANONYMOUS_CHANNELS
     )
     if session_is_anonymous_channel:
-        if not (session_memory_boundary(session) or "").startswith(VISITOR_BOUNDARY_PREFIX):
-            result.discard("memory")
+        # Memory stays: a website session always has its visitor's own
+        # boundary (session_memory_boundary), never the agent's shared one.
         result.discard("skill_manage")
 
     # An evaluation row has no human behind it, and ``ask_user_question``

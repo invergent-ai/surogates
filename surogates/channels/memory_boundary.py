@@ -27,6 +27,7 @@ __all__ = [
     "is_case_agent_session",
     "is_case_config",
     "is_case_session",
+    "is_visitor_boundary",
     "is_eval_session",
     "session_memory_boundary",
     "visitor_boundary",
@@ -60,6 +61,11 @@ BUYER_BOUNDARY_PREFIX = "buyer:"
 # derived by :func:`visitor_boundary` from who the server knows the visitor
 # to be; nothing the browser sends names it directly.
 VISITOR_BOUNDARY_PREFIX = "visitor:"
+
+def is_visitor_boundary(boundary: str | None) -> bool:
+    """Whether *boundary* is a website visitor's own memory partition."""
+    return (boundary or "").startswith(VISITOR_BOUNDARY_PREFIX)
+
 
 # Every session of a Keel case, the step's own and each child it makes,
 # carries ``case:<case id>``: its memory is per agent and case, and the case's
