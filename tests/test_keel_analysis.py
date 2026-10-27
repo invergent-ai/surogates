@@ -235,7 +235,7 @@ async def test_keel_gets_a_label_for_each_hand_with_the_calls_usage(link, provid
     assert sent["model"] == "surogate" and sent["temperature"] == 0
     assert sent["response_format"]["type"] == "json_schema"
     prompt = json.dumps(sent["messages"])
-    assert H1["question"] in prompt and VOCABULARY[0] in prompt
+    assert all(hand["question"] in prompt for hand in (H1, H2, H3)) and VOCABULARY[0] in prompt
     assert not any(hand["id"] in prompt for hand in (H1, H2, H3))
 
 
@@ -721,3 +721,53 @@ async def test_a_long_number_a_hand_names_is_kept_out_of_a_label(link, provider)
         {"n": 1, "reason": "Account 20241118 reviewed", "answer_gist": "Counts"})))
 
     assert (await post(link, HANDS, hands_body(named))).json()["labels"] == []
+
+
+@pytest.mark.parametrize("text, named", [
+    ("ticket #482 is open", {"#482"}),
+    ("invoice INV#123", {"inv#123"}),
+    ("see Ref:A12 now", {"ref:a12"}),
+    ("about #C-7", {"#c-7"}),
+    ("file _AB-12-34_ here", {"ab-12-34"}),
+    ("ask @abc1 about it", {"abc1"}),
+])
+def test_a_short_reference_is_found_whether_it_is_a_word_or_a_run(text, named) -> None:
+    assert named <= identifiers_in(text)
+
+
+@pytest.mark.parametrize("what", ["a ticket #482", "an invoice INV#123", "a reference Ref:A12"])
+async def test_a_label_may_not_repeat_a_short_reference_of_a_hand(link, provider, what) -> None:
+    reference = what.split()[-1]
+    named = {**H1, "question": f"Is {what} a regular income source?"}
+    provider.replies.append(completion(labels(
+        {"n": 1, "reason": "Bonus as regular income", "answer_gist": f"Counts for {reference}"})))
+
+    assert (await post(link, HANDS, hands_body(named))).json()["labels"] == []
+
+
+async def test_a_long_number_alone_is_kept_out_of_a_label_when_a_hand_glues_it_to_letters(link, provider) -> None:
+    named = {**H1, "question": "Is ref20241118x a regular income account?"}
+    provider.replies.append(completion(labels(
+        {"n": 1, "reason": "Account 20241118 reviewed", "answer_gist": "Counts"})))
+
+    assert (await post(link, HANDS, hands_body(named))).json()["labels"] == []
+
+
+async def test_a_blocked_choice_blocks_its_hand(link, provider) -> None:
+    response = await post(link, HANDS, hands_body({**H1, "choices": [INJECTION, "No"]}))
+
+    assert response.status_code == 200 and response.json()["labels"] == []
+    assert provider.requests == []
+
+
+def test_omitting_thousands_of_identifiers_from_a_passage_is_fast() -> None:
+    import time
+
+    named = frozenset(f"ref-{n:06d}" for n in range(60000)) | {"2024"}
+    text = ("A payslip is accepted in 2024 when it is recent. " * 120)[:5900]
+    started = time.perf_counter()
+
+    out = with_identifiers_omitted(text, named)
+
+    assert time.perf_counter() - started < 2.0
+    assert "2024" not in out and out.count("[omitted]") == text.count("2024")

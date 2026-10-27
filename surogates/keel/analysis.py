@@ -50,7 +50,10 @@ OMITTED = "[omitted]"
 #: A run of the characters a reference number, an e-mail address or an amount is written with: whatever clings to it
 #: (quotes, markdown, an apostrophe, a dash, a colon) is not part of the run.
 _RUN = re.compile(r"[\w@.,\-/+]+")
-_RUN_ENDS = ".,-/+"
+_RUN_ENDS = ".,-/+_@"
+#: The characters stripped from the ends of a whitespace-separated word: a short reference such as ``#482`` or
+#: ``INV#123`` is a word of its own that a run would cut at the sign.
+_WORD_ENDS = ".,;:!?()[]{}<>\"'«»“”‘’$€£¥%"
 _LONG_NUMBER = re.compile(r"\d{4,}")
 
 #: What a call that reached no model used.
@@ -150,22 +153,24 @@ def one_line(value: object) -> str | None:
 def identifiers_in(*texts: str | None) -> frozenset[str]:
     """What the texts name that belongs to one case alone, casefolded.
 
-    Each run of letters, digits and ``@ . , - / +``, once those signs are
-    stripped from its ends, that is 4 characters or more and holds a digit or
-    an ``@`` (a reference number, an e-mail address, an amount), and each run
-    of 4 or more digits.  Quotes, markdown signs, apostrophes and colons end a
-    run, so ``**AB-12-34**`` and ``jane.doe@example.com's`` name what they
-    hold.  Names cannot be told apart from other words: only a prompt keeps
-    them out.
+    Three kinds, each 4 characters or more and holding a digit or an ``@``
+    (a reference number, an e-mail address, an amount), except the last:
+    each whitespace-separated word, once punctuation and currency signs are
+    stripped from its ends; each run of letters, digits and ``@ . , - / +``,
+    once those signs and ``_`` are stripped from its ends, which names what
+    ``**AB-12-34**`` and ``jane.doe@example.com's`` hold, since quotes,
+    markdown signs, apostrophes and colons end a run; and each run of 4 or
+    more digits.  Names cannot be told apart from other words: only a prompt
+    keeps them out.
     """
     found: set[str] = set()
     for text in texts:
         if not text:
             continue
-        for run in _RUN.findall(text):
-            run = run.strip(_RUN_ENDS)
-            if len(run) >= 4 and (any(ch.isdigit() for ch in run) or "@" in run):
-                found.add(run.casefold())
+        for piece in (*(word.strip(_WORD_ENDS) for word in text.split()),
+                      *(run.strip(_RUN_ENDS) for run in _RUN.findall(text))):
+            if len(piece) >= 4 and (any(ch.isdigit() for ch in piece) or "@" in piece):
+                found.add(piece.casefold())
         found.update(_LONG_NUMBER.findall(text))
     return frozenset(found)
 
@@ -193,9 +198,11 @@ def with_identifiers_omitted(text: str, identifiers: frozenset[str]) -> str:
         folded.append(piece)
         origin.extend([index] * len(piece))
     haystack = "".join(folded)
+    # A substring test is far cheaper than a scan: a long request names thousands of identifiers a passage never holds.
     spans = sorted(
         (origin[match.start()], origin[match.end() - 1] + 1)
         for identifier in identifiers
+        if identifier in haystack
         for match in re.finditer(re.escape(identifier), haystack)
     )
     merged: list[list[int]] = []
