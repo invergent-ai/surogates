@@ -882,6 +882,8 @@ async def test_update_cannot_turn_a_dynamic_loop_into_a_fixed_one(session_factor
             org_id=org_id, user_id=user_id, agent_id=agent, schedule_id=loop.id,
             schedule=parse_schedule("10m"),
         )
+    # Due at once: left active, the cross-tenant claim tests would pick it up.
+    await store.cancel(org_id=org_id, user_id=user_id, agent_id=agent, schedule_id=loop.id)
 
 
 async def test_another_users_schedule_cannot_be_managed(session_factory):

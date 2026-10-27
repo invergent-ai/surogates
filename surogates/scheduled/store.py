@@ -567,7 +567,9 @@ class ScheduledSessionStore:
                     ended = "limit"
                 elif row.expires_at is not None and row.expires_at <= now:
                     ended = "expired"
-                next_run_at = None if ended or cadence.is_dynamic else cadence.next_after(now)
+                # A one-off has run once, even when made to run early.
+                done_once = cadence.kind == "once"
+                next_run_at = None if ended or done_once or cadence.is_dynamic else cadence.next_after(now)
                 if ended is None and next_run_at is None and not cadence.is_dynamic:
                     ended = "done"
                 row.next_run_at = next_run_at
