@@ -45,3 +45,24 @@ def rejects_reasoning_controls(exc: Exception) -> bool:
     )) and any(reason in text for reason in (
         "unsupported", "not supported", "unknown", "unrecognized", "unexpected",
     ))
+
+
+async def create_without_reasoning(client: Any, **request: Any) -> Any:
+    """``client.chat.completions.create(**request)`` with the model's reasoning off where it can be turned off.
+
+    A gateway that rejects the reasoning controls gets the request as it
+    was, its own ``extra_body``, ``response_format`` and output bound kept.
+    """
+    extra_body = reasoning_disabled_extra_body(
+        request["model"], str(getattr(client, "base_url", "") or ""),
+    )
+    if extra_body is None:
+        return await client.chat.completions.create(**request)
+    try:
+        return await client.chat.completions.create(
+            **{**request, "extra_body": {**request.get("extra_body", {}), **extra_body}},
+        )
+    except Exception as exc:
+        if not rejects_reasoning_controls(exc):
+            raise
+        return await client.chat.completions.create(**request)

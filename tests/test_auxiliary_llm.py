@@ -18,3 +18,23 @@ def test_the_pro_tier_gets_nothing():
 
 def test_a_model_without_the_switch_gets_nothing():
     assert reasoning_disabled_extra_body("gemini-3.7-flash", _BYO) is None
+
+
+async def test_create_without_reasoning_merges_and_falls_back() -> None:
+    from types import SimpleNamespace
+
+    from surogates.harness.auxiliary_llm import create_without_reasoning
+
+    sent: list[dict] = []
+
+    async def create(**request):
+        sent.append(request)
+        if len(sent) == 1:
+            raise TypeError("unexpected keyword argument 'chat_template_kwargs'")
+        return "ok"
+
+    client = SimpleNamespace(base_url=_BYO, chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    request = {"model": "surogate3.7", "messages": [], "extra_body": {"top_k": 5}}
+    assert await create_without_reasoning(client, **request) == "ok"
+    assert sent[0]["extra_body"] == {"top_k": 5, "chat_template_kwargs": {"enable_thinking": False}}
+    assert sent[1] == request

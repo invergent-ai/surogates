@@ -28,10 +28,7 @@ from typing import Any, Dict, List, Optional, Union
 from uuid import UUID
 
 from surogates.channels.memory_boundary import CASE_BOUNDARY_PREFIX
-from surogates.harness.auxiliary_llm import (
-    reasoning_disabled_extra_body,
-    rejects_reasoning_controls,
-)
+from surogates.harness.auxiliary_llm import create_without_reasoning
 from surogates.harness.message_utils import content_as_text
 from surogates.tools.owner_scope import is_owner_scoped as _is_owner_scoped
 from surogates.db.narrative import (
@@ -296,24 +293,10 @@ def _summarizer_from_clients(
     async def _summarize(
         *, task: str, messages: list[dict[str, Any]], temperature: float, max_tokens: int,
     ) -> str | None:
-        request: dict[str, Any] = {
-            "model": model,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "stream": False,
-        }
-        extra_body = reasoning_disabled_extra_body(
-            model, str(getattr(client, "base_url", "") or ""),
+        response = await create_without_reasoning(
+            client, model=model, messages=messages,
+            temperature=temperature, max_tokens=max_tokens, stream=False,
         )
-        try:
-            response = await client.chat.completions.create(
-                **request, **({"extra_body": extra_body} if extra_body else {}),
-            )
-        except Exception as exc:
-            if not extra_body or not rejects_reasoning_controls(exc):
-                raise
-            response = await client.chat.completions.create(**request)
         return content_as_text(response.choices[0].message.content).strip() or None
 
     return _summarize, budget

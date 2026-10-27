@@ -32,10 +32,7 @@ from typing import Any, Literal
 from surogates.harness.streaming_executor import _is_error_result
 from surogates.harness.message_utils import content_as_text
 from surogates.harness.redact import mask_tool_arguments, mask_values, typed_texts
-from surogates.harness.auxiliary_llm import (
-    reasoning_disabled_extra_body,
-    rejects_reasoning_controls,
-)
+from surogates.harness.auxiliary_llm import create_without_reasoning
 from surogates.harness.structured_output import (
     iter_json_objects,
     parse_json_object,
@@ -670,29 +667,10 @@ class TurnSummarizer:
         slow provider — a timeout never reraises, since retrying it
         without the parameter would blame the wrong thing.
         """
-        extra_body = reasoning_disabled_extra_body(
-            kwargs["model"], str(getattr(client, "base_url", "") or ""),
-        )
-        request_kwargs = dict(kwargs)
-        if extra_body is not None:
-            request_kwargs["extra_body"] = {
-                **kwargs.get("extra_body", {}), **extra_body,
-            }
-
-        async def request() -> Any:
-            try:
-                return await client.chat.completions.create(**request_kwargs)
-            except Exception as exc:
-                if extra_body is None or not rejects_reasoning_controls(exc):
-                    raise
-                # Keep response_format and the output bound on a gateway
-                # that rejects reasoning controls. Both attempts share
-                # the same timeout, and empty content still stays empty.
-                return await client.chat.completions.create(**kwargs)
-
         try:
+            # Both attempts, with and without the reasoning controls, share the timeout.
             response = await asyncio.wait_for(
-                request(),
+                create_without_reasoning(client, **kwargs),
                 timeout=timeout,
             )
         except asyncio.TimeoutError:
