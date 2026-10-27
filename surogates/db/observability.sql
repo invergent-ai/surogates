@@ -1305,3 +1305,37 @@ CREATE INDEX IF NOT EXISTS idx_program_invitations_woken
     ON program_invitations (session_id) WHERE woken_at IS NOT NULL AND outbox_id IS NULL;
 ALTER TABLE outreach_messages
     ADD COLUMN IF NOT EXISTS not_before timestamptz;
+
+-- ── someone removed from an agent is no longer followed by it ──
+-- What the removal itself now does (surogates.followup.store.stop_following),
+-- for bindings removed before it did.  Matches only what a removed binding
+-- still leaves live, so it settles to a no-op; a re-added person's binding
+-- has no removed_at and is never touched.
+UPDATE followup_enrollments e
+SET status = 'ended', status_reason = 'Removed from the agent', updated_at = now()
+FROM agent_users au
+WHERE au.org_id = e.org_id AND au.agent_id = e.agent_id AND au.user_id = e.user_id
+  AND au.removed_at IS NOT NULL AND e.status <> 'ended';
+UPDATE inbox_items i
+SET status = 'acknowledged', responded_at = now(), updated_at = now()
+FROM escalations x, agent_users au
+WHERE au.org_id = x.org_id AND au.agent_id = x.agent_id AND au.user_id = x.user_id
+  AND au.removed_at IS NOT NULL AND x.resolved_at IS NULL
+  AND i.org_id = x.org_id AND i.status = 'pending'
+  AND i.payload->>'escalation' LIKE '%:' || replace(x.id::text, '-', '');
+UPDATE escalations x
+SET resolved_at = now()
+FROM agent_users au
+WHERE au.org_id = x.org_id AND au.agent_id = x.agent_id AND au.user_id = x.user_id
+  AND au.removed_at IS NOT NULL AND x.resolved_at IS NULL;
+UPDATE outreach_messages o
+SET state = 'replaced', reason = 'Removed from the agent'
+FROM agent_users au
+WHERE au.org_id = o.org_id AND au.agent_id = o.agent_id
+  AND au.user_id IN (o.user_id, o.subject_user_id)
+  AND au.removed_at IS NOT NULL AND o.state IN ('queued', 'awaiting_reply');
+DELETE FROM followup_contacts c
+USING agent_users au
+WHERE au.org_id = c.org_id AND au.agent_id = c.agent_id
+  AND au.user_id IN (c.person_user_id, c.contact_user_id)
+  AND au.removed_at IS NOT NULL;

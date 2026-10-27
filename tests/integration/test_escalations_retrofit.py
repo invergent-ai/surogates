@@ -8,6 +8,7 @@ alerts' key carries.  Applying the retrofit again adds nothing.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 
 import pytest
 import pytest_asyncio
@@ -75,3 +76,54 @@ async def test_earlier_escalations_become_records_once(engine):
         (free, "alert", "red", "fever", "raised", None),
         (step_inv, "missed_replies", None, "Ion has not answered", "raised", step_inv),
     ]
+
+
+async def test_people_removed_before_the_fix_stop_being_followed_once(engine):
+    org, removed, kept, team = uuid.uuid4(), uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    escalations = {removed: uuid.uuid4(), kept: uuid.uuid4()}
+    async with engine.begin() as conn:
+        await conn.execute(text("INSERT INTO orgs (id, name) VALUES (:id, 'o')"), {"id": org})
+        for person in (removed, kept):
+            await conn.execute(text(
+                "INSERT INTO users (id, org_id, email, display_name) VALUES (:id, :org, :email, 'p')"
+            ), {"id": person, "org": org, "email": f"{person}@x.test"})
+            await conn.execute(text(
+                "INSERT INTO agent_users (id, org_id, agent_id, user_id, source, removed_at)"
+                " VALUES (:id, :org, 'a1', :person, 'manual', :removed_at)"
+            ), {"id": uuid.uuid4(), "org": org, "person": person,
+                "removed_at": None if person == kept else datetime(2026, 10, 1)})
+            await conn.execute(text(
+                "INSERT INTO followup_enrollments (id, org_id, agent_id, user_id, protocol, enrolled_by)"
+                " VALUES (:id, :org, 'a1', :person, 'knee', 'operator')"
+            ), {"id": uuid.uuid4(), "org": org, "person": person})
+            await conn.execute(text(
+                "INSERT INTO escalations (id, org_id, agent_id, user_id, kind, reason)"
+                " VALUES (:id, :org, 'a1', :person, 'alert', 'fever')"
+            ), {"id": escalations[person], "org": org, "person": person})
+            await conn.execute(text(
+                "INSERT INTO followup_contacts (id, org_id, agent_id, person_user_id, contact_user_id)"
+                " VALUES (:id, :org, 'a1', :person, :contact)"
+            ), {"id": uuid.uuid4(), "org": org, "person": person, "contact": uuid.uuid4()})
+            await _alert(conn, org=org, person=person,
+                         key=f"escalation:-:{escalations[person].hex}:{team}")
+        await conn.execute(text("UPDATE outreach_messages SET state = 'awaiting_reply'"))
+        await apply_observability_ddl(conn)
+        await apply_observability_ddl(conn)
+
+        def rows(sql):
+            return conn.execute(text(sql))
+
+        enrolled = dict((await rows(
+            "SELECT user_id, status || ':' || coalesce(status_reason, '') FROM followup_enrollments"
+        )).all())
+        resolved = dict((await rows(
+            "SELECT user_id, resolved_at IS NOT NULL FROM escalations"
+        )).all())
+        held = dict((await rows(
+            "SELECT subject_user_id, state FROM outreach_messages"
+        )).all())
+        linked = set((await rows("SELECT person_user_id FROM followup_contacts")).scalars())
+    assert enrolled == {removed: "ended:Removed from the agent", kept: "active:"}
+    assert resolved == {removed: True, kept: False}
+    assert held == {removed: "replaced", kept: "awaiting_reply"}
+    assert linked == {kept}

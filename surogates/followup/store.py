@@ -20,6 +20,7 @@ from sqlalchemy.exc import IntegrityError
 from surogates.channels.capabilities import capabilities_for, initiating_platforms
 from surogates.channels.identity import mask_readable_phones
 from surogates.db.models import (
+    AgentUser,
     ChannelContactRow,
     ChannelIdentity,
     EscalationRow,
@@ -84,6 +85,7 @@ __all__ = [
     "resolve_escalation",
     "retire_escalation_alerts",
     "senders_of",
+    "stop_following",
     "update_enrollment",
     "update_settings",
     "upsert_enrollment",
@@ -168,12 +170,21 @@ async def enrollments(
 ) -> list[FollowupEnrollmentRow]:
     """An agent's enrollments, narrowed by whichever filters are given.
 
+    Never those of someone removed from the agent: their binding is
+    tombstoned, and they are no longer anyone the agent follows.  A person
+    with no binding at all (an account named by hand) still counts.
     Ordered oldest first, which is the order a roster and a history read.
     """
     query = (
         sa.select(FollowupEnrollmentRow)
         .where(FollowupEnrollmentRow.org_id == org_id)
         .where(FollowupEnrollmentRow.agent_id == agent_id)
+        .where(~sa.exists().where(
+            AgentUser.org_id == FollowupEnrollmentRow.org_id,
+            AgentUser.agent_id == FollowupEnrollmentRow.agent_id,
+            AgentUser.user_id == FollowupEnrollmentRow.user_id,
+            AgentUser.removed_at.isnot(None),
+        ))
         .order_by(FollowupEnrollmentRow.created_at)
     )
     for column, value in (
@@ -1405,18 +1416,91 @@ async def close_escalation_inbox_items(
     the conversation, and an escalation's conversation is the person's own.
     The item names its escalation as ``escalation:<step or ->:<id hex>``.
     """
-    now = _utcnow()
     async with session_factory() as db:
-        result = await db.execute(
-            sa.update(InboxItem)
-            .where(InboxItem.org_id == org_id)
-            .where(InboxItem.status == "pending")
-            .where(InboxItem.payload["escalation"].as_string().like(f"%:{escalation_id.hex}"))
-            .values(status="acknowledged", responded_at=now, updated_at=now)
-            .execution_options(synchronize_session=False)
-        )
+        result = await db.execute(_close_inbox_items(org_id, [escalation_id]))
         await db.commit()
     return int(result.rowcount or 0)
+
+
+def _close_inbox_items(org_id: uuid.UUID, escalation_ids: Iterable[uuid.UUID]) -> Any:
+    now = _utcnow()
+    named = InboxItem.payload["escalation"].as_string()
+    return (
+        sa.update(InboxItem)
+        .where(InboxItem.org_id == org_id)
+        .where(InboxItem.status == "pending")
+        .where(sa.or_(*(named.like(f"%:{i.hex}") for i in escalation_ids)))
+        .values(status="acknowledged", responded_at=now, updated_at=now)
+        .execution_options(synchronize_session=False)
+    )
+
+
+REMOVED_FROM_AGENT = "Removed from the agent"
+
+
+async def stop_following(
+    db: Any, *, org_id: uuid.UUID, user_id: uuid.UUID, agent_id: str | None = None,
+) -> None:
+    """Stop everything follow-up does for *user_id* on *agent_id*, or on
+    every agent of *org_id* when it is ``None``: someone taken off the agent
+    is no longer followed.
+
+    Their enrollments end (kept, so the history still reads), their open
+    escalations are resolved and leave the Inbox, what is still held for or
+    about them is given up, and their links to and from other people go.
+    Runs in the caller's transaction on *db*; the caller commits.
+    """
+    def scoped(model: Any) -> list[Any]:
+        where = [model.org_id == org_id]
+        if agent_id is not None:
+            where.append(model.agent_id == agent_id)
+        return where
+
+    now = _utcnow()
+    await db.execute(
+        sa.update(FollowupEnrollmentRow)
+        .where(*scoped(FollowupEnrollmentRow))
+        .where(FollowupEnrollmentRow.user_id == user_id)
+        .where(FollowupEnrollmentRow.status != "ended")
+        .values(status="ended", status_reason=REMOVED_FROM_AGENT, updated_at=now)
+        .execution_options(synchronize_session=False)
+    )
+    open_ids = list((
+        await db.execute(
+            sa.select(EscalationRow.id)
+            .where(*scoped(EscalationRow))
+            .where(EscalationRow.user_id == user_id)
+            .where(EscalationRow.resolved_at.is_(None))
+        )
+    ).scalars())
+    if open_ids:
+        await db.execute(
+            sa.update(EscalationRow)
+            .where(EscalationRow.id.in_(open_ids))
+            .values(resolved_at=now)
+            .execution_options(synchronize_session=False)
+        )
+        await db.execute(_close_inbox_items(org_id, open_ids))
+    await db.execute(
+        sa.update(OutreachMessageRow)
+        .where(*scoped(OutreachMessageRow))
+        .where(OutreachMessageRow.state.in_(("queued", "awaiting_reply")))
+        .where(sa.or_(
+            OutreachMessageRow.user_id == user_id,
+            OutreachMessageRow.subject_user_id == user_id,
+        ))
+        .values(state="replaced", reason=REMOVED_FROM_AGENT)
+        .execution_options(synchronize_session=False)
+    )
+    await db.execute(
+        sa.delete(FollowupContactRow)
+        .where(*scoped(FollowupContactRow))
+        .where(sa.or_(
+            FollowupContactRow.person_user_id == user_id,
+            FollowupContactRow.contact_user_id == user_id,
+        ))
+        .execution_options(synchronize_session=False)
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -469,3 +469,132 @@ async def test_user_delete_cascades_bindings(session_factory):
         await db.commit()
 
     assert await _bindings(session_factory, org_id) == []
+
+
+async def _follow(session_factory, org_id, agent_id, person, contact):
+    """Enrol *person* on *agent_id* with an open escalation, a held alert
+    about them, a message held for them, and *contact* linked to them."""
+    from surogates.db.models import (
+        EscalationRow, FollowupContactRow, FollowupEnrollmentRow, OutreachMessageRow,
+    )
+
+    escalation_id = uuid.uuid4()
+    async with session_factory() as db:
+        db.add(FollowupEnrollmentRow(
+            org_id=org_id, agent_id=agent_id, user_id=person, protocol="knee",
+            enrolled_by="operator",
+        ))
+        db.add(EscalationRow(
+            id=escalation_id, org_id=org_id, agent_id=agent_id, user_id=person,
+            kind="alert", reason="fever",
+        ))
+        for recipient, subject, kind in (
+            (uuid.uuid4(), person, "alert"), (person, None, "operator"),
+        ):
+            db.add(OutreachMessageRow(
+                org_id=org_id, agent_id=agent_id, user_id=recipient, platform="whatsapp",
+                channel_identifier="pn", kind=kind, text="x", state="awaiting_reply",
+                subject_user_id=subject,
+            ))
+        db.add(FollowupContactRow(
+            org_id=org_id, agent_id=agent_id, person_user_id=person, contact_user_id=contact,
+        ))
+        await db.commit()
+    return escalation_id
+
+
+async def _followed(session_factory, org_id, agent_id, person):
+    from surogates.db.models import (
+        EscalationRow, FollowupContactRow, FollowupEnrollmentRow, OutreachMessageRow,
+    )
+
+    def mine(model):
+        return (model.org_id == org_id, model.agent_id == agent_id)
+
+    async with session_factory() as db:
+        enrollments = (await db.execute(
+            select(FollowupEnrollmentRow.status, FollowupEnrollmentRow.status_reason)
+            .where(*mine(FollowupEnrollmentRow), FollowupEnrollmentRow.user_id == person)
+        )).all()
+        escalations = (await db.execute(
+            select(EscalationRow.resolved_at).where(*mine(EscalationRow))
+        )).scalars().all()
+        outreach = (await db.execute(
+            select(OutreachMessageRow.state, OutreachMessageRow.reason)
+            .where(*mine(OutreachMessageRow))
+        )).all()
+        contacts = (await db.execute(
+            select(FollowupContactRow.id).where(*mine(FollowupContactRow))
+        )).scalars().all()
+    return [tuple(r) for r in enrollments], escalations, {tuple(r) for r in outreach}, contacts
+
+
+async def test_removing_a_person_stops_following_them_on_that_agent(session_factory):
+    from surogates.followup import store as followup_store
+
+    org_id = await create_org(session_factory)
+    person = await create_user(session_factory, org_id)
+    other = await create_user(session_factory, org_id)
+    contact = await create_user(session_factory, org_id)
+    for agent in ("agent-a", "agent-b"):
+        await _enroll(session_factory, org_id, agent, person, SOURCE_MANUAL)
+        await _follow(session_factory, org_id, agent, person, contact)
+    await _enroll(session_factory, org_id, "agent-a", other, SOURCE_MANUAL)
+    await _follow(session_factory, org_id, "agent-a", other, uuid.uuid4())
+
+    async with session_factory() as db:
+        assert await remove_user_from_agent(
+            db, org_id=org_id, agent_id="agent-a", user_id=person,
+        )
+        await db.commit()
+
+    enrollments, escalations, outreach, contacts = await _followed(
+        session_factory, org_id, "agent-a", person,
+    )
+    assert enrollments == [("ended", "Removed from the agent")]
+    # The other person's escalation is still open; the removed one's is not.
+    assert sorted(e is None for e in escalations) == [False, True]
+    assert ("replaced", "Removed from the agent") in outreach
+    assert {s for s, _ in outreach} == {"replaced", "awaiting_reply"}
+    assert len(contacts) == 1  # only the other person's link survives
+    roster = await followup_store.enrollments(session_factory, org_id=org_id, agent_id="agent-a")
+    assert [r.user_id for r in roster] == [other]
+
+    # Another agent keeps following them.
+    enrollments, escalations, outreach, contacts = await _followed(
+        session_factory, org_id, "agent-b", person,
+    )
+    assert enrollments == [("active", None)]
+    assert escalations == [None]
+    assert {s for s, _ in outreach} == {"awaiting_reply"}
+    assert len(contacts) == 1
+
+    # Re-adding them does not re-enrol them: that is a deliberate act.
+    await _enroll(session_factory, org_id, "agent-a", person, SOURCE_MANUAL, reactivate=True)
+    enrollments, *_ = await _followed(session_factory, org_id, "agent-a", person)
+    assert enrollments == [("ended", "Removed from the agent")]
+    roster = await followup_store.enrollments(session_factory, org_id=org_id, agent_id="agent-a")
+    assert {r.user_id for r in roster} == {other, person}
+
+
+async def test_deleting_an_orphan_drops_their_follow_up(session_factory):
+    org_id = await create_org(session_factory)
+    orphan = await create_user(session_factory, org_id)
+    escalation_id = await _follow(session_factory, org_id, "agent-a", orphan, uuid.uuid4())
+
+    async with session_factory() as db:
+        assert await remove_user_from_agent(
+            db, org_id=org_id, agent_id="agent-a", user_id=orphan,
+        )
+        await db.commit()
+
+    enrollments, escalations, outreach, contacts = await _followed(
+        session_factory, org_id, "agent-a", orphan,
+    )
+    assert enrollments == [] and contacts == []
+    assert len(escalations) == 1 and escalations[0] is not None
+    # The alert to a team member survives, given up and no longer naming them.
+    assert outreach == {("replaced", "Removed from the agent")}
+    from surogates.db.models import EscalationRow
+    async with session_factory() as db:
+        assert (await db.get(EscalationRow, escalation_id)).user_id is None
