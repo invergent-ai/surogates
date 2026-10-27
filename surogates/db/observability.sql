@@ -1316,13 +1316,27 @@ SET status = 'ended', status_reason = 'Removed from the agent', updated_at = now
 FROM agent_users au
 WHERE au.org_id = e.org_id AND au.agent_id = e.agent_id AND au.user_id = e.user_id
   AND au.removed_at IS NOT NULL AND e.status <> 'ended';
-UPDATE inbox_items i
-SET status = 'acknowledged', responded_at = now(), updated_at = now()
-FROM escalations x, agent_users au
-WHERE au.org_id = x.org_id AND au.agent_id = x.agent_id AND au.user_id = x.user_id
-  AND au.removed_at IS NOT NULL AND x.resolved_at IS NULL
-  AND i.org_id = x.org_id AND i.status = 'pending'
-  AND i.payload->>'escalation' LIKE '%:' || replace(x.id::text, '-', '');
+-- Their open escalations leave the Inbox.  Only when there are any: the
+-- item is found by its exact key (escalation:<step or ->:<id hex>), which
+-- inbox_items has no index on, so the scan must not run on every migrate.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM escalations x
+        JOIN agent_users au
+          ON au.org_id = x.org_id AND au.agent_id = x.agent_id AND au.user_id = x.user_id
+        WHERE au.removed_at IS NOT NULL AND x.resolved_at IS NULL
+    ) THEN
+        UPDATE inbox_items i
+        SET status = 'acknowledged', responded_at = now(), updated_at = now()
+        FROM escalations x, agent_users au
+        WHERE au.org_id = x.org_id AND au.agent_id = x.agent_id AND au.user_id = x.user_id
+          AND au.removed_at IS NOT NULL AND x.resolved_at IS NULL
+          AND i.org_id = x.org_id AND i.status = 'pending'
+          AND i.payload->>'escalation' = 'escalation:'
+              || coalesce(x.invitation_id::text, '-') || ':' || replace(x.id::text, '-', '');
+    END IF;
+END $$;
 UPDATE escalations x
 SET resolved_at = now()
 FROM agent_users au
@@ -1339,3 +1353,24 @@ USING agent_users au
 WHERE au.org_id = c.org_id AND au.agent_id = c.agent_id
   AND au.user_id IN (c.person_user_id, c.contact_user_id)
   AND au.removed_at IS NOT NULL;
+
+-- ── a resolved escalation's alerts are not held for delivery ──
+-- Resolving retires them (surogates.followup.store.retire_escalation_alerts);
+-- this gives up those held from before it did.  Bounded by the held rows
+-- (idx_outreach_messages_state), each joined to its escalation by primary
+-- key: the id is read from the dedupe key, escalation:<step>:<hex>:… and
+-- reminder:<step>:<hex>:… or missed:<id>:…, cast only once it has the shape.
+UPDATE outreach_messages o
+SET state = 'replaced', reason = 'Escalation resolved before it was read'
+FROM escalations x
+WHERE o.state IN ('queued', 'awaiting_reply')
+  AND o.kind = 'alert'
+  AND x.id = CASE
+      WHEN split_part(o.dedupe_key, ':', 1) IN ('escalation', 'reminder')
+           AND split_part(o.dedupe_key, ':', 3) ~ '^[0-9a-f]{32}$'
+          THEN split_part(o.dedupe_key, ':', 3)::uuid
+      WHEN split_part(o.dedupe_key, ':', 1) = 'missed'
+           AND split_part(o.dedupe_key, ':', 2) ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+          THEN split_part(o.dedupe_key, ':', 2)::uuid
+  END
+  AND x.org_id = o.org_id AND x.resolved_at IS NOT NULL;

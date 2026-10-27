@@ -106,6 +106,8 @@ async def test_people_removed_before_the_fix_stop_being_followed_once(engine):
             ), {"id": uuid.uuid4(), "org": org, "person": person, "contact": uuid.uuid4()})
             await _alert(conn, org=org, person=person,
                          key=f"escalation:-:{escalations[person].hex}:{team}")
+            await _inbox_item(conn, org=org, person=person,
+                              key=f"escalation:-:{escalations[person].hex}")
         await conn.execute(text("UPDATE outreach_messages SET state = 'awaiting_reply'"))
         await apply_observability_ddl(conn)
         await apply_observability_ddl(conn)
@@ -123,7 +125,61 @@ async def test_people_removed_before_the_fix_stop_being_followed_once(engine):
             "SELECT subject_user_id, state FROM outreach_messages"
         )).all())
         linked = set((await rows("SELECT person_user_id FROM followup_contacts")).scalars())
+        inbox = dict((await rows("SELECT user_id, status FROM inbox_items")).all())
+    assert inbox == {removed: "acknowledged", kept: "pending"}
     assert enrolled == {removed: "ended:Removed from the agent", kept: "active:"}
     assert resolved == {removed: True, kept: False}
     assert held == {removed: "replaced", kept: "awaiting_reply"}
     assert linked == {kept}
+
+
+async def _inbox_item(conn, *, org, person, key):
+    """An Inbox item raised for the escalation *key*, on *person*'s session."""
+    session_id = uuid.uuid4()
+    await conn.execute(text(
+        "INSERT INTO sessions (id, org_id, agent_id, user_id) VALUES (:id, :org, 'a1', :person)"
+    ), {"id": session_id, "org": org, "person": person})
+    event_id = (await conn.execute(text(
+        "INSERT INTO events (session_id, org_id, type, data)"
+        " VALUES (:session, :org, 'followup.escalation', '{}') RETURNING id"
+    ), {"session": session_id, "org": org})).scalar_one()
+    await conn.execute(text(
+        "INSERT INTO inbox_items (org_id, user_id, session_id, source_event_id, kind, title, payload)"
+        " VALUES (:org, :person, :session, :event, 'action_required', 't',"
+        " jsonb_build_object('escalation', CAST(:key AS text)))"
+    ), {"org": org, "person": person, "session": session_id, "event": event_id, "key": key})
+
+
+async def test_alerts_held_for_cases_resolved_before_the_fix_are_given_up_once(engine):
+    org, person, team = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    resolved, open_, missed = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    async with engine.begin() as conn:
+        for escalation_id, resolved_at in ((resolved, datetime(2026, 10, 1)), (open_, None),
+                                           (missed, datetime(2026, 10, 1))):
+            await conn.execute(text(
+                "INSERT INTO escalations (id, org_id, agent_id, user_id, kind, reason, resolved_at)"
+                " VALUES (:id, :org, 'a1', :person, 'alert', 'fever', :resolved_at)"
+            ), {"id": escalation_id, "org": org, "person": person, "resolved_at": resolved_at})
+        keys = {
+            "alert": f"escalation:-:{resolved.hex}:{team}",
+            "reminder": f"reminder:-:{resolved.hex}:{team}",
+            "missed": f"missed:{missed}:{team}",
+            "open": f"escalation:-:{open_.hex}:{team}",
+            # Keys naming no escalation, malformed ids included, are left alone.
+            "old": f"escalation:-:aaa:{team}",
+            "notice": f"outcome:x:2026-10-01:{team}",
+        }
+        for key in keys.values():
+            await _alert(conn, org=org, person=person, key=key)
+        await conn.execute(text("UPDATE outreach_messages SET state = 'awaiting_reply'"))
+        await apply_observability_ddl(conn)
+        await apply_observability_ddl(conn)
+        states = dict((await conn.execute(text(
+            "SELECT dedupe_key, state || ':' || coalesce(reason, '') FROM outreach_messages"
+        ))).all())
+    gone = "replaced:Escalation resolved before it was read"
+    assert {name: states[key] for name, key in keys.items()} == {
+        "alert": gone, "reminder": gone, "missed": gone,
+        "open": "awaiting_reply:", "old": "awaiting_reply:", "notice": "awaiting_reply:",
+    }
+
