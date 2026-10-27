@@ -317,3 +317,71 @@ class TestVanishedViewer:
         client.text.clear()
         await asyncio.sleep(0.05)
         assert client.text == []
+
+
+class StalledPageCdp(FakeCdp):
+    """A page whose main thread is held: its Page commands time out until freed."""
+
+    def __init__(self, stalled: set[str]) -> None:
+        super().__init__({"Page.getLayoutMetrics": _layout()})
+        self.stalled = stalled
+
+    async def call(self, method, params=None, *, session=None, timeout=10.0):
+        self.calls.append((method, params or {}, session))
+        if method in self.stalled:
+            raise asyncio.TimeoutError
+        return self._results.get(method, {})
+
+
+class TestBusyPage:
+    async def test_a_busy_page_keeps_the_viewer_and_starts_once_it_answers(self, monkeypatch) -> None:
+        monkeypatch.setattr("surogates.browser.shell.PAGE_RETRY_MAX_DELAY", 0.01)
+        sleeps: list[float] = []
+        real_sleep = asyncio.sleep
+
+        async def quick_sleep(delay: float) -> None:
+            sleeps.append(delay)
+            await real_sleep(0)
+
+        monkeypatch.setattr("surogates.browser.shell.asyncio.sleep", quick_sleep)
+        cdp = StalledPageCdp({"Page.enable"})
+        session, cdp, client = await _session(cdp=cdp)
+        # start() returned: the viewer is connected, told the page is busy,
+        # and has its tab list, with no screencast yet.
+        assert {"t": "status", "state": "busy"} in client.text
+        assert any(message.get("t") == "tabs" for message in client.text)
+        assert "Page.startScreencast" not in cdp.methods()
+
+        await real_sleep(0.01)
+        cdp.stalled.clear()
+        for _ in range(50):
+            if "Page.startScreencast" in cdp.methods():
+                break
+            await real_sleep(0.01)
+        assert "Page.startScreencast" in cdp.methods()
+        assert client.text[-1] == {"t": "status", "state": "ready"}
+        assert sleeps[0] == 1.0 and all(delay <= 1.0 for delay in sleeps)
+        await session.close()
+
+    async def test_an_unmeasured_viewport_does_not_hold_the_screencast_back(self) -> None:
+        session, cdp, client = await _session(cdp=StalledPageCdp({"Page.getLayoutMetrics"}))
+        assert "Page.startScreencast" in cdp.methods()
+        assert {"t": "status", "state": "busy"} not in client.text
+        # Commands scale against the default viewport meanwhile.
+        await session.handle(json.dumps({"t": "click", "x": 0.5, "y": 0.5}))
+        press = next(c for c in cdp.calls if c[0] == "Input.dispatchMouseEvent")
+        assert (press[1]["x"], press[1]["y"]) == (640, 400)
+        await session.close()
+
+    async def test_the_retry_stops_when_the_viewer_leaves(self, monkeypatch) -> None:
+        real_sleep = asyncio.sleep
+
+        async def quick_sleep(delay: float) -> None:
+            await real_sleep(0)
+
+        monkeypatch.setattr("surogates.browser.shell.asyncio.sleep", quick_sleep)
+        session, cdp, _client = await _session(cdp=StalledPageCdp({"Page.enable"}))
+        await session.close()
+        before = cdp.methods().count("Page.enable")
+        await real_sleep(0.02)
+        assert cdp.methods().count("Page.enable") == before

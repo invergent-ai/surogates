@@ -33,6 +33,10 @@ class CdpClient:
         self._pending: dict[int, asyncio.Future] = {}
         self._handlers: dict[str, list[Callable[[dict], None]]] = {}
         self._pump: asyncio.Task | None = None
+        # Set when the browser's socket ends on its own.  Calls in flight fail
+        # at once rather than each waiting out its timeout, and the viewer's
+        # connection learns the browser is gone instead of freezing.
+        self.closed = asyncio.Event()
 
     async def __aenter__(self) -> "CdpClient":
         self._pump = asyncio.create_task(self._read_loop())
@@ -81,6 +85,8 @@ class CdpClient:
         if session:
             message["sessionId"] = session
 
+        if self.closed.is_set():
+            raise ConnectionError("the browser's CDP connection is closed")
         future: asyncio.Future = asyncio.get_running_loop().create_future()
         self._pending[message_id] = future
         await self._socket.send(json.dumps(message))
@@ -106,14 +112,28 @@ class CdpClient:
         )
         return result["sessionId"]
 
+    def _lost(self) -> None:
+        self.closed.set()
+        for future in self._pending.values():
+            if not future.done():
+                future.set_exception(ConnectionError("the browser's CDP connection closed"))
+        self._pending.clear()
+
     async def _read_loop(self) -> None:
         while True:
             try:
-                payload = json.loads(await self._socket.recv())
+                raw = await self._socket.recv()
             except asyncio.CancelledError:
                 raise
-            except Exception:  # noqa: BLE001 - a dead or noisy socket ends the loop
+            except Exception:  # noqa: BLE001 - the socket ended: the browser is gone
+                logger.info("cdp connection closed", exc_info=True)
+                self._lost()
                 return
+            try:
+                payload = json.loads(raw)
+            except ValueError:
+                logger.warning("cdp sent a frame that is not JSON; dropped")
+                continue
             message_id = payload.get("id")
             if message_id is not None:
                 future = self._pending.pop(message_id, None)

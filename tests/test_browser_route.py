@@ -1369,6 +1369,41 @@ async def _wake_noop(_session_id: str) -> None:
     return None
 
 
+class FakeUpstream:
+    """The browser's CDP socket: answers the calls a shell's start makes, and can die."""
+
+    def __init__(self) -> None:
+        import asyncio
+
+        self._replies: asyncio.Queue = asyncio.Queue()
+        self._loop = None
+        self.closed = False
+
+    async def send(self, raw: str) -> None:
+        import asyncio
+        import json
+
+        self._loop = asyncio.get_running_loop()
+        message = json.loads(raw)
+        result = {
+            "Target.getTargets": {"targetInfos": [{"type": "page", "targetId": "t1", "url": "https://a.test/"}]},
+            "Target.attachToTarget": {"sessionId": "s1"},
+        }.get(message["method"], {})
+        await self._replies.put(json.dumps({"id": message["id"], "result": result}))
+
+    async def recv(self) -> str:
+        reply = await self._replies.get()
+        if reply is None:
+            raise ConnectionError("browser went away")
+        return reply
+
+    async def close(self) -> None:
+        self.closed = True
+
+    def die(self) -> None:
+        self._loop.call_soon_threadsafe(self._replies.put_nowait, None)
+
+
 class TestShellUpstream:
     @pytest.fixture()
     def shell(self, app_factory, monkeypatch):
@@ -1414,3 +1449,14 @@ class TestShellUpstream:
         client, path = shell.connect_with(ConnectionRefusedError("refused"))
         assert self._closed_with(client, path) == 4502
         assert shell.resolver.forgotten == [shell.sid]
+
+    def test_the_browser_dying_under_a_viewer_closes_with_its_own_code(self, shell) -> None:
+        upstream = FakeUpstream()
+        client, path = shell.connect_with(upstream)
+        with client, pytest.raises(WebSocketDisconnect) as closed:
+            with client.websocket_connect(path) as ws:
+                assert ws.receive_json()["t"] == "tabs"
+                upstream.die()
+                ws.receive_json()
+        assert closed.value.code == 4503
+        assert upstream.closed

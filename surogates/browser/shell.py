@@ -66,6 +66,8 @@ MAX_SCROLL_DELTA = 10_000
 # An Input.insertText carrying megabytes is a trivial denial of service, and a
 # frame this large is never a legitimate command.
 MAX_WS_MESSAGE = 64 * 1024
+# The longest wait between attempts to start a busy page's screencast.
+PAGE_RETRY_MAX_DELAY = 10.0
 # Used until the first Page.getLayoutMetrics answers, so an early click scales
 # against something sane rather than dividing by zero.
 DEFAULT_VIEWPORT = (1280, 800)
@@ -367,14 +369,54 @@ class ShellSession:
             logger.exception("browser shell command failed")
 
     async def _attach(self, target_id: str) -> None:
+        """Attach to a tab and start its screencast, or keep the viewer and retry.
+
+        Attaching is the browser's to answer; the Page commands after it are
+        the page's, and a page whose main thread is held (a long click, a
+        modal dialog, a heavy script) answers none until it is free again.
+        The viewer stays connected through that and is told the page is busy;
+        frames start once the page answers.
+        """
+
         self._target = target_id
         self._session = await self._cdp.attach_page(target_id)
+        try:
+            await self._start_page()
+        except asyncio.TimeoutError:
+            await self._send({"t": "status", "state": "busy"})
+            self._spawn(self._retry_page_start())
+
+    async def _start_page(self) -> None:
         await self._cdp.call("Page.enable", session=self._session)
-        await self._refresh_viewport()
+        try:
+            await self._refresh_viewport()
+        except asyncio.TimeoutError:
+            # Commands scale against the viewport in hand until a navigation
+            # measures it again; frames do not depend on it.
+            logger.info("browser shell kept its viewport: the page did not answer")
         # Last, and before anything navigates: see the class docstring.
         await self._cdp.call(
             "Page.startScreencast", dict(SCREENCAST_PARAMS), session=self._session
         )
+
+    async def _retry_page_start(self) -> None:
+        delay = 1.0
+        session = self._session
+        # A tab switch since attaches a session of its own; this one is moot.
+        while True:
+            await asyncio.sleep(delay)
+            if self._gone or self._session != session:
+                return
+            try:
+                await self._start_page()
+            except asyncio.TimeoutError:
+                delay = min(delay * 2, PAGE_RETRY_MAX_DELAY)
+                continue
+            except Exception:  # noqa: BLE001 - background task, never fatal
+                logger.exception("browser shell could not start the page")
+                return
+            await self._send({"t": "status", "state": "ready"})
+            return
 
     async def _switch_tab(self, target_id: object) -> None:
         if not isinstance(target_id, str) or not target_id:

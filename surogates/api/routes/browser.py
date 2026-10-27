@@ -807,22 +807,45 @@ async def browser_shell_ws(websocket: WebSocket, session_id: UUID) -> None:
 
     await websocket.accept()
     session: ShellSession | None = None
+
+    async def relay(shell: ShellSession) -> None:
+        while True:
+            message = await websocket.receive()
+            if message["type"] == "websocket.disconnect":
+                return
+            raw = message.get("text")
+            if raw is None:
+                # The client half of this protocol is JSON only; binary is
+                # the server's direction.
+                continue
+            await shell.handle(raw)
+
     try:
         async with CdpClient(upstream) as cdp:
             session = ShellSession(cdp, websocket, lease_held=lease_held)
             await session.start()
-            while True:
-                message = await websocket.receive()
-                if message["type"] == "websocket.disconnect":
-                    return
-                raw = message.get("text")
-                if raw is None:
-                    # The client half of this protocol is JSON only; binary is
-                    # the server's direction.
-                    continue
-                await session.handle(raw)
+            viewer = asyncio.ensure_future(relay(session))
+            browser_lost = asyncio.ensure_future(cdp.closed.wait())
+            try:
+                await asyncio.wait(
+                    {viewer, browser_lost}, return_when=asyncio.FIRST_COMPLETED,
+                )
+            finally:
+                for task in (viewer, browser_lost):
+                    task.cancel()
+            if viewer.done() and not viewer.cancelled():
+                viewer.result()  # the viewer left, or its relay raised
+                return
+            raise ConnectionError("the browser's CDP connection closed")
     except WebSocketDisconnect:
         return
+    except ConnectionError:
+        # The browser's end of the stream died under a connected viewer: a
+        # code of its own, so the viewer reconnects rather than freezing on
+        # the last frame.
+        logger.info("browser shell lost the browser for session %s", session_id, exc_info=True)
+        with contextlib.suppress(Exception):
+            await websocket.close(code=4503, reason="browser connection lost")
     except Exception:
         logger.exception("browser shell session failed")
         with contextlib.suppress(Exception):
