@@ -27,6 +27,13 @@ class FakePool:
         )
         self.snapshot_cache: dict[str, dict[str, Any]] = {}
         self.typed_secrets = TypedSecrets()
+        self.profile_problems: list[tuple[str, str, str]] = []
+
+    async def report_profile_problem(self, session_id: str, profile_id: str, reason: str) -> None:
+        self.profile_problems.append((session_id, profile_id, reason))
+
+    def take_profile_note(self, session_id: str) -> str | None:
+        return None
 
     async def ensure(
         self,

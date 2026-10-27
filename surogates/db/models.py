@@ -1719,6 +1719,11 @@ class BrowserProfile(Base):
     cookie_domains: Mapped[list[Any]] = mapped_column(
         JSONB, nullable=False, server_default=text("'[]'::jsonb")
     )
+    # An agent-owned profile is used, without being bound, by every session
+    # of the agent on these channels: the operator's grant of its login.
+    use_in_channels: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, server_default=text("'{}'::text[]")
+    )
     created_at: Mapped[datetime] = mapped_column(
         nullable=False, server_default=func.now()
     )

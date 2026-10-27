@@ -120,6 +120,7 @@ class BrowserPool:
         # already hold (avoids threading the store through the executor chain).
         self.browser_profile_store = browser_profile_store
         self.typed_secrets = TypedSecrets()
+        self._profile_notes: dict[str, str] = {}
         self._mapping: dict[str, _Slot] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._global_lock = asyncio.Lock()
@@ -240,6 +241,25 @@ class BrowserPool:
                 newly_provisioned=True,
                 snapshot_cache=slot.snapshot_cache,
             )
+
+    async def report_profile_problem(self, session_id: str, profile_id: str, reason: str) -> None:
+        """Say, once, that *session_id*'s new browser started without its saved login.
+
+        The session gets an event; the model gets the note on its next
+        browser tool result, so it does not act as if it were signed in.
+        """
+        self._profile_notes[session_id] = (
+            f"This browser started logged out: its saved login (browser profile {profile_id}) {reason}. "
+            "Do not act as if you were signed in. If the task needs the login, stop and say so in your reply."
+        )
+        await self._emit_event(
+            session_id,
+            EventType.BROWSER_PROFILE_UNAVAILABLE.value,
+            {"session_id": session_id, "profile_id": profile_id, "reason": reason},
+        )
+
+    def take_profile_note(self, session_id: str) -> str | None:
+        return self._profile_notes.pop(session_id, None)
 
     async def _publish(self, session_id: str, org_id: str, user_id: str, slot: _Slot) -> None:
         await self._registry.set(

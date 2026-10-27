@@ -1380,3 +1380,7 @@ WHERE o.state IN ('queued', 'awaiting_reply')
           THEN split_part(o.dedupe_key, ':', 2)::uuid
   END
   AND x.org_id = o.org_id AND x.resolved_at IS NOT NULL;
+
+-- An agent-owned browser profile used, without being bound, on these channels.
+ALTER TABLE browser_profiles
+    ADD COLUMN IF NOT EXISTS use_in_channels text[] NOT NULL DEFAULT '{}'::text[];
