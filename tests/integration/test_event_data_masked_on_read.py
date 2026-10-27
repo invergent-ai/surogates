@@ -48,3 +48,24 @@ async def test_a_legacy_typed_password_never_comes_back_from_the_database(
     for data in (event.data, column):
         assert PASSWORD not in json.dumps(data)
         assert data["arguments"]["ref"] == "@e5"
+
+
+async def test_the_column_keeps_its_jsonb_operators(session_store, session_factory):
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    session = await session_store.create_session(
+        org_id=org_id, user_id=user_id, agent_id="agent-1", channel="web",
+    )
+    async with session_factory() as db:
+        db.add(Event(session_id=session.id, type="user.message", data={"synthetic": True}))
+        await db.commit()
+        found = (
+            await db.execute(
+                sa.select(sa.func.count()).where(
+                    Event.session_id == session.id,
+                    Event.data.has_key("synthetic"),
+                    Event.data["synthetic"].as_boolean(),
+                )
+            )
+        ).scalar_one()
+    assert found == 1

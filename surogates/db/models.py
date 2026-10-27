@@ -77,6 +77,12 @@ class EventData(TypeDecorator):
 
     impl = JSONB
     cache_ok = True
+    # Without these the column loses JSONB's operators: has_key would bind
+    # its key as jsonb, which Postgres has no ``?`` for.
+    comparator_factory = JSONB.Comparator
+
+    def coerce_compared_value(self, op, value):
+        return self.impl.coerce_compared_value(op, value)
 
     def process_result_value(self, value, dialect):
         # Imported here: the harness package imports the database models.
