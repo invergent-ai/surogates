@@ -42,8 +42,9 @@ const TYPED_TEXT = /("text"\s*:\s*")((?:[^"\\]|\\.)*)/g;
 
 /**
  * A tool call's arguments as they may be shown: the text browser_type typed
- * (a password, often) becomes one bullet per character. The server stores it
- * masked, but events stored before it did still carry it in the clear.
+ * (a password, often) becomes one bullet per character. The agent API masks
+ * it on every read, legacy rows included, but a host may feed this component
+ * events it read from the database itself, as Surogate Studio does.
  */
 export function shownArgs(toolName: string, args: string): string {
   if (toolName !== "browser_type") return args;

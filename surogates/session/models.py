@@ -11,7 +11,7 @@ from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 # Statuses a conversation may be resumed/reused in.  ``completed`` counts
@@ -81,6 +81,14 @@ class Event(BaseModel):
     trace_id: str | None = None
     span_id: str | None = None
     created_at: datetime | None = None
+
+    @field_validator("data")
+    @classmethod
+    def _mask_typed_text(cls, data: dict) -> dict:
+        # Imported here: the harness package imports this module.
+        from surogates.harness.redact import mask_typed_arguments
+
+        return mask_typed_arguments(data)
 
 
 class SessionLease(BaseModel):

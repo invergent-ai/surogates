@@ -250,6 +250,23 @@ def mask_tool_arguments(name: Any, arguments: Any) -> Any:
     return json.dumps(mask_tool_arguments(name, parsed), ensure_ascii=False)
 
 
+def mask_typed_arguments(data: Any) -> Any:
+    """*data* with typed text masked in every tool call at any depth, nothing else redacted.
+
+    Events stored before typed text was masked on write still carry it; every
+    read masks it again, so no reader is shown it.
+    """
+    if isinstance(data, Mapping):
+        masked = {key: mask_typed_arguments(value) for key, value in data.items()}
+        if "arguments" in masked:
+            name = data.get("name") or data.get("tool_name")
+            masked["arguments"] = mask_tool_arguments(name, masked["arguments"])
+        return masked
+    if isinstance(data, list):
+        return [mask_typed_arguments(value) for value in data]
+    return data
+
+
 def typed_texts(tool_calls: list[dict[str, Any]]) -> list[str]:
     """The text each typing call in *tool_calls* (OpenAI shape) typed, longest first."""
     found: set[str] = set()
