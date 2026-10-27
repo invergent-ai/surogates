@@ -45,19 +45,52 @@ function DialogOverlay({
   )
 }
 
+/**
+ * Remembers which element held focus when the dialog's content mounted, before
+ * the dialog takes focus. It renders inside the content, so it runs once per
+ * opening, not once per render of the page that holds the dialog.
+ */
+function RememberOpener({
+  into,
+}: {
+  into: React.MutableRefObject<HTMLElement | null>
+}) {
+  React.useState(() => {
+    const active = document.activeElement
+    into.current = active instanceof HTMLElement ? active : null
+    return null
+  })
+  return null
+}
+
 function DialogContent({
   className,
   children,
   showCloseButton = true,
+  onCloseAutoFocus,
   ...props
 }: React.ComponentProps<typeof DialogPrimitive.Content> & {
   showCloseButton?: boolean
 }) {
+  const opener = React.useRef<HTMLElement | null>(null)
   return (
     <DialogPortal>
       <DialogOverlay />
       <DialogPrimitive.Content
         data-slot="dialog-content"
+        // Radix gives focus back to the dialog's trigger and to nothing else,
+        // so a dialog a page opens from a state change would leave focus on
+        // the page's body. Give it back to the element that held focus when
+        // the dialog opened, which is the trigger when there is one.
+        onCloseAutoFocus={(event) => {
+          onCloseAutoFocus?.(event)
+          if (event.defaultPrevented) return
+          const target = opener.current
+          if (target && target !== document.body && target.isConnected) {
+            event.preventDefault()
+            target.focus()
+          }
+        }}
         className={cn(
           // The Work console's dialog: a 14px card with a hairline border and a
           // deep shadow, sentence-case title at 16px.
@@ -66,6 +99,7 @@ function DialogContent({
         )}
         {...props}
       >
+        <RememberOpener into={opener} />
         {children}
         {showCloseButton && (
           <DialogPrimitive.Close data-slot="dialog-close" asChild>
