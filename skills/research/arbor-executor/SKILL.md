@@ -42,7 +42,9 @@ you put in `worker_complete` and the files you wrote with the file tools.
      "branch": "<your branch>"}`.
    - If your coordination board is available (`share_note`), also post a `FAIL`
      note for a dead end (with why) or a `RESULT` note for a candidate outcome
-     (`outcome=… | evidence=<the check you actually ran> | risk=…`) so sibling
+     (`outcome=… | evidence=<the check you actually ran> | risk=…`), each with
+     a `ref` to the tool result that shows it (`{kind: "tool_result", tool:
+     "<tool name>", contains: "<text from its output>"}`), so sibling
      experiments and the coordinator can reuse it. This is in addition to
      `worker_complete`, not a replacement.
 

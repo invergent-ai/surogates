@@ -108,3 +108,22 @@ async def test_a_fenced_json_reply_is_still_read():
 
     assert [d.content for d in kept] == ["note 0"]
     assert rejected == []
+
+
+async def test_each_cited_note_is_judged_with_its_source_quoted_under_it():
+    prompts: list[str] = []
+
+    async def _create(**kwargs):
+        prompts.append(kwargs["messages"][0]["content"])
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+            content='[{"index": 0, "keep": true}, {"index": 1, "keep": true}]'))])
+
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=_create)))
+    await _verify([
+        NoteDraft(type="FAIL", content="q.py dead-ends", source="Traceback\nImportError: q"),
+        NoteDraft(type="CLAIM", content="taking the adapter"),
+    ], client)
+
+    [prompt] = prompts
+    assert "0: [FAIL] q.py dead-ends\n   SOURCE:\n   | Traceback\n   | ImportError: q\n1: [CLAIM]" in prompt
+    assert "only if its SOURCE supports it" in prompt

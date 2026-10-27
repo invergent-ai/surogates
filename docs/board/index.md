@@ -15,7 +15,7 @@ Without the board, results flow only upward: a child reports to its parent at co
 | `CLAIM` | 200 chars | TTL'd "I am working on X" to prevent overlap (default 300 s, renewable by re-posting) | `claiming telegram adapter refactor` |
 | `RESULT` | 400 chars | Candidate outcome with mandatory structured evidence: `outcome=…\|evidence=…\|risk=…` | `outcome=slack migrated\|evidence=pytest tests/channels/slack 14/14 passed\|risk=DM path untested` |
 
-A new `RESULT` from the same writer supersedes its previous one (latest wins). Notes can carry a `ref` pointer to expandable detail (a source event or artifact).
+A new `RESULT` from the same writer supersedes its previous one (latest wins). `FACT`, `FAIL` and `RESULT` must cite their source in `ref`: the tool result, event or artifact that shows what the note says. A `CLAIM` needs none.
 
 ## How a Group Forms
 
@@ -28,14 +28,15 @@ Automatic — no flag, no configuration:
 ## Writing Notes — `share_note`
 
 ```
-share_note(notes=[{type, content, ref?}, …], ttl_seconds?)
+share_note(notes=[{type, content, ref}, …], ttl_seconds?)
   → {admitted: […], renewed_claims: […], rejected: [{index, reason}, …]}
 ```
 
 Admission pipeline (rejected notes are tool feedback, never rows):
 
 1. **Deterministic pre-checks** (free): type validity, size caps, prompt-injection scan and secret scan (same bars as memory entries), duplicate detection against the active board, claim renewal detection (re-posting your own claim refreshes its TTL — renewal runs *before* the cap so a writer at the cap can always renew), claim cap (2 active per writer), group cap (300 active notes; `RESULT` always admitted since supersede frees its slot).
-2. **LLM verification** (always on, via the tenant summary model): `RESULT` evidence must describe a check *actually run* with a concrete outcome; `FACT`/`FAIL` must be specific and anchored; vague notes are rejected with a reason the model learns from. **Fail-closed**: if the verifier is unavailable, nothing is admitted ("verification unavailable — retry on a later turn") — everything visible on a board has passed the gate, with no fallback that would weaken that invariant.
+2. **Citation** (`FACT`, `FAIL`, `RESULT`): the `ref` is required and followed before anything is judged. `{kind: "tool_result", tool, contains?}` resolves to the writer's own latest result of that tool (whose output contains the text, when given) and is stored as the concrete event ref; `{kind: "event", session_id, event_id}` and `{kind: "artifact", session_id, artifact_id}` are taken as given. The target must exist and belong to the same group, and a `RESULT` must cite its writer's own session. The cited content is read with the reader `expand_note` uses, bounded to 1500 characters. A note whose ref is missing or cannot be followed is rejected with the reason.
+3. **LLM verification** (always on, via the tenant summary model): each cited note is judged together with its source, quoted under it, and kept only if that source shows what the note states (for a `RESULT`, the check named as evidence and its outcome). A specific-sounding note its source does not support is rejected, as are vague notes; the reason comes back for the model to learn from. This is a check of the note against its cited source by a model, not a re-execution of the check. **Fail-closed**: if the verifier is unavailable, nothing is admitted ("verification unavailable — retry on a later turn") — everything visible on a board has passed the gate, with no fallback that would weaken that invariant.
 
 Admitted notes emit a `board.note` event on the writer's session for transcript audit.
 
@@ -44,7 +45,7 @@ Admitted notes emit a `board.note` event on the writer's session for transcript 
 - **Join snapshot**: the first harness iteration that sees a non-empty board appends one `board.update` event with the full windowed render (priority `RESULT` > `FACT` > `FAIL` > `CLAIM`, 35 % of the budget reserved for `FAIL` so dead ends never scroll out, expired claims filtered, exact-deduped, ~600-token budget).
 - **Per-iteration deltas**: each iteration checks for board changes past the session's cursor and appends a compact `board.update` delta — new notes plus transitions ("superseded: …", "expired: …", "renewed: …"). Events append at the **end** of history, never mid-list, so the provider prefix cache and event replay stay stable; each member's transcript records exactly which board state it saw and when.
 - **`read_board(types?)`**: the consolidated *current* state (supersede/expiry applied) at a larger budget — for decision points, since inline updates in history may be stale. Any durable render advances the session's persisted cursor.
-- **`expand_note(note_id)`**: follows a note's `ref` to bounded detail (4000 chars) — `{kind: "event", session_id, event_id}` or `{kind: "artifact", session_id, artifact_id}`. The ref target must belong to the same group (refs are not a side door into arbitrary org sessions); org scoping is enforced on every query.
+- **`expand_note(note_id)`**: follows a note's `ref` to bounded detail (4000 chars): `{kind: "event", session_id, event_id}` or `{kind: "artifact", session_id, artifact_id}`. The ref target must belong to the same group (refs are not a side door into arbitrary org sessions); org scoping is enforced on every query.
 
 Render line format: `[n42 w3f2/FAIL +2m] content` — note id (for `expand_note`), writer label (`coord` for the group root, `w<hex4>` for workers), age, and remaining TTL for claims.
 

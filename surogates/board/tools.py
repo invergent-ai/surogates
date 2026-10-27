@@ -14,7 +14,7 @@ from uuid import UUID
 
 from surogates.board.render import render_board
 from surogates.board.store import BoardStore
-from surogates.board.types import NOTE_TYPES
+from surogates.board.types import CITED_TYPES, NOTE_TYPES
 from surogates.board.verifier import NoteDraft, verify_notes_llm
 from surogates.config import get_board_settings
 from surogates.session.events import EventType
@@ -31,16 +31,18 @@ BOARD_TOOLS: frozenset[str] = frozenset(
 _SHARE_NOTE_SCHEMA = ToolSchema(
     name="share_note",
     description=(
-        "Share compact, verified notes on your coordination group's board "
-        "so parallel workers (and your coordinator) can reuse them. Types: "
-        "FACT (concrete reusable knowledge, anchored to a file/symbol/"
-        "endpoint/error), FAIL (a dead end you actually hit and why — the "
+        "Share compact notes on your coordination group's board so parallel "
+        "workers (and your coordinator) can reuse them. Types: FACT "
+        "(concrete reusable knowledge, anchored to a file/symbol/endpoint/"
+        "error), FAIL (a dead end you actually hit and why: the "
         "highest-value note for peers), CLAIM (short-lived 'I am working on "
         "X' to prevent overlap; expires automatically), RESULT (your "
-        "candidate outcome as `outcome=…|evidence=…|risk=…` where evidence "
-        "names a check you ACTUALLY ran and its observed result). Notes are "
-        "admitted only after verification — vague or unevidenced notes are "
-        "rejected with a reason. Batch related notes into one call."
+        "candidate outcome as `outcome=…|evidence=…|risk=…`). FACT, FAIL and "
+        "RESULT must cite their source in `ref`, usually the tool result "
+        "that shows it; a RESULT cites a check from your own session. Each "
+        "note is admitted only if a verifier finds the cited source supports "
+        "it; otherwise it is rejected with a reason. Batch related notes "
+        "into one call."
     ),
     parameters={
         "type": "object",
@@ -62,9 +64,13 @@ _SHARE_NOTE_SCHEMA = ToolSchema(
                         "ref": {
                             "type": "object",
                             "description": (
-                                "Optional pointer to expandable detail: "
-                                "{kind:'event', session_id, event_id} or "
-                                "{kind:'artifact', session_id, artifact_id}."
+                                "The source the note cites (required for "
+                                "FACT, FAIL and RESULT): {kind:'tool_result', "
+                                "tool:'<tool name>', contains:'<text from its "
+                                "output>'} for your own latest matching tool "
+                                "result, or {kind:'event', session_id, "
+                                "event_id}, or {kind:'artifact', session_id, "
+                                "artifact_id}. It must be in your group."
                             ),
                         },
                     },
@@ -97,6 +103,78 @@ def _group_id_or_none(session_config: dict | None) -> UUID | None:
 
 def _writer_label(session_id: UUID, group_id: UUID) -> str:
     return "coord" if session_id == group_id else f"w{session_id.hex[:4]}"
+
+
+_SOURCE_MAX_CHARS = 1500
+
+
+async def _tool_result_ref(
+    ref: dict[str, Any], *, session_factory: Any, writer_session_id: UUID,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """The writer's own latest result of ``ref["tool"]`` (whose output
+    contains ``ref["contains"]`` when given), as a concrete event ref.
+
+    A model sees its tool calls by name and output, never by event id, so
+    this is the ref it can write; the note keeps the event it resolved to.
+    """
+    from sqlalchemy import select
+
+    from surogates.db.models import Event
+
+    tool = str(ref.get("tool") or "").strip()
+    if not tool:
+        return None, "a tool_result ref needs the tool's name"
+    stmt = (
+        select(Event.id)
+        .where(Event.session_id == writer_session_id)
+        .where(Event.type == EventType.TOOL_RESULT.value)
+        .where(Event.data["name"].astext == tool)
+        .order_by(Event.id.desc())
+        .limit(1)
+    )
+    contains = str(ref.get("contains") or "").strip()
+    if contains:
+        stmt = stmt.where(Event.data["content"].astext.contains(contains))
+    async with session_factory() as db:
+        event_id = (await db.execute(stmt)).scalar_one_or_none()
+    if event_id is None:
+        return None, (
+            f"no result of {tool} in your session"
+            + (f" contains {contains!r}" if contains else "")
+        )
+    return {"kind": "event", "session_id": str(writer_session_id), "event_id": event_id}, None
+
+
+async def _cite(
+    draft: NoteDraft, *, writer_session_id: UUID, group_id: UUID, kwargs: dict[str, Any],
+) -> str | None:
+    """Resolve and read the source *draft* cites, so the verifier judges it
+    against that source.  Fills ``draft.ref`` (concrete) and
+    ``draft.source``; returns why it cannot be admitted, else None."""
+    if draft.type not in CITED_TYPES:
+        return None
+    if not draft.ref:
+        return f"{draft.type} needs a ref to the tool result, event or artifact that shows it"
+    ref = draft.ref
+    if ref.get("kind") == "tool_result":
+        resolved, error = await _tool_result_ref(
+            ref, session_factory=kwargs["session_factory"],
+            writer_session_id=writer_session_id,
+        )
+        if resolved is None:
+            return f"ref: {error}"
+        ref = resolved
+    if draft.type == "RESULT" and str(ref.get("session_id")) != str(writer_session_id):
+        return "a RESULT must cite a check from your own session"
+    detail, error = await _read_ref(
+        ref, group_id=group_id, max_chars=_SOURCE_MAX_CHARS, kwargs=kwargs,
+    )
+    if error is not None:
+        return f"ref: {error}"
+    if not detail.strip():
+        return "ref: the cited source is empty"
+    draft.ref, draft.source = ref, detail
+    return None
 
 
 async def _share_note_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
@@ -138,12 +216,23 @@ async def _share_note_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
         })
 
     async def _verifier(drafts: list[NoteDraft]):
-        return await verify_notes_llm(
-            drafts,
+        cited: list[int] = []
+        refused: list[tuple[int, str]] = []
+        for i, draft in enumerate(drafts):
+            reason = await _cite(
+                draft, writer_session_id=session_id, group_id=group_id, kwargs=kwargs,
+            )
+            if reason is None:
+                cited.append(i)
+            else:
+                refused.append((i, reason))
+        kept, rejected = await verify_notes_llm(
+            [drafts[i] for i in cited],
             llm_client=verifier_client,
             model=verifier_model,
             timeout_seconds=_VERIFIER_TIMEOUT_SECONDS,
         )
+        return kept, refused + [(cited[j], reason) for j, reason in rejected]
 
     board = BoardStore(session_factory)
     result = await board.admit(
@@ -299,8 +388,88 @@ async def _check_ref_target(
     return target
 
 
-async def _expand_note_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
+async def _read_ref(
+    ref: dict[str, Any], *, group_id: UUID, max_chars: int, kwargs: dict[str, Any],
+) -> tuple[str, str | None]:
+    """What *ref* points at, bounded to *max_chars*: ``(detail, None)``, or
+    ``("", why not)`` when it is malformed, outside the group or gone.
+
+    The one reader for refs: ``expand_note`` shows what it returns, and
+    ``share_note`` hands it to the verifier as the note's source.
+    """
     session_store = kwargs["session_store"]
+    tenant = kwargs["tenant"]
+    kind = str(ref.get("kind") or "")
+    if kind == "event":
+        try:
+            target_sid = UUID(str(ref.get("session_id")))
+            event_id = int(ref.get("event_id"))
+        except (TypeError, ValueError):
+            return "", "malformed event ref"
+        target = await _check_ref_target(
+            session_store=session_store, tenant=tenant,
+            target_sid=target_sid, group_id=group_id,
+        )
+        if target is None:
+            return "", "ref target not accessible"
+        event = await session_store.get_event_by_id(target_sid, event_id)
+        if event is None:
+            return "", "ref event not found"
+        return _extract_event_text(event.data or {})[:max_chars], None
+
+    if kind == "artifact":
+        try:
+            target_sid = UUID(str(ref.get("session_id")))
+            artifact_id = UUID(str(ref.get("artifact_id")))
+        except (TypeError, ValueError):
+            return "", "malformed artifact ref"
+        target = await _check_ref_target(
+            session_store=session_store, tenant=tenant,
+            target_sid=target_sid, group_id=group_id,
+        )
+        if target is None:
+            return "", "ref target not accessible"
+        from surogates.artifacts.store import (
+            ArtifactNotFoundError,
+            ArtifactStore,
+        )
+        from surogates.devices.binding import device_of
+        from surogates.devices.workspace import DeviceOperationError
+        from surogates.sandbox.pool import sandbox_session_key
+        from surogates.session.attachment_ingest import workspace_root_id
+        from surogates.storage.tenant import boundary_workspace_prefix
+        from surogates.tools.workspace_io import StorageWorkspaceIO
+
+        if device_of(target.config) is not None:
+            # On a local folder: read through this tool call, and only on
+            # the same folder, the one its computer gives this call.
+            files = kwargs.get("workspace_io")
+            if files is None or sandbox_session_key(target) != kwargs.get("task_id"):
+                return "", "ref artifact is on a local folder this session cannot reach"
+        else:
+            storage = kwargs.get("storage")
+            bucket = (target.config or {}).get("storage_bucket")
+            if storage is None or not bucket:
+                return "", "artifact storage unavailable"
+            files = StorageWorkspaceIO(
+                storage,
+                bucket=bucket,
+                prefix=boundary_workspace_prefix(target.config, target, workspace_root_id(target)),
+            )
+        artifact_store = ArtifactStore(files, session_id=target_sid, root=sandbox_session_key(target))
+        try:
+            payload = await artifact_store.get_payload(artifact_id)
+        except ArtifactNotFoundError:
+            return "", "ref artifact not found"
+        except DeviceOperationError as exc:
+            # A local folder's computer that will not read it, in its own words.
+            return "", f"ref artifact could not be read: {exc}"
+        return json.dumps(payload)[:max_chars], None
+
+    return "", f"unknown ref kind {kind!r}"
+
+
+async def _expand_note_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
     session_factory = kwargs["session_factory"]
     tenant = kwargs["tenant"]
     group_id = _group_id_or_none(kwargs.get("session_config"))
@@ -318,80 +487,14 @@ async def _expand_note_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
     if not note.ref:
         return json.dumps({"error": "note has no expandable detail"})
 
-    kind = str(note.ref.get("kind") or "")
-    if kind == "event":
-        try:
-            target_sid = UUID(str(note.ref.get("session_id")))
-            event_id = int(note.ref.get("event_id"))
-        except (TypeError, ValueError):
-            return json.dumps({"error": "malformed event ref on note"})
-        target = await _check_ref_target(
-            session_store=session_store, tenant=tenant,
-            target_sid=target_sid, group_id=group_id,
-        )
-        if target is None:
-            return json.dumps({"error": "ref target not accessible"})
-        event = await session_store.get_event_by_id(target_sid, event_id)
-        if event is None:
-            return json.dumps({"error": "ref event not found"})
-        detail = _extract_event_text(event.data or {})[:_EXPAND_MAX_CHARS]
-        return json.dumps(
-            {"note_id": note_id, "kind": "event", "detail": detail}
-        )
-
-    if kind == "artifact":
-        try:
-            target_sid = UUID(str(note.ref.get("session_id")))
-            artifact_id = UUID(str(note.ref.get("artifact_id")))
-        except (TypeError, ValueError):
-            return json.dumps({"error": "malformed artifact ref on note"})
-        target = await _check_ref_target(
-            session_store=session_store, tenant=tenant,
-            target_sid=target_sid, group_id=group_id,
-        )
-        if target is None:
-            return json.dumps({"error": "ref target not accessible"})
-        from surogates.artifacts.store import (
-            ArtifactNotFoundError,
-            ArtifactStore,
-        )
-        from surogates.devices.binding import device_of
-        from surogates.devices.workspace import DeviceOperationError
-        from surogates.sandbox.pool import sandbox_session_key
-        from surogates.session.attachment_ingest import workspace_root_id
-        from surogates.storage.tenant import boundary_workspace_prefix
-        from surogates.tools.workspace_io import StorageWorkspaceIO
-
-        if device_of(target.config) is not None:
-            # On a local folder: read through this tool call, and only on
-            # the same folder, the one its computer gives this call.
-            files = kwargs.get("workspace_io")
-            if files is None or sandbox_session_key(target) != kwargs.get("task_id"):
-                return json.dumps({"error": "ref artifact is on a local folder this session cannot reach"})
-        else:
-            storage = kwargs.get("storage")
-            bucket = (target.config or {}).get("storage_bucket")
-            if storage is None or not bucket:
-                return json.dumps({"error": "artifact storage unavailable"})
-            files = StorageWorkspaceIO(
-                storage,
-                bucket=bucket,
-                prefix=boundary_workspace_prefix(target.config, target, workspace_root_id(target)),
-            )
-        artifact_store = ArtifactStore(files, session_id=target_sid, root=sandbox_session_key(target))
-        try:
-            payload = await artifact_store.get_payload(artifact_id)
-        except ArtifactNotFoundError:
-            return json.dumps({"error": "ref artifact not found"})
-        except DeviceOperationError as exc:
-            # A local folder's computer that will not read it, in its own words.
-            return json.dumps({"error": f"ref artifact could not be read: {exc}"})
-        detail = json.dumps(payload)[:_EXPAND_MAX_CHARS]
-        return json.dumps(
-            {"note_id": note_id, "kind": "artifact", "detail": detail}
-        )
-
-    return json.dumps({"error": f"unknown ref kind {kind!r}"})
+    detail, error = await _read_ref(
+        note.ref, group_id=group_id, max_chars=_EXPAND_MAX_CHARS, kwargs=kwargs,
+    )
+    if error is not None:
+        return json.dumps({"error": error})
+    return json.dumps(
+        {"note_id": note_id, "kind": str(note.ref.get("kind")), "detail": detail}
+    )
 
 
 def register(registry: ToolRegistry) -> None:
