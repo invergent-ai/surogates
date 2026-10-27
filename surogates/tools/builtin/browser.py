@@ -23,6 +23,7 @@ from surogates.browser.client import ClickTimeoutError, KernelBrowserClient
 from surogates.browser.control import BrowserControlStore, paused_by_user_result
 from surogates.browser.pool import BrowserPool
 from surogates.browser.serialize import render_markdown
+from surogates.coding_agents.repo_resolve import principal_kwargs
 from surogates.devices.browser import (
     DeviceBrowserClient,
     DeviceEndpoint,
@@ -39,6 +40,7 @@ from surogates.storage.tenant import (
     boundary_workspace_prefix,
     workspace_session_shim,
 )
+from surogates.tenant.credentials import InvalidVaultRef, parse_vault_ref
 
 
 def build_browser_session_source_ref(
@@ -668,14 +670,27 @@ async def _browser_click_handler(
     return json.dumps(_noted(body, client))
 
 
+# Only credentials named for the browser can be typed into a page: the vault
+# also holds the agent's API keys, channel tokens and SSH keys, and a page the
+# agent was steered to must not be able to collect those through a form.
+BROWSER_SECRET_PREFIX = "browser_"
+
 TYPE_SCHEMA = {
     "type": "object",
     "properties": {
-        "text": {"type": "string"},
+        "text": {"type": "string", "description": "The text to type."},
+        "secret_ref": {
+            "type": "string",
+            "pattern": f"^vault://{BROWSER_SECRET_PREFIX}[A-Za-z0-9_.@-]+$",
+            "description": (
+                "Type a stored secret instead of text, e.g. "
+                f"'vault://{BROWSER_SECRET_PREFIX}acme_password'. The value is "
+                "typed without ever being shown to you."
+            ),
+        },
         "ref": {"type": "string", "pattern": "^@e[0-9]+$"},
         "delay_ms": {"type": "integer", "minimum": 0, "default": 0},
     },
-    "required": ["text"],
     "additionalProperties": False,
 }
 
@@ -692,8 +707,23 @@ async def _browser_type_handler(
     workspace_path: str | None = None,
     session_config: dict[str, Any] | None = None,
     workspace_io: Any = None,
+    credential_vault: Any = None,
     **_: Any,
 ) -> str:
+    if ("text" in arguments) == ("secret_ref" in arguments):
+        return json.dumps({
+            "error": "invalid_arguments",
+            "detail": "browser_type takes exactly one of text or secret_ref",
+        })
+    if "secret_ref" in arguments:
+        text = await _resolve_browser_secret(
+            arguments["secret_ref"], tenant=tenant, credential_vault=credential_vault,
+        )
+        if isinstance(text, dict):
+            return json.dumps(text)
+    else:
+        text = arguments["text"]
+
     preflight = await _resolve_session_browser(
         tenant=tenant,
         session_id=session_id,
@@ -707,20 +737,64 @@ async def _browser_type_handler(
         return preflight
 
     _browser_id, endpoint, snapshot_cache = preflight
+    body: dict[str, Any] = {"typed": True}
     client = _make_client(_client_factory, endpoint, snapshot_cache)
     async with client:
         if "ref" in arguments:
+            secret_field = bool(snapshot_cache.get(arguments["ref"], {}).get("secret"))
             try:
                 await client.type_into_ref(
                     arguments["ref"],
-                    arguments["text"],
+                    text,
                     delay_ms=arguments.get("delay_ms", 0),
                 )
             except ClickTimeoutError as exc:
                 return json.dumps({"error": "click_timeout", "detail": str(exc)})
+            if secret_field and "text" in arguments:
+                body["note"] = (
+                    f"{arguments['ref']} is a secret field. When the value is "
+                    f"stored as a 'vault://{BROWSER_SECRET_PREFIX}...' credential, "
+                    "pass it as secret_ref so it never enters the conversation."
+                )
         else:
-            await client.type_text(arguments["text"], delay_ms=arguments.get("delay_ms", 0))
-    return json.dumps(_noted({"typed": True}, client))
+            await client.type_text(text, delay_ms=arguments.get("delay_ms", 0))
+    return json.dumps(_noted(body, client))
+
+
+async def _resolve_browser_secret(
+    secret_ref: str, *, tenant: Any, credential_vault: Any,
+) -> str | dict[str, str]:
+    """The plaintext *secret_ref* names, or the error result to return instead.
+
+    The agent's own credential (its service account's, else the acting
+    user's) wins over an org-wide one of the same name.
+    """
+    try:
+        name = parse_vault_ref(secret_ref)
+    except InvalidVaultRef as exc:
+        return {"error": "invalid_secret_ref", "detail": str(exc)}
+    if not name.startswith(BROWSER_SECRET_PREFIX):
+        return {
+            "error": "invalid_secret_ref",
+            "detail": f"only credentials named '{BROWSER_SECRET_PREFIX}...' can be typed into a page",
+        }
+    org_id = getattr(tenant, "org_id", None)
+    if credential_vault is None or org_id is None:
+        return {"error": "secret_unavailable", "detail": "the credential vault is not available here"}
+    principal = principal_kwargs(
+        user_id=getattr(tenant, "user_id", None),
+        service_account_id=getattr(tenant, "service_account_id", None),
+    )
+    scopes = [principal] if any(principal.values()) else []
+    scopes.append({"user_id": None, "service_account_id": None})
+    for scope in scopes:
+        try:
+            value = await credential_vault.retrieve(org_id, name, **scope)
+        except ValueError:
+            return {"error": "secret_unavailable", "detail": f"the credential {name!r} cannot be decrypted"}
+        if value is not None:
+            return value
+    return {"error": "secret_not_found", "detail": f"no credential named {name!r} is stored for this agent"}
 
 
 PRESS_KEY_SCHEMA = {
@@ -1355,7 +1429,13 @@ def register(registry: ToolRegistry) -> None:
         name="browser_type",
         schema=ToolSchema(
             name="browser_type",
-            description="Type text at focus or into a specific @eN ref.",
+            description=(
+                "Type text at focus or into a specific @eN ref. For a field the "
+                "page outline marks [secret] (a password, a one-time code, a card "
+                "number), pass secret_ref naming a stored credential instead of "
+                "text whenever the user has stored one, so the value never enters "
+                "the conversation. Pass exactly one of text or secret_ref."
+            ),
             parameters=TYPE_SCHEMA,
         ),
         handler=_browser_type_handler,

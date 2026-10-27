@@ -442,6 +442,85 @@ class TestTypeHandler:
         assert client.calls[0][0] == "type_text"
 
 
+class FakeVault:
+    """Credentials by (name, user_id, service_account_id); None for org-wide."""
+
+    def __init__(self, values: dict[tuple[str, Any, Any], str]) -> None:
+        self.values = values
+        self.asked: list[tuple[Any, str, Any, Any]] = []
+
+    async def retrieve(self, org_id, name, user_id=None, *, service_account_id=None):
+        self.asked.append((org_id, name, user_id, service_account_id))
+        return self.values.get((name, user_id, service_account_id))
+
+
+class TestTypeSecrets:
+    async def _type(self, tenant, arguments, *, vault=None, pool=None, client=None):
+        from surogates.tools.builtin.browser import _browser_type_handler
+
+        client = client or FakeClickClient()
+        result = await _browser_type_handler(
+            arguments,
+            tenant=tenant,
+            session_id=uuid4(),
+            browser_pool=pool or FakePool(),
+            browser_control=FakeControlStore(),
+            credential_vault=vault,
+            _client_factory=lambda endpoint: client,
+        )
+        return json.loads(result), client
+
+    async def test_a_secret_ref_types_the_stored_value_and_never_returns_it(self, tenant) -> None:
+        vault = FakeVault({("browser_acme_password", tenant.user_id, None): "Waalhaven-2026"})
+        body, client = await self._type(
+            tenant, {"ref": "@e5", "secret_ref": "vault://browser_acme_password"}, vault=vault,
+        )
+        assert client.calls[0][:2] == ("type_into_ref", ("@e5", "Waalhaven-2026"))
+        assert body == {"typed": True}
+
+    async def test_an_org_wide_credential_answers_when_the_agent_has_none(self, tenant) -> None:
+        vault = FakeVault({("browser_acme_password", None, None): "org-secret"})
+        _body, client = await self._type(
+            tenant, {"secret_ref": "vault://browser_acme_password"}, vault=vault,
+        )
+        assert client.calls[0][:2] == ("type_text", ("org-secret",))
+        assert [asked[2:] for asked in vault.asked] == [(tenant.user_id, None), (None, None)]
+
+    async def test_only_credentials_named_for_the_browser_can_be_typed(self, tenant) -> None:
+        # The vault also holds the agent's API keys and channel tokens; a page
+        # the agent was steered to must not be able to collect them.
+        vault = FakeVault({("git_pat", tenant.user_id, None): "ghp_secret"})
+        body, client = await self._type(tenant, {"secret_ref": "vault://git_pat"}, vault=vault)
+        assert body["error"] == "invalid_secret_ref"
+        assert client.calls == [] and vault.asked == []
+
+    async def test_a_missing_credential_says_so(self, tenant) -> None:
+        body, client = await self._type(
+            tenant, {"secret_ref": "vault://browser_nope"}, vault=FakeVault({}),
+        )
+        assert body["error"] == "secret_not_found"
+        assert client.calls == []
+
+    async def test_no_vault_means_no_secret(self, tenant) -> None:
+        body, _client = await self._type(tenant, {"secret_ref": "vault://browser_x"})
+        assert body["error"] == "secret_unavailable"
+
+    @pytest.mark.parametrize("arguments", [{}, {"text": "a", "secret_ref": "vault://browser_x"}])
+    async def test_exactly_one_of_text_and_secret_ref(self, tenant, arguments) -> None:
+        body, client = await self._type(tenant, arguments, vault=FakeVault({}))
+        assert body["error"] == "invalid_arguments"
+        assert client.calls == []
+
+    async def test_text_typed_into_a_secret_field_points_at_secret_ref(self, tenant) -> None:
+        pool = FakePool()
+        pool.snapshot_cache["@e5"] = {"role": "textbox", "name": "Password", "secret": True}
+        body, _client = await self._type(tenant, {"ref": "@e5", "text": "pw"}, pool=pool)
+        assert body["typed"] is True
+        assert "secret_ref" in body["note"]
+        plain, _client = await self._type(tenant, {"ref": "@e2", "text": "hello"})
+        assert "note" not in plain
+
+
 class TestClickOutcomes:
     async def test_a_click_that_times_out_says_so(self, tenant) -> None:
         from surogates.browser.client import ClickTimeoutError

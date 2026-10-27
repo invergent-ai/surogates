@@ -104,6 +104,21 @@ function nameOf(el, role) {
   return clean240(el.getAttribute('title') || '');
 }
 
+const __SECRET_AUTOCOMPLETE = new Set(['current-password', 'new-password',
+  'one-time-code', 'cc-number', 'cc-csc']);
+
+// A field whose value must never be read back or repeated: what the agent
+// types there is a password, a one-time code or a card number.
+function isSecret(el) {
+  const tag = el.tagName.toLowerCase();
+  if (tag !== 'input' && tag !== 'textarea') return false;
+  if (tag === 'input' && (el.getAttribute('type') || '').toLowerCase() === 'password') {
+    return true;
+  }
+  const tokens = (el.getAttribute('autocomplete') || '').toLowerCase().split(/\s+/);
+  return tokens.some((token) => __SECRET_AUTOCOMPLETE.has(token));
+}
+
 function depthOf(el) {
   let d = 0, cur = el;
   while (cur && cur.parentElement) { d++; cur = cur.parentElement; }
@@ -225,6 +240,7 @@ for (const el of __els) {
     text_block: textBlock,
   };
   if (role === 'heading') entry.heading_level = headingLevelOf(el);
+  if (isSecret(el)) entry.secret = true;
   out.push(entry);
 }
 return {

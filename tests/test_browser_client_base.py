@@ -13,6 +13,7 @@ from surogates.browser.client import (
     ClickTimeoutError,
     KernelBrowserClient,
 )
+from surogates.browser.serialize import render_markdown
 
 # Two frames, as a snapshot gives them: the page, and an iframe at (100, 200).
 FRAMES = {
@@ -66,6 +67,37 @@ def test_keys_are_joined_into_one_chord_in_playwrights_names() -> None:
     assert base._chord(("ctrl", "Shift", "esc")) == "Control+Shift+Escape"
     with pytest.raises(ValueError):
         base._chord(())
+
+
+async def test_a_secret_field_is_marked_in_the_tree_the_cache_and_the_outline() -> None:
+    client = KernelBrowserClient("http://browser")
+    frames = {**FRAMES, "frames": [{"x": 0, "y": 0, "nodes": [
+        {"role": "textbox", "name": "Password", "x": 0, "y": 0, "width": 200, "height": 20, "depth": 3,
+         "children_count": 0, "idx": 0, "text_block": "", "secret": True, "backend_node_id": 21},
+        {"role": "textbox", "name": "Supplier", "x": 0, "y": 30, "width": 200, "height": 20, "depth": 3,
+         "children_count": 0, "idx": 1, "text_block": "", "backend_node_id": 22},
+    ]}]}
+
+    async def execute(code: str, **_: Any) -> dict[str, Any]:
+        return frames
+
+    client._playwright_execute = execute  # type: ignore[method-assign]
+    try:
+        state = await client.get_state()
+    finally:
+        await client.close()
+
+    assert state["tree"][0]["secret"] is True and "secret" not in state["tree"][1]
+    assert client._snapshot_cache["@e1"]["secret"] is True
+    outline = render_markdown(state)
+    assert '- textbox @e1 "Password" [secret]' in outline
+    assert '- textbox @e2 "Supplier"\n' in outline + "\n"
+
+
+def test_the_collector_knows_which_fields_are_secret() -> None:
+    for marker in ("'password'", "current-password", "new-password", "one-time-code", "cc-number", "cc-csc"):
+        assert marker in SNAPSHOT_COLLECTOR
+    assert "entry.secret = true" in SNAPSHOT_COLLECTOR
 
 
 def test_a_snapshot_detaches_the_cdp_session_it_opens() -> None:

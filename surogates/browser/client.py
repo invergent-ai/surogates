@@ -216,6 +216,8 @@ class BrowserClientBase:
             heading_level = node.get("heading_level")
             if heading_level is not None:
                 entry["heading_level"] = int(heading_level)
+            if node.get("secret"):
+                entry["secret"] = True
             tree.append(entry)
             cache_entry: dict[str, Any] = {
                 "x": center_x,
@@ -227,6 +229,8 @@ class BrowserClientBase:
             }
             if intent is not None:
                 cache_entry["intent"] = intent
+            if node.get("secret"):
+                cache_entry["secret"] = True
             cache[ref] = cache_entry
 
         return tree, cache
