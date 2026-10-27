@@ -165,3 +165,49 @@ async def test_other_click_failures_are_not_mistaken_for_a_timeout() -> None:
             await client.click_at(5, 5)
     finally:
         await client.close()
+
+
+SECRET_ENTRY = {"ref": "@e5", "role": "textbox", "name": "Password", "backend_node_id": 21, "nth": 0, "secret": True}
+
+
+@pytest.mark.parametrize(("failure", "says"), [
+    ("Error: secret_refused: not_secret", "not a password"),
+    ("Error: secret_refused: origin https://attacker.example", "not on https://attacker.example"),
+])
+async def test_a_refused_fill_says_why_without_the_value(failure: str, says: str) -> None:
+    from surogates.browser.client import SecretFieldRefused
+
+    client = KernelBrowserClient("http://browser")
+    client._snapshot_cache["@e5"] = dict(SECRET_ENTRY)
+    scripts: list[str] = []
+
+    async def execute(code: str, **_: Any) -> Any:
+        scripts.append(code)
+        raise RuntimeError(failure)
+
+    client._playwright_execute = execute  # type: ignore[method-assign]
+    try:
+        with pytest.raises(SecretFieldRefused, match=says) as refused:
+            await client.fill_secret("@e5", "Waalhaven-2026", origins=["https://acme.example"])
+    finally:
+        await client.close()
+    assert "Waalhaven-2026" not in str(refused.value)
+    # Checked and written in one call on the node itself, never typed at a focus.
+    assert "page.keyboard" not in scripts[0]
+    assert "this.ownerDocument.location.origin" in scripts[0]
+    assert "cdp.detach()" in scripts[0]
+
+
+async def test_a_fill_that_stalls_is_a_click_timeout() -> None:
+    client = KernelBrowserClient("http://browser")
+    client._snapshot_cache["@e5"] = dict(SECRET_ENTRY)
+
+    async def execute(code: str, **_: Any) -> Any:
+        raise RuntimeError("click_timeout")
+
+    client._playwright_execute = execute  # type: ignore[method-assign]
+    try:
+        with pytest.raises(ClickTimeoutError):
+            await client.fill_secret("@e5", "x", origins=["https://acme.example"])
+    finally:
+        await client.close()

@@ -1798,20 +1798,25 @@ class AgentHarness(
         sandbox spec builder can read ``session.config['repos']`` /
         ``session.config['ssh_targets']``.  Never written back to the persisted
         row; with nothing configured the session is returned unchanged.
+
+        The agent's service account rides along whenever it is known: the
+        agent's own credentials (its SSH keys, the browser secrets it may
+        type) are stored under it, whoever the session's principal is.
         """
-        if not self._coding_repos and not self._ssh_targets and not self._whatsapp_forms:
+        if (
+            not self._coding_repos and not self._ssh_targets and not self._whatsapp_forms
+            and not self._agent_service_account_id
+        ):
             return session
         config = dict(session.config or {})
+        if self._agent_service_account_id:
+            config["agent_service_account_id"] = self._agent_service_account_id
         if self._whatsapp_forms:
             config["whatsapp_forms"] = [dict(form) for form in self._whatsapp_forms]
         if self._coding_repos:
             config["repos"] = [dict(repo) for repo in self._coding_repos]
         if self._ssh_targets:
             config["ssh_targets"] = [dict(t) for t in self._ssh_targets]
-            # Carry the agent SA id so the spec builder resolves the agent-owned
-            # SSH keys under it (not the session's credential principal).
-            if self._agent_service_account_id:
-                config["agent_service_account_id"] = self._agent_service_account_id
         return session.model_copy(update={"config": config})
 
     def _slash_command_block_reason(

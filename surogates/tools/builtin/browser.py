@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
 from surogates.browser.base import (
@@ -19,11 +21,11 @@ from surogates.browser.base import (
     browser_credits_exhausted_result,
     browser_unavailable_result,
 )
-from surogates.browser.client import ClickTimeoutError, KernelBrowserClient
+from surogates.browser.client import ClickTimeoutError, KernelBrowserClient, SecretFieldRefused
 from surogates.browser.control import BrowserControlStore, paused_by_user_result
 from surogates.browser.pool import BrowserPool
 from surogates.browser.serialize import render_markdown
-from surogates.coding_agents.repo_resolve import principal_kwargs
+from surogates.channels.constants import STUDIO_CHANNEL
 from surogates.devices.browser import (
     DeviceBrowserClient,
     DeviceEndpoint,
@@ -40,6 +42,7 @@ from surogates.storage.tenant import (
     boundary_workspace_prefix,
     workspace_session_shim,
 )
+from surogates.harness.redact import mask_typed_text
 from surogates.tenant.credentials import InvalidVaultRef, parse_vault_ref
 
 
@@ -599,6 +602,8 @@ async def _browser_close_handler(
         return paused_by_user_result()
 
     await browser_pool.destroy_for_session(sid)
+    # The page that could echo them is gone with its browser.
+    _typed_secrets.pop(sid, None)
     return json.dumps({"closed": True})
 
 
@@ -683,9 +688,10 @@ TYPE_SCHEMA = {
             "type": "string",
             "pattern": f"^vault://{BROWSER_SECRET_PREFIX}[A-Za-z0-9_.@-]+$",
             "description": (
-                "Type a stored secret instead of text, e.g. "
-                f"'vault://{BROWSER_SECRET_PREFIX}acme_password'. The value is "
-                "typed without ever being shown to you."
+                "Fill the [secret] field 'ref' names with a stored credential "
+                f"instead of text, e.g. 'vault://{BROWSER_SECRET_PREFIX}acme_password'. "
+                "The value is never shown to you, and only goes into a field "
+                "marked [secret] on a site the credential is for."
             ),
         },
         "ref": {"type": "string", "pattern": "^@e[0-9]+$"},
@@ -693,6 +699,35 @@ TYPE_SCHEMA = {
     },
     "additionalProperties": False,
 }
+
+# The stored secrets this worker has typed, per session: whatever a page does
+# with one afterwards (echo it into its text, keep it where a script reads
+# it), it is cut out of every browser tool result before the model sees it.
+_typed_secrets: dict[str, set[str]] = {}
+
+
+def _scrub(session_id: Any, result: Any) -> Any:
+    secrets = _typed_secrets.get(str(session_id))
+    if not secrets or not isinstance(result, str):
+        return result
+    for secret in sorted(secrets, key=len, reverse=True):
+        result = result.replace(secret, mask_typed_text(secret))
+        escaped = json.dumps(secret)[1:-1]
+        if escaped != secret:
+            result = result.replace(escaped, mask_typed_text(secret))
+    return result
+
+
+def _scrubbing(handler: Callable[..., Any]) -> Callable[..., Any]:
+    @functools.wraps(handler)
+    async def run(arguments: dict[str, Any], **kwargs: Any) -> Any:
+        return _scrub(kwargs.get("session_id"), await handler(arguments, **kwargs))
+
+    return run
+
+
+def _refused(error: str, detail: str) -> str:
+    return json.dumps({"error": error, "detail": detail})
 
 
 @answering_refusals
@@ -708,21 +743,25 @@ async def _browser_type_handler(
     session_config: dict[str, Any] | None = None,
     workspace_io: Any = None,
     credential_vault: Any = None,
+    channel: str | None = None,
     **_: Any,
 ) -> str:
     if ("text" in arguments) == ("secret_ref" in arguments):
-        return json.dumps({
-            "error": "invalid_arguments",
-            "detail": "browser_type takes exactly one of text or secret_ref",
-        })
+        return _refused("invalid_arguments", "browser_type takes exactly one of text or secret_ref")
     if "secret_ref" in arguments:
-        text = await _resolve_browser_secret(
-            arguments["secret_ref"], tenant=tenant, credential_vault=credential_vault,
+        return await _fill_secret(
+            arguments,
+            tenant=tenant,
+            session_id=session_id,
+            browser_pool=browser_pool,
+            browser_control=browser_control,
+            _client_factory=_client_factory,
+            workspace_path=workspace_path,
+            session_config=session_config,
+            workspace_io=workspace_io,
+            credential_vault=credential_vault,
+            channel=channel,
         )
-        if isinstance(text, dict):
-            return json.dumps(text)
-    else:
-        text = arguments["text"]
 
     preflight = await _resolve_session_browser(
         tenant=tenant,
@@ -745,56 +784,182 @@ async def _browser_type_handler(
             try:
                 await client.type_into_ref(
                     arguments["ref"],
-                    text,
+                    arguments["text"],
                     delay_ms=arguments.get("delay_ms", 0),
                 )
             except ClickTimeoutError as exc:
-                return json.dumps({"error": "click_timeout", "detail": str(exc)})
-            if secret_field and "text" in arguments:
+                return _refused("click_timeout", str(exc))
+            if secret_field:
                 body["note"] = (
                     f"{arguments['ref']} is a secret field. When the value is "
                     f"stored as a 'vault://{BROWSER_SECRET_PREFIX}...' credential, "
                     "pass it as secret_ref so it never enters the conversation."
                 )
         else:
-            await client.type_text(text, delay_ms=arguments.get("delay_ms", 0))
+            await client.type_text(arguments["text"], delay_ms=arguments.get("delay_ms", 0))
     return json.dumps(_noted(body, client))
 
 
-async def _resolve_browser_secret(
-    secret_ref: str, *, tenant: Any, credential_vault: Any,
-) -> str | dict[str, str]:
-    """The plaintext *secret_ref* names, or the error result to return instead.
+async def _fill_secret(
+    arguments: dict[str, Any],
+    *,
+    tenant: Any,
+    session_id: UUID | str | None,
+    session_config: dict[str, Any] | None,
+    workspace_io: Any,
+    credential_vault: Any,
+    channel: str | None,
+    _client_factory: Callable[..., Any],
+    **browser: Any,
+) -> str:
+    """browser_type with a secret_ref: a stored credential into a secret field of its own site.
 
-    The agent's own credential (its service account's, else the acting
-    user's) wins over an org-wide one of the same name.
+    Every check runs before the value is read from the vault, except the two
+    only the live page can answer (is the field secret now, is it on one of
+    the credential's origins), which the browser checks and writes in one
+    step.
+    """
+
+    ref = arguments.get("ref")
+    if not ref:
+        return _refused("invalid_arguments", "secret_ref fills a field: pass the ref of a [secret] field")
+    preflight = await _resolve_session_browser(
+        tenant=tenant,
+        session_id=session_id,
+        session_config=session_config,
+        workspace_io=workspace_io,
+        **browser,
+    )
+    if isinstance(preflight, str):
+        return preflight
+    _browser_id, endpoint, snapshot_cache = preflight
+    if not (snapshot_cache.get(ref) or {}).get("secret"):
+        return _refused(
+            "not_a_secret_field",
+            f"{ref} is not marked [secret] in the latest page outline; a stored secret "
+            "only goes into a password, one-time-code or card field",
+        )
+
+    credential = await _resolve_browser_secret(
+        arguments["secret_ref"],
+        tenant=tenant,
+        credential_vault=credential_vault,
+        session_config=session_config,
+        channel=channel,
+    )
+    if isinstance(credential, str):
+        return credential
+    value, origins = credential
+    _typed_secrets.setdefault(str(session_id), set()).add(value)
+
+    client = _make_client(_client_factory, endpoint, snapshot_cache)
+    async with client:
+        try:
+            await client.fill_secret(ref, value, origins=origins)
+        except KeyError as exc:
+            return _refused("unknown_ref", str(exc))
+        except SecretFieldRefused as exc:
+            return _refused("secret_refused", str(exc))
+        except ClickTimeoutError as exc:
+            return _refused("click_timeout", str(exc))
+    return json.dumps(_noted({"typed": True}, client))
+
+
+def _origin(raw: Any) -> str | None:
+    """*raw* as a page's ``location.origin`` reads, or None when it is not an http(s) origin."""
+    if not isinstance(raw, str):
+        return None
+    parts = urlsplit(raw.strip())
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        return None
+    try:
+        port = parts.port
+    except ValueError:
+        return None
+    default = {"http": 80, "https": 443}[parts.scheme]
+    host = parts.hostname if ":" not in parts.hostname else f"[{parts.hostname}]"
+    return f"{parts.scheme}://{host}" + (f":{port}" if port not in (None, default) else "")
+
+
+def _browser_credential(raw: str, name: str) -> tuple[str, list[str]] | str:
+    """A stored browser credential's value and the origins it may be typed on, or the refusal.
+
+    A browser credential is a JSON object, ``{"value": "...", "origins":
+    ["https://acme.example"]}``: the vault row has no column for where a
+    secret belongs, and a credential that could be typed on any site could
+    be typed on the one a prompt-injected page sends the agent to.
+    """
+    try:
+        stored = json.loads(raw)
+    except ValueError:
+        stored = None
+    value = stored.get("value") if isinstance(stored, dict) else None
+    origins = stored.get("origins") if isinstance(stored, dict) else None
+    allowed = [_origin(o) for o in origins] if isinstance(origins, list) else []
+    if not isinstance(value, str) or not value or not allowed or None in allowed:
+        return _refused(
+            "secret_not_bound",
+            f"the credential {name!r} must be stored as "
+            '{"value": "...", "origins": ["https://the-site.example"]} '
+            "so it can only be typed on its own site",
+        )
+    return value, allowed
+
+
+async def _resolve_browser_secret(
+    secret_ref: str,
+    *,
+    tenant: Any,
+    credential_vault: Any,
+    session_config: dict[str, Any] | None,
+    channel: str | None,
+) -> tuple[str, list[str]] | str:
+    """The credential *secret_ref* names as (value, origins), or the refusal to return.
+
+    Two credentials can answer.  The agent's own, stored under its service
+    account, is one the operator gave this agent to use, whoever it is
+    talking to.  An org-wide one belongs to the operator's organisation and
+    answers only the operator's own chat with the agent (Studio): an end
+    user, a website visitor, a buyer or a channel member must not be able to
+    have the agent type the organisation's password, and a delegated or
+    scheduled session cannot show whose request it carries.  A user's
+    personal credential never answers: end users cannot store one, and the
+    agent typing a credential on someone's behalf is the agent's own grant.
     """
     try:
         name = parse_vault_ref(secret_ref)
     except InvalidVaultRef as exc:
-        return {"error": "invalid_secret_ref", "detail": str(exc)}
+        return _refused("invalid_secret_ref", str(exc))
     if not name.startswith(BROWSER_SECRET_PREFIX):
-        return {
-            "error": "invalid_secret_ref",
-            "detail": f"only credentials named '{BROWSER_SECRET_PREFIX}...' can be typed into a page",
-        }
+        return _refused(
+            "invalid_secret_ref",
+            f"only credentials named '{BROWSER_SECRET_PREFIX}...' can be typed into a page",
+        )
     org_id = getattr(tenant, "org_id", None)
     if credential_vault is None or org_id is None:
-        return {"error": "secret_unavailable", "detail": "the credential vault is not available here"}
-    principal = principal_kwargs(
-        user_id=getattr(tenant, "user_id", None),
-        service_account_id=getattr(tenant, "service_account_id", None),
-    )
-    scopes = [principal] if any(principal.values()) else []
-    scopes.append({"user_id": None, "service_account_id": None})
+        return _refused("secret_unavailable", "the credential vault is not available here")
+
+    scopes: list[dict[str, Any]] = []
+    agent_sa = (session_config or {}).get("agent_service_account_id")
+    if agent_sa:
+        try:
+            scopes.append({"user_id": None, "service_account_id": UUID(str(agent_sa))})
+        except ValueError:
+            logger.warning("Invalid agent_service_account_id on a session; its own credentials are skipped")
+    if channel == STUDIO_CHANNEL:
+        scopes.append({"user_id": None, "service_account_id": None})
     for scope in scopes:
         try:
-            value = await credential_vault.retrieve(org_id, name, **scope)
+            raw = await credential_vault.retrieve(org_id, name, **scope)
         except ValueError:
-            return {"error": "secret_unavailable", "detail": f"the credential {name!r} cannot be decrypted"}
-        if value is not None:
-            return value
-    return {"error": "secret_not_found", "detail": f"no credential named {name!r} is stored for this agent"}
+            return _refused("secret_unavailable", f"the credential {name!r} cannot be decrypted")
+        if raw is not None:
+            return _browser_credential(raw, name)
+    return _refused(
+        "secret_not_found",
+        f"no credential named {name!r} is stored for this agent"
+        + ("" if channel == STUDIO_CHANNEL else " (organisation credentials are typed only in the operator's own chat)"),
+    )
 
 
 PRESS_KEY_SCHEMA = {
@@ -1373,7 +1538,7 @@ def register(registry: ToolRegistry) -> None:
             ),
             parameters=NAVIGATE_SCHEMA,
         ),
-        handler=_browser_navigate_handler,
+        handler=_scrubbing(_browser_navigate_handler),
         toolset="browser",
     )
     registry.register(
@@ -1387,7 +1552,7 @@ def register(registry: ToolRegistry) -> None:
             ),
             parameters=GET_STATE_SCHEMA,
         ),
-        handler=_browser_get_state_handler,
+        handler=_scrubbing(_browser_get_state_handler),
         toolset="browser",
     )
     registry.register(
@@ -1402,7 +1567,7 @@ def register(registry: ToolRegistry) -> None:
             ),
             parameters=EVALUATE_SCHEMA,
         ),
-        handler=_browser_evaluate_handler,
+        handler=_scrubbing(_browser_evaluate_handler),
         toolset="browser",
     )
     registry.register(
@@ -1412,7 +1577,7 @@ def register(registry: ToolRegistry) -> None:
             description="Close the browser for this session.",
             parameters=CLOSE_SCHEMA,
         ),
-        handler=_browser_close_handler,
+        handler=_scrubbing(_browser_close_handler),
         toolset="browser",
     )
     registry.register(
@@ -1422,7 +1587,7 @@ def register(registry: ToolRegistry) -> None:
             description="Click a browser element by @eN ref or viewport coordinates.",
             parameters=CLICK_SCHEMA,
         ),
-        handler=_browser_click_handler,
+        handler=_scrubbing(_browser_click_handler),
         toolset="browser",
     )
     registry.register(
@@ -1438,7 +1603,7 @@ def register(registry: ToolRegistry) -> None:
             ),
             parameters=TYPE_SCHEMA,
         ),
-        handler=_browser_type_handler,
+        handler=_scrubbing(_browser_type_handler),
         toolset="browser",
     )
     registry.register(
@@ -1452,7 +1617,7 @@ def register(registry: ToolRegistry) -> None:
             ),
             parameters=PRESS_KEY_SCHEMA,
         ),
-        handler=_browser_press_key_handler,
+        handler=_scrubbing(_browser_press_key_handler),
         toolset="browser",
     )
     registry.register(
@@ -1467,7 +1632,7 @@ def register(registry: ToolRegistry) -> None:
             ),
             parameters=SCROLL_SCHEMA,
         ),
-        handler=_browser_scroll_handler,
+        handler=_scrubbing(_browser_scroll_handler),
         toolset="browser",
     )
     registry.register(
@@ -1477,7 +1642,7 @@ def register(registry: ToolRegistry) -> None:
             description="Drag along a path of viewport coordinates.",
             parameters=DRAG_SCHEMA,
         ),
-        handler=_browser_drag_handler,
+        handler=_scrubbing(_browser_drag_handler),
         toolset="browser",
     )
     registry.register(
@@ -1487,7 +1652,7 @@ def register(registry: ToolRegistry) -> None:
             description="Wait for a bounded number of milliseconds.",
             parameters=WAIT_SCHEMA,
         ),
-        handler=_browser_wait_handler,
+        handler=_scrubbing(_browser_wait_handler),
         toolset="browser",
     )
     registry.register(
@@ -1501,7 +1666,7 @@ def register(registry: ToolRegistry) -> None:
             ),
             parameters=UPLOAD_FILE_SCHEMA,
         ),
-        handler=_browser_upload_file_handler,
+        handler=_scrubbing(_browser_upload_file_handler),
         toolset="browser",
     )
     registry.register(
@@ -1516,6 +1681,6 @@ def register(registry: ToolRegistry) -> None:
             ),
             parameters=SCREENSHOT_SCHEMA,
         ),
-        handler=_browser_screenshot_handler,
+        handler=_scrubbing(_browser_screenshot_handler),
         toolset="browser",
     )
