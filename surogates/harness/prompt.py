@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from surogates.channels.constants import ADAPTER_CHANNELS
 from surogates.channels.memory_boundary import is_case_agent_session, is_case_session
 from surogates.devices.binding import device_of
 from surogates.harness.loop_context_replay import sanitize_sender_name
@@ -903,6 +904,10 @@ class PromptBuilder:
             hint = self._prompts.platform_hint(channel)
             if hint:
                 parts.append(f"\n## Platform\n{hint}")
+            # Without it the model, having already written to the person,
+            # closed a turn with a note to itself and the person received it.
+            if channel in ADAPTER_CHANNELS:
+                parts.append("\n" + self._prompts.get("guidance/channel_reply"))
             # create_artifact renders into the Studio web panel, which these
             # channels don't have -- tell the agent to deliver visual output
             # as an image via MEDIA: instead.  Appended after the platform
