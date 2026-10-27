@@ -593,6 +593,17 @@ class TestTypeSecrets:
         body, _client = await self._type(tenant, {"ref": "@e5", "secret_ref": "vault://browser_x"})
         assert body["error"] == "secret_unavailable"
 
+    async def test_a_browser_on_the_users_computer_never_gets_a_stored_secret(self, tenant) -> None:
+        # Its operations are journaled in the clear for replay, and its app
+        # shows what it types: the vault is never read for it.
+        vault = FakeVault({("browser_acme", None, AGENT_SA): ACME})
+        body, client = await self._type(
+            tenant, {"ref": "@e5", "secret_ref": "vault://browser_acme"}, vault=vault,
+            config={"agent_service_account_id": str(AGENT_SA), "execution": {"kind": "device"}},
+        )
+        assert body["error"] == "secret_unavailable"
+        assert client.calls == [] and vault.asked == []
+
     @pytest.mark.parametrize("arguments", [{}, {"text": "a", "secret_ref": "vault://browser_x", "ref": "@e5"}])
     async def test_exactly_one_of_text_and_secret_ref(self, tenant, arguments) -> None:
         body, client = await self._type(tenant, arguments, vault=FakeVault({}))

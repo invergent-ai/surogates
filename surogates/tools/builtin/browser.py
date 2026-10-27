@@ -823,6 +823,17 @@ async def _fill_secret(
     ref = arguments.get("ref")
     if not ref:
         return _refused("invalid_arguments", "secret_ref fills a field: pass the ref of a [secret] field")
+    if isinstance(workspace_io, DeviceWorkspaceIO) or _on_a_computer(session_config):
+        # The computer's browser is driven by journaled operations, kept so a
+        # stopped worker can resume them, and its app shows what it types in
+        # its approval prompt: a vault secret typed there would be stored in
+        # the clear and shown.  The browser on the user's own computer has
+        # their own sign-ins and password manager for this.
+        return _refused(
+            "secret_unavailable",
+            "stored secrets are typed only in the cloud browser, never in the browser on the user's computer",
+        )
+
     preflight = await _resolve_session_browser(
         tenant=tenant,
         session_id=session_id,
