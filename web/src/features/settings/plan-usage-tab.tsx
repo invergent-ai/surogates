@@ -4,7 +4,7 @@
 // Settings → Plan & usage: what this agent sells and what the
 // signed-in user currently holds. Balances arrive token-denominated
 // from the harness's /v1/commerce endpoints (which front surogate-ops
-// with the runtime token) and are shown as messages; the browser
+// with the runtime token) and are shown as turns; the browser
 // never talks to ops directly.
 
 import { BrandBeam } from "@invergent/agent-chat-react";
@@ -14,7 +14,7 @@ import { Alert, AlertDescription } from "@invergent/ui-sdk/alert";
 import { Button } from "@invergent/ui-sdk/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@invergent/ui-sdk/card";
 import { SectionLabel } from "@invergent/ui-sdk/section-label";
-import { approxMessagesLabel } from "@/lib/usage-units";
+import { approxTurnsLabel } from "@/lib/usage-units";
 
 interface CommerceOffer {
   id: string;
@@ -61,6 +61,9 @@ interface CommerceOverview {
     trial_used_offer_ids?: string[];
   } | null;
   purchasable: boolean;
+  /** Tokens one turn of this agent costs (every model call of the
+   * turn); amounts render as turns with it, plain tokens without. */
+  tokens_per_turn_estimate?: number | null;
 }
 
 // Statuses that hold a plan; "free" is the agent's Free plan.
@@ -197,6 +200,7 @@ export function PlanUsageTab() {
   }
 
   const ent = overview.entitlement;
+  const perTurn = overview.tokens_per_turn_estimate ?? null;
   const subscriptions = overview.offers.filter(
     (o) => o.kind === "subscription",
   );
@@ -242,13 +246,13 @@ export function PlanUsageTab() {
                   Included usage left this period
                 </span>
                 <span className="shrink-0 text-right font-medium tabular-nums">
-                  {approxMessagesLabel(ent.period_token_remaining)}
+                  {approxTurnsLabel(ent.period_token_remaining, perTurn)}
                 </span>
               </div>
               <div className="flex items-start justify-between gap-4">
                 <span className="text-muted-foreground">Extra usage</span>
                 <span className="shrink-0 text-right font-medium tabular-nums">
-                  {approxMessagesLabel(ent.topup_token_remaining)}
+                  {approxTurnsLabel(ent.topup_token_remaining, perTurn)}
                 </span>
               </div>
               {ent.browser_minutes?.metered ? (
@@ -350,7 +354,7 @@ export function PlanUsageTab() {
                       (offer.media_credits_amount ?? 0) > 0
                         ? `${[
                             offer.token_amount > 0
-                              ? approxMessagesLabel(offer.token_amount)
+                              ? approxTurnsLabel(offer.token_amount, perTurn)
                               : "",
                             (offer.browser_minutes_amount ?? 0) > 0
                               ? `${offer.browser_minutes_amount} min browsing`
