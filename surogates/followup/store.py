@@ -83,6 +83,8 @@ __all__ = [
     "record_inbound",
     "render_text",
     "resolve_escalation",
+    "escalation_id_of",
+    "is_resolved_escalation_alert",
     "retire_escalation_alerts",
     "senders_of",
     "stop_following",
@@ -1240,48 +1242,82 @@ MISSED_PREFIX = "missed:"
 RESOLVED_BEFORE_READ = "Escalation resolved before it was read"
 
 
-def _alerts_about(escalation_hex_: Any, escalation_dashed: Any) -> Any:
-    """Outreach rows an escalation sent: its alerts, its red alert's
-    reminder, its missed-replies alerts.  Takes the id as SQL expressions,
-    so the match also correlates against ``escalations``."""
-    key = OutreachMessageRow.dedupe_key
-    return sa.or_(
-        *(
-            key.like(sa.literal(f"{prefix}%:") + escalation_hex_ + sa.literal(":%"))
-            for prefix in (ESCALATION_PREFIX, REMINDER_PREFIX)
-        ),
-        key.like(sa.literal(MISSED_PREFIX) + escalation_dashed + sa.literal(":%")),
+def escalation_id_of(key: str | None) -> uuid.UUID | None:
+    """The escalation an outreach row's dedupe key names: an alert
+    (``escalation:<step or ->:<hex>:<recipient>``), its red alert's reminder
+    (``reminder:…`` alike) or a missed-replies alert
+    (``missed:<id>:<recipient>``); ``None`` for anything else."""
+    parts = (key or "").split(":")
+    head = parts[0] + ":"
+    if head in (ESCALATION_PREFIX, REMINDER_PREFIX) and len(parts) >= 3:
+        raw = parts[2]
+    elif head == MISSED_PREFIX and len(parts) >= 2:
+        raw = parts[1]
+    else:
+        return None
+    try:
+        return uuid.UUID(raw)
+    except ValueError:
+        return None
+
+
+async def is_resolved_escalation_alert(session_factory: Any, row: Any) -> bool:
+    """Whether *row* is an alert about an escalation already resolved.
+
+    The write-time retire (:func:`retire_escalation_alerts`) keeps these out
+    of the held queue; this is the delivery-time check for one that slipped
+    in after it, e.g. a reminder queued while a colleague resolved the case.
+    A taken case still delivers: whoever took it may need what it says.
+    One primary-key read, and only for an alert about to go out.
+    """
+    if row.kind != "alert":
+        return False
+    escalation_id = escalation_id_of(row.dedupe_key)
+    if escalation_id is None:
+        return False
+    async with session_factory() as db:
+        escalation = await db.get(EscalationRow, escalation_id)
+    return (
+        escalation is not None
+        and escalation.org_id == row.org_id
+        and escalation.resolved_at is not None
     )
-
-
-#: An outreach row about an escalation already resolved: a held alert that
-#: must not reach the team when they next write.  A taken case still
-#: delivers: whoever took it may need what it says.
-ABOUT_RESOLVED_ESCALATION = sa.exists().where(
-    EscalationRow.org_id == OutreachMessageRow.org_id,
-    EscalationRow.agent_id == OutreachMessageRow.agent_id,
-    EscalationRow.resolved_at.isnot(None),
-    _alerts_about(
-        sa.func.replace(sa.cast(EscalationRow.id, sa.String), "-", ""),
-        sa.cast(EscalationRow.id, sa.String),
-    ),
-)
 
 
 async def retire_escalation_alerts(
     session_factory: Any, *, org_id: uuid.UUID, escalation_ids: Iterable[uuid.UUID],
 ) -> int:
     """Give up the alerts still held for resolved escalations, so the team's
-    next message does not deliver a case already dealt with."""
+    next message does not deliver a case already dealt with: their alerts,
+    their red alert's reminder, their missed-replies alerts.  Each is matched
+    on its key's exact prefix, so the lookup stays on the key index."""
     ids = list(escalation_ids)
     if not ids:
         return 0
     async with session_factory() as db:
+        found = (
+            await db.execute(
+                sa.select(EscalationRow.id, EscalationRow.invitation_id)
+                .where(EscalationRow.org_id == org_id)
+                .where(EscalationRow.id.in_(ids))
+            )
+        ).all()
+        prefixes = [
+            prefix
+            for escalation_id, invitation_id in found
+            for prefix in (
+                f"{escalation_key(escalation_id, invitation_id)}:",
+                f"{REMINDER_PREFIX}{invitation_id or '-'}:{escalation_id.hex}:",
+                f"{MISSED_PREFIX}{escalation_id}:",
+            )
+        ]
+        if not prefixes:
+            return 0
         result = await db.execute(
             sa.update(OutreachMessageRow)
             .where(OutreachMessageRow.org_id == org_id)
             .where(OutreachMessageRow.state.in_(("queued", "awaiting_reply")))
-            .where(sa.or_(*(_alerts_about(sa.literal(i.hex), sa.literal(str(i))) for i in ids)))
+            .where(sa.or_(*(OutreachMessageRow.dedupe_key.startswith(p, autoescape=True) for p in prefixes)))
             .values(state="replaced", reason=RESOLVED_BEFORE_READ)
             .execution_options(synchronize_session=False)
         )

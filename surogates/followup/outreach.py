@@ -251,6 +251,17 @@ async def _write_text(
     )
 
 
+async def _retire_if_resolved(session_factory: Any, row: Any) -> bool:
+    """Give up *row* when it is an alert about a case already resolved."""
+    if not await followup_store.is_resolved_escalation_alert(session_factory, row):
+        return False
+    await _transition(
+        session_factory, row.id, from_states=_HELD,
+        state="replaced", reason=followup_store.RESOLVED_BEFORE_READ,
+    )
+    return True
+
+
 async def _deliver_now(
     session_factory: Any,
     session_store: Any,
@@ -261,6 +272,8 @@ async def _deliver_now(
     final_state: str,
 ) -> bool:
     """Claim *row*, write its text into *session_id*, and give it back on failure."""
+    if await _retire_if_resolved(session_factory, row):
+        return False
     if not await _transition(
         session_factory, row.id, from_states=_HELD,
         state=final_state, session_id=session_id, sent_at=row.sent_at or now,
@@ -326,10 +339,7 @@ async def deliver_pending(
                 .where(OutreachMessageRow.platform == platform)
                 .where(OutreachMessageRow.channel_identifier == channel_identifier)
                 .where(sa.or_(
-                    sa.and_(
-                        OutreachMessageRow.state.in_(_HELD),
-                        ~followup_store.ABOUT_RESOLVED_ESCALATION,
-                    ),
+                    OutreachMessageRow.state.in_(_HELD),
                     sa.and_(
                         OutreachMessageRow.kind == "operator",
                         OutreachMessageRow.state == "failed",
@@ -1067,10 +1077,7 @@ async def send_queued_outreach(
                             OutreachMessageRow.not_before <= now,
                         ),
                     ),
-                    sa.and_(
-                        OutreachMessageRow.state == "awaiting_reply", answered,
-                        ~followup_store.ABOUT_RESOLVED_ESCALATION,
-                    ),
+                    sa.and_(OutreachMessageRow.state == "awaiting_reply", answered),
                 ))
                 .order_by(OutreachMessageRow.created_at)
                 .limit(BATCH)
@@ -1111,6 +1118,9 @@ async def _send_one(
     slack_client_factory: Any = None,
 ) -> int:
     queued = row.state == "queued"
+    # Before any template goes out: a resolved case must not reopen a chat.
+    if await _retire_if_resolved(session_factory, row):
+        return 0
     if row.destination:
         return await _send_to_destination(
             session_factory, row, session_store=session_store, redis=redis, now=now,
