@@ -96,6 +96,7 @@
     "react-jsx-parser": "^2.4.1",
     "react-resizable-panels": "^4.6.4",
     "recharts": "^3.8.0",
+    "remark-breaks": "4.0.0",
     "remark-gfm": "^4.0.1",
     "shadcn": "^4.4.0",
     "shiki": "^4.0.2",
