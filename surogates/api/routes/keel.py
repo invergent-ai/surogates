@@ -368,8 +368,15 @@ def agent_id_of(request: Request) -> str:
     return agent_id
 
 
-async def resolve_agent(request: Request, agent_id: str, org_id: UUID) -> dict[str, Any]:
-    """The agent's runtime config, when it is the org's and running."""
+async def resolve_agent(
+    request: Request, agent_id: str, org_id: UUID, *, running: bool = True,
+) -> dict[str, Any]:
+    """The agent's runtime config, when it is the org's and, unless *running* is false, running.
+
+    A call that only analyses what the agent already did (labelling its
+    raised hands, say) passes ``running=False`` and is served for a
+    stopped agent too.
+    """
     cache = request.app.state.runtime_config_cache
     unknown = refused(status.HTTP_404_NOT_FOUND, "unknown-agent", "No such agent in this org.")
     for attempt in (1, 2):
@@ -393,7 +400,7 @@ async def resolve_agent(request: Request, agent_id: str, org_id: UUID) -> dict[s
     # Another org's agent is not told apart from no agent at all.
     if not same_org:
         raise unknown
-    if not payload.get("enabled"):
+    if running and not payload.get("enabled"):
         raise refused(status.HTTP_409_CONFLICT, "agent-stopped", "The agent is stopped.")
     return payload
 

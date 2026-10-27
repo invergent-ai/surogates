@@ -50,12 +50,13 @@ def create_keel_link_app() -> FastAPI:
         redoc_url=None,
     )
 
-    from surogates.api.routes import health, keel, keel_case_agents, keel_items
+    from surogates.api.routes import health, keel, keel_analysis, keel_case_agents, keel_items
 
     app.include_router(health.router, tags=["health"])
     app.include_router(keel.router, prefix="/v1", tags=["keel"])
     app.include_router(keel_items.router, prefix="/v1", tags=["keel"])
     app.include_router(keel_case_agents.router, prefix="/v1", tags=["keel"])
+    app.include_router(keel_analysis.router, prefix="/v1", tags=["keel"])
     if not settings.keel.link_key:
         logger.warning("SUROGATES_KEEL_LINK_KEY is empty: keel-link refuses every call.")
     return app
