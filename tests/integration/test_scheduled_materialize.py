@@ -309,6 +309,86 @@ async def test_materialize_falls_back_to_fresh_workspace_when_creator_missing(
     assert schedule.id is not None
 
 
+async def test_a_run_logs_in_as_its_schedule_captured_not_as_its_chat_now(
+    session_factory, redis_client,
+):
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    scheduled_store = ScheduledSessionStore(session_factory)
+    session_store = SessionStore(session_factory, redis=redis_client)
+    creator = await session_store.create_session(
+        user_id=user_id, org_id=org_id, agent_id="agent-a", channel="studio",
+        config={
+            "storage_bucket": "agent-a-bucket", "storage_key_prefix": "",
+            "workspace_path": "/workspace/agent-a-bucket/sessions/C",
+            "browser": {"profile_id": "bound-later"},
+        },
+    )
+    attached = await scheduled_store.create(
+        org_id=org_id, user_id=user_id, agent_id="agent-a", name="Post",
+        prompt="post", schedule=parse_schedule("10m"), source="loop",
+        created_from_session_id=creator.id,
+        next_run_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+    )
+    detached = await scheduled_store.create(
+        org_id=org_id, user_id=user_id, agent_id="agent-a", name="Post 2",
+        prompt="post", schedule=parse_schedule("10m"), source="loop",
+        next_run_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+    )
+    async with session_factory() as db:
+        await db.execute(
+            text(
+                "UPDATE scheduled_sessions SET context = CAST(:ctx AS jsonb) "
+                "WHERE id IN (:a, :d)"
+            ),
+            {
+                "ctx": '{"browser": {"profile_id": "captured"}, "origin_channel": "studio"}',
+                "a": attached.id, "d": detached.id,
+            },
+        )
+        await db.commit()
+    await redis_client.delete(SHARED_WORK_QUEUE_KEY)
+
+    for row in await _claim_one(scheduled_store):
+        sid = await materialize_scheduled_run(
+            row, **_deps(session_factory, redis_client, scheduled_store, session_store),
+        )
+        run = await session_store.get_session(sid)
+        assert run.config["browser"] == {"profile_id": "captured"}
+        assert run.config["origin_channel"] == "studio"
+
+
+async def test_a_run_of_a_schedule_without_a_captured_context_takes_its_chats(
+    session_factory, redis_client,
+):
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    scheduled_store = ScheduledSessionStore(session_factory)
+    session_store = SessionStore(session_factory, redis=redis_client)
+    creator = await session_store.create_session(
+        user_id=user_id, org_id=org_id, agent_id="agent-a", channel="studio",
+        config={
+            "storage_bucket": "agent-a-bucket", "storage_key_prefix": "",
+            "workspace_path": "/workspace/agent-a-bucket/sessions/C",
+            "browser": {"profile_id": "chat-profile"},
+        },
+    )
+    await scheduled_store.create(
+        org_id=org_id, user_id=user_id, agent_id="agent-a", name="Legacy",
+        prompt="post", schedule=parse_schedule("10m"), source="loop",
+        created_from_session_id=creator.id,
+        next_run_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+    )
+    await redis_client.delete(SHARED_WORK_QUEUE_KEY)
+
+    [row] = await _claim_one(scheduled_store)
+    sid = await materialize_scheduled_run(
+        row, **_deps(session_factory, redis_client, scheduled_store, session_store),
+    )
+    run = await session_store.get_session(sid)
+    assert run.config["browser"] == {"profile_id": "chat-profile"}
+
+
 async def test_materialize_creates_sa_owned_run_session(
     session_factory, redis_client,
 ):

@@ -34,6 +34,7 @@ from surogates.channels.constants import session_queue_priority
 from surogates.config import enqueue_session
 from surogates.scheduled.schedule import DYNAMIC_LOOP_STALE_RUN_SECONDS
 from surogates.session.events import EventType
+from surogates.session.execution_context import inherit_context
 from surogates.session.provisioning import (
     create_agent_session,
     create_child_session,
@@ -83,6 +84,9 @@ async def materialize_scheduled_run(
         except SessionNotFoundError:
             parent = None
 
+    # What the schedule captured when it was made; rows from before it was
+    # captured take the creating chat's current context instead.
+    captured = getattr(schedule, "context", None) or None
     try:
         if parent is not None:
             session = await create_child_session(
@@ -91,6 +95,7 @@ async def materialize_scheduled_run(
                 channel="scheduled",
                 config=scheduled_config,
                 idempotency_key=idempotency_key,
+                context=captured,
             )
         else:
             session = await create_agent_session(
@@ -102,7 +107,7 @@ async def materialize_scheduled_run(
                 service_account_id=schedule.service_account_id,
                 agent_id=schedule.agent_id,
                 channel="scheduled",
-                config=scheduled_config,
+                config={**scheduled_config, **inherit_context(None, None, captured)},
                 parent_id=None,
                 idempotency_key=idempotency_key,
             )

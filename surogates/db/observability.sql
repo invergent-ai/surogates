@@ -613,6 +613,12 @@ ALTER TABLE scheduled_sessions
     ADD COLUMN IF NOT EXISTS service_account_id uuid
         REFERENCES service_accounts(id);
 
+-- Who a run acts for and what it logs in as, captured when the schedule is
+-- made; a run's own time limit.
+ALTER TABLE scheduled_sessions
+    ADD COLUMN IF NOT EXISTS context jsonb NOT NULL DEFAULT '{}'::jsonb,
+    ADD COLUMN IF NOT EXISTS max_run_seconds integer;
+
 -- Replace the old (org, user, agent) index with one that covers both
 -- principal shapes.  Old index is dropped explicitly because the name
 -- is changing.

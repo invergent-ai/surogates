@@ -843,6 +843,10 @@ class ScheduledSession(Base):
     locked_until: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     created_from_session_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), nullable=True)
+    # Who a run acts for and what it logs in as, captured at creation
+    # (surogates.session.execution_context).
+    context: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
+    max_run_seconds: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
