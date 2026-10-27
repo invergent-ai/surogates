@@ -358,6 +358,23 @@ async def test_escalate_from_a_chat_with_no_person_names_nobody(sf, care_team):
     assert item.payload["user_id"] is None
 
 
+@pytest.mark.parametrize(("channel", "label"), [
+    ("studio", "from the operator chat"),
+    ("scheduled", "from a scheduled run"),
+])
+@pytest.mark.asyncio
+async def test_escalate_with_no_end_user_says_where_it_came_from(sf, care_team, channel, label):
+    _, inbox_sa = care_team
+    session_id = uuid.uuid4()
+    async with sf() as db:
+        db.add(SessionRow(id=session_id, org_id=ORG, agent_id=AGENT, channel=channel))
+        await db.commit()
+    await followup.handle_escalate({"reason": "The X login stopped working."}, **_kw(sf, session_id))
+    async with sf() as db:
+        item = (await db.execute(sa.select(InboxItem))).scalar_one()
+    assert item.title == f"Needs your attention: {label}"
+
+
 @pytest.mark.asyncio
 async def test_escalate_refuses_in_a_team_members_own_conversation(sf, care_team):
     """A doctor's tap on an alert template read as "send the alert again":
