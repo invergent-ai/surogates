@@ -275,9 +275,11 @@ async def _deliver_now(
     now: datetime,
     final_state: str,
 ) -> bool:
-    """Claim *row*, write its text into *session_id*, and give it back on failure."""
-    if await _retire_if_resolved(session_factory, row):
-        return False
+    """Claim *row*, write its text into *session_id*, and give it back on failure.
+
+    The caller has already given up a row about a resolved case
+    (:func:`_retire_if_resolved`).
+    """
     if not await _transition(
         session_factory, row.id, from_states=_HELD,
         state=final_state, session_id=session_id, sent_at=row.sent_at or now,
@@ -299,8 +301,8 @@ async def _deliver_now(
 
 async def is_opener(
     session_factory: Any, *, org_id: uuid.UUID, agent_id: str, provider_message_id: str,
-) -> bool:
-    """Whether *provider_message_id* is a template we sent to reopen a window."""
+) -> uuid.UUID | None:
+    """The row of the template we sent to reopen a window as *provider_message_id*, if it is one."""
     async with session_factory() as db:
         return (
             await db.execute(
@@ -310,7 +312,7 @@ async def is_opener(
                 .where(OutreachMessageRow.provider_message_id == provider_message_id)
                 .limit(1)
             )
-        ).first() is not None
+        ).scalar_one_or_none()
 
 
 #: Why a held text was given up, as the reason key of the team's notice;
@@ -327,36 +329,28 @@ async def answer_withdrawn(
     *,
     org_id: uuid.UUID,
     agent_id: str,
-    provider_message_id: str,
+    opener_id: uuid.UUID,
     session_id: uuid.UUID,
     now: datetime | None = None,
 ) -> bool:
     """Say so when a tapped template's alert was withdrawn before it was read.
 
-    Runs after :func:`deliver_pending`, so whatever was still live behind
-    the template has gone out and nothing is said.  When the alert was given
-    up instead (its case resolved, its person removed), the tap would get
-    silence.  The note names nobody: the template disclosed nothing and the
-    alert never arrived.  True when the note was written.
+    *opener_id* is the template's row (:func:`is_opener`).  Runs after
+    :func:`deliver_pending`, so whatever was still live behind the template
+    has gone out and nothing is said.  When the alert was given up instead
+    (its case resolved, its person removed), the tap would get silence.  The
+    note names nobody: the template disclosed nothing and the alert never
+    arrived.  True when the note was written.
     """
     now = now or datetime.now(timezone.utc)
     async with session_factory() as db:
-        opener = (
+        rows = (
             await db.execute(
-                sa.select(OutreachMessageRow)
-                .where(OutreachMessageRow.org_id == org_id)
-                .where(OutreachMessageRow.agent_id == agent_id)
-                .where(OutreachMessageRow.provider_message_id == provider_message_id)
-                .limit(1)
+                sa.select(OutreachMessageRow).where(
+                    sa.or_(OutreachMessageRow.id == opener_id, OutreachMessageRow.rides_on == opener_id),
+                )
             )
-        ).scalar_one_or_none()
-        if opener is None:
-            return False
-        rows = [opener, *(
-            await db.execute(
-                sa.select(OutreachMessageRow).where(OutreachMessageRow.rides_on == opener.id)
-            )
-        ).scalars()]
+        ).scalars().all()
     withdrawn = [
         r for r in rows
         if r.kind == "alert" and r.state == "replaced" and r.reason in _WITHDRAWN_WHY
@@ -374,7 +368,7 @@ async def answer_withdrawn(
     data = {
         "message": {"role": "assistant", "content": text},
         "synthetic": "outreach",
-        "outreach_id": str(opener.id),
+        "outreach_id": str(opener_id),
         "outreach_kind": "withdrawn",
     }
     await session_store.emit_event(
@@ -435,7 +429,7 @@ async def deliver_pending(
             await _answered_too_late(
                 session_factory, session_store, row, session_id=session_id, agents=agents,
             )
-        elif await _deliver_now(
+        elif not await _retire_if_resolved(session_factory, row) and await _deliver_now(
             session_factory, session_store, row,
             session_id=session_id, now=now, final_state="delivered",
         ):

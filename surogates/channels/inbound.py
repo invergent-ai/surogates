@@ -888,7 +888,7 @@ class ChannelInboundPipeline:
                 await answer_withdrawn(
                     deps.session_factory, deps.session_store,
                     org_id=UUID(str(routing.org_id)), agent_id=routing.agent_id,
-                    provider_message_id=tapped, session_id=session_id,
+                    opener_id=tapped, session_id=session_id,
                 )
             except Exception:  # noqa: BLE001 — the tap is handled either way
                 logger.warning("[followup] could not answer a withdrawn alert's tap", exc_info=True)
@@ -1230,21 +1230,20 @@ class ChannelInboundPipeline:
     # ------------------------------------------------------------------
 
     @staticmethod
-    async def _tapped_opener(deps: Any, routing: Any, msg: InboundMessage) -> str | None:
-        """The provider id of the reopening template *msg* taps, if it taps one."""
+    async def _tapped_opener(deps: Any, routing: Any, msg: InboundMessage) -> UUID | None:
+        """The row of the reopening template *msg* taps, if it taps one."""
         source = msg.source or {}
         reply_to = source.get("template_reply") and source.get("reply_to")
         if not reply_to or deps.session_factory is None:
             return None
         try:
-            found = await is_opener(
+            return await is_opener(
                 deps.session_factory, org_id=UUID(str(routing.org_id)),
                 agent_id=routing.agent_id, provider_message_id=reply_to,
             )
         except Exception:  # noqa: BLE001 — when unsure, the agent reads it
             logger.warning("[followup] could not check the tapped template", exc_info=True)
             return None
-        return str(reply_to) if found else None
 
     @staticmethod
     async def _intercept_pending_input(
