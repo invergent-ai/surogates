@@ -569,19 +569,21 @@ class TestTypeSecrets:
         json.dumps({"value": PASSWORD, "origins": []}),
         json.dumps({"value": PASSWORD, "origins": ["acme.example"]}),
         json.dumps({"value": PASSWORD, "origins": ["javascript:alert(1)"]}),
+        json.dumps({"value": PASSWORD, "origins": ["http://acme.example"]}),
     ])
     async def test_a_credential_not_bound_to_its_site_is_refused(self, tenant, stored) -> None:
         vault = FakeVault({("browser_acme", None, AGENT_SA): stored})
         body, client = await self._type(tenant, {"ref": "@e5", "secret_ref": "vault://browser_acme"}, vault=vault)
         assert body["error"] == "secret_not_bound"
+        assert "Studio, Settings, Vault" in body["detail"]
         assert PASSWORD not in json.dumps(body)
         assert client.calls == []
 
     async def test_origins_are_compared_as_the_page_reads_its_own(self, tenant) -> None:
-        stored = json.dumps({"value": PASSWORD, "origins": ["HTTPS://Acme.Example:443/login", "http://acme.example:8080"]})
+        stored = json.dumps({"value": PASSWORD, "origins": ["HTTPS://Acme.Example:443/login", "http://localhost:8080", "http://[::1]"]})
         vault = FakeVault({("browser_acme", None, AGENT_SA): stored})
         _body, client = await self._type(tenant, {"ref": "@e5", "secret_ref": "vault://browser_acme"}, vault=vault)
-        assert client.calls[0][2] == {"origins": ["https://acme.example", "http://acme.example:8080"]}
+        assert client.calls[0][2] == {"origins": ["https://acme.example", "http://localhost:8080", "http://[::1]"]}
 
     async def test_only_credentials_named_for_the_browser_can_be_typed(self, tenant) -> None:
         vault = FakeVault({("git_pat", None, AGENT_SA): "ghp_secret"})

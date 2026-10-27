@@ -876,12 +876,21 @@ async def _fill_secret(
     return json.dumps(_noted({"typed": True}, client))
 
 
+LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
 def _origin(raw: Any) -> str | None:
-    """*raw* as a page's ``location.origin`` reads, or None when it is not an http(s) origin."""
+    """*raw* as a page's ``location.origin`` reads, or None when it is not an origin a secret may go to.
+
+    Only https qualifies, except on this machine: a password typed into a
+    plain http page crosses the network readable by anyone on the path.
+    """
     if not isinstance(raw, str):
         return None
     parts = urlsplit(raw.strip())
-    if parts.scheme not in ("http", "https") or not parts.hostname:
+    if not parts.hostname:
+        return None
+    if parts.scheme != "https" and not (parts.scheme == "http" and parts.hostname in LOCAL_HOSTS):
         return None
     try:
         port = parts.port
@@ -910,9 +919,9 @@ def _browser_credential(raw: str, name: str) -> tuple[str, list[str]] | str:
     if not isinstance(value, str) or not value or not allowed or None in allowed:
         return _refused(
             "secret_not_bound",
-            f"the credential {name!r} must be stored as "
-            '{"value": "...", "origins": ["https://the-site.example"]} '
-            "so it can only be typed on its own site",
+            f"the credential {name!r} has no site it may be typed on. "
+            "Ask the operator to open Studio, Settings, Vault, choose Update on "
+            f"{name!r} and fill in the sites this password may be typed on",
         )
     return value, allowed
 
