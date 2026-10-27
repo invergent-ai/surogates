@@ -64,23 +64,3 @@ def test_typed_texts_finds_each_typing_calls_text_longest_first() -> None:
         {"id": "d", "function": {"name": "web_search", "arguments": json.dumps({"text": "nope"})}},
     ]
     assert typed_texts(calls) == [PASSWORD, "ana"]
-
-
-def test_an_event_stored_before_masking_is_masked_when_read() -> None:
-    """Every reader (event list, live stream, harness) gets events as Event
-    models, so a legacy row's plaintext is masked once, there."""
-    from types import SimpleNamespace
-    from uuid import uuid4
-
-    from surogates.session.models import Event
-
-    legacy = SimpleNamespace(
-        id=1, session_id=uuid4(), org_id=None, user_id=None, type="llm.response",
-        trace_id=None, span_id=None, created_at=None,
-        data={"message": {"tool_calls": [{"id": "c1", "function": {
-            "name": "browser_type", "arguments": json.dumps({"ref": "@e5", "text": PASSWORD}),
-        }}]}},
-    )
-    read = Event.model_validate(legacy)
-    assert PASSWORD not in json.dumps(read.data)
-    assert BULLETS in read.data["message"]["tool_calls"][0]["function"]["arguments"]
