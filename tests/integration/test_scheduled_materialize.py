@@ -249,7 +249,8 @@ async def test_materialize_child_inherits_creator_workspace(
     assert first_child.config["sandbox_root_session_id"] == str(creator.id)
     assert sandbox_session_key(first_child) == str(creator.id)
 
-    # Force due again, run a second iteration.
+    # The first run ends; force due again, run a second iteration.
+    await session_store.update_session_status(first_sid, "completed")
     async with session_factory() as db:
         await db.execute(
             text(
@@ -507,3 +508,114 @@ async def test_mark_run_failed_reschedules_and_releases_claim(
     assert refreshed.status == "active"
     assert refreshed.next_run_at is not None
     assert refreshed.next_run_at > datetime.now(timezone.utc)
+
+
+def _agent() -> str:
+    import uuid
+
+    return f"agent-{uuid.uuid4().hex[:8]}"
+
+
+async def _make_due(session_factory, schedule_id) -> None:
+    async with session_factory() as db:
+        await db.execute(
+            text("UPDATE scheduled_sessions SET next_run_at = now() - interval '1 minute' WHERE id = :id"),
+            {"id": schedule_id},
+        )
+        await db.commit()
+
+
+async def _first_run(session_factory, redis_client, **kw):
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    scheduled_store = ScheduledSessionStore(session_factory)
+    session_store = SessionStore(session_factory, redis=redis_client)
+    agent = _agent()
+    schedule = await scheduled_store.create(
+        org_id=org_id, user_id=user_id, agent_id=agent, name="Digest", prompt="send the digest",
+        schedule=parse_schedule("10m"), source="tool", created_from_session_id=None,
+        next_run_at=datetime.now(timezone.utc) - timedelta(minutes=1), **kw,
+    )
+    deps = _deps(session_factory, redis_client, scheduled_store, session_store)
+    claimed = (await scheduled_store.claim_due(agent_id=agent, worker_id="w1", limit=1))[0]
+    run_id = await materialize_scheduled_run(claimed, **deps)
+    return org_id, user_id, agent, schedule, run_id, scheduled_store, session_store, deps
+
+
+async def test_a_run_is_told_which_schedule_and_run_it_is(session_factory, redis_client):
+    _, _, agent, schedule, run_id, scheduled_store, session_store, deps = await _first_run(
+        session_factory, redis_client,
+    )
+    identity = (await session_store.get_session(run_id)).config["scheduled_run"]
+    assert identity["id"] == str(schedule.id)
+    assert (identity["name"], identity["run_number"], identity["previous_run"]) == ("Digest", 1, None)
+    assert identity["cadence"] == "Every 10 minutes"
+
+    await session_store.update_session_status(run_id, "completed")
+    await _make_due(session_factory, schedule.id)
+    claimed = (await scheduled_store.claim_due(agent_id=agent, worker_id="w1", limit=1))[0]
+    second = await materialize_scheduled_run(claimed, **deps)
+    identity = (await session_store.get_session(second)).config["scheduled_run"]
+    assert identity["run_number"] == 2
+    assert identity["previous_run"]["session_id"] == str(run_id)
+    assert identity["previous_run"]["status"] == "completed"
+
+
+async def test_no_new_run_while_the_previous_one_is_still_going(session_factory, redis_client):
+    _, _, agent, schedule, run_id, scheduled_store, _, deps = await _first_run(session_factory, redis_client)
+    await _make_due(session_factory, schedule.id)
+    claimed = (await scheduled_store.claim_due(agent_id=agent, worker_id="w1", limit=1))[0]
+
+    assert await materialize_scheduled_run(claimed, **deps) == run_id
+
+    row = await scheduled_store.get(schedule.id)
+    assert (row.run_count, row.last_session_id, row.locked_by) == (1, run_id, None)
+    assert "still going" in row.last_error
+    assert row.next_run_at > datetime.now(timezone.utc)
+
+
+async def test_a_run_past_the_run_limit_does_not_hold_its_schedule(session_factory, redis_client):
+    _, _, agent, schedule, run_id, scheduled_store, _, deps = await _first_run(
+        session_factory, redis_client, max_run_seconds=60,
+    )
+    async with session_factory() as db:
+        await db.execute(
+            text("UPDATE sessions SET created_at = now() - interval '2 minutes' WHERE id = :id"),
+            {"id": run_id},
+        )
+        await db.commit()
+    await _make_due(session_factory, schedule.id)
+    claimed = (await scheduled_store.claim_due(agent_id=agent, worker_id="w1", limit=1))[0]
+
+    assert await materialize_scheduled_run(claimed, **deps) != run_id
+    assert (await scheduled_store.get(schedule.id)).run_count == 2
+
+
+async def test_cancelling_a_schedule_ends_its_running_run(session_factory, redis_client):
+    org_id, user_id, agent, schedule, run_id, scheduled_store, session_store, _ = await _first_run(
+        session_factory, redis_client,
+    )
+    event_id = (await session_store.get_events(run_id))[0].id
+    async with session_factory() as db:
+        await db.execute(
+            text(
+                "INSERT INTO inbox_items (org_id, user_id, session_id, source_event_id, kind, title) "
+                "VALUES (:org, :user, :run, :event, 'input_required', 'Which one?')"
+            ),
+            {"org": org_id, "user": user_id, "run": run_id, "event": event_id},
+        )
+        await db.commit()
+
+    assert await scheduled_store.cancel(
+        org_id=org_id, user_id=user_id, agent_id=agent, schedule_id=schedule.id, ended_by="user:x",
+    )
+    await recover_stalled_loops(
+        scheduled_store=scheduled_store, redis=redis_client, session_store=session_store, limit=1000,
+    )
+
+    assert (await session_store.get_session(run_id)).status == "paused"
+    async with session_factory() as db:
+        status = (await db.execute(
+            text("SELECT status FROM inbox_items WHERE session_id = :run"), {"run": run_id},
+        )).scalar_one()
+    assert status == "expired"

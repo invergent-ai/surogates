@@ -300,6 +300,7 @@ async def main(
         async def recover():  # pragma: no cover - prod path
             await recover_stalled_loops(
                 scheduled_store=store, redis=redis, limit=claim_limit,
+                session_store=None if _run_one_injected else session_store,
             )
 
     worker_id = getattr(settings, "worker_id", "platform-ticker")

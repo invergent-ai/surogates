@@ -25,14 +25,20 @@ loops whose run died without rescheduling itself.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID
 
 from sqlalchemy.exc import IntegrityError
 
 from surogates.channels.constants import session_queue_priority
-from surogates.config import enqueue_session
-from surogates.scheduled.schedule import DYNAMIC_LOOP_STALE_RUN_SECONDS
+from surogates.config import INTERRUPT_CHANNEL_PREFIX, enqueue_session
+from surogates.scheduled.schedule import (
+    DEFAULT_MAX_RUN_SECONDS,
+    DYNAMIC_LOOP_STALE_RUN_SECONDS,
+    local_iso,
+    schedule_from_row,
+)
 from surogates.session.events import EventType
 from surogates.session.provisioning import (
     create_agent_session,
@@ -63,10 +69,20 @@ async def materialize_scheduled_run(
     )
     idempotency_key = f"scheduled:{schedule.id}:{fire_key}"
     is_dynamic_loop = schedule.schedule.get("kind") == "dynamic_loop"
+
+    previous = await _previous_run(session_store, schedule)
+    if previous is not None and _still_going(previous, schedule):
+        await scheduled_store.mark_run_skipped(
+            schedule,
+            reason=f"Skipped a run: the previous run ({previous.id}) is still going.",
+        )
+        return previous.id
+
     scheduled_config = {
         "scheduled_session_id": str(schedule.id),
         "scheduled_source": schedule.source,
         "scheduled_dynamic_loop": is_dynamic_loop,
+        "scheduled_run": run_identity(schedule, previous),
     }
 
     # When the schedule has a known creator session, every run shares its
@@ -135,10 +151,55 @@ async def materialize_scheduled_run(
     return session.id
 
 
+def run_identity(schedule: Any, previous: Any | None) -> dict[str, Any]:
+    """What a run is told about the schedule it belongs to."""
+    tz = schedule.timezone or "UTC"
+    try:
+        upcoming = schedule_from_row(schedule).next_after(datetime.now(timezone.utc))
+    except ValueError:
+        upcoming = None
+    return {
+        "id": str(schedule.id),
+        "name": schedule.name,
+        "cadence": schedule.schedule_display,
+        "timezone": tz,
+        "run_number": (schedule.run_count or 0) + 1,
+        "repeat_limit": schedule.repeat_limit,
+        "previous_run": None if previous is None else {
+            "session_id": str(previous.id),
+            "status": previous.status,
+            "started_at": local_iso(previous.created_at, tz),
+        },
+        "last_error": schedule.last_error,
+        "next_run_at": None if upcoming is None else local_iso(upcoming, tz),
+        "expires_at": local_iso(schedule.expires_at, tz),
+    }
+
+
+async def _previous_run(session_store: Any, schedule: Any) -> Any | None:
+    if schedule.last_session_id is None:
+        return None
+    try:
+        return await session_store.get_session(schedule.last_session_id)
+    except SessionNotFoundError:
+        return None
+
+
+def _still_going(run: Any, schedule: Any) -> bool:
+    """Whether *run* is still at work: active, and not past the schedule's
+    run limit, so a wedged run does not hold its schedule forever."""
+    if run.status != "active":
+        return False
+    limit = timedelta(seconds=schedule.max_run_seconds or DEFAULT_MAX_RUN_SECONDS)
+    started = run.created_at if run.created_at.tzinfo else run.created_at.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) - started < limit
+
+
 async def recover_stalled_loops(
     *,
     scheduled_store: Any,
     redis: Any,
+    session_store: Any | None = None,
     stale_seconds: int = DYNAMIC_LOOP_STALE_RUN_SECONDS,
     limit: int = 100,
 ) -> None:
@@ -159,6 +220,18 @@ async def recover_stalled_loops(
     excludes expired rows), so it never reaches the completion code and stays
     ``active`` forever. :meth:`expire_active_schedules` transitions those.
     """
+    for schedule in await scheduled_store.plan_unscheduled(limit=limit):
+        logger.info("Planned schedule %s: next run %s", schedule.id, schedule.next_run_at)
+
+    # Every writer of a cancel (the runtime's own, the control plane writing
+    # the row) is covered here, a tick later, instead of at each of them.
+    if session_store is not None:
+        for run_id in await scheduled_store.end_runs_of_cancelled(limit=limit):
+            if await session_store.pause_if_active(run_id, {"reason": "schedule_cancelled"}):
+                logger.info("Stopped run %s of a cancelled schedule", run_id)
+            if redis is not None:
+                await redis.publish(f"{INTERRUPT_CHANNEL_PREFIX}:{run_id}", "schedule_cancelled")
+
     expired = await scheduled_store.expire_active_schedules(limit=limit)
     for schedule in expired:
         logger.info(
