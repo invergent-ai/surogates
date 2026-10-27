@@ -679,12 +679,12 @@ async def test_stream_race_recovery_streams_resumed_events(
     Uses ``app.state.session_store`` (redis-aware) so ``emit_event``
     actually publishes on ``surogates:session:{id}``.
     """
-    from surogates.api.routes import website as website_module
+    from surogates.api.routes import events as events_module
 
     # ASGITransport buffers the response until the application closes it.
     # Let the recovered stream expire after delivering the resumed events;
     # an active session would otherwise hold this request open for five minutes.
-    monkeypatch.setattr(website_module, "_MAX_STREAM_DURATION", 2)
+    monkeypatch.setattr(events_module, "_MAX_STREAM_DURATION", 2)
 
     csrf, sid, origin = await _bootstrap(app, client, session_factory)
     redis_store: SessionStore = app.state.session_store
@@ -728,6 +728,64 @@ async def test_stream_race_recovery_streams_resumed_events(
         f"session.done must not be emitted when the race is recovered; "
         f"got: {types}"
     )
+
+
+async def test_stream_outlasts_a_busy_turn_and_resumes_at_last_event_id(
+    app, client: AsyncClient, session_factory, monkeypatch,
+):
+    """The visitor's stream is the session event stream: a turn's flood of
+    token publishes does not close it early, and a reconnect carrying
+    ``Last-Event-ID`` replays nothing the widget already has."""
+    from surogates.api.routes import events as events_module
+
+    monkeypatch.setattr(events_module, "_MAX_STREAM_DURATION", 3)
+    _csrf, sid, origin = await _bootstrap(app, client, session_factory)
+    redis_store: SessionStore = app.state.session_store
+    first = await redis_store.emit_event(sid, EventType.USER_MESSAGE, {"content": "hi"})
+
+    async def _busy_turn():
+        await asyncio.sleep(0.3)
+        async with app.state.redis.pipeline(transaction=False) as pipe:
+            for token_index in range(700):
+                pipe.publish(f"surogates:session:{sid}", f"{token_index}:llm.delta")
+            await pipe.execute()
+        await asyncio.sleep(1.0)
+        await redis_store.emit_event(
+            sid, EventType.LLM_RESPONSE, {"message": {"content": "done"}},
+        )
+
+    turn = asyncio.create_task(_busy_turn())
+    try:
+        async with client.stream(
+            "GET",
+            f"/v1/website/sessions/{sid}/events?after=0",
+            headers={"Origin": origin, "Last-Event-ID": str(first)},
+        ) as response:
+            assert response.status_code == 200
+            events = await _read_sse_events(
+                response, until_types={"stream.timeout"}, deadline_s=8.0,
+            )
+    finally:
+        await turn
+
+    types = [event_type for event_type, _ in events]
+    assert "user.message" not in types
+    assert "llm.response" in types
+    assert types[-1] == "stream.timeout"
+
+
+async def test_preflight_allows_last_event_id(app, client: AsyncClient):
+    resp = await client.options(
+        "/v1/website/sessions/x/events",
+        headers={
+            "Origin": _DEFAULT_ORIGIN,
+            "Access-Control-Request-Method": "GET",
+            "Access-Control-Request-Headers": "last-event-id",
+        },
+    )
+    assert resp.status_code == 204
+    allowed = resp.headers["access-control-allow-headers"].lower()
+    assert "last-event-id" in allowed
 
 
 # ---------------------------------------------------------------------------
