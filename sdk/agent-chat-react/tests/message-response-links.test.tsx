@@ -34,3 +34,20 @@ describe("a message's links", () => {
     expect([...shown.querySelectorAll("a")].map((a) => a.getAttribute("href"))).toEqual(["https://surogate.ai/"]);
   });
 });
+
+describe("a message's line breaks", () => {
+  it("keeps a single newline a line break, not a space joining two lines", () => {
+    const shown = render("Ana\nBob");
+    expect(shown.querySelectorAll("br")).toHaveLength(1);
+    expect(shown.textContent).not.toContain("Ana Bob");
+  });
+
+  it("leaves code blocks and lists as they were", () => {
+    const shown = render("Steps:\n\n- one\n- two\n\n```\na\nb\n```");
+    expect([...shown.querySelectorAll("li")].map((li) => li.textContent)).toEqual(["one", "two"]);
+    expect(shown.querySelectorAll("li br")).toHaveLength(0);
+    // A code block keeps one line per source line, each its own block element.
+    expect([...shown.querySelectorAll("pre code > span")].map((line) => line.textContent)).toEqual(["a", "b"]);
+    expect(shown.querySelectorAll("pre br")).toHaveLength(0);
+  });
+});
