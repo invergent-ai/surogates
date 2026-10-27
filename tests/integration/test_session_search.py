@@ -598,3 +598,76 @@ async def test_negation_excludes_a_term(session_store, session_factory):
     )
 
     assert {r["session_id"] for r in result["results"]} == {str(python_only.id)}
+
+
+class _FakeSummaryClient:
+    base_url = "http://summary.local/v1"
+
+    def __init__(self, text):
+        self.text = text
+        self.requests = []
+        self.chat = SimpleNamespace(
+            completions=SimpleNamespace(create=self._create),
+        )
+
+    async def _create(self, **request):
+        self.requests.append(request)
+        return SimpleNamespace(choices=[
+            SimpleNamespace(message=SimpleNamespace(content=self.text)),
+        ])
+
+
+async def test_results_carry_the_summary_model_text(session_store, session_factory):
+    """The dispatcher hands the tool the agent's summary client; the
+    result must be that model's recap, not a raw transcript preview."""
+    org_id = await create_org(session_factory)
+    issued, session = await _own_session(
+        session_store, session_factory, org_id, "agent-summary",
+    )
+    await session_store.emit_event(
+        session.id, EventType.USER_MESSAGE, {"content": "the invoice export broke"},
+    )
+    summary_client = _FakeSummaryClient("Fixed the invoice export by escaping commas.")
+    main_client = _FakeSummaryClient("main model must not be used")
+
+    result = json.loads(
+        await _session_search_handler(
+            {"query": "invoice"},
+            session_store=session_store,
+            tenant=SimpleNamespace(
+                org_id=org_id, user_id=None, service_account_id=issued.id,
+            ),
+            agent_id="agent-summary",
+            llm_client=main_client,
+            model="main-model",
+            summary_llm_client=summary_client,
+            summary_model="summary-model",
+        )
+    )
+
+    assert result["results"][0]["summary"] == "Fixed the invoice export by escaping commas."
+    assert summary_client.requests[0]["model"] == "summary-model"
+    assert main_client.requests == []
+
+
+async def test_raw_preview_is_centred_on_the_match(session_store, session_factory):
+    """Without any LLM client the preview must show the matching part of
+    a long session, not its opening lines."""
+    org_id = await create_org(session_factory)
+    issued, session = await _own_session(
+        session_store, session_factory, org_id, "agent-preview",
+    )
+    await session_store.emit_event(
+        session.id, EventType.USER_MESSAGE, {"content": "hello " * 2000},
+    )
+    await session_store.emit_event(
+        session.id, EventType.USER_MESSAGE, {"content": "the zebrafish assay failed"},
+    )
+
+    result = await _search(
+        session_store, org_id, "agent-preview", issued.id, query="zebrafish",
+    )
+
+    summary = result["results"][0]["summary"]
+    assert "zebrafish assay failed" in summary
+    assert len(summary) < 3500

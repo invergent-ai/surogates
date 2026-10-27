@@ -28,6 +28,11 @@ from typing import Any, Dict, List, Optional, Union
 from uuid import UUID
 
 from surogates.channels.memory_boundary import CASE_BOUNDARY_PREFIX
+from surogates.harness.auxiliary_llm import (
+    reasoning_disabled_extra_body,
+    rejects_reasoning_controls,
+)
+from surogates.harness.message_utils import content_as_text
 from surogates.tools.owner_scope import is_owner_scoped as _is_owner_scoped
 from surogates.db.narrative import (
     narrative_tsquery_sql,
@@ -45,7 +50,14 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 MAX_SESSION_CHARS = 100_000
-MAX_SUMMARY_TOKENS = 10000
+# Summaries run in parallel under one SUMMARY_TIMEOUT_SECONDS budget, so
+# the output allowance is sized for a recap a fast model finishes in
+# seconds, not a transcript rewrite.
+MAX_SUMMARY_TOKENS = 1200
+SUMMARY_TIMEOUT_SECONDS = 60.0
+# Without a summarizer each result shows a window of the transcript centred
+# on the first match; a fixed head would mostly show the greeting.
+RAW_PREVIEW_CHARS = 3000
 
 # Sources excluded from session browsing/searching by default.
 # Third-party integrations tag their sessions with specific channels
@@ -251,6 +263,40 @@ def _truncate_around_matches(
 # ---------------------------------------------------------------------------
 # Auxiliary LLM summarization
 # ---------------------------------------------------------------------------
+
+
+def _summarizer_from_clients(kwargs: dict[str, Any]) -> Any | None:
+    """Build the summarizer from the agent's summary slot, falling back to
+    the main turn client, as the title generator and board verifier do."""
+    client = kwargs.get("summary_llm_client") or kwargs.get("llm_client")
+    model = kwargs.get("summary_model") or kwargs.get("model")
+    if client is None or not model:
+        return None
+
+    async def _summarize(
+        *, task: str, messages: list[dict[str, Any]], temperature: float, max_tokens: int,
+    ) -> str | None:
+        request: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "stream": False,
+        }
+        extra_body = reasoning_disabled_extra_body(
+            model, str(getattr(client, "base_url", "") or ""),
+        )
+        try:
+            response = await client.chat.completions.create(
+                **request, **({"extra_body": extra_body} if extra_body else {}),
+            )
+        except Exception as exc:
+            if not extra_body or not rejects_reasoning_controls(exc):
+                raise
+            response = await client.chat.completions.create(**request)
+        return content_as_text(response.choices[0].message.content).strip() or None
+
+    return _summarize
 
 
 async def _summarize_session(
@@ -730,26 +776,19 @@ async def session_search(
                     exc_info=True,
                 )
 
-        # Summarize all sessions in parallel
-        async def _summarize_all() -> list[str | Exception | None]:
-            """Summarize all sessions in parallel."""
-            coros = [
-                _summarize_session(text, query, meta, auxiliary_fn)
+        # Summaries run in parallel, each under the shared budget; a session
+        # whose summary times out falls back to its raw preview instead of
+        # failing the whole search.
+        results = await asyncio.gather(
+            *(
+                asyncio.wait_for(
+                    _summarize_session(text, query, meta, auxiliary_fn),
+                    timeout=SUMMARY_TIMEOUT_SECONDS,
+                )
                 for _, _, text, meta in tasks
-            ]
-            return await asyncio.gather(*coros, return_exceptions=True)
-
-        try:
-            results = await asyncio.wait_for(_summarize_all(), timeout=60.0)
-        except asyncio.TimeoutError:
-            logger.warning(
-                "Session summarization timed out after 60 seconds",
-                exc_info=True,
-            )
-            return json.dumps({
-                "success": False,
-                "error": "Session summarization timed out. Try a more specific query or reduce the limit.",
-            }, ensure_ascii=False)
+            ),
+            return_exceptions=True,
+        )
 
         summaries: list[dict[str, Any]] = []
         for (sid, match_info, conversation_text, _), result_val in zip(tasks, results):
@@ -775,7 +814,9 @@ async def session_search(
                 # Fallback: raw preview so matched sessions aren't silently
                 # dropped when the summarizer is unavailable.
                 preview = (
-                    (conversation_text[:500] + "\n...[truncated]")
+                    _truncate_around_matches(
+                        conversation_text, query, max_chars=RAW_PREVIEW_CHARS,
+                    )
                     if conversation_text
                     else "No preview available."
                 )
@@ -889,7 +930,7 @@ async def _session_search_handler(
     """Handle session_search tool calls.
 
     Extracts ``session_store``, ``tenant`` (with org_id and principal),
-    ``session_id``, and optional ``auxiliary_fn`` from kwargs, then
+    ``session_id``, and the summary (or main) LLM client from kwargs, then
     delegates to the main :func:`session_search` function.
     """
     store = kwargs.get("session_store")
@@ -909,7 +950,7 @@ async def _session_search_handler(
     )
     agent_id = kwargs.get("agent_id", "")
     current_session_id = kwargs.get("session_id")
-    auxiliary_fn = kwargs.get("auxiliary_fn")
+    auxiliary_fn = _summarizer_from_clients(kwargs)
 
     # Coerce string UUIDs to UUID objects
     if isinstance(org_id, str):
