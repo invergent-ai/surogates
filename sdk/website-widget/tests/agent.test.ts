@@ -207,17 +207,15 @@ describe('WebsiteAgent -- happy path', () => {
     });
     const { events, done } = collectEvents(agent.run(INPUT));
 
-    // Wait a microtask cycle so the async driveRun has attached
-    // stream listeners before we start emitting.  The order is
-    // bootstrap → open SSE → send; all three awaits must settle
-    // before the synthetic stream is listening.
+    // The order is bootstrap → send → open SSE at the message's event
+    // id, so earlier turns of a reused session never replay into the run.
     await waitForSource();
     const src = requireSource();
-    expect(src.url).toBe('https://api.test/v1/website/sessions/sess-1/events?after=0');
+    expect(src.url).toBe('https://api.test/v1/website/sessions/sess-1/events?after=42');
 
     // Simulate a minimal successful turn.
-    src.emit(SURG_EVENT.LLM_DELTA, { delta: 'hi' }, 1);
-    src.emit(SURG_EVENT.LLM_RESPONSE, { content: 'hi', finish_reason: 'stop' }, 2);
+    src.emit(SURG_EVENT.LLM_DELTA, { delta: 'hi' }, 43);
+    src.emit(SURG_EVENT.LLM_RESPONSE, { message: { content: 'hi' }, finish_reason: 'stop' }, 44);
 
     await done;
 
@@ -255,7 +253,7 @@ describe('WebsiteAgent -- happy path', () => {
 
     await waitForSource();
     const src = requireSource();
-    src.emit(SURG_EVENT.LLM_RESPONSE, { content: 'ok', finish_reason: 'stop' }, 10);
+    src.emit(SURG_EVENT.LLM_RESPONSE, { message: { content: 'ok' }, finish_reason: 'stop' }, 10);
     await done;
 
     // Trailing frame during the drain window.
@@ -303,101 +301,123 @@ describe('WebsiteAgent -- cookie-expiry recovery', () => {
     const { events, done } = collectEvents(agent.run(INPUT));
 
     await waitForSource();
-    // Eventually the retry finishes, opens a second EventSource
-    // against sess-2, and we need to drive that one to a clean
-    // end-of-turn so ``done`` resolves.  Spin on the observable
-    // side-effects (bootstrap call count, instance count) rather
-    // than a fixed microtask budget: happy-dom's fetch resolves
-    // across several microtask hops so the retry flow needs > 10.
-    await waitUntil(() => bootstrapCalls === 2 && sendCalls === 2);
-    await waitUntil(() => FakeEventSource.instances.length === 2);
+    expect(bootstrapCalls).toBe(2);
+    expect(sendCalls).toBe(2);
 
-    // The active source should be the one opened against sess-2
-    // (the fresh session from the retry).
+    // The only stream is the one on the fresh session, from its message:
+    // none was ever opened against the expired one.
+    expect(FakeEventSource.instances).toHaveLength(1);
     const active = requireSource();
-    expect(active.url).toContain('/sessions/sess-2/events');
-    active.emit(SURG_EVENT.LLM_RESPONSE, { content: 'ok', finish_reason: 'stop' }, 1);
+    expect(active.url).toBe('https://api.test/v1/website/sessions/sess-2/events?after=99');
+    active.emit(SURG_EVENT.LLM_RESPONSE, { message: { content: 'ok' }, finish_reason: 'stop' }, 100);
     await done;
 
-    // Exactly one RUN_STARTED and one RUN_FINISHED (no RUN_ERROR
-    // leaked from the discarded old source).
     const types = events.map((e) => e.type);
     expect(types.filter((t) => t === EventType.RUN_STARTED)).toHaveLength(1);
     expect(types.filter((t) => t === EventType.RUN_FINISHED)).toHaveLength(1);
     expect(types).not.toContain(EventType.RUN_ERROR);
   });
-
-  it('detaches the old SSE onerror so it cannot race a terminal event', async () => {
-    // Paired with the fix above: during recovery we null the old
-    // source's onerror before calling close(), so any late browser
-    // transition to ``readyState=2`` on the discarded source can't
-    // emit a second RUN_ERROR.
-    let bootstrapCalls = 0;
-    let sendCalls = 0;
-    globalThis.fetch = vi.fn(async (url: unknown, init: RequestInit | undefined) => {
-      const u = String(url);
-      if (init?.method === 'POST' && u.endsWith('/v1/website/sessions')) {
-        bootstrapCalls += 1;
-        return makeResponse(201, {
-          session_id: `sess-${bootstrapCalls}`,
-          csrf_token: `csrf-${bootstrapCalls}`,
-          expires_at: 0,
-          agent_name: 'a',
-        });
-      }
-      sendCalls += 1;
-      return sendCalls === 1
-        ? makeResponse(401, { detail: 'expired' })
-        : makeResponse(202, { event_id: 1 });
-    }) as unknown as typeof fetch;
-
-    const agent = new WebsiteAgent({ apiUrl: 'https://api.test', publishableKey: 'k' });
-    const { events, done } = collectEvents(agent.run(INPUT));
-    await waitForSource();
-    await waitUntil(() => bootstrapCalls === 2 && sendCalls === 2);
-    await waitUntil(() => FakeEventSource.instances.length === 2);
-
-    const [stale, active] = FakeEventSource.instances;
-    if (!stale || !active) throw new Error('expected both stale and active sources');
-
-    // The stale source's onerror should be null -- the ``closeEventSource``
-    // helper nulls it out before close() so a late transition to
-    // CLOSED can't sneak a second RUN_ERROR through.
-    expect(stale.onerror).toBeNull();
-
-    active.emit(SURG_EVENT.LLM_RESPONSE, { content: 'ok', finish_reason: 'stop' }, 1);
-    await done;
-
-    const types = events.map((e) => e.type);
-    expect(types).not.toContain(EventType.RUN_ERROR);
-  });
 });
 
-describe('WebsiteAgent -- SSE terminal close', () => {
-  it('emits RUN_ERROR with code=sse_closed when the EventSource closes', async () => {
-    globalThis.fetch = vi.fn(async (_u: unknown, init: RequestInit | undefined) => {
-      if (init?.method === 'POST' && !String(_u).includes('/messages')) {
-        return makeResponse(201, {
-          session_id: 's',
-          csrf_token: 'c',
-          expires_at: 0,
-          agent_name: 'a',
-        });
-      }
-      return makeResponse(202, { event_id: 1 });
-    }) as unknown as typeof fetch;
+function sessionFetch(eventId = 1): typeof fetch {
+  return vi.fn(async (_u: unknown, init: RequestInit | undefined) => {
+    if (init?.method === 'POST' && !String(_u).includes('/messages')) {
+      return makeResponse(201, {
+        session_id: 's',
+        csrf_token: 'c',
+        expires_at: 0,
+        agent_name: 'a',
+      });
+    }
+    return makeResponse(202, { event_id: eventId });
+  }) as unknown as typeof fetch;
+}
 
+describe('WebsiteAgent -- stream reconnect', () => {
+  it('reopens at its cursor on stream.timeout and drops frames it already has', async () => {
+    globalThis.fetch = sessionFetch(10);
     const agent = new WebsiteAgent({ apiUrl: 'https://api.test', publishableKey: 'k' });
     const { events, done } = collectEvents(agent.run(INPUT));
     await waitForSource();
 
-    // Simulate a terminal transport drop.
-    requireSource().fail();
+    const first = requireSource();
+    first.emit(SURG_EVENT.LLM_DELTA, { delta: 'Hel' }, 11);
+    first.emit(SURG_EVENT.LLM_DELTA, { delta: 'lo' }, 12);
+    // The server's orderly close at its maximum duration; the browser
+    // hands an id-less frame the stream's last id.
+    first.emit(SURG_EVENT.STREAM_TIMEOUT, { reason: 'max_duration_exceeded' }, 12);
+
+    expect(FakeEventSource.instances).toHaveLength(2);
+    expect(first.readyState).toBe(2);
+    const second = requireSource();
+    expect(second.url).toBe('https://api.test/v1/website/sessions/s/events?after=12');
+
+    // A replay of what the run already translated is dropped.
+    second.emit(SURG_EVENT.LLM_DELTA, { delta: 'lo' }, 12);
+    second.emit(SURG_EVENT.LLM_DELTA, { delta: '!' }, 13);
+    second.emit(SURG_EVENT.LLM_RESPONSE, { message: { content: 'Hello!' }, finish_reason: 'stop' }, 14);
     await done;
 
-    const final = events[events.length - 1] as { type: EventType; code?: string };
-    expect(final.type).toBe(EventType.RUN_ERROR);
-    expect(final.code).toBe('sse_closed');
+    const deltas = events
+      .filter((e) => e.type === EventType.TEXT_MESSAGE_CHUNK)
+      .map((e) => (e as { delta?: string }).delta);
+    expect(deltas).toEqual(['Hel', 'lo', '!']);
+    expect(events.map((e) => e.type)).not.toContain(EventType.CUSTOM);
+    expect(events[events.length - 1]?.type).toBe(EventType.RUN_FINISHED);
+  });
+
+  it('reopens a dropped stream with backoff, and resets once frames flow again', async () => {
+    vi.useFakeTimers();
+    try {
+      globalThis.fetch = sessionFetch(5);
+      const agent = new WebsiteAgent({ apiUrl: 'https://api.test', publishableKey: 'k' });
+      const { events, done } = collectEvents(agent.run(INPUT));
+      await waitForSource();
+
+      requireSource().fail();
+      expect(FakeEventSource.instances).toHaveLength(1);
+      vi.advanceTimersByTime(999);
+      expect(FakeEventSource.instances).toHaveLength(1);
+      vi.advanceTimersByTime(1);
+      expect(FakeEventSource.instances).toHaveLength(2);
+      requireSource().emit(SURG_EVENT.LLM_DELTA, { delta: 'a' }, 6);
+
+      // The frame reset the count: the next drop waits 1 s again.
+      requireSource().fail();
+      vi.advanceTimersByTime(1000);
+      expect(FakeEventSource.instances).toHaveLength(3);
+      expect(requireSource().url).toBe('https://api.test/v1/website/sessions/s/events?after=6');
+      requireSource().emit(SURG_EVENT.LLM_RESPONSE, { message: { content: 'a' }, finish_reason: 'stop' }, 7);
+      await done;
+      expect(events.map((e) => e.type)).not.toContain(EventType.RUN_ERROR);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('emits RUN_ERROR with code=sse_closed once the reconnects run out', async () => {
+    vi.useFakeTimers();
+    try {
+      globalThis.fetch = sessionFetch();
+      const agent = new WebsiteAgent({ apiUrl: 'https://api.test', publishableKey: 'k' });
+      const { events, done } = collectEvents(agent.run(INPUT));
+      await waitForSource();
+
+      for (const delay of [1000, 2000, 4000, 4000, 4000]) {
+        requireSource().fail();
+        vi.advanceTimersByTime(delay);
+      }
+      expect(FakeEventSource.instances).toHaveLength(6);
+      requireSource().fail();
+      await done;
+
+      const final = events[events.length - 1] as { type: EventType; code?: string };
+      expect(final.type).toBe(EventType.RUN_ERROR);
+      expect(final.code).toBe('sse_closed');
+      expect(events.filter((e) => e.type === EventType.RUN_ERROR)).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

@@ -22,11 +22,13 @@
  *
  * * **SSE → AG-UI.**  The channel's native event stream is converted
  *   to AG-UI events by :class:`Translator` frame-by-frame.  The agent
- *   opens a fresh EventSource per run (with ``?after=<cursor>`` to
- *   skip already-processed frames) and closes it after a short grace
- *   drain on turn completion so trailing server frames (late
- *   ``memory.update``, ``session.done``) advance the cursor rather
- *   than replaying on the next run.
+ *   opens a fresh EventSource per run once its message is posted, at
+ *   ``?after=<the message's event id>`` so earlier turns never replay,
+ *   and closes it after a short grace drain on turn completion.  When
+ *   the server ends a stream (``stream.timeout``) or the transport
+ *   drops while the run is live, the agent reopens it from its cursor,
+ *   backing off between failed attempts, and drops any frame it has
+ *   already seen.
  *
  * * **RUN lifecycle.**  AG-UI requires every run to be bracketed by
  *   ``RUN_STARTED`` and exactly one of ``RUN_FINISHED`` / ``RUN_ERROR``.
@@ -100,6 +102,22 @@ const SURG_EVENT_NAMES: readonly string[] = Object.values(SURG_EVENT);
  * the next run.
  */
 const DRAIN_WINDOW_MS = 250;
+
+/**
+ * Waits before each reopen of a dropped stream.  A frame received
+ * resets the count, so only consecutive failures exhaust it.
+ */
+const RECONNECT_DELAYS_MS: readonly number[] = [1000, 2000, 4000, 4000, 4000];
+
+/**
+ * Frames the server sends without an ``id:`` line.  A browser hands
+ * them the stream's previous id as ``lastEventId``, so they must not be
+ * mistaken for a replay of the frame that carried it.
+ */
+const UNNUMBERED_FRAMES: ReadonlySet<string> = new Set([
+  SURG_EVENT.SESSION_DONE,
+  SURG_EVENT.STREAM_TIMEOUT,
+]);
 
 export class WebsiteAgent extends AbstractAgent {
   readonly apiUrl: string;
@@ -192,6 +210,8 @@ export class WebsiteAgent extends AbstractAgent {
         terminated: false,
         source: undefined,
         drainTimer: undefined,
+        reconnectTimer: undefined,
+        failedReconnects: 0,
       };
 
       void this.driveRun(input, subscriber, ctx).catch((err) => {
@@ -217,6 +237,10 @@ export class WebsiteAgent extends AbstractAgent {
         // close immediately.  Either way, mark terminated so any
         // in-flight frame callbacks skip subscriber emission.
         ctx.terminated = true;
+        if (ctx.reconnectTimer !== undefined) {
+          globalThis.clearTimeout(ctx.reconnectTimer);
+          ctx.reconnectTimer = undefined;
+        }
         if (ctx.drainTimer !== undefined) return;
         closeEventSource(ctx.source);
         ctx.source = undefined;
@@ -254,30 +278,22 @@ export class WebsiteAgent extends AbstractAgent {
       const userText = this.extractUserText(input.messages);
       const boot = await this.ensureBootstrapped();
 
-      // Open SSE BEFORE sending the message so no events race past us.
+      // POST the visitor's message (one retry on 401 via a re-bootstrap),
+      // then stream from the message's own event id.  Events are stored
+      // before they are published, so a stream opened after the POST
+      // replays whatever the turn already wrote and misses nothing, while
+      // everything at or before the message belongs to earlier turns: a
+      // page reload (cursor 0 on a reused session) or a run that ended
+      // early must not feed old replies into this run's translator.
       // Browsers drop Authorization headers on EventSource, but the
-      // session cookie rides along automatically (the route
-      // authenticates off the cookie + the Origin re-check, not off
-      // Bearer headers).
+      // session cookie rides along (the route authenticates off the
+      // cookie + the Origin re-check).
+      const sent = await this.sendWithCookieRecovery(boot, userText);
+      if (ctx.terminated) return;
+      this.cursor = Math.max(this.cursor, sent.eventId);
       this.replaceStreamSource(
-        ctx, boot.sessionId, this.cursor, new Translator(), subscriber, input,
+        ctx, sent.sessionId, this.cursor || -1, new Translator(), subscriber, input,
       );
-
-      // POST the visitor's message.  One retry on 401 (cookie expiry)
-      // via a re-bootstrap; on retry the SSE stream is no longer tied
-      // to the right session so we reopen it against the freshly
-      // minted session id.  A **fresh ``Translator``** is handed to
-      // the replacement stream -- the old instance may have absorbed
-      // previous-session trailing frames on the now-doomed SSE
-      // between SSE-open and the send failing, and its internal
-      // ``_turnComplete`` / ``pendingToolCalls`` state belongs to a
-      // session that no longer exists.  Reusing it would risk
-      // flipping end-of-turn on the first frame of the new stream.
-      await this.sendWithCookieRecovery(boot, userText, (fresh) => {
-        this.replaceStreamSource(
-          ctx, fresh.sessionId, 0, new Translator(), subscriber, input,
-        );
-      });
     } catch (err) {
       if (ctx.terminated) return;
       ctx.terminated = true;
@@ -316,9 +332,9 @@ export class WebsiteAgent extends AbstractAgent {
   /**
    * Tear down whatever EventSource is currently live on ``ctx`` and
    * open a fresh one against *sessionId* starting at *after*.  Called
-   * both for the initial stream and after cookie recovery.  Always
-   * clears the stale ``onerror`` first so the old source can't race
-   * a ``RUN_ERROR`` into the subscriber after it's been replaced.
+   * for the run's stream and for every reopen of it.  Always clears
+   * the stale ``onerror`` first so the old source can't race a
+   * ``RUN_ERROR`` into the subscriber after it's been replaced.
    */
   private replaceStreamSource(
     ctx: RunContext,
@@ -331,36 +347,37 @@ export class WebsiteAgent extends AbstractAgent {
     closeEventSource(ctx.source);
     const source = openEventStream(this.apiUrl, sessionId, after, this.agentId);
     ctx.source = source;
-    this.attachStreamListeners(source, translator, subscriber, input, ctx);
+    const reopen = () =>
+      this.replaceStreamSource(ctx, sessionId, this.cursor || -1, translator, subscriber, input);
+    this.attachStreamListeners(source, translator, subscriber, input, ctx, reopen);
   }
 
   /**
    * Try ``sendMessage``; on auth failure re-bootstrap once and retry.
    *
-   * The re-bootstrap mints a new session id, so the caller passes an
-   * ``onRebootstrap`` callback that reopens the SSE stream against the
-   * fresh session before the retry.  Visitor continuity across
-   * bootstraps is a deliberate non-feature for v1; the new session
-   * starts empty.  Only frames emitted on the OLD session between
-   * SSE-open and send-failure are lost -- and those are always
-   * previous-turn events, since the current turn's ``sendMessage`` is
-   * what 401-ed.
+   * Returns the session the message landed in and its event id.  The
+   * re-bootstrap mints a new session id; visitor continuity across
+   * bootstraps is a deliberate non-feature for v1, so the new session
+   * starts empty.
    */
   private async sendWithCookieRecovery(
     boot: BootstrapResult,
     content: string,
-    onRebootstrap: (fresh: BootstrapResult) => void,
-  ): Promise<void> {
+  ): Promise<{ sessionId: string; eventId: number }> {
     try {
-      await sendMessage(this.apiUrl, boot.sessionId, boot.csrfToken, content, this.agentId);
-      return;
+      const { eventId } = await sendMessage(
+        this.apiUrl, boot.sessionId, boot.csrfToken, content, this.agentId,
+      );
+      return { sessionId: boot.sessionId, eventId };
     } catch (err) {
       if (!(err instanceof SurogatesAuthError)) throw err;
       this.bootstrapResult = undefined;
       this.cursor = 0;
       const fresh = await this.ensureBootstrapped();
-      onRebootstrap(fresh);
-      await sendMessage(this.apiUrl, fresh.sessionId, fresh.csrfToken, content, this.agentId);
+      const { eventId } = await sendMessage(
+        this.apiUrl, fresh.sessionId, fresh.csrfToken, content, this.agentId,
+      );
+      return { sessionId: fresh.sessionId, eventId };
     }
   }
 
@@ -382,7 +399,40 @@ export class WebsiteAgent extends AbstractAgent {
     subscriber: Subscriber<BaseEvent>,
     input: RunAgentInput,
     ctx: RunContext,
+    reopen: () => void,
   ): void {
+    const fail = (message: string, code: string) => {
+      if (ctx.terminated) return;
+      ctx.terminated = true;
+      closeEventSource(source);
+      if (ctx.source === source) ctx.source = undefined;
+      subscriber.next({ type: EventType.RUN_ERROR, message, code } as BaseEvent);
+      subscriber.complete();
+    };
+
+    // Reopen from the cursor while the run is live.  The server's
+    // ``stream.timeout`` is an orderly close and reopens at once; a
+    // transport failure waits a growing delay first, and gives up as
+    // RUN_ERROR once the delays run out.
+    const reconnect = (afterFailure: boolean) => {
+      if (ctx.terminated || ctx.source !== source || ctx.reconnectTimer !== undefined) return;
+      closeEventSource(source);
+      if (!afterFailure) {
+        reopen();
+        return;
+      }
+      const delay = RECONNECT_DELAYS_MS[ctx.failedReconnects];
+      if (delay === undefined) {
+        fail('SSE connection closed', 'sse_closed');
+        return;
+      }
+      ctx.failedReconnects += 1;
+      ctx.reconnectTimer = globalThis.setTimeout(() => {
+        ctx.reconnectTimer = undefined;
+        if (!ctx.terminated) reopen();
+      }, delay);
+    };
+
     const scheduleDrainClose = () => {
       // ``globalThis`` so the SDK works in both browser (returns
       // number) and Node (returns Timeout) without a type cast.
@@ -417,17 +467,23 @@ export class WebsiteAgent extends AbstractAgent {
     };
 
     const handleFrame = (name: string, data: string, lastEventId: string) => {
+      if (name === SURG_EVENT.STREAM_TIMEOUT) {
+        reconnect(false);
+        return;
+      }
+      const numbered = !UNNUMBERED_FRAMES.has(name);
+      const id = numbered ? Number(lastEventId) || 0 : 0;
+      // A reopened stream, or the browser's own reconnect, can hand back
+      // frames this run has already translated.
+      if (id > 0 && id <= this.cursor) return;
+      ctx.failedReconnects = 0;
       let parsed: unknown;
       try {
         parsed = JSON.parse(data);
       } catch {
         parsed = data;
       }
-      const frame: SurogatesFrame = {
-        id: Number(lastEventId) || 0,
-        type: name,
-        data: parsed,
-      };
+      const frame: SurogatesFrame = { id, type: name, data: parsed };
       // Cursor advancement happens BEFORE the termination guard so
       // frames arriving during the drain window still push the
       // cursor past them.  This is the whole point of the drain:
@@ -450,22 +506,12 @@ export class WebsiteAgent extends AbstractAgent {
       });
     }
 
-    // Transport-level failures.  The native EventSource reconnects
-    // on network blips automatically (``readyState === 0``); a
-    // ``readyState === 2`` is terminal.  ``ctx.terminated`` stops
-    // this from firing a second RUN_ERROR after finish() / the
-    // driveRun catch have already terminated.
-    source.onerror = () => {
-      if (source.readyState !== 2 /* CLOSED */) return;
-      if (ctx.terminated) return;
-      ctx.terminated = true;
-      subscriber.next({
-        type: EventType.RUN_ERROR,
-        message: 'SSE connection closed',
-        code: 'sse_closed',
-      } as BaseEvent);
-      subscriber.complete();
-    };
+    // Transport-level failures.  The agent reopens the stream itself
+    // rather than leave it to the browser, whose reconnect would ask
+    // again for the URL first opened and could keep failing silently.
+    // ``ctx.terminated`` stops this after finish() / the driveRun catch
+    // have already terminated.
+    source.onerror = () => reconnect(true);
   }
 
   /**
@@ -495,6 +541,9 @@ interface RunContext {
   terminated: boolean;
   source: EventSource | undefined;
   drainTimer: ReturnType<typeof setTimeout> | undefined;
+  reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Consecutive failed reopens; a received frame resets it. */
+  failedReconnects: number;
 }
 
 /**

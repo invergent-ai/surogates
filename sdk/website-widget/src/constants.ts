@@ -67,4 +67,7 @@ export const SURG_EVENT = {
   POLICY_DENIED: 'policy.denied',
   POLICY_ALLOWED: 'policy.allowed',
   HARNESS_CRASH: 'harness.crash',
+  // The server closes a stream at its maximum duration with this frame;
+  // the client reopens it from its cursor.
+  STREAM_TIMEOUT: 'stream.timeout',
 } as const;
