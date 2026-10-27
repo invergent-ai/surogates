@@ -78,6 +78,31 @@ class TestEnsure:
         assert result.newly_provisioned is False
         assert backend.provisions == 1
 
+    async def test_reuse_puts_back_an_entry_a_viewer_pruned(self) -> None:
+        # A viewer that could not reach a busy browser in time may prune its
+        # entry; the browser is still running, and the next call that reuses
+        # it must make it findable again, or every viewer gets "no browser".
+        registry = FakeRegistry()
+        pool = BrowserPool(backend=FakeBackend(), registry=registry)  # type: ignore[arg-type]
+        first = await pool.ensure("sess-1", "o", "u", BrowserSpec())
+        await registry.delete("sess-1")
+
+        again = await pool.ensure("sess-1", "o", "u", BrowserSpec())
+
+        assert again.newly_provisioned is False
+        entry = registry.entries["sess-1"]
+        assert (entry.browser_id, entry.cdp_url, entry.org_id, entry.user_id) == (
+            first.browser_id, first.endpoint.cdp_url, "o", "u",
+        )
+
+    async def test_reuse_leaves_a_present_entry_alone(self) -> None:
+        registry = FakeRegistry()
+        pool = BrowserPool(backend=FakeBackend(), registry=registry)  # type: ignore[arg-type]
+        await pool.ensure("sess-1", "o", "u", BrowserSpec())
+        original = registry.entries["sess-1"]
+        await pool.ensure("sess-1", "o", "u", BrowserSpec())
+        assert registry.entries["sess-1"] is original
+
     async def test_reattaches_from_registry_when_local_map_misses(self) -> None:
         # Shared-runtime sessions move between workers. A worker whose local
         # map misses the browser must reattach from the shared registry, not

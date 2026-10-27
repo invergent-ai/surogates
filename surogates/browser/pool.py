@@ -91,6 +91,7 @@ class BrowserPool:
         lock = await self._session_lock(session_id)
         async with lock:
             slot = self._mapping.get(session_id)
+            registered = False
             if slot is None:
                 # Shared-runtime sessions can move between workers, so this
                 # worker's local map may miss a browser another worker
@@ -111,9 +112,16 @@ class BrowserPool:
                         snapshot_cache={},
                     )
                     self._mapping[session_id] = slot
+                    registered = True
             if slot is not None:
                 status = await self._backend.status(slot.browser_id)
                 if status == BrowserStatus.RUNNING:
+                    # The entry is how viewers find this browser, and a viewer
+                    # that could not reach it in time may have pruned it; a
+                    # running browser nobody can find is a pane that says
+                    # "no browser" for the rest of the session.
+                    if not registered and await self._registry.get(session_id) is None:
+                        await self._publish(session_id, org_id, user_id, slot)
                     return EnsureResult(
                         browser_id=slot.browser_id,
                         endpoint=slot.endpoint,
@@ -176,18 +184,7 @@ class BrowserPool:
                     await client.close()
             slot = _Slot(browser_id=browser_id, endpoint=endpoint, snapshot_cache={})
             self._mapping[session_id] = slot
-            await self._registry.set(
-                BrowserEntry(
-                    session_id=session_id,
-                    org_id=org_id,
-                    user_id=user_id,
-                    rest_url=endpoint.rest_url,
-                    cdp_url=endpoint.cdp_url,
-                    live_view_url=endpoint.live_view_url,
-                    provisioned_at=datetime.now(timezone.utc),
-                    browser_id=browser_id,
-                )
-            )
+            await self._publish(session_id, org_id, user_id, slot)
             await self._emit_event(
                 session_id,
                 EventType.BROWSER_PROVISIONED.value,
@@ -199,6 +196,20 @@ class BrowserPool:
                 newly_provisioned=True,
                 snapshot_cache=slot.snapshot_cache,
             )
+
+    async def _publish(self, session_id: str, org_id: str, user_id: str, slot: _Slot) -> None:
+        await self._registry.set(
+            BrowserEntry(
+                session_id=session_id,
+                org_id=org_id,
+                user_id=user_id,
+                rest_url=slot.endpoint.rest_url,
+                cdp_url=slot.endpoint.cdp_url,
+                live_view_url=slot.endpoint.live_view_url,
+                provisioned_at=datetime.now(timezone.utc),
+                browser_id=slot.browser_id,
+            )
+        )
 
     async def destroy_for_session(self, session_id: str) -> None:
         lock = await self._session_lock(session_id)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import socket
 from typing import Any
 from uuid import UUID
 
@@ -790,11 +791,15 @@ async def browser_shell_ws(websocket: WebSocket, session_id: UUID) -> None:
             exc_info=True,
         )
         # Prune only when nothing was LISTENING after the full readiness
-        # window -- a refused connection is a stale entry, but a reachable
-        # browser that answered strangely (bad /json/version, an envoy hiccup)
-        # is still a browser, and deleting its entry would kill a live one.
+        # window -- a refused connection or a name that no longer resolves is
+        # a stale entry, but a reachable browser that answered strangely (bad
+        # /json/version, an envoy hiccup) or slowly is still a browser, and
+        # deleting its entry would kill a live one.  Deliberately not OSError:
+        # TimeoutError is one, and a websocket handshake that times out
+        # against a busy browser is the commonest way a live one answers late.
         if isinstance(
-            exc, (httpx.ConnectError, httpx.ConnectTimeout, ConnectionError, OSError)
+            exc,
+            (httpx.ConnectError, httpx.ConnectTimeout, ConnectionRefusedError, socket.gaierror),
         ):
             await resolver.forget_unreachable(str(session_id))
         await websocket.close(code=4502, reason="upstream unavailable")

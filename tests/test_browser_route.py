@@ -1367,3 +1367,50 @@ def _wake_recorder(wakes: list[str]):
 
 async def _wake_noop(_session_id: str) -> None:
     return None
+
+
+class TestShellUpstream:
+    @pytest.fixture()
+    def shell(self, app_factory, monkeypatch):
+        from surogates.api.routes import browser as browser_routes
+
+        build, resolver, _control = app_factory
+        sid = str(uuid4())
+        resolver.entries[sid] = _resolved(sid)
+
+        async def authenticated(*_: Any, **__: Any) -> TenantContext:
+            return _tenant()
+
+        async def devtools(_cdp_url: str, **_: Any) -> str:
+            return "ws://browser-x.svc:9222/devtools/browser/1"
+
+        monkeypatch.setattr(browser_routes, "authenticate_websocket_tenant", authenticated)
+        monkeypatch.setattr(browser_routes, "_cdp_browser_ws_url", devtools)
+
+        def connect_with(upstream):
+            async def connect(*_: Any, **__: Any):
+                if isinstance(upstream, BaseException):
+                    raise upstream
+                return upstream
+
+            monkeypatch.setattr(browser_routes.websockets, "connect", connect)
+            return TestClient(build()), f"/v1/sessions/{sid}/browser/shell"
+
+        return SimpleNamespace(sid=sid, resolver=resolver, connect_with=connect_with)
+
+    def _closed_with(self, client: TestClient, path: str) -> int:
+        with client, pytest.raises(WebSocketDisconnect) as closed:
+            with client.websocket_connect(path) as ws:
+                ws.receive_json()
+        return closed.value.code
+
+    def test_a_slow_handshake_keeps_the_browser_registered(self, shell) -> None:
+        # TimeoutError is an OSError: a busy browser answering late is not gone.
+        client, path = shell.connect_with(TimeoutError("timed out during opening handshake"))
+        assert self._closed_with(client, path) == 4502
+        assert shell.resolver.forgotten == [] and shell.sid in shell.resolver.entries
+
+    def test_a_refused_connection_forgets_the_browser(self, shell) -> None:
+        client, path = shell.connect_with(ConnectionRefusedError("refused"))
+        assert self._closed_with(client, path) == 4502
+        assert shell.resolver.forgotten == [shell.sid]
