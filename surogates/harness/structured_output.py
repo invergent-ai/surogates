@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Iterator
-from typing import Any, TypeVar
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass
+from types import SimpleNamespace
+from typing import Any, Generic, TypeVar
 
 from pydantic import BaseModel
 
@@ -113,6 +115,105 @@ async def generate_structured(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class StructuredCall(Generic[T]):
+    """What a structured call produced and what its completions used.
+
+    *value* is the validated object, ``None`` when neither attempt gave a
+    usable one.  *completions* counts the responses received (a provider
+    that failed or refused sends none), the token counts sum every one of
+    them, and *served_by* is the model the last response named.
+    """
+
+    value: T | None
+    completions: int
+    input_tokens: int
+    output_tokens: int
+    cache_read_tokens: int
+    served_by: str | None
+
+
+class _UsageTally:
+    """Stands in for an OpenAI client and adds up what its responses used."""
+
+    def __init__(self, client: Any) -> None:
+        self._client = client
+        self.completions = 0
+        self.input_tokens = 0
+        self.output_tokens = 0
+        self.cache_read_tokens = 0
+        self.served_by: str | None = None
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+    async def _create(self, **kwargs: Any) -> Any:
+        # Imported here: llm_call is a heavy module that must not load
+        # with every user of the structured-output helpers.
+        from surogates.harness.llm_call import _extract_cached_tokens
+
+        response = await self._client.chat.completions.create(**kwargs)
+        self.completions += 1
+        usage = getattr(response, "usage", None)
+        self.input_tokens += _count(getattr(usage, "prompt_tokens", 0))
+        self.output_tokens += _count(getattr(usage, "completion_tokens", 0))
+        self.cache_read_tokens += _extract_cached_tokens(usage)
+        served = getattr(response, "model", None)
+        if isinstance(served, str) and served:
+            self.served_by = served
+        return response
+
+    def call(self, value: T | None) -> StructuredCall[T]:
+        return StructuredCall(
+            value,
+            self.completions,
+            self.input_tokens,
+            self.output_tokens,
+            self.cache_read_tokens,
+            self.served_by,
+        )
+
+
+def _count(value: Any) -> int:
+    return int(value) if isinstance(value, (int, float)) else 0
+
+
+async def generate_structured_with_usage(
+    *,
+    llm_client: Any,
+    model: str,
+    messages: list[dict[str, str]],
+    output_model: type[T],
+    max_tokens: int = 300,
+    temperature: float = 0,
+) -> StructuredCall[T]:
+    """:func:`generate_structured`, also answering what the call used.
+
+    Makes the same two attempts in the same order.  Every completion
+    either attempt received is counted, whether or not it held a usable
+    object, so the caller can say what the call cost.  Never raises for
+    what the provider does.
+    """
+    tally = _UsageTally(llm_client)
+    value = await _try_outlines(
+        llm_client=tally,
+        model=model,
+        messages=messages,
+        output_model=output_model,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        make_model=_make_tallied_outlines_model,
+    )
+    if value is None:
+        value = await _try_openai_json_mode(
+            llm_client=tally,
+            model=model,
+            messages=messages,
+            output_model=output_model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+    return tally.call(value)
+
+
 async def _try_outlines(
     *,
     llm_client: Any,
@@ -121,6 +222,7 @@ async def _try_outlines(
     output_model: type[T],
     max_tokens: int,
     temperature: float,
+    make_model: Callable[..., Any] | None = None,
 ) -> T | None:
     try:
         import outlines
@@ -130,7 +232,7 @@ async def _try_outlines(
         return None
 
     try:
-        outlines_model = _make_outlines_model(
+        outlines_model = (make_model or _make_outlines_model)(
             outlines_module=outlines,
             llm_client=llm_client,
             model=model,
@@ -145,7 +247,7 @@ async def _try_outlines(
     except Exception as exc:
         logger.info(
             "Structured generation with Outlines failed: %s",
-            exc,
+            type(exc).__name__,
         )
         return None
 
@@ -205,7 +307,7 @@ async def _try_openai_json_mode(
             response_format={"type": "json_object"},
         )
     except Exception as exc:
-        logger.debug("JSON-mode fallback provider call failed: %s", exc)
+        logger.debug("JSON-mode fallback provider call failed: %s", type(exc).__name__)
         return None
 
     if not getattr(response, "choices", None):
@@ -221,7 +323,10 @@ async def _try_openai_json_mode(
             try:
                 return output_model.model_validate(parsed)
             except Exception as exc:
-                logger.debug("JSON-mode fallback validation failed: %s", exc)
+                logger.debug(
+                    "JSON-mode fallback validation failed: %s",
+                    type(exc).__name__,
+                )
     return None
 
 
@@ -247,6 +352,22 @@ def _make_outlines_model(
     :func:`_try_openai_json_mode` takes over.
     """
     return outlines_module.from_openai(llm_client, model)
+
+
+def _make_tallied_outlines_model(
+    *,
+    outlines_module: Any,
+    llm_client: Any,
+    model: str,
+) -> Any:
+    """Outlines' own adapter over a usage tally.
+
+    ``from_openai`` accepts only a real ``openai`` client, so the adapter
+    class it picks for an async client is built directly over the stand-in.
+    """
+    from outlines.models.openai import AsyncOpenAI as OutlinesAsyncOpenAI
+
+    return OutlinesAsyncOpenAI(llm_client, model)
 
 
 def _coerce_structured_result(value: Any, output_model: type[T]) -> T:
