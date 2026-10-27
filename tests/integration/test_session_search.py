@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from types import SimpleNamespace
 
 import pytest
 
 from surogates.session.events import EventType
-from surogates.tools.builtin.session_search import _session_search_handler
+from surogates.tools.builtin.session_search import (
+    MAIN_MODEL_TRANSCRIPT_CHARS,
+    MAX_PARALLEL_SUMMARIES,
+    _session_search_handler,
+)
 
 from .conftest import create_org, create_user, issue_service_account_token
 
@@ -606,12 +611,18 @@ class _FakeSummaryClient:
     def __init__(self, text):
         self.text = text
         self.requests = []
+        self.in_flight = 0
+        self.peak_in_flight = 0
         self.chat = SimpleNamespace(
             completions=SimpleNamespace(create=self._create),
         )
 
     async def _create(self, **request):
         self.requests.append(request)
+        self.in_flight += 1
+        self.peak_in_flight = max(self.peak_in_flight, self.in_flight)
+        await asyncio.sleep(0.05)
+        self.in_flight -= 1
         return SimpleNamespace(choices=[
             SimpleNamespace(message=SimpleNamespace(content=self.text)),
         ])
@@ -671,3 +682,99 @@ async def test_raw_preview_is_centred_on_the_match(session_store, session_factor
     summary = result["results"][0]["summary"]
     assert "zebrafish assay failed" in summary
     assert len(summary) < 3500
+
+
+def _transcript(request):
+    content = request["messages"][1]["content"]
+    return content.split("CONVERSATION TRANSCRIPT:\n", 1)[1]
+
+
+async def _seed_long_sessions(session_store, session_factory, org_id, agent_id, count):
+    issued = await issue_service_account_token(session_factory, org_id)
+    for _ in range(count):
+        session = await session_store.create_session(
+            user_id=None, service_account_id=issued.id, org_id=org_id,
+            agent_id=agent_id, channel="api",
+        )
+        await session_store.emit_event(
+            session.id, EventType.USER_MESSAGE, {"content": "padding words " * 3000},
+        )
+        await session_store.emit_event(
+            session.id, EventType.USER_MESSAGE, {"content": "the quokka migration stalled"},
+        )
+    return issued
+
+
+async def _search_with(session_store, org_id, agent_id, issued, **clients):
+    return json.loads(
+        await _session_search_handler(
+            {"query": "quokka", "limit": 5},
+            session_store=session_store,
+            tenant=SimpleNamespace(
+                org_id=org_id, user_id=None, service_account_id=issued.id,
+            ),
+            agent_id=agent_id,
+            **clients,
+        )
+    )
+
+
+async def test_main_model_fallback_shares_a_small_transcript_budget(
+    session_store, session_factory,
+):
+    """With no summary slot the main model still summarises, but the whole
+    search sends it a few thousand tokens, each window around the match,
+    with few calls in flight."""
+    org_id = await create_org(session_factory)
+    issued = await _seed_long_sessions(session_store, session_factory, org_id, "agent-main", 5)
+    main_client = _FakeSummaryClient("Main model recap.")
+
+    result = await _search_with(
+        session_store, org_id, "agent-main", issued,
+        llm_client=main_client, model="main-model",
+    )
+
+    assert [r["summary"] for r in result["results"]] == ["Main model recap."] * 5
+    assert {r["model"] for r in main_client.requests} == {"main-model"}
+    sent = [_transcript(r) for r in main_client.requests]
+    assert sum(len(t) for t in sent) <= MAIN_MODEL_TRANSCRIPT_CHARS + 500
+    assert all("quokka migration stalled" in t for t in sent)
+    assert main_client.peak_in_flight <= MAX_PARALLEL_SUMMARIES
+
+
+async def test_summary_slot_gets_the_full_window_and_main_model_is_unused(
+    session_store, session_factory,
+):
+    org_id = await create_org(session_factory)
+    issued = await _seed_long_sessions(session_store, session_factory, org_id, "agent-slot", 2)
+    summary_client = _FakeSummaryClient("Summary slot recap.")
+    main_client = _FakeSummaryClient("unused")
+
+    await _search_with(
+        session_store, org_id, "agent-slot", issued,
+        llm_client=main_client, model="main-model",
+        summary_llm_client=summary_client, summary_model="summary-model",
+    )
+
+    assert main_client.requests == []
+    assert {r["model"] for r in summary_client.requests} == {"summary-model"}
+    assert all(len(_transcript(r)) > MAIN_MODEL_TRANSCRIPT_CHARS for r in summary_client.requests)
+    assert summary_client.peak_in_flight <= MAX_PARALLEL_SUMMARIES
+
+
+async def test_a_summary_client_without_a_model_falls_back_to_the_main_model(
+    session_store, session_factory,
+):
+    org_id = await create_org(session_factory)
+    issued = await _seed_long_sessions(session_store, session_factory, org_id, "agent-half", 1)
+    summary_client = _FakeSummaryClient("unused")
+    main_client = _FakeSummaryClient("Main model recap.")
+
+    await _search_with(
+        session_store, org_id, "agent-half", issued,
+        llm_client=main_client, model="main-model",
+        summary_llm_client=summary_client, summary_model="",
+    )
+
+    assert summary_client.requests == []
+    assert len(_transcript(main_client.requests[0])) <= MAIN_MODEL_TRANSCRIPT_CHARS + 100

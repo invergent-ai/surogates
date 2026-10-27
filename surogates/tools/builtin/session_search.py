@@ -58,6 +58,13 @@ SUMMARY_TIMEOUT_SECONDS = 60.0
 # Without a summarizer each result shows a window of the transcript centred
 # on the first match; a fixed head would mostly show the greeting.
 RAW_PREVIEW_CHARS = 3000
+# Without a summary slot the summaries run on the agent's main model, which
+# may be the most expensive one it has: the whole search then shares this
+# transcript budget (about 4k tokens) instead of up to 100k chars a session.
+MAIN_MODEL_TRANSCRIPT_CHARS = 16_000
+# Summary calls in flight at once for one search; the rest queue inside the
+# same SUMMARY_TIMEOUT_SECONDS and fall back to their preview if it runs out.
+MAX_PARALLEL_SUMMARIES = 2
 
 # Sources excluded from session browsing/searching by default.
 # Third-party integrations tag their sessions with specific channels
@@ -265,13 +272,26 @@ def _truncate_around_matches(
 # ---------------------------------------------------------------------------
 
 
-def _summarizer_from_clients(kwargs: dict[str, Any]) -> Any | None:
-    """Build the summarizer from the agent's summary slot, falling back to
-    the main turn client, as the title generator and board verifier do."""
-    client = kwargs.get("summary_llm_client") or kwargs.get("llm_client")
-    model = kwargs.get("summary_model") or kwargs.get("model")
+def _summarizer_from_clients(
+    kwargs: dict[str, Any],
+) -> tuple[Any | None, int | None]:
+    """The summarizer, and the transcript budget for the whole search.
+
+    The agent's summary slot is preferred.  Without one it falls back to
+    the main turn client, as the title generator, turn summarizer and
+    context compressor do, but under :data:`MAIN_MODEL_TRANSCRIPT_CHARS`
+    so a search costs a few thousand main-model tokens, not five full
+    transcripts.  ``None`` as the budget means no search-wide cap.
+    """
+    summary_client = kwargs.get("summary_llm_client")
+    summary_model = kwargs.get("summary_model")
+    if summary_client is not None and summary_model:
+        client, model, budget = summary_client, summary_model, None
+    else:
+        client, model = kwargs.get("llm_client"), kwargs.get("model")
+        budget = MAIN_MODEL_TRANSCRIPT_CHARS
     if client is None or not model:
-        return None
+        return None, None
 
     async def _summarize(
         *, task: str, messages: list[dict[str, Any]], temperature: float, max_tokens: int,
@@ -296,7 +316,7 @@ def _summarizer_from_clients(kwargs: dict[str, Any]) -> Any | None:
             response = await client.chat.completions.create(**request)
         return content_as_text(response.choices[0].message.content).strip() or None
 
-    return _summarize
+    return _summarize, budget
 
 
 async def _summarize_session(
@@ -508,6 +528,7 @@ async def session_search(
     agent_id: str = "",
     current_session_id: UUID | None = None,
     auxiliary_fn: Any | None = None,
+    transcript_budget: int | None = None,
     owner_scope: bool = False,
 ) -> str:
     """Search past sessions and return focused summaries of matching conversations.
@@ -528,6 +549,8 @@ async def session_search(
         service_account_id: Service-account UUID for API sessions.
         current_session_id: The current session UUID to exclude.
         auxiliary_fn: Optional async callable for LLM summarization.
+        transcript_budget: Transcript characters all summaries of this search
+            share, or None for :data:`MAX_SESSION_CHARS` per session.
     """
     if session_store is None:
         return json.dumps({
@@ -776,14 +799,27 @@ async def session_search(
                     exc_info=True,
                 )
 
-        # Summaries run in parallel, each under the shared budget; a session
-        # whose summary times out falls back to its raw preview instead of
-        # failing the whole search.
+        per_session_chars = (
+            transcript_budget // len(tasks)
+            if transcript_budget is not None and tasks
+            else MAX_SESSION_CHARS
+        )
+        in_flight = asyncio.Semaphore(MAX_PARALLEL_SUMMARIES)
+
+        async def _summarize_bounded(text: str, meta: dict[str, Any]) -> str | None:
+            async with in_flight:
+                return await _summarize_session(
+                    _truncate_around_matches(text, query, max_chars=per_session_chars),
+                    query, meta, auxiliary_fn,
+                )
+
+        # The timeout covers queueing too, so the whole search ends within
+        # it; a session whose summary is late falls back to its raw preview
+        # instead of failing the search.
         results = await asyncio.gather(
             *(
                 asyncio.wait_for(
-                    _summarize_session(text, query, meta, auxiliary_fn),
-                    timeout=SUMMARY_TIMEOUT_SECONDS,
+                    _summarize_bounded(text, meta), timeout=SUMMARY_TIMEOUT_SECONDS,
                 )
                 for _, _, text, meta in tasks
             ),
@@ -950,7 +986,7 @@ async def _session_search_handler(
     )
     agent_id = kwargs.get("agent_id", "")
     current_session_id = kwargs.get("session_id")
-    auxiliary_fn = _summarizer_from_clients(kwargs)
+    auxiliary_fn, transcript_budget = _summarizer_from_clients(kwargs)
 
     # Coerce string UUIDs to UUID objects
     if isinstance(org_id, str):
@@ -977,5 +1013,6 @@ async def _session_search_handler(
         agent_id=agent_id,
         current_session_id=current_session_id,
         auxiliary_fn=auxiliary_fn,
+        transcript_budget=transcript_budget,
         owner_scope=owner_scope,
     )
