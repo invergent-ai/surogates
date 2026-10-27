@@ -215,7 +215,7 @@ async def send_session_events(
     store = _get_session_store(request)
     await _verify_session_access(request, store, session_id, tenant)
     session = await store.get_session(session_id)
-    require_user_writable_session(session)
+    require_user_writable_session(session, tenant)
     await require_device_access(request, session, tenant)
 
     sent: list[SentSessionEvent] = []

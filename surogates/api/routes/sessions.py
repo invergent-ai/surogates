@@ -684,19 +684,6 @@ def apply_eval_isolation(
     return resolved
 
 
-def _require_metered_door(session: Session, tenant: TenantContext) -> None:
-    """409 a person starting a turn in their buy-page conversation.
-
-    The buy page meters every turn of it; the buyer's own login reaching it
-    here (send, resume, retry) would run turns nothing charges.
-    """
-    if session.channel == BUY_PAGE_CHANNEL and tenant.user_id is not None:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="This conversation continues on the agent's buy page.",
-        )
-
-
 async def _buy_page_buyer(
     body: CreateSessionRequest,
     request: Request,
@@ -1199,8 +1186,7 @@ async def deliver_message(
     _require_service_account_api_route(request, tenant)
     store = _get_session_store(request)
     session = await _get_session_for_tenant(request, session_id, tenant, agent_runtime)
-    require_user_writable_session(session)
-    _require_metered_door(session, tenant)
+    require_user_writable_session(session, tenant)
     await require_device_access(request, session, tenant)
 
     if session.status not in ("active", "idle", "failed", "paused", "completed"):
@@ -1926,8 +1912,7 @@ async def resume_session(
     """Resume a paused session."""
     store = _get_session_store(request)
     session = await _get_session_for_tenant(request, session_id, tenant, agent_runtime)
-    require_user_writable_session(session)
-    _require_metered_door(session, tenant)
+    require_user_writable_session(session, tenant)
     await require_device_access(request, session, tenant)
 
     if session.status != "paused":
@@ -1973,8 +1958,7 @@ async def retry_session(
     _require_service_account_api_route(request, tenant)
     store = _get_session_store(request)
     session = await _get_session_for_tenant(request, session_id, tenant, agent_runtime)
-    require_user_writable_session(session)
-    _require_metered_door(session, tenant)
+    require_user_writable_session(session, tenant)
     await require_device_access(request, session, tenant)
 
     if session.status not in ("failed", "paused"):
@@ -2110,7 +2094,7 @@ async def update_session(
     _require_service_account_api_route(request, tenant)
     store = _get_session_store(request)
     session = await _get_session_for_tenant(request, session_id, tenant, agent_runtime)
-    require_user_writable_session(session)
+    require_user_writable_session(session, tenant)
     _require_not_project_master(session, tenant, "rename the project instead")
 
     await store.update_session_title(session_id, body.title)
@@ -2135,7 +2119,7 @@ async def delete_session(
     """Archive (soft-delete) a session and delete its workspace storage."""
     _require_service_account_api_route(request, tenant)
     session = await _get_session_for_tenant(request, session_id, tenant, agent_runtime)
-    require_user_writable_session(session)
+    require_user_writable_session(session, tenant)
     _require_not_project_master(session, tenant, "archive the project instead")
     # A chat whose folder never bound is deleted all the same.
     await require_device_access(request, session, tenant, bound=False)

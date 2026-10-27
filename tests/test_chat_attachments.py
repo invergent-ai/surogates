@@ -173,7 +173,7 @@ def patched_send_message(monkeypatch):
         )
         monkeypatch.setattr(
             "surogates.api.routes.sessions.require_user_writable_session",
-            lambda _session: None,
+            lambda _session, _tenant: None,
         )
 
         # Keyed as the session's workspace keys its files: under its own prefix.

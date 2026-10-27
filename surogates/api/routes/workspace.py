@@ -716,7 +716,7 @@ async def upload_file(
     session, _bucket, _root_id = await _get_workspace_session_bucket_and_root(
         request, store, session_id, tenant
     )
-    require_user_writable_session(session)
+    require_user_writable_session(session, tenant)
     access = await require_device_access(request, session, tenant)
 
     if change_digest is not None:
@@ -845,7 +845,7 @@ async def delete_file(
     session, _bucket, _root_id = await _get_workspace_session_bucket_and_root(
         request, store, session_id, tenant, path=path, change=True,
     )
-    require_user_writable_session(session)
+    require_user_writable_session(session, tenant)
     access = await require_device_access(request, session, tenant)
 
     request_id = request_id or uuid4().hex

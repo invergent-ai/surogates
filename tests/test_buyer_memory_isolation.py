@@ -219,17 +219,57 @@ async def test_a_user_is_named_only_on_the_buy_page_channel(monkeypatch):
     assert exc.value.status_code == 422
 
 
-def test_the_buyers_own_login_cannot_start_a_turn_in_it():
+def _buy_page_row(org_id):
     from types import SimpleNamespace
 
-    buyer_session = SimpleNamespace(channel="buy_page")
+    return SimpleNamespace(
+        id=uuid4(), org_id=org_id, channel="buy_page", agent_id="support-bot",
+        parent_id=None, config={}, user_id=None, service_account_id=None,
+    )
+
+
+def test_the_buyers_own_login_cannot_write_to_it():
+    from surogates.api.session_guards import require_user_writable_session
+
     _, _, user_tenant, _ = _route_fixtures("/v1/sessions", service_account=False)
     _, _, agent_tenant, _ = _route_fixtures("/v1/api/sessions", service_account=True)
 
     with pytest.raises(HTTPException) as exc:
-        sessions_route._require_metered_door(buyer_session, user_tenant)
+        require_user_writable_session(_buy_page_row(user_tenant.org_id), user_tenant)
     assert exc.value.status_code == 409
-    sessions_route._require_metered_door(buyer_session, agent_tenant)
+    require_user_writable_session(_buy_page_row(agent_tenant.org_id), agent_tenant)
+
+
+class _OneSessionStore:
+    def __init__(self, session):
+        self.session = session
+
+    async def get_session(self, session_id):
+        return self.session
+
+
+@pytest.mark.parametrize("route", ["answer", "events"])
+async def test_no_route_starts_an_unmetered_turn_in_it(route):
+    """Answering the agent's question and sending a control event both wake
+    the session, so they are as closed to the buyer's login as a message."""
+    from surogates.api.routes import ask_user_question, events
+
+    _, request, tenant, _ = _route_fixtures("/v1/sessions", service_account=False)
+    session = _buy_page_row(tenant.org_id)
+    request.app.state.session_store = _OneSessionStore(session)
+
+    with pytest.raises(HTTPException) as exc:
+        if route == "answer":
+            await ask_user_question.respond_to_ask_user_question(
+                session.id, "call-1",
+                ask_user_question.AskUserQuestionResponseRequest.model_construct(responses=[]),
+                request, tenant,
+            )
+        else:
+            await events.send_session_events(
+                session.id, events.SendEventsRequest(events=[]), request, tenant,
+            )
+    assert exc.value.status_code == 409
 
 
 def test_on_the_buy_page_the_agent_still_acts_as_itself():
