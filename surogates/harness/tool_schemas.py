@@ -83,8 +83,10 @@ _CHANNEL_TOOLS: frozenset[str] = frozenset({
     "step_outcome", "followup_enroll", "followup_update",
     "followup_status", "followup_contacts", "followup_withdraw_consent",
 })
-_CRON_TOOLS: frozenset[str] = frozenset({
-    "cron_create", "cron_list", "cron_delete",
+_CRON_READ_TOOLS: frozenset[str] = frozenset({"cron_list", "cron_get"})
+#: What makes or changes a schedule; also what a scheduled run may not call.
+CRON_WRITE_TOOLS: frozenset[str] = frozenset({
+    "cron_create", "cron_update", "cron_pause", "cron_resume", "cron_run_now", "cron_delete",
 })
 _WHITEBOARD_TOOLS: frozenset[str] = frozenset({
     "whiteboard_draw",
@@ -123,6 +125,7 @@ def drop_unusable_tools(
     has_kbs: bool,
     has_channel: bool,
     makes_routines: bool,
+    reads_routines: bool = True,
     is_whiteboard: bool = False,
     is_voice: bool = False,
     has_forms: bool = False,
@@ -139,9 +142,10 @@ def drop_unusable_tools(
     ``send_form`` goes only where it *has_forms*: a WhatsApp conversation
     of an agent with published forms.
 
-    The cron tools go to a session that *makes_routines* through its
-    model: a chat with an owner, ``/loop`` on and ``ask_user_question``
-    to confirm with.  A scheduled run may not make another.
+    The tools that make or change a schedule go to a session that
+    *makes_routines*: a chat with an owner of its own.  Listing and reading
+    them goes wherever someone owns the session (*reads_routines*),
+    scheduled runs and helpers included.
 
     The office tools go only where ``has_file_pane``.
 
@@ -154,7 +158,9 @@ def drop_unusable_tools(
     if not has_channel:
         drop |= _CHANNEL_TOOLS
     if not makes_routines:
-        drop |= _CRON_TOOLS
+        drop |= CRON_WRITE_TOOLS
+    if not reads_routines:
+        drop |= _CRON_READ_TOOLS
     if not is_whiteboard:
         drop |= _WHITEBOARD_TOOLS
     if not is_voice:

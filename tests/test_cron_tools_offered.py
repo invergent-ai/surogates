@@ -1,10 +1,10 @@
-"""Which sessions' models may make a schedule with ``cron_create``.
+"""Which sessions' models may make, change and read schedules.
 
-Every chat whose sender owns what it makes and can be asked first: a user's
-or a service account's own top-level session that is offered
-``ask_user_question``, with ``/loop`` on.  Never an anonymous visitor, a
-scheduled run, a project's thread or anything else working under a parent,
-nor a session no one answers.
+A user's or a service account's own top-level chat makes and changes them,
+whatever ``/loop`` and ``ask_user_question`` are set to: only the policy,
+by tool name, takes one away.  Scheduled runs, threads and helpers of an
+owned session read them.  An anonymous visitor and an evaluation row get
+none.
 """
 
 from __future__ import annotations
@@ -24,7 +24,9 @@ from surogates.tools.registry import ToolRegistry
 from surogates.tools.runtime import ToolRuntime
 from tests.test_steer_loop import _final_response, _make_loop_harness
 
-ROUTINE_TOOLS = {"cron_create", "cron_list", "cron_delete"}
+WRITE_TOOLS = {"cron_create", "cron_update", "cron_pause", "cron_resume", "cron_run_now", "cron_delete"}
+READ_TOOLS = {"cron_list", "cron_get"}
+ROUTINE_TOOLS = WRITE_TOOLS | READ_TOOLS
 
 
 def _session(*, user: bool = True, service_account: bool = False, parent: bool = False, **config) -> Session:
@@ -38,7 +40,7 @@ def _session(*, user: bool = True, service_account: bool = False, parent: bool =
     )
 
 
-async def _offered(monkeypatch, session: Session, *, loop: bool = True) -> set[str]:
+async def _offered(monkeypatch, session: Session, *, loop: bool = True, denied: frozenset = frozenset()) -> set[str]:
     registry = ToolRegistry()
     ToolRuntime(registry).register_builtins()
     store = AsyncMock()
@@ -46,6 +48,10 @@ async def _offered(monkeypatch, session: Session, *, loop: bool = True) -> set[s
     store.get_events = AsyncMock(return_value=[])
     harness = _make_loop_harness(session_store=store)
     harness._tools = registry
+    if denied:
+        harness._governance_gate = SimpleNamespace(
+            offers=lambda name: name not in denied, allow_listed=lambda names: frozenset(),
+        )
     harness._slash_commands = SlashCommandConfig() if loop else SlashCommandConfig(
         commands=SLASH_COMMAND_IDS - {"loop"},
     )
@@ -74,17 +80,35 @@ async def test_an_ordinary_chat_is_offered_the_cron_tools(monkeypatch, session):
 
 @pytest.mark.parametrize("session", [
     _session(user=False),
+    _session(memory_boundary=f"{EVAL_BOUNDARY_PREFIX}run-1"),
+], ids=["anonymous", "an-eval-row"])
+@pytest.mark.asyncio
+async def test_a_session_no_one_owns_or_answers_gets_none(monkeypatch, session):
+    assert not ROUTINE_TOOLS & await _offered(monkeypatch, session)
+
+
+@pytest.mark.parametrize("session", [
     _session(parent=True, scheduled_session_id=str(uuid4())),
     _session(scheduled_session_id=str(uuid4())),
     _session(parent=True, workstream_role="thread"),
     _session(parent=True),
-    _session(memory_boundary=f"{EVAL_BOUNDARY_PREFIX}run-1"),
-], ids=["anonymous", "a-scheduled-run", "a-detached-scheduled-run", "a-project-thread", "a-worker", "an-eval-row"])
+], ids=["a-scheduled-run", "a-detached-scheduled-run", "a-project-thread", "a-worker"])
 @pytest.mark.asyncio
-async def test_a_session_no_one_owns_or_answers_is_not(monkeypatch, session):
-    assert not ROUTINE_TOOLS & await _offered(monkeypatch, session)
+async def test_runs_and_helpers_read_schedules_and_make_none(monkeypatch, session):
+    offered = await _offered(monkeypatch, session)
+    assert READ_TOOLS <= offered
+    assert not WRITE_TOOLS & offered
 
 
 @pytest.mark.asyncio
-async def test_an_agent_without_loop_is_not(monkeypatch):
-    assert not ROUTINE_TOOLS & await _offered(monkeypatch, _session(), loop=False)
+async def test_neither_loop_off_nor_a_denied_question_tool_takes_them_away(monkeypatch):
+    assert ROUTINE_TOOLS <= await _offered(monkeypatch, _session(), loop=False)
+    offered = await _offered(monkeypatch, _session(), denied=frozenset({"ask_user_question"}))
+    assert ROUTINE_TOOLS <= offered and "ask_user_question" not in offered
+
+
+@pytest.mark.asyncio
+async def test_the_policy_takes_away_only_what_it_names(monkeypatch):
+    offered = await _offered(monkeypatch, _session(), denied=frozenset({"cron_create", "cron_delete"}))
+    assert not {"cron_create", "cron_delete"} & offered
+    assert READ_TOOLS <= offered
