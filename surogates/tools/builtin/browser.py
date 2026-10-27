@@ -19,7 +19,7 @@ from surogates.browser.base import (
     browser_credits_exhausted_result,
     browser_unavailable_result,
 )
-from surogates.browser.client import KernelBrowserClient
+from surogates.browser.client import ClickTimeoutError, KernelBrowserClient
 from surogates.browser.control import BrowserControlStore, paused_by_user_result
 from surogates.browser.pool import BrowserPool
 from surogates.browser.serialize import render_markdown
@@ -655,12 +655,17 @@ async def _browser_click_handler(
     async with client:
         try:
             if has_ref:
-                await client.click_ref(arguments["ref"], **common)
+                dialogs = await client.click_ref(arguments["ref"], **common)
             else:
-                await client.click_at(arguments["x"], arguments["y"], **common)
+                dialogs = await client.click_at(arguments["x"], arguments["y"], **common)
         except KeyError as exc:
             return json.dumps({"error": "unknown_ref", "detail": str(exc)})
-    return json.dumps(_noted({"clicked": True}, client))
+        except ClickTimeoutError as exc:
+            return json.dumps({"error": "click_timeout", "detail": str(exc)})
+    body: dict[str, Any] = {"clicked": True}
+    if dialogs:
+        body["dialogs"] = dialogs
+    return json.dumps(_noted(body, client))
 
 
 TYPE_SCHEMA = {
@@ -705,11 +710,14 @@ async def _browser_type_handler(
     client = _make_client(_client_factory, endpoint, snapshot_cache)
     async with client:
         if "ref" in arguments:
-            await client.type_into_ref(
-                arguments["ref"],
-                arguments["text"],
-                delay_ms=arguments.get("delay_ms", 0),
-            )
+            try:
+                await client.type_into_ref(
+                    arguments["ref"],
+                    arguments["text"],
+                    delay_ms=arguments.get("delay_ms", 0),
+                )
+            except ClickTimeoutError as exc:
+                return json.dumps({"error": "click_timeout", "detail": str(exc)})
         else:
             await client.type_text(arguments["text"], delay_ms=arguments.get("delay_ms", 0))
     return json.dumps(_noted({"typed": True}, client))

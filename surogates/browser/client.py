@@ -18,6 +18,55 @@ import httpx
 SNAPSHOT_COLLECTOR = (Path(__file__).parent / "observe" / "snapshot.js").read_text(encoding="utf-8").strip()
 
 
+class ClickTimeoutError(RuntimeError):
+    """A click did not finish in time: the page is busy, blocked or gone."""
+
+
+# How long one click may take in the browser, settling included.  A page whose
+# main thread is busy answers no CDP call at all, and an unbounded click held
+# the agent's turn (and every viewer attaching to that page) for over a
+# minute.  The execute budget and the HTTP read timeout sit above it so the
+# click's own deadline is the one that fires, with a result that says so.
+CLICK_TIMEOUT_MS = 20_000
+_CLICK_EXECUTE_TIMEOUT_SEC = 30
+
+
+def _bounded_click(body: str) -> str:
+    """*body* run with a deadline, answering any JS dialog it opens, its CDP session detached after.
+
+    *body* may assign the CDP session it opens to ``cdp``.  A dialog left
+    open blocks the page, and with it every later call, so each one is
+    answered (accepted: the agent clicked meaning to go on; a prompt is
+    dismissed, since there is no text to give it) and reported in the result.
+    """
+
+    return f"""
+let cdp = null;
+const __dialogs = [];
+const __onDialog = (d) => {{
+  __dialogs.push({{type: d.type(), message: d.message()}});
+  (d.type() === 'prompt' ? d.dismiss() : d.accept()).catch(() => null);
+}};
+page.on('dialog', __onDialog);
+let __timer = null;
+try {{
+  await Promise.race([
+    (async () => {{
+{body}
+    }})(),
+    new Promise((_, reject) => {{
+      __timer = setTimeout(() => reject(new Error('click_timeout')), {CLICK_TIMEOUT_MS});
+    }}),
+  ]);
+}} finally {{
+  clearTimeout(__timer);
+  page.off('dialog', __onDialog);
+  if (cdp) cdp.detach().catch(() => null);
+}}
+return {{dialogs: __dialogs}};
+"""
+
+
 class BrowserClientBase:
     """What the cloud's browser client and the computer's share: the ``@eN`` ref
     cache, the page tree built from a snapshot's frames, key names and screenshot
@@ -328,7 +377,9 @@ for (const __f of __targets) {
   __frames.push({x: __ox, y: __oy, nodes: __r.nodes});
 }
 const __cdp = await page.context().newCDPSession(page);
-const __doc = await __cdp.send('DOM.getDocument', {depth: -1, pierce: true});
+let __doc;
+try { __doc = await __cdp.send('DOM.getDocument', {depth: -1, pierce: true}); }
+finally { __cdp.detach().catch(() => null); }
 const __map = {};
 (function walk(n){ if(!n) return; const a=n.attributes||[]; for(let i=0;i<a.length;i+=2){ if(a[i]==='data-sg-i'){ __map[a[i+1]] = n.backendNodeId; } } for(const c of (n.children||[])) walk(c); if(n.contentDocument) walk(n.contentDocument); })(__doc.root);
 for (const __fr of __frames) { for (const node of __fr.nodes) { node.backend_node_id = (node.idx!=null && __map[String(node.idx)]!=null) ? __map[String(node.idx)] : null; } }
@@ -341,6 +392,11 @@ return {
 """
 
     _DEFAULT_TIMEOUT = httpx.Timeout(connect=5.0, read=60.0, write=10.0, pool=5.0)
+    _CLICK_TIMEOUT_DETAIL = (
+        f"The click did not finish within {CLICK_TIMEOUT_MS // 1000} s: the page is "
+        "busy or blocked. Call browser_get_state or browser_screenshot to see "
+        "where it is before trying again."
+    )
 
     def __init__(
         self,
@@ -476,14 +532,14 @@ return {
         button: str = "left",
         click_type: str = "click",
         num_clicks: int = 1,
-    ) -> None:
-        """Click at viewport coordinates."""
+    ) -> list[dict[str, str]]:
+        """Click at viewport coordinates; returns the JS dialogs the click opened and answered."""
 
         options: dict[str, Any] = {"button": button}
         if num_clicks != 1:
             options["clickCount"] = num_clicks
         if click_type == "click":
-            code = (
+            return await self._click(_bounded_click(
                 "let __reqSeen = false;\n"
                 "const __reqHandler = () => { __reqSeen = true; };\n"
                 "page.on('request', __reqHandler);\n"
@@ -498,8 +554,7 @@ return {
                 "} finally {\n"
                 "  page.off('request', __reqHandler);\n"
                 "}\n"
-                "return true;"
-            )
+            ))
         elif click_type == "down":
             code = (
                 f"await page.mouse.move({int(x)}, {int(y)});\n"
@@ -515,8 +570,9 @@ return {
         else:
             raise ValueError(f"unsupported click_type: {click_type}")
         await self._playwright_execute(code)
+        return []
 
-    async def click_ref(self, ref: str, **kwargs: Any) -> None:
+    async def click_ref(self, ref: str, **kwargs: Any) -> list[dict[str, str]]:
         """Re-locate a `browser_get_state` ref and click its live center.
 
         Refs are two-tier: a CDP backend node id is tried first, then a
@@ -526,7 +582,7 @@ return {
         """
 
         entry = self._resolve_ref(ref)
-        await self._act_click_on_entry(
+        return await self._act_click_on_entry(
             entry,
             button=kwargs.get("button", "left"),
             num_clicks=kwargs.get("num_clicks", 1),
@@ -702,11 +758,24 @@ return await page.evaluate(() => ({{
         *,
         button: str = "left",
         num_clicks: int = 1,
-    ) -> None:
+    ) -> list[dict[str, str]]:
         """Resolve a cache entry two-tier and click its live center."""
 
-        code = self._build_ref_click_js(entry, button, num_clicks)
-        await self._playwright_execute(code)
+        return await self._click(self._build_ref_click_js(entry, button, num_clicks))
+
+    async def _click(self, code: str) -> list[dict[str, str]]:
+        """Run a :func:`_bounded_click` script; its dialogs, or :class:`ClickTimeoutError`."""
+
+        try:
+            result = await self._playwright_execute(code, timeout_sec=_CLICK_EXECUTE_TIMEOUT_SEC)
+        except httpx.TimeoutException as exc:
+            raise ClickTimeoutError(self._CLICK_TIMEOUT_DETAIL) from exc
+        except RuntimeError as exc:
+            if "click_timeout" in str(exc):
+                raise ClickTimeoutError(self._CLICK_TIMEOUT_DETAIL) from exc
+            raise
+        dialogs = result.get("dialogs") if isinstance(result, dict) else None
+        return list(dialogs) if isinstance(dialogs, list) else []
 
     def _build_ref_click_js(
         self,
@@ -734,8 +803,8 @@ return await page.evaluate(() => ({{
             if num_clicks != 1
             else f"{{button: {button_lit}}}"
         )
-        return f"""
-const cdp = await page.context().newCDPSession(page);
+        return _bounded_click(f"""
+cdp = await page.context().newCDPSession(page);
 let objectId = null;
 const __bid = {bid_lit};
 if (__bid !== null) {{
@@ -814,8 +883,7 @@ const cx = Math.round((quad[0] + quad[2] + quad[4] + quad[6]) / 4);
 const cy = Math.round((quad[1] + quad[3] + quad[5] + quad[7]) / 4);
 await page.mouse.click(cx, cy, {click_opts});
 await page.waitForTimeout(150);
-return true;
-"""
+""")
 
     def _snapshot_script(self, selector: str | None) -> str:
         return self._SNAPSHOT_SCRIPT.replace(

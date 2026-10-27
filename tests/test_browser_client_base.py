@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from typing import Any
 
+import httpx
 import pytest
 
 from surogates.browser.client import (
     SNAPSHOT_COLLECTOR,
     BrowserClientBase,
+    ClickTimeoutError,
     KernelBrowserClient,
 )
 
@@ -64,3 +66,70 @@ def test_keys_are_joined_into_one_chord_in_playwrights_names() -> None:
     assert base._chord(("ctrl", "Shift", "esc")) == "Control+Shift+Escape"
     with pytest.raises(ValueError):
         base._chord(())
+
+
+def test_a_snapshot_detaches_the_cdp_session_it_opens() -> None:
+    assert "__cdp.detach()" in KernelBrowserClient("http://browser")._snapshot_script(None)
+
+
+def test_a_ref_click_is_bounded_answers_dialogs_and_detaches() -> None:
+    code = KernelBrowserClient("http://browser")._build_ref_click_js(
+        {"ref": "@e1", "role": "button", "name": "Go", "backend_node_id": 1, "nth": 0}, "left", 1,
+    )
+    assert "cdp = await page.context().newCDPSession(page);" in code
+    assert "const cdp =" not in code  # the wrapper's own binding is the one detached
+    assert "cdp.detach()" in code
+    assert "page.on('dialog', __onDialog)" in code and "page.off('dialog', __onDialog)" in code
+    assert "reject(new Error('click_timeout'))" in code
+
+
+@pytest.mark.parametrize("failure", [
+    RuntimeError("Error: click_timeout"),
+    httpx.ReadTimeout("read timed out"),
+])
+async def test_a_stalled_click_is_a_click_timeout(failure: Exception) -> None:
+    client = KernelBrowserClient("http://browser")
+    client._snapshot_cache["@e1"] = {"role": "button", "name": "Go", "backend_node_id": 1, "nth": 0}
+    budgets: list[int] = []
+
+    async def execute(code: str, *, timeout_sec: int = 60) -> Any:
+        budgets.append(timeout_sec)
+        raise failure
+
+    client._playwright_execute = execute  # type: ignore[method-assign]
+    try:
+        with pytest.raises(ClickTimeoutError):
+            await client.click_ref("@e1")
+        with pytest.raises(ClickTimeoutError):
+            await client.click_at(5, 5)
+    finally:
+        await client.close()
+    assert budgets and all(budget < 60 for budget in budgets)
+
+
+async def test_a_click_returns_the_dialogs_it_answered() -> None:
+    client = KernelBrowserClient("http://browser")
+    dialog = {"type": "alert", "message": "Saved"}
+
+    async def execute(code: str, **_: Any) -> Any:
+        return {"dialogs": [dialog]}
+
+    client._playwright_execute = execute  # type: ignore[method-assign]
+    try:
+        assert await client.click_at(5, 5) == [dialog]
+    finally:
+        await client.close()
+
+
+async def test_other_click_failures_are_not_mistaken_for_a_timeout() -> None:
+    client = KernelBrowserClient("http://browser")
+
+    async def execute(code: str, **_: Any) -> Any:
+        raise RuntimeError("ref click blocked: covered by <div>")
+
+    client._playwright_execute = execute  # type: ignore[method-assign]
+    try:
+        with pytest.raises(RuntimeError, match="covered"):
+            await client.click_at(5, 5)
+    finally:
+        await client.close()

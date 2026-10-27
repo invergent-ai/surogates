@@ -442,6 +442,37 @@ class TestTypeHandler:
         assert client.calls[0][0] == "type_text"
 
 
+class TestClickOutcomes:
+    async def test_a_click_that_times_out_says_so(self, tenant) -> None:
+        from surogates.browser.client import ClickTimeoutError
+        from surogates.tools.builtin.browser import _browser_click_handler
+
+        class Stalled(FakeClickClient):
+            async def click_ref(self, ref: str, **kwargs: Any) -> None:
+                raise ClickTimeoutError("busy")
+
+        result = await _browser_click_handler(
+            {"ref": "@e3"}, tenant=tenant, session_id=uuid4(), browser_pool=FakePool(),
+            browser_control=FakeControlStore(), _client_factory=lambda endpoint: Stalled(),
+        )
+        assert json.loads(result) == {"error": "click_timeout", "detail": "busy"}
+
+    async def test_the_dialogs_a_click_answered_are_reported(self, tenant) -> None:
+        from surogates.tools.builtin.browser import _browser_click_handler
+
+        class Confirming(FakeClickClient):
+            async def click_ref(self, ref: str, **kwargs: Any) -> list[dict[str, str]]:
+                return [{"type": "confirm", "message": "Delete the supplier?"}]
+
+        result = await _browser_click_handler(
+            {"ref": "@e3"}, tenant=tenant, session_id=uuid4(), browser_pool=FakePool(),
+            browser_control=FakeControlStore(), _client_factory=lambda endpoint: Confirming(),
+        )
+        assert json.loads(result) == {
+            "clicked": True, "dialogs": [{"type": "confirm", "message": "Delete the supplier?"}],
+        }
+
+
 class TestPressKey:
     async def test_press_single(self, tenant) -> None:
         from surogates.tools.builtin.browser import _browser_press_key_handler
