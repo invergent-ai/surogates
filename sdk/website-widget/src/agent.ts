@@ -291,9 +291,7 @@ export class WebsiteAgent extends AbstractAgent {
       const sent = await this.sendWithCookieRecovery(boot, userText);
       if (ctx.terminated) return;
       this.cursor = Math.max(this.cursor, sent.eventId);
-      this.replaceStreamSource(
-        ctx, sent.sessionId, this.cursor || -1, new Translator(), subscriber, input,
-      );
+      this.replaceStreamSource(ctx, sent.sessionId, new Translator(), subscriber, input);
     } catch (err) {
       if (ctx.terminated) return;
       ctx.terminated = true;
@@ -331,7 +329,7 @@ export class WebsiteAgent extends AbstractAgent {
 
   /**
    * Tear down whatever EventSource is currently live on ``ctx`` and
-   * open a fresh one against *sessionId* starting at *after*.  Called
+   * open a fresh one against *sessionId* starting after the cursor.  Called
    * for the run's stream and for every reopen of it.  Always clears
    * the stale ``onerror`` first so the old source can't race a
    * ``RUN_ERROR`` into the subscriber after it's been replaced.
@@ -339,17 +337,17 @@ export class WebsiteAgent extends AbstractAgent {
   private replaceStreamSource(
     ctx: RunContext,
     sessionId: string,
-    after: number,
     translator: Translator,
     subscriber: Subscriber<BaseEvent>,
     input: RunAgentInput,
   ): void {
     closeEventSource(ctx.source);
-    const source = openEventStream(this.apiUrl, sessionId, after, this.agentId);
+    const source = openEventStream(this.apiUrl, sessionId, this.cursor || -1, this.agentId);
     ctx.source = source;
-    const reopen = () =>
-      this.replaceStreamSource(ctx, sessionId, this.cursor || -1, translator, subscriber, input);
-    this.attachStreamListeners(source, translator, subscriber, input, ctx, reopen);
+    this.attachStreamListeners(
+      source, translator, subscriber, input, ctx,
+      () => this.replaceStreamSource(ctx, sessionId, translator, subscriber, input),
+    );
   }
 
   /**

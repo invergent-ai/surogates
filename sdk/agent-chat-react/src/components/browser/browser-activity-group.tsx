@@ -50,15 +50,15 @@ const ACTION_SUMMARIES: Record<string, (args: Record<string, unknown>) => string
     if (x !== null && y !== null) return `click (${x}, ${y})`;
     return "click";
   },
-  // Never the text: what the agent typed is often a password, and events
-  // stored before the server masked it still carry it in the clear.
+  // Never the text: what the agent typed is often a password, and a host
+  // may feed events it read from the database, which the server never masked.
   browser_type: (args) => {
     const ref = stringValue(args.ref);
-    const text = stringValue(args.text);
+    const chars = [...stringValue(args.text)].length;
     const what = stringValue(args.secret_ref)
       ? "a stored secret"
-      : text
-        ? `${[...text].length} ${[...text].length === 1 ? "char" : "chars"}`
+      : chars
+        ? `${chars} ${chars === 1 ? "char" : "chars"}`
         : "";
     const typed = what ? `type ${what}` : "type";
     return ref ? `${typed} into ${ref}` : typed;
