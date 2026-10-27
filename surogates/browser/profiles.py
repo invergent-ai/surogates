@@ -9,7 +9,7 @@ from uuid import UUID
 
 from cryptography.fernet import Fernet, InvalidToken
 from sqlalchemy import delete as sa_delete
-from sqlalchemy import func, select, update
+from sqlalchemy import any_, func, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from surogates.db.models import BrowserProfile
@@ -176,7 +176,7 @@ class BrowserProfileStore:
                     .where(
                         BrowserProfile.org_id == org_id,
                         BrowserProfile.service_account_id == service_account_id,
-                        BrowserProfile.use_in_channels.any(channel),
+                        channel == any_(BrowserProfile.use_in_channels),
                         BrowserProfile.storage_state_enc.is_not(None),
                     )
                     .order_by(BrowserProfile.created_at.asc())
