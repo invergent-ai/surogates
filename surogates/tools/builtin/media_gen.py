@@ -1,8 +1,8 @@
-"""Image and video generation tools (OpenRouter-shaped APIs).
+"""Image and video generation tools.
 
-``generate_image`` calls a chat-completions endpoint with
-``modalities: ["image", "text"]`` (how OpenRouter exposes image models)
-through the per-session image client.  ``generate_video`` drives the
+``generate_image`` asks the per-session image client for an image in
+whatever request shape its provider takes (``image_request``).
+``generate_video`` drives the
 async ``POST /videos`` job API over raw httpx: submit, poll, download.
 Both write the result into the session workspace (local path and/or
 object storage, mirroring browser screenshots) and return the
@@ -17,8 +17,6 @@ executor kwargs (the same chain ``vision_llm_client`` rides).
 from __future__ import annotations
 
 import asyncio
-import base64
-import binascii
 import json
 import logging
 import math
@@ -32,14 +30,11 @@ from uuid import uuid4
 import httpx
 
 from surogates.devices.workspace import MAX_WRITE_BYTES, DeviceOperationError, said
-from surogates.harness.message_utils import message_to_dict
 from surogates.sandbox.copy_files import TooLargeForCopy, write_copy, writes_to_copy
+from surogates.tools.builtin import image_request
 from surogates.tools.builtin.artifact import artifact_client
 from surogates.storage.tenant import boundary_workspace_key, workspace_session_shim
-from surogates.tools.builtin.vision import (
-    _extract_response_content,
-    _image_ref_to_data_url,
-)
+from surogates.tools.builtin.vision import _image_ref_to_data_url
 from surogates.tools.registry import ToolRegistry, ToolSchema
 from surogates.tools.utils.tool_result_storage import HARNESS_FOLDER_REFUSAL, in_harness_folder
 from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError, validate_path
@@ -186,10 +181,12 @@ GENERATE_IMAGE_SCHEMA = ToolSchema(
     description=(
         "Generate an image from a text prompt and save it into the session "
         "workspace. Optionally guide the generation with input images "
-        "(image-to-image). Returns the workspace-relative file path of the "
-        "generated image. The image is automatically shown to the user as "
-        "an inline artifact — do NOT embed the path in your reply as a "
-        "markdown image; just mention the result."
+        "(image-to-image), when the image model takes them. Returns the "
+        "workspace-relative path, the real width and height, `delivery` "
+        "(how the image reaches anyone from this conversation: follow it, "
+        "since on WhatsApp, Slack, Telegram and other messaging channels the "
+        "image is only sent when you attach it) and `not_as_asked` when the "
+        "model ignored a size, aspect ratio or transparency you asked for."
     ),
     parameters={
         "type": "object",
@@ -206,6 +203,13 @@ GENERATE_IMAGE_SCHEMA = ToolSchema(
                 "type": "string",
                 "enum": ["0.5K", "1K", "2K", "4K"],
                 "description": "Output resolution tier (provider default: 1K).",
+            },
+            "transparent_background": {
+                "type": "boolean",
+                "description": (
+                    "Ask for a transparent background (PNG with alpha), e.g. "
+                    "for a logo or sticker. Not every image model can."
+                ),
             },
             "input_images": {
                 "type": "array",
@@ -324,10 +328,23 @@ async def _generate_image_handler(arguments: dict[str, Any], **kwargs: Any) -> s
     if taken is not None:
         return _json_error(taken)
 
-    content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+    info = await image_request.model_info(client, model)
+    if info.listed and not info.makes_images:
+        return _json_error(
+            f"generate_image is not available: the configured image model {model} "
+            "does not generate images. The operator picks an image model in Studio, "
+            "on the agent's Model tab."
+        )
     input_images = arguments.get("input_images") or []
     if isinstance(input_images, str):
         input_images = [input_images]
+    if input_images and info.listed and not info.takes_images:
+        return _json_error(
+            f"The image model {model} cannot start from an input image. Generate "
+            "from a text prompt alone, or ask the operator for an image model "
+            "that edits images."
+        )
+    data_urls: list[str] = []
     for ref in input_images:
         try:
             data_url, _ = await _image_ref_to_data_url(
@@ -344,13 +361,11 @@ async def _generate_image_handler(arguments: dict[str, Any], **kwargs: Any) -> s
             return _json_error(str(exc))
         except httpx.HTTPError as exc:
             return _json_error(f"Failed to fetch input image: {exc}")
-        content.append({"type": "image_url", "image_url": {"url": data_url}})
+        data_urls.append(data_url)
 
-    extra_body: dict[str, Any] = {"modalities": ["image", "text"]}
-    for field_name in ("aspect_ratio", "image_size"):
-        value = str(arguments.get(field_name) or "").strip()
-        if value:
-            extra_body[field_name] = value
+    aspect_ratio = str(arguments.get("aspect_ratio") or "").strip()
+    image_size = str(arguments.get("image_size") or "").strip()
+    transparent = bool(arguments.get("transparent_background"))
 
     raw_cents = getattr(cfg, "image_cents", 4)
     image_cents = max(0, int(4 if raw_cents is None else raw_cents))
@@ -366,72 +381,111 @@ async def _generate_image_handler(arguments: dict[str, Any], **kwargs: Any) -> s
     media_ref = f"img-{uuid4().hex}"
 
     try:
-        response = await client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": content}],
-            extra_body=extra_body,
+        try:
+            image = await image_request.generate(
+                client, model, prompt=prompt, input_images=data_urls,
+                aspect_ratio=aspect_ratio, image_size=image_size,
+                transparent=transparent, info=info,
+            )
+        except image_request.ImageRequestError as exc:
+            if exc.status == 402:
+                return _json_error(_MEDIA_BUDGET_ERROR)
+            return _json_error(exc.message)
+
+        extension = _MIME_EXTENSIONS[image.mime_type]
+        notes = image_request.shortfalls(
+            image, aspect_ratio=aspect_ratio, image_size=image_size, transparent=transparent,
         )
-    except Exception as exc:  # noqa: BLE001 — provider errors become tool errors
-        # The provider refused: release the buyer hold without spending.
+        if output_path:
+            relative_path, renamed = _with_extension(output_path, extension)
+            if renamed:
+                notes.append(
+                    f"Saved as {relative_path}: the image is {extension.upper()}, "
+                    f"not what {output_path} names."
+                )
+        else:
+            relative_path = _default_media_path("image", extension)
+
+        try:
+            saved = await _save_media_bytes(
+                image.data,
+                relative_path=relative_path,
+                workspace_path=kwargs.get("workspace_path"),
+                storage=kwargs.get("storage"),
+                session_id=kwargs.get("session_id"),
+                session_config=kwargs.get("session_config"),
+                sandbox_pool=kwargs.get("sandbox_pool"),
+                owner=kwargs.get("task_id"),
+                workspace_io=kwargs.get("workspace_io"),
+            )
+        except (TooLargeForCopy, OSError, WorkspaceSandboxError, DeviceOperationError) as exc:
+            return _json_error(said(exc))
+        if not saved:
+            return _json_error(
+                "workspace_unavailable: generate_image requires a session "
+                "workspace destination"
+            )
+        # Charged only now, for an image that decoded and was saved, at
+        # what the provider reported it cost, else the flat price.
+        await _settle_media_budget(
+            cfg, billing,
+            image_cents if image.cost_cents is None else image.cost_cents,
+            media_ref,
+        )
+        billing = None
+    finally:
         await _settle_media_budget(cfg, billing, 0, media_ref)
-        if _is_insufficient_credits(exc):
-            return _json_error(_MEDIA_BUDGET_ERROR)
-        return _json_error(f"Image generation failed: {exc}")
-    # The provider accepted and charged for the generation — the buyer
-    # spend mirrors the owner-plane debit regardless of what we manage
-    # to do with the payload afterwards.
-    await _settle_media_budget(cfg, billing, image_cents, media_ref)
-
-    image_url = _first_generated_image_url(response)
-    if not image_url.startswith("data:image/"):
-        return _json_error("The image model returned no image")
-
-    header, _, encoded = image_url.partition(",")
-    try:
-        data = base64.b64decode(encoded, validate=True)
-    except (binascii.Error, ValueError):
-        return _json_error("The image model returned invalid base64 image data")
-
-    mime_type = header.removeprefix("data:").split(";", 1)[0].lower()
-    extension = _MIME_EXTENSIONS.get(mime_type, "png")
-    relative_path = output_path or _default_media_path("image", extension)
-
-    try:
-        saved = await _save_media_bytes(
-            data,
-            relative_path=relative_path,
-            workspace_path=kwargs.get("workspace_path"),
-            storage=kwargs.get("storage"),
-            session_id=kwargs.get("session_id"),
-            session_config=kwargs.get("session_config"),
-            sandbox_pool=kwargs.get("sandbox_pool"),
-            owner=kwargs.get("task_id"),
-            workspace_io=kwargs.get("workspace_io"),
-        )
-    except (TooLargeForCopy, OSError, WorkspaceSandboxError, DeviceOperationError) as exc:
-        return _json_error(said(exc))
-    if not saved:
-        return _json_error(
-            "workspace_unavailable: generate_image requires a session "
-            "workspace destination"
-        )
 
     result: dict[str, Any] = {
         "path": relative_path,
-        "model": getattr(response, "model", model),
+        "model": image.model or model,
+        "width": image.width,
+        "height": image.height,
     }
-    if await _create_media_artifact(
+    artifact = await _create_media_artifact(
         artifact_client(kwargs),
         kind="image",
         path=relative_path,
-        mime_type=mime_type,
+        mime_type=image.mime_type,
         caption=prompt,
-    ):
+    )
+    if artifact:
         result["artifact"] = True
-    text = _extract_response_content(response)
-    if text:
-        result["text"] = text
+    if notes:
+        result["not_as_asked"] = notes
+    result["delivery"] = _image_delivery(kwargs.get("channel"), relative_path, artifact=artifact)
+    if image.text:
+        result["text"] = image.text
     return json.dumps(result, ensure_ascii=False)
+
+
+def _with_extension(path: str, extension: str) -> tuple[str, bool]:
+    """*path* with the suffix the bytes really are, and whether it changed."""
+    stem, dot, suffix = path.rpartition(".")
+    if not dot or "/" in suffix:
+        return f"{path}.{extension}", True
+    same = {suffix.lower(), extension} <= {"jpg", "jpeg"} or suffix.lower() == extension
+    return (path, False) if same else (f"{stem}.{extension}", True)
+
+
+def _image_delivery(channel: Any, path: str, *, artifact: bool) -> str:
+    """How the image reaches anyone from where this session runs."""
+    from surogates.harness.prompt import CHANNELS_WITHOUT_ARTIFACT_PANEL
+
+    if channel in CHANNELS_WITHOUT_ARTIFACT_PANEL:
+        return (
+            f"Not sent yet: put MEDIA:{path} on its own line in your reply to "
+            "attach it to your message."
+        )
+    if channel == "scheduled":
+        return (
+            f"Nobody sees this run as it happens: the image stays at {path} in "
+            "the workspace until you post or upload it (browser_upload_file "
+            "takes this path) or name the path in your final reply."
+        )
+    if artifact:
+        return "Shown inline in the chat; mention it, do not embed the path."
+    return f"Saved in the workspace at {path}."
 
 
 async def _generate_video_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
@@ -686,31 +740,6 @@ async def _create_media_artifact(
         )
         return False
     return True
-
-
-def _first_generated_image_url(response: Any) -> str:
-    """Extract the first generated image data URL from a completion.
-
-    OpenRouter returns generated images as
-    ``message.images[].image_url.url``.  ``images`` is a provider
-    extension, so read it from the duck-typed attribute first and the
-    serialized dict second (``model_dump`` keeps pydantic extras).
-    """
-    choices = getattr(response, "choices", None) or []
-    if not choices:
-        return ""
-    message = getattr(choices[0], "message", None)
-    if message is None:
-        return ""
-    images = getattr(message, "images", None)
-    if not images:
-        images = message_to_dict(message).get("images")
-    if not images:
-        return ""
-    first = images[0]
-    if not isinstance(first, dict):
-        first = message_to_dict(first) if hasattr(first, "model_dump") else {}
-    return str(((first.get("image_url") or {}).get("url")) or "")
 
 
 async def _download_video(client: httpx.AsyncClient, url: str, *, limit: int = _MAX_VIDEO_BYTES) -> bytes:
