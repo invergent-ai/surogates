@@ -1,6 +1,6 @@
 # keel-link
 
-`surogates keel-link` is Keel's private door into the runtime. Keel, the case engine, calls it to start an agent's session for one step of a case, and then to answer it, ask it for a revision, send it a plain message, give it a comment that mentions its agent, cancel it, and read its status, its events and its progress. It starts an agent's item session too, on a work item a case gives the agent as it gives a person one, and then sends it a plain message, cancels it, and reads its status, its events and its progress. It starts a person's case agent session, gives it the person's messages, stops its turn, and reads its status and its events. It also groups an agent's raised hands by reason, with the agent's own model. It also lists, reads and writes a case's files, opens a case's document in the document editor for a person, and invites staff into an organisation. It is a process of its own, on a port of its own, and it serves nothing else.
+`surogates keel-link` is Keel's private door into the runtime. Keel, the case engine, calls it to start an agent's session for one step of a case, and then to answer it, ask it for a revision, send it a plain message, give it a comment that mentions its agent, cancel it, and read its status, its events and its progress. It starts an agent's item session too, on a work item a case gives the agent as it gives a person one, and then sends it a plain message, cancels it, and reads its status, its events and its progress. It starts a person's case agent session, gives it the person's messages, stops its turn, and reads its status and its events. It also groups an agent's raised hands by reason, and drafts a passage of policy from agreeing answers, with the agent's own model. It also lists, reads and writes a case's files, opens a case's document in the document editor for a person, and invites staff into an organisation. It is a process of its own, on a port of its own, and it serves nothing else.
 
 ## What it serves
 
@@ -28,6 +28,7 @@
 | `GET /v1/keel/case-agent-sessions/{session_id}/events?after=<id>&limit=<n>` | A page of the case agent session's events, as a step session's page. See [Watching a step session](#watching-a-step-session). |
 | `GET /v1/keel/case-agent-sessions/{session_id}/events/stream?after=<id>` | The case agent session's events after the cursor `after`, then live, as a step session's stream. See [Watching a step session](#watching-a-step-session). |
 | `POST /v1/keel/hand-reasons?agent_id=<agent>` | Takes `{"org_id", "hands": [{"id", "question", "choices", "answer"}], "vocabulary": [str]}` (1 to 25 hands) and answers `200 {"labels": [{"id", "reason", "answer_gist", "policy_silent"}], "usage": {"input_tokens", "output_tokens", "cost_usd"}}`: a reason in policy terms for each hand the model labelled usably, and the gist of its answer. A hand with no label was not labelled this time. See [Raised hands, grouped](#raised-hands-grouped). |
+| `POST /v1/keel/policy-text?agent_id=<agent>` | Takes `{"org_id", "reason", "gist", "hands": [{"question", "answer"}]}` (1 to 50 hands) and answers `200 {"text", "usage"}`: one passage of written policy in Markdown, 1 to 6,000 characters, that states the rule the answers applied, and what the call used (as for hand labelling). See [A policy passage](#a-policy-passage). |
 | `GET /v1/keel/cases/{case_id}/files` | The case's files, by path: `{"files": [{"path", "name", "size", "modified_at", "editing"}]}`. `editing` names who is in the file's editor now, by display name, sorted; someone the runtime has no name for is `Someone`, or `An agent` for an agent. A case no session has written to yet has `{"files": []}`. The platform's own folders are left out. |
 | `GET /v1/keel/cases/{case_id}/files/content?path=<path>` | The file's bytes, as `application/octet-stream`, with their SHA-256 hex digest in `X-Content-SHA256`. A file over `SUROGATES_KEEL_MAX_FILE_BYTES` is not read. |
 | `PUT /v1/keel/cases/{case_id}/files/content?path=<path>` | Writes the body at the path, over any file there. `200 {"name", "uri", "sha256", "size"}`, where `uri` is `case-file://<case id>/<path>`: the value a step's file field holds. |
@@ -60,7 +61,7 @@ Errors answer `{"detail": {"code", "message"}}`, and a message never repeats the
 | 409 | `other-firebase-project` | An invitation for an account that signs in with a Firebase project the org does not sign in with. |
 | 413 | `too-large` | A file to write or read over `SUROGATES_KEEL_MAX_FILE_BYTES`. |
 | 415 | `not-a-document` | The editor was asked for a file that is not an office document, or a mention names a file that is not a document an agent edits. |
-| 422 | `inputs-blocked` | The prompt-injection screen blocked the step's inputs, or the item's inputs, question, choices or evidence. |
+| 422 | `inputs-blocked` | The prompt-injection screen blocked the step's inputs, or the item's inputs, question, choices or evidence; or a policy passage's reason or gist, or every one of its hands. |
 | 422 | `invalid-path` | A file's path Keel may not name: see [A case's files](#a-cases-files). |
 | 422 | `invalid-request` | The body does not validate (an invitation's email that is not one among them), a case id or an org id is not a UUID, or a session's events were asked for with a cursor or a page size out of range. |
 | 500 | `internal-error` | The database failed, other than while a step, item or case agent session's events or progress were read. Only the error's class name is logged. |
@@ -281,6 +282,16 @@ An agent gets the designer's tools only through an allow-list naming them: its p
 - **Usage.** `usage` adds up the tokens of every completion the call received, the cache reads included; `cost_usd` is a decimal string with six places, estimated against the model that served the call, and null when no price is known for it. A call that reached no model answers zeros and `"0.000000"`.
 - **Bounds and failures.** The model work, both attempts together, takes at most 22 seconds: past that the answer is `504 model-timeout`, before Keel's own wait ends. No completion at all is `502 model-failed`; completions that held no valid object are a `200` with no labels and their usage.
 - **Logs.** A line names the agent, a count or an error's class, never a question, an answer, a reason or what the model said. The `openai` client library logs the body of each request at DEBUG: keep its logger at INFO or above.
+
+## A policy passage
+
+`POST /v1/keel/policy-text?agent_id=<agent>` has the agent's own model write one passage of written policy from the answers people gave a reason's raised hands, so the knowledge base can hold the rule they applied. Keel sends the reason, the gist most answers agree on and up to 50 questions with their answers; the passage is a draft a builder reviews.
+
+- **The same model and bound as hand labelling:** the agent's summary slot, else its main slot, keyed at org scope, billed where the slot's endpoint meters it, a stopped agent served too, and at most 22 seconds for both attempts (`504 model-timeout` past that). `org_id` must be the agent's. `reason` and `gist` are 1 to 120 characters, each `question` 1 to 2,000 and each `answer` 1 to 20,000.
+- **The screen.** A blocked `reason` or `gist`, or every hand blocked, is `422 inputs-blocked`. One blocked hand is left out of the call. Each answer reaches the model cut to its first 2,000 characters.
+- **The passage.** It states the rule in general terms (when it applies, any exception the answers show), never quotes a question or an answer, and states only what the answers share when they differ. Every identifier of a hand of the request that the passage still holds (see [Raised hands, grouped](#raised-hands-grouped)) is replaced by `[omitted]`, longest first, without regard to case.
+- **When there is none.** A model that gave no valid object, or a text that is empty or over 6,000 characters, is `502 model-failed`: a passage is all or nothing.
+- **Logs and storage** are as for hand labelling: nothing is stored, and a line never holds a question, an answer or the passage.
 
 ## Watching a step session
 

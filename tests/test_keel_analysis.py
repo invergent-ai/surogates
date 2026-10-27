@@ -468,3 +468,125 @@ async def test_a_long_free_text_answer_reaches_the_model_cut_short(link, provide
     [sent] = provider.bodies()
     user = sent["messages"][-1]["content"]
     assert "a" * 1999 + "Z" in user and "Zb" not in user
+
+
+# --- a policy passage ----------------------------------------------------------------------------------------
+
+P1 = {"question": "Does a bonus paid every quarter count as regular income?", "answer": "Yes, when it has been paid "
+                                                                                       "for a year."}
+P2 = {"question": "The payslip is two months old. Is it accepted?", "answer": "Yes, up to six months old."}
+P3 = {"question": "The payslip is eight months old. Is it accepted?", "answer": "No, ask for a newer one."}
+
+
+def policy_body(*hands: dict[str, Any], reason: str = "Age of a payslip", gist: str = "Valid up to six months",
+                **extra: Any) -> dict[str, Any]:
+    return {"org_id": str(ORG), "reason": reason, "gist": gist, "hands": list(hands or (P1, P2, P3)), **extra}
+
+
+def passage(text: str, *, why: str = "The answers share one rule.") -> str:
+    return json.dumps({"why": why, "text": text})
+
+
+async def test_keel_gets_a_policy_passage_with_its_usage(link, provider) -> None:
+    provider.replies.append(completion(
+        passage("  ## Age of a payslip\n\nA payslip is accepted when it is no older than six months.  "),
+        prompt=800, completion_tokens=200))
+
+    response = await post(link, POLICY, policy_body())
+
+    assert response.status_code == 200
+    answer = response.json()
+    assert answer["text"] == "## Age of a payslip\n\nA payslip is accepted when it is no older than six months."
+    assert answer["usage"]["input_tokens"] == 800 and answer["usage"]["output_tokens"] == 200
+    assert COST.match(answer["usage"]["cost_usd"])
+    [request] = provider.requests
+    assert request.url.path == "/proxy/services/_summary_llm/agents/intake-agent/chat/completions"
+    [sent] = provider.bodies()
+    assert sent["temperature"] == 0 and sent["response_format"]["type"] == "json_schema"
+    prompt = json.dumps(sent["messages"])
+    assert "Age of a payslip" in prompt and "Valid up to six months" in prompt
+    assert all(hand["answer"] in prompt for hand in (P1, P2, P3))
+
+
+async def test_a_passage_never_repeats_what_a_hand_names(link, provider) -> None:
+    named = {"question": "Applicant jane.doe@example.com on file POL-2024-118734 asks about a bonus.",
+             "answer": "Count it when paid for a year."}
+    provider.replies.append(completion(passage(
+        "Count a bonus paid for a year. Write to jane.doe@example.com about pol-2024-118734.")))
+
+    answer = (await post(link, POLICY, policy_body(named, P2))).json()
+
+    assert answer["text"].count("[omitted]") == 2
+    assert "jane.doe@example.com" not in answer["text"].casefold()
+    assert "pol-2024-118734" not in answer["text"].casefold()
+
+
+@pytest.mark.parametrize("reply", [
+    [completion(passage(""))],
+    [completion(passage("x" * 6001))],
+    [completion("no object here"), completion('{"why": 7}')],
+    [httpx.Response(500, json={"error": {"message": "broke"}})] * 2,
+])
+async def test_no_usable_passage_is_502(link, provider, reply) -> None:
+    provider.replies.extend(reply)
+
+    response = await post(link, POLICY, policy_body())
+
+    assert code_of(response) == (502, "model-failed")
+
+
+async def test_a_passage_the_model_cannot_finish_in_time_is_504(link, provider, monkeypatch) -> None:
+    monkeypatch.setattr(analysis, "ANALYSIS_MODEL_SECONDS", 0.2)
+    provider.delay = 2.0
+
+    response = await post(link, POLICY, policy_body())
+
+    assert code_of(response) == (504, "model-timeout")
+
+
+async def test_policy_inputs_the_screen_blocks(link, provider) -> None:
+    for body in (policy_body(reason=INJECTION),
+                 policy_body(gist=INJECTION),
+                 policy_body({**P1, "answer": INJECTION}, {**P2, "question": INJECTION})):
+        response = await post(link, POLICY, body)
+        assert code_of(response) == (422, "inputs-blocked")
+    assert provider.requests == []
+
+    provider.replies.append(completion(passage("A payslip is accepted up to six months.")))
+    response = await post(link, POLICY, policy_body(P1, {**P2, "answer": INJECTION}, P3))
+
+    assert response.status_code == 200
+    [sent] = provider.bodies()
+    assert INJECTION not in json.dumps(sent["messages"])
+
+
+@pytest.mark.parametrize("case, expected", [
+    ({"key": None}, (401, "bad-link-key")),
+    ({"agent": "elsewhere-agent"}, (404, "unknown-agent")),
+    ({"body": policy_body(*[{**P1, "question": f"Question {n}?"} for n in range(51)])}, (422, "invalid-request")),
+    ({"body": {**policy_body(), "hands": []}}, (422, "invalid-request")),
+    ({"body": {k: v for k, v in policy_body().items() if k != "gist"}}, (422, "invalid-request")),
+    ({"body": policy_body(reason="r" * 121)}, (422, "invalid-request")),
+    ({"body": policy_body({**P1, "answer": "a" * 20001})}, (422, "invalid-request")),
+    ({"body": {k: v for k, v in policy_body().items() if k != "org_id"}}, (422, "invalid-request")),
+    ({"agent": "no-model-agent"}, (503, "unavailable")),
+])
+async def test_keel_link_refuses_a_policy_request_it_cannot_serve(link, provider, case, expected) -> None:
+    response = await post(link, POLICY, case.get("body", policy_body()),
+                          agent=case["agent"] if "agent" in case else "intake-agent",
+                          key=case["key"] if "key" in case else LINK_KEY)
+
+    assert code_of(response) == expected
+    assert provider.requests == []
+
+
+async def test_nothing_of_a_policy_request_reaches_the_log(link, provider, caplog) -> None:
+    caplog.set_level(logging.INFO)
+    marked = {**P1, "answer": "MARKER-ANSWER, counted when paid for a year."}
+    provider.replies.append(completion(passage("MARKER-TEXT: counted when paid for a year.")))
+
+    assert (await post(link, POLICY, policy_body(marked))).status_code == 200
+
+    provider.replies.extend([httpx.Response(500, text="MARKER-BODY upstream broke")] * 2)
+    assert code_of(await post(link, POLICY, policy_body(marked))) == (502, "model-failed")
+    assert not any(marker in caplog.text for marker in ("MARKER-ANSWER", "MARKER-TEXT", "MARKER-BODY"))

@@ -24,6 +24,7 @@ from surogates.api.routes.keel import (
 )
 from surogates.keel.analysis import AnalysisError
 from surogates.keel.hand_reasons import HandReasonsRequest, label_hands
+from surogates.keel.policy_text import PolicyTextRequest, draft_policy_text
 
 router = APIRouter()
 
@@ -37,5 +38,18 @@ async def hand_reasons(request: Request) -> dict[str, Any]:
     agent = await resolve_agent(request, agent_id_of(request), body.org_id, running=False)
     try:
         return await label_hands(body, agent, vault=getattr(request.app.state, "credential_vault", None))
+    except AnalysisError as exc:
+        raise refused(exc.status, exc.code, exc.message) from None
+
+
+@router.post("/keel/policy-text")
+async def policy_text(request: Request) -> dict[str, Any]:
+    """Draft one passage of policy, in Markdown, from the answers people gave a reason's raised hands: the
+    passage and what the call used.  Every identifier of a hand in it is replaced."""
+    require_link(request)
+    body = await read_body(request, PolicyTextRequest)
+    agent = await resolve_agent(request, agent_id_of(request), body.org_id, running=False)
+    try:
+        return await draft_policy_text(body, agent, vault=getattr(request.app.state, "credential_vault", None))
     except AnalysisError as exc:
         raise refused(exc.status, exc.code, exc.message) from None
