@@ -778,6 +778,21 @@ async def handle_escalate(arguments: dict, **kwargs: Any) -> str:
     ctx, settings = await load_context(kwargs)
     if ctx is None:
         return "Could not escalate: no conversation context."
+    if (
+        followup_store.is_team_member(settings, ctx.user_id)
+        and await ctx.person_user_id(sf) == ctx.user_id
+    ):
+        # An escalation is about the person in the conversation.  Raised
+        # here it named the team member as the patient, and re-raised an
+        # alert from this transcript whose case was already resolved.
+        return (
+            "Not escalated: this conversation is with a team member, who "
+            "receives the alerts. An escalation is about the person writing, "
+            "and a team member is not someone followed. Do not raise an alert "
+            "from earlier in this conversation again: its case may be resolved "
+            "or the person no longer followed; team_overview says who is "
+            "followed now, and team_escalation takes or resolves a case."
+        )
 
     invitation = await _open_invitation_for_session(sf, ctx.session_id)
     program_target = None

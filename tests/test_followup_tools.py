@@ -359,6 +359,33 @@ async def test_escalate_from_a_chat_with_no_person_names_nobody(sf, care_team):
 
 
 @pytest.mark.asyncio
+async def test_escalate_refuses_in_a_team_members_own_conversation(sf, care_team):
+    """A doctor's tap on an alert template read as "send the alert again":
+    the agent re-raised a resolved case, filed under the doctor as the
+    patient."""
+    from surogates.db.models import EscalationRow
+
+    doctor, _ = care_team
+    session_id = uuid.uuid4()
+    async with sf() as db:
+        db.add(User(id=doctor, org_id=ORG, email=f"{doctor}@x", display_name="Dr. Radu"))
+        db.add(SessionRow(
+            id=session_id, org_id=ORG, agent_id=AGENT, channel="whatsapp", user_id=doctor,
+            config={"whatsapp_channel_id": "40712000002", "channel_identifier": "pn1"},
+        ))
+        await db.commit()
+    result = await followup.handle_escalate(
+        {"reason": "Petre Vlad · ziua 8, alertă retrimisă.", "severity": "red"},
+        **_kw(sf, session_id),
+    )
+    assert result.startswith("Not escalated: this conversation is with a team member")
+    async with sf() as db:
+        assert (await db.execute(sa.select(InboxItem))).scalars().all() == []
+        assert (await db.execute(sa.select(EscalationRow))).scalars().all() == []
+    assert await _outreach(sf) == []
+
+
+@pytest.mark.asyncio
 async def test_escalate_marks_red_when_an_emergency_script_was_sent(sf, patient, care_team):
     _, session_id = patient
     await followup.handle_escalate({"reason": "Durere în piept"}, **_kw(sf, session_id))
@@ -423,8 +450,7 @@ async def test_the_care_team_member_is_not_alerted_about_themselves(sf, patient)
         message_template_name=None, message_template_language=None,
     )
     result = await followup.handle_escalate({"reason": "x"}, **_kw(sf, session_id))
-    assert result.startswith("Could not escalate")
-    assert "the only team member is the person in this conversation" in result
+    assert result.startswith("Not escalated: this conversation is with a team member")
     assert await _outreach(sf) == []
 
 
