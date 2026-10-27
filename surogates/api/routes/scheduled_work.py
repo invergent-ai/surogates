@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from surogates.runtime import AgentRuntimeContext, agent_runtime_context_dep
 from surogates.scheduled.models import ScheduledSession
+from surogates.scheduled.prompt_guard import ScheduledPromptBlocked, validate_scheduled_prompt
+from surogates.scheduled.schedule import schedule_from_fields, schedule_from_row
 from surogates.scheduled.store import ScheduledSessionStore
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import TenantContext
@@ -38,11 +39,32 @@ class ScheduledWorkItem(BaseModel):
     created_from_session_id: UUID | None = None
     created_at: datetime
     updated_at: datetime
+    cadence_kind: str | None = None
+    cadence: dict | None = None
+    paused_at: datetime | None = None
+    ended_reason: str | None = None
+    ended_by: str | None = None
+    consecutive_failures: int = 0
+    max_run_seconds: int | None = None
 
 
 class ScheduledWorkListResponse(BaseModel):
     items: list[ScheduledWorkItem]
     total: int
+
+
+class ScheduledWorkUpdate(BaseModel):
+    """Fields to change; a new cadence is given as in ``cron_create``."""
+
+    name: str | None = Field(None, max_length=200)
+    prompt: str | None = Field(None, min_length=1)
+    cron: str | None = None
+    interval: str | None = None
+    at: str | None = None
+    days: list[str] | None = None
+    times: list[str] | None = None
+    timezone: str | None = None
+    max_run_seconds: int | None = Field(None, ge=60, le=86400)
 
 
 class RunScheduledWorkNowResponse(BaseModel):
@@ -60,21 +82,33 @@ def _scheduled_store(request: Request) -> ScheduledSessionStore:
     return ScheduledSessionStore(session_factory)
 
 
-def _require_user(tenant: TenantContext) -> UUID:
-    if tenant.user_id is None:
+def _principal(tenant: TenantContext) -> dict[str, UUID | None]:
+    """The caller as the store scopes schedules: a person sees their own, a
+    service account the agent's."""
+    if tenant.user_id is not None:
+        return {"user_id": tenant.user_id, "service_account_id": None}
+    service_account_id = getattr(tenant, "service_account_id", None)
+    if service_account_id is None:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Scheduled work is user-owned only.",
+            detail="Scheduled work needs a signed-in user or a service account.",
         )
-    return tenant.user_id
+    return {"user_id": None, "service_account_id": service_account_id}
 
 
 def _kind(row: ScheduledSession) -> str:
     if row.schedule.get("kind") == "dynamic_loop":
         return "dynamic_loop"
-    if row.repeat_limit == 1:
+    if row.repeat_limit == 1 or row.kind == "once":
         return "one_shot"
     return "cron"
+
+
+def _not_found(schedule_id: UUID) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail=f"Scheduled work {schedule_id} not found.",
+    )
 
 
 def _item(row: ScheduledSession) -> ScheduledWorkItem:
@@ -98,6 +132,13 @@ def _item(row: ScheduledSession) -> ScheduledWorkItem:
         created_from_session_id=row.created_from_session_id,
         created_at=row.created_at,
         updated_at=row.updated_at,
+        cadence_kind=row.kind,
+        cadence=row.cadence,
+        paused_at=row.paused_at,
+        ended_reason=row.ended_reason,
+        ended_by=row.ended_by,
+        consecutive_failures=row.consecutive_failures,
+        max_run_seconds=row.max_run_seconds,
     )
 
 
@@ -106,19 +147,20 @@ async def list_scheduled_work(
     request: Request,
     tenant: TenantContext = Depends(get_current_tenant),
     agent_runtime: AgentRuntimeContext = Depends(agent_runtime_context_dep),
-    status_filter: Literal["active", "paused", "completed", "failed", "all"] = Query(
+    status_filter: str = Query(
         "active",
         alias="status",
+        pattern=r"^(all|(active|paused|completed|cancelled|failed)(,(active|paused|completed|cancelled|failed))*)$",
+        description="One status, a comma list, or all.",
     ),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     # A project's routines: the schedules its master session made.
     created_from_session_id: UUID | None = Query(None),
 ) -> ScheduledWorkListResponse:
-    user_id = _require_user(tenant)
     rows = await _scheduled_store(request).list_for_user(
         org_id=tenant.org_id,
-        user_id=user_id,
+        **_principal(tenant),
         agent_id=agent_runtime.agent_id,
         status=status_filter,
         include_inactive=status_filter == "all",
@@ -142,19 +184,114 @@ async def run_scheduled_work_now(
     tenant: TenantContext = Depends(get_current_tenant),
     agent_runtime: AgentRuntimeContext = Depends(agent_runtime_context_dep),
 ) -> RunScheduledWorkNowResponse:
-    user_id = _require_user(tenant)
     queued = await _scheduled_store(request).run_now(
         org_id=tenant.org_id,
-        user_id=user_id,
+        **_principal(tenant),
         agent_id=agent_runtime.agent_id,
         schedule_id=schedule_id,
     )
     if not queued:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Scheduled work {schedule_id} not found.",
-        )
+        raise _not_found(schedule_id)
     return RunScheduledWorkNowResponse(id=schedule_id, queued=True)
+
+
+@router.get("/scheduled-work/{schedule_id}", response_model=ScheduledWorkItem)
+async def get_scheduled_work(
+    schedule_id: UUID,
+    request: Request,
+    tenant: TenantContext = Depends(get_current_tenant),
+    agent_runtime: AgentRuntimeContext = Depends(agent_runtime_context_dep),
+) -> ScheduledWorkItem:
+    row = await _scheduled_store(request).get_for(
+        schedule_id, org_id=tenant.org_id, agent_id=agent_runtime.agent_id, **_principal(tenant),
+    )
+    if row is None:
+        raise _not_found(schedule_id)
+    return _item(row)
+
+
+@router.patch("/scheduled-work/{schedule_id}", response_model=ScheduledWorkItem)
+async def update_scheduled_work(
+    schedule_id: UUID,
+    body: ScheduledWorkUpdate,
+    request: Request,
+    tenant: TenantContext = Depends(get_current_tenant),
+    agent_runtime: AgentRuntimeContext = Depends(agent_runtime_context_dep),
+) -> ScheduledWorkItem:
+    store = _scheduled_store(request)
+    principal = _principal(tenant)
+    current = await store.get_for(
+        schedule_id, org_id=tenant.org_id, agent_id=agent_runtime.agent_id, **principal,
+    )
+    if current is None or current.status not in ("active", "paused"):
+        raise _not_found(schedule_id)
+    try:
+        if body.prompt is not None:
+            validate_scheduled_prompt(body.prompt, source="scheduled_work")
+        cadence = None
+        if any(v for v in (body.cron, body.interval, body.at, body.days, body.times)):
+            cadence = schedule_from_fields(
+                cron=body.cron, interval=body.interval, at=body.at, days=body.days, times=body.times,
+                timezone_name=body.timezone or current.timezone or "UTC",
+            )
+        elif body.timezone is not None:
+            cadence = schedule_from_row(current.model_copy(update={
+                "timezone": body.timezone,
+                "cadence": {**(current.cadence or {}), "tz": body.timezone},
+                "schedule": {**current.schedule, "timezone_name": body.timezone},
+            }))
+        updated = await store.update(
+            org_id=tenant.org_id, agent_id=agent_runtime.agent_id, schedule_id=schedule_id,
+            name=body.name, prompt=body.prompt, schedule=cadence,
+            max_run_seconds=body.max_run_seconds, **principal,
+        )
+    except (ValueError, ScheduledPromptBlocked) as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    if updated is None:
+        raise _not_found(schedule_id)
+    return _item(updated)
+
+
+@router.post("/scheduled-work/{schedule_id}/pause", response_model=ScheduledWorkItem)
+async def pause_scheduled_work(
+    schedule_id: UUID,
+    request: Request,
+    tenant: TenantContext = Depends(get_current_tenant),
+    agent_runtime: AgentRuntimeContext = Depends(agent_runtime_context_dep),
+) -> ScheduledWorkItem:
+    return await _transition(request, tenant, agent_runtime, schedule_id, "pause")
+
+
+@router.post("/scheduled-work/{schedule_id}/resume", response_model=ScheduledWorkItem)
+async def resume_scheduled_work(
+    schedule_id: UUID,
+    request: Request,
+    tenant: TenantContext = Depends(get_current_tenant),
+    agent_runtime: AgentRuntimeContext = Depends(agent_runtime_context_dep),
+) -> ScheduledWorkItem:
+    return await _transition(request, tenant, agent_runtime, schedule_id, "resume")
+
+
+async def _transition(
+    request: Request, tenant: TenantContext, agent_runtime: AgentRuntimeContext,
+    schedule_id: UUID, action: str,
+) -> ScheduledWorkItem:
+    store = _scheduled_store(request)
+    principal = _principal(tenant)
+    changed = await getattr(store, action)(
+        org_id=tenant.org_id, agent_id=agent_runtime.agent_id, schedule_id=schedule_id, **principal,
+    )
+    row = await store.get_for(
+        schedule_id, org_id=tenant.org_id, agent_id=agent_runtime.agent_id, **principal,
+    )
+    if row is None:
+        raise _not_found(schedule_id)
+    if not changed:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Scheduled work {schedule_id} is {row.status}; it cannot {action}.",
+        )
+    return _item(row)
 
 
 @router.delete(
@@ -167,16 +304,22 @@ async def cancel_scheduled_work(
     tenant: TenantContext = Depends(get_current_tenant),
     agent_runtime: AgentRuntimeContext = Depends(agent_runtime_context_dep),
 ) -> Response:
-    user_id = _require_user(tenant)
-    deleted = await _scheduled_store(request).delete(
-        org_id=tenant.org_id,
-        user_id=user_id,
-        agent_id=agent_runtime.agent_id,
-        schedule_id=schedule_id,
+    """Cancel: the row is kept, with who cancelled it; its run still going is stopped."""
+    store = _scheduled_store(request)
+    principal = _principal(tenant)
+    row = await store.get_for(
+        schedule_id, org_id=tenant.org_id, agent_id=agent_runtime.agent_id, **principal,
     )
-    if not deleted:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Scheduled work {schedule_id} not found.",
-        )
+    if row is None:
+        raise _not_found(schedule_id)
+    await store.cancel(
+        org_id=tenant.org_id, agent_id=agent_runtime.agent_id, schedule_id=schedule_id,
+        ended_by=_who(tenant), **principal,
+    )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+def _who(tenant: TenantContext) -> str:
+    if tenant.user_id is not None:
+        return f"user:{tenant.user_id}"
+    return f"service_account:{getattr(tenant, 'service_account_id', None)}"

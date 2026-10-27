@@ -181,5 +181,70 @@ async def test_run_now_and_cancel_scheduled_work_are_user_scoped(
     )
 
     assert cancel_response.status_code == 204
-    with pytest.raises(KeyError):
-        await store.get(schedule.id)
+    cancelled = await store.get(schedule.id)
+    assert (cancelled.status, cancelled.ended_reason, cancelled.ended_by) == (
+        "cancelled", "cancelled", f"user:{user_id}",
+    )
+    assert cancelled.next_run_at is None
+
+
+async def test_scheduled_work_can_be_read_changed_paused_and_resumed(
+    client: AsyncClient, session_factory
+):
+    org_id, user_id, token = await _tenant(session_factory)
+    auth = {"Authorization": f"Bearer {token}"}
+    store = ScheduledSessionStore(session_factory)
+    schedule = await store.create_loop(
+        org_id=org_id, user_id=user_id, agent_id=_AGENT_ID, prompt="check price",
+        schedule=parse_schedule("10m"), created_from_session_id=None,
+    )
+    base = f"/v1/scheduled-work/{schedule.id}"
+
+    got = await client.get(base, headers=auth)
+    assert got.status_code == 200
+    assert (got.json()["cadence_kind"], got.json()["consecutive_failures"]) == ("interval", 0)
+
+    changed = await client.patch(
+        base, headers=auth,
+        json={"prompt": "check the price twice", "days": ["mon", "fri"], "times": ["09:00"],
+              "timezone": "Europe/Bucharest"},
+    )
+    assert changed.status_code == 200, changed.text
+    body = changed.json()
+    assert body["prompt"] == "check the price twice"
+    assert body["cadence_kind"] == "calendar"
+    assert body["timezone"] == "Europe/Bucharest"
+
+    assert (await client.patch(base, headers=auth, json={"interval": "1h", "cron": "0 9 * * *"})).status_code == 422
+    assert (await client.patch(base, headers=auth, json={"interval": "30s"})).status_code == 422
+
+    assert (await client.post(f"{base}/pause", headers=auth)).status_code == 200
+    assert (await client.post(f"{base}/pause", headers=auth)).status_code == 409
+    paused = await store.get(schedule.id)
+    assert (paused.status, paused.next_run_at) == ("paused", None)
+
+    assert (await client.post(f"{base}/resume", headers=auth)).status_code == 200
+    resumed = await store.get(schedule.id)
+    assert resumed.status == "active"
+    assert resumed.next_run_at is not None
+
+    listed = await client.get("/v1/scheduled-work?status=all", headers=auth)
+    assert listed.status_code == 200
+    assert str(schedule.id) in {item["id"] for item in listed.json()["items"]}
+
+
+async def test_another_users_scheduled_work_is_not_found(client: AsyncClient, session_factory):
+    org_id, owner_id, _ = await _tenant(session_factory)
+    other_id = uuid.uuid4()
+    await create_user(session_factory, org_id, user_id=other_id)
+    other = create_access_token(org_id, other_id, {"sessions:read", "sessions:write", "tools:read"})
+    auth = {"Authorization": f"Bearer {other}"}
+    schedule = await ScheduledSessionStore(session_factory).create_loop(
+        org_id=org_id, user_id=owner_id, agent_id=_AGENT_ID, prompt="check price",
+        schedule=parse_schedule("10m"), created_from_session_id=None,
+    )
+    base = f"/v1/scheduled-work/{schedule.id}"
+    assert (await client.get(base, headers=auth)).status_code == 404
+    assert (await client.patch(base, headers=auth, json={"prompt": "x"})).status_code == 404
+    assert (await client.post(f"{base}/pause", headers=auth)).status_code == 404
+    assert (await client.delete(base, headers=auth)).status_code == 404
