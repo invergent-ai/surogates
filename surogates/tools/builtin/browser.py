@@ -42,7 +42,7 @@ from surogates.storage.tenant import (
     boundary_workspace_prefix,
     workspace_session_shim,
 )
-from surogates.harness.redact import mask_typed_text
+from surogates.harness.redact import mask_values
 from surogates.tenant.credentials import InvalidVaultRef, parse_vault_ref
 
 
@@ -602,8 +602,6 @@ async def _browser_close_handler(
         return paused_by_user_result()
 
     await browser_pool.destroy_for_session(sid)
-    # The page that could echo them is gone with its browser.
-    _typed_secrets.pop(sid, None)
     return json.dumps({"closed": True})
 
 
@@ -700,28 +698,14 @@ TYPE_SCHEMA = {
     "additionalProperties": False,
 }
 
-# The stored secrets this worker has typed, per session: whatever a page does
-# with one afterwards (echo it into its text, keep it where a script reads
-# it), it is cut out of every browser tool result before the model sees it.
-_typed_secrets: dict[str, set[str]] = {}
-
-
-def _scrub(session_id: Any, result: Any) -> Any:
-    secrets = _typed_secrets.get(str(session_id))
-    if not secrets or not isinstance(result, str):
-        return result
-    for secret in sorted(secrets, key=len, reverse=True):
-        result = result.replace(secret, mask_typed_text(secret))
-        escaped = json.dumps(secret)[1:-1]
-        if escaped != secret:
-            result = result.replace(escaped, mask_typed_text(secret))
-    return result
-
-
 def _scrubbing(handler: Callable[..., Any]) -> Callable[..., Any]:
     @functools.wraps(handler)
     async def run(arguments: dict[str, Any], **kwargs: Any) -> Any:
-        return _scrub(kwargs.get("session_id"), await handler(arguments, **kwargs))
+        result = await handler(arguments, **kwargs)
+        pool, session_id = kwargs.get("browser_pool"), kwargs.get("session_id")
+        if pool is None or session_id is None or not isinstance(result, str):
+            return result
+        return mask_values(result, pool.typed_secrets.of(str(session_id)))
 
     return run
 
@@ -861,7 +845,7 @@ async def _fill_secret(
     if isinstance(credential, str):
         return credential
     value, origins = credential
-    _typed_secrets.setdefault(str(session_id), set()).add(value)
+    browser["browser_pool"].typed_secrets.add(str(session_id), value)
 
     client = _make_client(_client_factory, endpoint, snapshot_cache)
     async with client:
@@ -1543,7 +1527,10 @@ DEVICE_SERVERS_NOTE = (
 
 
 def register(registry: ToolRegistry) -> None:
-    registry.register(
+    def add(*, handler: Callable[..., Any], **tool: Any) -> None:
+        registry.register(handler=_scrubbing(handler), toolset="browser", **tool)
+
+    add(
         name="browser_navigate",
         schema=ToolSchema(
             name="browser_navigate",
@@ -1558,10 +1545,9 @@ def register(registry: ToolRegistry) -> None:
             ),
             parameters=NAVIGATE_SCHEMA,
         ),
-        handler=_scrubbing(_browser_navigate_handler),
-        toolset="browser",
+        handler=_browser_navigate_handler,
     )
-    registry.register(
+    add(
         name="browser_get_state",
         schema=ToolSchema(
             name="browser_get_state",
@@ -1572,10 +1558,9 @@ def register(registry: ToolRegistry) -> None:
             ),
             parameters=GET_STATE_SCHEMA,
         ),
-        handler=_scrubbing(_browser_get_state_handler),
-        toolset="browser",
+        handler=_browser_get_state_handler,
     )
-    registry.register(
+    add(
         name="browser_evaluate",
         schema=ToolSchema(
             name="browser_evaluate",
@@ -1587,30 +1572,27 @@ def register(registry: ToolRegistry) -> None:
             ),
             parameters=EVALUATE_SCHEMA,
         ),
-        handler=_scrubbing(_browser_evaluate_handler),
-        toolset="browser",
+        handler=_browser_evaluate_handler,
     )
-    registry.register(
+    add(
         name="browser_close",
         schema=ToolSchema(
             name="browser_close",
             description="Close the browser for this session.",
             parameters=CLOSE_SCHEMA,
         ),
-        handler=_scrubbing(_browser_close_handler),
-        toolset="browser",
+        handler=_browser_close_handler,
     )
-    registry.register(
+    add(
         name="browser_click",
         schema=ToolSchema(
             name="browser_click",
             description="Click a browser element by @eN ref or viewport coordinates.",
             parameters=CLICK_SCHEMA,
         ),
-        handler=_scrubbing(_browser_click_handler),
-        toolset="browser",
+        handler=_browser_click_handler,
     )
-    registry.register(
+    add(
         name="browser_type",
         schema=ToolSchema(
             name="browser_type",
@@ -1623,10 +1605,9 @@ def register(registry: ToolRegistry) -> None:
             ),
             parameters=TYPE_SCHEMA,
         ),
-        handler=_scrubbing(_browser_type_handler),
-        toolset="browser",
+        handler=_browser_type_handler,
     )
-    registry.register(
+    add(
         name="browser_press_key",
         schema=ToolSchema(
             name="browser_press_key",
@@ -1637,10 +1618,9 @@ def register(registry: ToolRegistry) -> None:
             ),
             parameters=PRESS_KEY_SCHEMA,
         ),
-        handler=_scrubbing(_browser_press_key_handler),
-        toolset="browser",
+        handler=_browser_press_key_handler,
     )
-    registry.register(
+    add(
         name="browser_scroll",
         schema=ToolSchema(
             name="browser_scroll",
@@ -1652,30 +1632,27 @@ def register(registry: ToolRegistry) -> None:
             ),
             parameters=SCROLL_SCHEMA,
         ),
-        handler=_scrubbing(_browser_scroll_handler),
-        toolset="browser",
+        handler=_browser_scroll_handler,
     )
-    registry.register(
+    add(
         name="browser_drag",
         schema=ToolSchema(
             name="browser_drag",
             description="Drag along a path of viewport coordinates.",
             parameters=DRAG_SCHEMA,
         ),
-        handler=_scrubbing(_browser_drag_handler),
-        toolset="browser",
+        handler=_browser_drag_handler,
     )
-    registry.register(
+    add(
         name="browser_wait",
         schema=ToolSchema(
             name="browser_wait",
             description="Wait for a bounded number of milliseconds.",
             parameters=WAIT_SCHEMA,
         ),
-        handler=_scrubbing(_browser_wait_handler),
-        toolset="browser",
+        handler=_browser_wait_handler,
     )
-    registry.register(
+    add(
         name="browser_upload_file",
         schema=ToolSchema(
             name="browser_upload_file",
@@ -1686,10 +1663,9 @@ def register(registry: ToolRegistry) -> None:
             ),
             parameters=UPLOAD_FILE_SCHEMA,
         ),
-        handler=_scrubbing(_browser_upload_file_handler),
-        toolset="browser",
+        handler=_browser_upload_file_handler,
     )
-    registry.register(
+    add(
         name="browser_screenshot",
         schema=ToolSchema(
             name="browser_screenshot",
@@ -1701,6 +1677,5 @@ def register(registry: ToolRegistry) -> None:
             ),
             parameters=SCREENSHOT_SCHEMA,
         ),
-        handler=_scrubbing(_browser_screenshot_handler),
-        toolset="browser",
+        handler=_browser_screenshot_handler,
     )

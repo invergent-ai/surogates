@@ -227,6 +227,16 @@ def mask_typed_text(text: str) -> str:
     return TYPED_TEXT_MASK * len(text)
 
 
+def mask_values(text: str, values: list[str] | set[str]) -> str:
+    """*text* with each of *values* masked, as written and as JSON escapes it, longest first."""
+    for value in sorted(values, key=len, reverse=True):
+        text = text.replace(value, mask_typed_text(value))
+        escaped = json.dumps(value)[1:-1]
+        if escaped != value:
+            text = text.replace(escaped, mask_typed_text(value))
+    return text
+
+
 def mask_tool_arguments(name: Any, arguments: Any) -> Any:
     """*arguments* of tool *name* with typed text masked, in the same shape (dict or JSON string)."""
     if name not in TYPED_TEXT_TOOLS:

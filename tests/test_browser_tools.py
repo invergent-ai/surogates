@@ -12,7 +12,7 @@ import pytest
 
 from surogates.browser.base import BrowserEndpoint, BrowserSpec
 from surogates.browser.control import ControlEntry
-from surogates.browser.pool import EnsureResult
+from surogates.browser.pool import BrowserPool, EnsureResult, TypedSecrets
 
 
 class FakePool:
@@ -26,6 +26,7 @@ class FakePool:
             live_view_url="ws://browser:32000",
         )
         self.snapshot_cache: dict[str, dict[str, Any]] = {}
+        self.typed_secrets = TypedSecrets()
 
     async def ensure(
         self,
@@ -625,12 +626,13 @@ class TestTypedSecretsNeverComeBack:
         from surogates.tools.builtin import browser as tools
 
         sid = str(uuid4())
+        pool = secret_pool()
         vault = FakeVault({("browser_acme", None, AGENT_SA): json.dumps(
             {"value": 'pa"ss', "origins": ["https://acme.example"]},
         )})
         await tools._scrubbing(tools._browser_type_handler)(
             {"ref": "@e5", "secret_ref": "vault://browser_acme"},
-            tenant=tenant, session_id=sid, browser_pool=secret_pool(), browser_control=FakeControlStore(),
+            tenant=tenant, session_id=sid, browser_pool=pool, browser_control=FakeControlStore(),
             credential_vault=vault, channel="studio",
             session_config={"agent_service_account_id": str(AGENT_SA)},
             _client_factory=lambda endpoint: FillClient(),
@@ -640,16 +642,36 @@ class TestTypedSecretsNeverComeBack:
             # A page that copied the value into its text, read back by a script.
             return json.dumps({"result": 'the field says pa"ss'})
 
-        echoed = await tools._scrubbing(echoing)({}, session_id=sid)
+        echoed = await tools._scrubbing(echoing)({}, session_id=sid, browser_pool=pool)
         assert "pa\\\"ss" not in echoed and 'pa"ss' not in json.loads(echoed)["result"]
         assert json.loads(echoed)["result"] == "the field says " + "\u2022" * 5
         # Another session's results are untouched.
-        assert await tools._scrubbing(echoing)({}, session_id=str(uuid4())) == await echoing({})
+        assert await tools._scrubbing(echoing)({}, session_id=str(uuid4()), browser_pool=pool) == await echoing({})
 
-        await tools._browser_close_handler(
-            {}, tenant=tenant, session_id=sid, browser_pool=FakePool(), browser_control=FakeControlStore(),
-        )
-        assert sid not in tools._typed_secrets
+    async def test_typed_secrets_go_with_the_browser(self) -> None:
+        from tests.test_browser_pool import FakeBackend, FakeRegistry
+
+        pool = BrowserPool(backend=FakeBackend(), registry=FakeRegistry())
+        await pool.ensure("s1", "org", "user", BrowserSpec())
+        pool.typed_secrets.add("s1", "hunter2")
+        assert pool.typed_secrets.of("s1") == ["hunter2"]
+        await pool.destroy_for_session("s1")
+        assert pool.typed_secrets.of("s1") == []
+
+    def test_a_session_left_idle_loses_its_typed_secrets(self, monkeypatch) -> None:
+        from surogates.browser import pool as pool_module
+
+        now = [1000.0]
+        monkeypatch.setattr(pool_module.time, "monotonic", lambda: now[0])
+        secrets = TypedSecrets(ttl=60)
+        secrets.add("idle", "a")
+        secrets.add("busy", "b")
+        now[0] += 45
+        assert secrets.of("busy") == ["b"]
+        now[0] += 45
+        # Any session's use sweeps the ones idle past the TTL.
+        assert secrets.of("busy") == ["b"]
+        assert secrets.of("idle") == []
 
     def test_every_browser_tool_is_registered_scrubbed(self) -> None:
         from surogates.tools.builtin import browser as tools
