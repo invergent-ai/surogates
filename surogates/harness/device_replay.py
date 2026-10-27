@@ -21,7 +21,7 @@ from sqlalchemy import select
 
 from surogates.db.models import DeviceOperation
 from surogates.devices.binding import device_of
-from surogates.harness.redact import TYPED_TEXT_MASK, TYPED_TEXT_TOOLS
+from surogates.harness.redact import TYPED_TEXT_MASK, typed_texts
 from surogates.session.events import EventType
 
 logger = logging.getLogger(__name__)
@@ -112,14 +112,8 @@ async def _typed_in_journal(session_factory: Any, calling_session_id: Any, invoc
 
 def _masked_text(call: dict[str, Any]) -> bool:
     """Whether *call* is a typing call whose text the event log holds masked."""
-    fn = call.get("function") or {}
-    if fn.get("name") not in TYPED_TEXT_TOOLS:
-        return False
-    try:
-        text = json.loads(fn.get("arguments") or "{}").get("text")
-    except (ValueError, AttributeError):
-        return False
-    return isinstance(text, str) and bool(text) and not text.strip(TYPED_TEXT_MASK)
+    typed = typed_texts([call])
+    return bool(typed) and not typed[0].strip(TYPED_TEXT_MASK)
 
 
 def _with_text(call: dict[str, Any], text: str) -> dict[str, Any]:

@@ -31,7 +31,7 @@ from typing import Any, Literal
 
 from surogates.harness.streaming_executor import _is_error_result
 from surogates.harness.message_utils import content_as_text
-from surogates.harness.redact import mask_tool_arguments, mask_typed_text, typed_texts
+from surogates.harness.redact import mask_tool_arguments, mask_values, typed_texts
 from surogates.harness.auxiliary_llm import (
     reasoning_disabled_extra_body,
     rejects_reasoning_controls,
@@ -486,8 +486,7 @@ class TurnSummarizer:
         # is exactly that.  The model never sees it, and a caption that
         # names it anyway, from the reasoning or a result, is discarded.
         typed = typed_texts(tool_calls)
-        for value in typed:
-            reasoning = reasoning.replace(value, mask_typed_text(value))
+        reasoning = mask_values(reasoning, typed)
         user_block_parts: list[str] = []
         if prior_iteration_summaries:
             prior = "\n".join(f"- {s}" for s in prior_iteration_summaries)
