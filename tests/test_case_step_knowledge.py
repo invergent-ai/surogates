@@ -43,6 +43,7 @@ Q = str(uuid4())
 AGENT = "support-bot"
 INCOME = b"# Income\n\nCount the net pay of the current employer only."
 PAGE_PATH = "policies/income.md"
+COMPILE = "3f2a1c9e-7b4d-4e8a-9c1f-0a2b3c4d5e6f"
 SOURCE_PATH = "sources/handbook.md"
 DIGEST = hashlib.sha256(INCOME).hexdigest()
 NOT_ATTACHED = "Error: knowledge base 'kb2' is not attached to this agent."
@@ -212,8 +213,53 @@ async def test_a_step_reads_a_granted_kb_and_records_the_page(ops, hub, pinned):
 
     assert PAGE_PATH in listing
     assert INCOME.decode() in out
-    assert log.pages_read(step.id) == [{"kb_id": "kb2", "path": PAGE_PATH, "sha256": DIGEST}]
+    assert log.pages_read(step.id) == [{"kb_id": "kb2", "path": PAGE_PATH, "sha256": DIGEST, "compile_id": None}]
     assert len(log.events) == 1
+
+
+@pytest.mark.parametrize(("hub_object_path", "compile_id"), [
+    (f"wiki/.versions/{COMPILE}/{uuid4()}/{PAGE_PATH}", COMPILE),
+    (None, None),
+    ("wiki/.versions/published/manual", None),
+    (f"wiki/{PAGE_PATH}", None),
+    (f"wiki/policies/{COMPILE}/x/{PAGE_PATH}", None),
+    (f"wiki/.versions/{COMPILE.upper()}/x/{PAGE_PATH}", None),
+], ids=["a-compiles-object", "no-object", "not-a-uuid", "outside-versions", "not-in-versions", "not-lowercase"])
+async def test_a_read_names_the_compile_that_wrote_its_page(ops, hub, hub_object_path, compile_id):
+    async with ops() as db:
+        await db.execute(
+            sa.update(OpsKBWikiPage).where(OpsKBWikiPage.id == "kb2-income").values(hub_object_path=hub_object_path)
+        )
+        await db.commit()
+    log = _Log()
+    step = await _step(_SessionStore(), knowledge=["kb2"])
+
+    out = await _read(step, log, "kb2")
+
+    assert INCOME.decode() in out
+    assert log.pages_read(step.id) == [{"kb_id": "kb2", "path": PAGE_PATH, "sha256": DIGEST, "compile_id": compile_id}]
+
+
+async def test_a_passage_read_is_recorded_as_its_page(ops, hub):
+    versioned = f"wiki/.versions/{COMPILE}/{uuid4()}/{PAGE_PATH}"
+    async with ops() as db:
+        await db.execute(sa.update(OpsKBWikiPage).where(OpsKBWikiPage.id == "kb2-income").values(hub_object_path=versioned))
+        # A passage row as ops writes one: it keeps its parent artifact's digest and object.
+        db.add(OpsKBWikiPage(
+            id="kb2-income-p1", kb_id="kb2", path="_passages/" + "e" * 64 + ".md", parent_path=PAGE_PATH,
+            hub_object_path=versioned, content_sha256=DIGEST, source_start=0, source_end=len(INCOME.decode()),
+            page_type="concept", title="Income", size_bytes=len(INCOME),
+        ))
+        await db.commit()
+    log = _Log()
+    step = await _step(_SessionStore(), knowledge=["kb2"])
+
+    passage = await _call("kb_read_page", {"kb_id": "kb2", "path": PAGE_PATH, "passage_id": "kb2-income-p1"}, step, log)
+    whole = await _read(step, log, "kb2")
+
+    assert INCOME.decode() in passage and INCOME.decode() in whole
+    entry = {"kb_id": "kb2", "path": PAGE_PATH, "sha256": DIGEST, "compile_id": COMPILE}
+    assert log.pages_read(step.id) == [entry, entry]
 
 
 async def test_a_child_reads_its_steps_granted_kb(ops, hub):
@@ -225,7 +271,7 @@ async def test_a_child_reads_its_steps_granted_kb(ops, hub):
 
     assert INCOME.decode() in out
     # On the step's log, which its report reads.
-    assert log.pages_read(step.id) == [{"kb_id": "kb2", "path": PAGE_PATH, "sha256": DIGEST}]
+    assert log.pages_read(step.id) == [{"kb_id": "kb2", "path": PAGE_PATH, "sha256": DIGEST, "compile_id": None}]
     assert log.pages_read(child.id) == []
 
 
@@ -296,7 +342,7 @@ async def test_only_a_read_of_page_content_is_recorded(ops, hub):
         await client.aclose()
 
     assert "Continue with offset=10" in window
-    assert log.pages_read(step.id) == [{"kb_id": "kb2", "path": PAGE_PATH, "sha256": DIGEST}]
+    assert log.pages_read(step.id) == [{"kb_id": "kb2", "path": PAGE_PATH, "sha256": DIGEST, "compile_id": None}]
     assert len(log.events) == 1
 
 

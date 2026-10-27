@@ -62,6 +62,13 @@ CASE = CONTRACT["case_id"]
 BUCKET = "case-workspaces"
 PAGE = {"kb_id": "kb-uuid", "path": "policies/income.md", "sha256": "a" * 64}
 OTHER_PAGE = {"kb_id": "kb-uuid", "path": "policies/applicants.md", "sha256": "b" * 64}
+C1 = "11111111-1111-4111-8111-111111111111"
+C2 = "22222222-2222-4222-8222-222222222222"
+
+
+def reported(page: dict, compile_id: str | None = None) -> dict:
+    """A page as the step's report carries it: always with the compile that wrote it, null when unknown."""
+    return {**page, "compile_id": compile_id}
 ACCEPTED = {"result": "completed", "message": "Keel completed the step."}
 #: What the step's session row says it used, when its log holds no cache read: the usage a report of the step carries.
 USAGE = {"input_tokens": 1200, "output_tokens": 340, "cache_read_tokens": 0, "estimated_cost_usd": "0.0123"}
@@ -377,7 +384,7 @@ async def test_an_accepted_completion_carries_its_call_pages_and_usage(fake_keel
     assert json.loads(request.content) == {
         "call_id": "c1",
         **COMPLETION,
-        "pages_read": [OTHER_PAGE, PAGE],
+        "pages_read": [reported(OTHER_PAGE), reported(PAGE)],
         "usage": USAGE,
         "bundle_version": None,
     }
@@ -394,7 +401,25 @@ async def test_a_page_read_without_a_sha256_digest_is_left_out_of_the_report(fak
 
     assert result == "Step ended: Keel completed the step."
     [request] = fake_keel.requests
-    assert json.loads(request.content)["pages_read"] == [PAGE]
+    assert json.loads(request.content)["pages_read"] == [reported(PAGE)]
+
+
+async def test_a_page_read_names_its_compile_or_none(fake_keel, store):
+    # A compile id is a lowercase hyphenated UUID or nothing: an event written before reads named one, and
+    # any other value, report as null and never make Keel refuse the report.
+    for compile_id in (C1, C1, C2):
+        store.write(EventType.KB_PAGE_READ, {**PAGE, "compile_id": compile_id})
+    store.write(EventType.KB_PAGE_READ, PAGE)
+    store.write(EventType.KB_PAGE_READ, {**OTHER_PAGE, "compile_id": "published"})
+    store.write(EventType.KB_PAGE_READ, {**OTHER_PAGE, "compile_id": 12})
+
+    result = await _call("complete_step", COMPLETION, store)
+
+    assert result == "Step ended: Keel completed the step."
+    [request] = fake_keel.requests
+    assert json.loads(request.content)["pages_read"] == [
+        reported(OTHER_PAGE), reported(PAGE), reported(PAGE, C1), reported(PAGE, C2),
+    ]
 
 
 async def test_a_page_read_beyond_keels_bounds_is_left_out_of_the_report(fake_keel, store):
@@ -414,7 +439,7 @@ async def test_a_page_read_beyond_keels_bounds_is_left_out_of_the_report(fake_ke
 
     assert result == "Step ended: Keel completed the step."
     [request] = fake_keel.requests
-    assert json.loads(request.content)["pages_read"] == [PAGE, at_the_bounds]
+    assert json.loads(request.content)["pages_read"] == [reported(PAGE), reported(at_the_bounds)]
 
 
 async def test_a_file_field_becomes_a_case_file(fake_keel, tmp_path):
@@ -660,7 +685,7 @@ async def test_raise_hand_parks_the_step(fake_keel, store):
     assert request.url.path == f"/api/harness/sessions/{store.row.id}/raise-hand"
     assert request.headers["authorization"] == "Bearer door-key"
     assert json.loads(request.content) == {
-        "call_id": "c7", **hand, "pages_read": [PAGE], "usage": USAGE, "bundle_version": None,
+        "call_id": "c7", **hand, "pages_read": [reported(PAGE)], "usage": USAGE, "bundle_version": None,
     }
     # The step resumes in this session once a person answers: its inputs stay.
     assert not store.redacted()

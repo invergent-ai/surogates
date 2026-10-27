@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import json
+import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+import pytest
 from openai import AsyncOpenAI
 from pydantic import BaseModel
 
 from surogates.harness.structured_output import (
+    StructuredCall,
     generate_structured,
+    generate_structured_with_usage,
 )
 
 
@@ -396,3 +400,124 @@ async def test_fallback_skips_draft_objects_that_fail_the_schema() -> None:
         )
 
     assert decision == RoutingDecision(route="final", confidence=0.6)
+
+
+def _reply(content: str, *, usage: SimpleNamespace | None = None, model: str | None = None) -> SimpleNamespace:
+    return SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content=content, refusal=None))],
+        usage=usage,
+        model=model,
+    )
+
+
+async def test_a_structured_call_counts_every_completion_it_received() -> None:
+    llm_client = AsyncOpenAI(api_key="test-key")
+    llm_client.chat.completions.create = AsyncMock(side_effect=[
+        _reply(
+            "not json",
+            usage=SimpleNamespace(
+                prompt_tokens=900,
+                completion_tokens=40,
+                prompt_tokens_details=SimpleNamespace(cached_tokens=300),
+            ),
+            model="provider/model-a",
+        ),
+        _reply(
+            json.dumps({"route": "ask_user_question", "confidence": 0.5}),
+            usage=SimpleNamespace(
+                prompt_tokens=950,
+                completion_tokens=60,
+                cache_read_input_tokens=100,
+                prompt_tokens_details=None,
+            ),
+            model="provider/model-b",
+        ),
+    ])
+
+    call = await generate_structured_with_usage(
+        llm_client=llm_client,
+        model="@preset/summary",
+        messages=[{"role": "user", "content": "Route this."}],
+        output_model=RoutingDecision,
+        max_tokens=64,
+    )
+
+    assert call == StructuredCall(
+        RoutingDecision(route="ask_user_question", confidence=0.5),
+        completions=2,
+        input_tokens=1850,
+        output_tokens=100,
+        cache_read_tokens=400,
+        served_by="provider/model-b",
+    )
+    first, second = (c.kwargs for c in llm_client.chat.completions.create.await_args_list)
+    assert first["response_format"]["type"] == "json_schema"
+    assert second["response_format"] == {"type": "json_object"}
+
+
+async def test_a_structured_call_that_reaches_no_model_used_nothing() -> None:
+    llm_client = AsyncOpenAI(api_key="test-key")
+    llm_client.chat.completions.create = AsyncMock(side_effect=RuntimeError("boom"))
+
+    call = await generate_structured_with_usage(
+        llm_client=llm_client,
+        model="@preset/summary",
+        messages=[{"role": "user", "content": "Route this."}],
+        output_model=RoutingDecision,
+    )
+
+    assert call == StructuredCall(None, 0, 0, 0, 0, None)
+
+
+async def test_a_reply_without_usage_counts_as_a_completion_that_used_nothing() -> None:
+    llm_client = AsyncOpenAI(api_key="test-key")
+    llm_client.chat.completions.create = AsyncMock(
+        return_value=_reply(json.dumps({"route": "r", "confidence": 1.0})),
+    )
+
+    call = await generate_structured_with_usage(
+        llm_client=llm_client,
+        model="m",
+        messages=[{"role": "user", "content": "Route this."}],
+        output_model=RoutingDecision,
+    )
+
+    assert call == StructuredCall(RoutingDecision(route="r", confidence=1.0), 1, 0, 0, 0, None)
+
+
+@pytest.mark.parametrize("function", [generate_structured, generate_structured_with_usage])
+async def test_a_failed_structured_attempt_logs_only_the_errors_class(function, caplog) -> None:
+    caplog.set_level(logging.DEBUG, logger="surogates.harness.structured_output")
+    llm_client = AsyncOpenAI(api_key="test-key")
+    llm_client.chat.completions.create = AsyncMock(side_effect=[
+        _reply("MARKER-7f3 not json"),
+        _reply('{"route": "MARKER-7f3"}'),
+    ])
+
+    result = await function(
+        llm_client=llm_client,
+        model="m",
+        messages=[{"role": "user", "content": "Route this."}],
+        output_model=RoutingDecision,
+    )
+
+    assert getattr(result, "value", result) is None
+    assert "MARKER-7f3" not in caplog.text
+
+
+@pytest.mark.parametrize("function", [generate_structured, generate_structured_with_usage])
+async def test_a_provider_that_fails_is_logged_by_its_errors_class_only(function, caplog) -> None:
+    caplog.set_level(logging.DEBUG, logger="surogates.harness.structured_output")
+    llm_client = AsyncOpenAI(api_key="test-key")
+    llm_client.chat.completions.create = AsyncMock(side_effect=RuntimeError("MARKER-9z1 the provider quoted this"))
+
+    result = await function(
+        llm_client=llm_client,
+        model="m",
+        messages=[{"role": "user", "content": "Route this."}],
+        output_model=RoutingDecision,
+    )
+
+    assert getattr(result, "value", result) is None
+    assert "RuntimeError" in caplog.text
+    assert "MARKER-9z1" not in caplog.text

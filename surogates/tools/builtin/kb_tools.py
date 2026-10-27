@@ -73,6 +73,7 @@ import httpx
 import sqlalchemy as sa
 
 from surogates.db.ops_engine import ensure_ops_session_factory
+from surogates.keel.run_facts import compile_id_in
 from surogates.keel.steps import case_scope_in, is_case_config
 from surogates.session.attachment_ingest import workspace_root_id
 from surogates.session.events import EventType
@@ -222,19 +223,42 @@ async def _sendable_grant(kwargs: dict[str, Any]) -> list[str]:
         return []
 
 
-async def _record_page_read(kwargs: dict[str, Any], *, kb_id: str, path: str, raw: bytes) -> None:
+def _compile_id(hub_object_path: str | None) -> str | None:
+    """The knowledge base compile that wrote the object a page row points at.
+
+    Ops stores a compile's objects under ``wiki/.versions/<compile id>/…`` and
+    re-uploads only the pages a compile changed, so a row's object is the one
+    written by the compile that last wrote the page's text, never the compile
+    that is current when the page is read.  None for a row published before
+    objects were versioned, and for any path that does not read so.
+    """
+    parts = (hub_object_path or "").split("/")
+    if len(parts) < 4 or parts[0] != "wiki" or parts[1] != ".versions":
+        return None
+    return compile_id_in(parts[2])
+
+
+async def _record_page_read(
+    kwargs: dict[str, Any], *, kb_id: str, path: str, raw: bytes, compile_id: str | None,
+) -> None:
     """Write a page a session of a case read to the case root's log.
 
     The root's log, not the session's own: the step's report to Keel reads
     the pages every session of the case read from there (see
     ``workspace_root_id``, which a child's config points at its step).
-    The digest is the SHA-256 of the content read.
+    The digest is the SHA-256 of the content read, and *compile_id* names
+    the compile that last wrote the page's text, None when that is unknown.
     """
     session = SimpleNamespace(id=kwargs["session_id"], config=kwargs.get("session_config"))
     await kwargs["session_store"].emit_event(
         uuid.UUID(workspace_root_id(session)),
         EventType.KB_PAGE_READ,
-        {"kb_id": kb_id, "path": path, "sha256": hashlib.sha256(raw).hexdigest()},
+        {
+            "kb_id": kb_id,
+            "path": path,
+            "sha256": hashlib.sha256(raw).hexdigest(),
+            "compile_id": compile_id,
+        },
     )
 
 
@@ -774,7 +798,9 @@ async def _kb_read_page_handler(
         and context not in ("links", "conflicts")
         and not text.startswith("Error:")
     ):
-        await _record_page_read(kwargs, kb_id=kb_id, path=path, raw=raw)
+        await _record_page_read(
+            kwargs, kb_id=kb_id, path=path, raw=raw, compile_id=_compile_id(page.hub_object_path),
+        )
     return text
 
 
