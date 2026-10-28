@@ -434,7 +434,7 @@ An id is answered when its user belongs to the org, as a home user or as a membe
 
 These are left out of the answer, and are never an error: a user of another org, an id that names nobody, and an address mail cannot reach. The runtime stores stand-in addresses for users that have no mailbox: a channel user's (`<platform>-<id>@<org>.channels.surogate.local`) and a followed person's (`person-<id>@<org>.people.surogate.local`). It also uses `.invalid` addresses for agents. So an address under `surogate.local`, an address under `.invalid` and a value that is not `name@domain` are left out. An id that is not a UUID is `422 invalid-request`.
 
-The answer carries `Cache-Control: no-store`. No address is logged: a database failure is `503 unavailable`, which Keel retries, and only the error's class name and the org id are logged.
+The answer carries `Cache-Control: no-store`. No address is logged. A statement the database fails or times out is `503 unavailable`, and a connection the pool cannot make is a plain `500`, as on every other keel-link route; Keel retries both. Only the error's class name and the org id are logged.
 
 ## Reruns and trials
 

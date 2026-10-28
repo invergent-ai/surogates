@@ -99,9 +99,9 @@ from surogates.session.models import Event
 from surogates.session.provisioning import create_agent_session
 from surogates.session.store import SessionNotFoundError, StepFinishedError
 from surogates.storage.backend import TooLarge
+from surogates.tenant.addresses import org_addresses
 from surogates.tenant.auth.jwt import signing_secret
 from surogates.tenant.auth.service_account import ServiceAccountStore
-from surogates.tenant.addresses import org_addresses
 from surogates.tenant.invitations import InvitationError, invite_member
 from surogates.tenant.memberships import MembershipError, belongs_to
 
