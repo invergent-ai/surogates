@@ -199,7 +199,11 @@ async def test_run_now_and_cancel_scheduled_work_are_user_scoped(
 
 async def test_owner_me_narrows_an_ops_chat_account_to_its_own(client: AsyncClient, session_factory):
     org_id, user_id, _ = await _tenant(session_factory)
-    sa_id, auth = await _ops_chat(session_factory, org_id)
+    from .conftest import issue_service_account_token
+
+    # Ops forwards with the account's bare key, which is only accepted under /v1/api.
+    issued = await issue_service_account_token(session_factory, org_id, f"ops-chat-{uuid.uuid4().hex[:8]}")
+    sa_id, auth = issued.id, {"Authorization": f"Bearer {issued.token}"}
     store = ScheduledSessionStore(session_factory)
     mine = await store.create_loop(
         org_id=org_id, service_account_id=sa_id, agent_id=_AGENT_ID, prompt="mine",
@@ -210,17 +214,17 @@ async def test_owner_me_narrows_an_ops_chat_account_to_its_own(client: AsyncClie
         schedule=parse_schedule("10m"), created_from_session_id=None,
     )
 
-    every = {i["id"] for i in (await client.get("/v1/scheduled-work", headers=auth)).json()["items"]}
+    every = {i["id"] for i in (await client.get("/v1/api/scheduled-work", headers=auth)).json()["items"]}
     assert {str(mine.id), str(theirs.id)} <= every
-    own = {i["id"] for i in (await client.get("/v1/scheduled-work?owner=me", headers=auth)).json()["items"]}
+    own = {i["id"] for i in (await client.get("/v1/api/scheduled-work?owner=me", headers=auth)).json()["items"]}
     assert own == {str(mine.id)}
 
-    other = f"/v1/scheduled-work/{theirs.id}?owner=me"
+    other = f"/v1/api/scheduled-work/{theirs.id}?owner=me"
     assert (await client.get(other, headers=auth)).status_code == 404
-    assert (await client.post(f"/v1/scheduled-work/{theirs.id}/pause?owner=me", headers=auth)).status_code == 404
+    assert (await client.post(f"/v1/api/scheduled-work/{theirs.id}/pause?owner=me", headers=auth)).status_code == 404
     assert (await client.delete(other, headers=auth)).status_code == 404
     assert (await store.get(theirs.id)).status == "active"
-    assert (await client.post(f"/v1/scheduled-work/{mine.id}/pause?owner=me", headers=auth)).status_code == 200
+    assert (await client.post(f"/v1/api/scheduled-work/{mine.id}/pause?owner=me", headers=auth)).status_code == 200
 
 
 async def test_scheduled_work_can_be_read_changed_paused_and_resumed(
