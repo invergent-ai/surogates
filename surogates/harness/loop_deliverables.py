@@ -199,10 +199,36 @@ SCHEDULE_TOOLS = frozenset({
 
 def unbacked_schedule_claim(final_text: str, messages: list[dict]) -> bool:
     """The reply says a schedule exists or runs and this turn neither made
-    one nor looked one up successfully."""
+    one nor looked one up successfully.  A turn whose schedule call was
+    refused outright already told the model why; a nudge would only repeat
+    it.  A preview awaiting the user's yes (``would``) is not a refusal."""
     if not final_text or not _SCHEDULE_CLAIM_RE.search(final_text.replace("’", "'")):
         return False
-    return not _called_successfully(_current_turn(messages), SCHEDULE_TOOLS)
+    turn = _current_turn(messages)
+    return not (_called_successfully(turn, SCHEDULE_TOOLS) or _refused(turn, CRON_TOOLS))
+
+
+#: Every tool that makes, changes or reads a schedule.
+CRON_TOOLS = SCHEDULE_TOOLS | {"cron_pause", "cron_delete"}
+
+
+def _refused(turn: list[dict], names: frozenset[str]) -> bool:
+    """Whether a call of one of *names* this turn was refused, not previewed."""
+    calls = {
+        call.get("id")
+        for m in turn if isinstance(m, dict)
+        for call in m.get("tool_calls") or []
+        if isinstance(call, dict) and (call.get("function") or {}).get("name") in names
+    }
+    for m in turn:
+        if isinstance(m, dict) and m.get("role") == "tool" and m.get("tool_call_id") in calls:
+            try:
+                result = json.loads(m.get("content") or "")
+            except (TypeError, ValueError):
+                continue
+            if isinstance(result, dict) and result.get("success") is False and "would" not in result:
+                return True
+    return False
 
 
 def schedule_claim_nudge(can_schedule: bool) -> str:

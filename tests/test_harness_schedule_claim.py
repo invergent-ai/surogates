@@ -50,11 +50,16 @@ def test_a_successful_schedule_call_this_turn_backs_the_claim():
         assert not unbacked_schedule_claim("I've scheduled it.", messages), name
 
 
-def test_a_failed_or_preview_only_call_does_not_back_it():
-    failed = [_ASK, _call("cron_create"), _result({"success": False, "error": "x"})]
-    assert unbacked_schedule_claim("The schedule is active.", failed)
+def test_a_preview_or_an_unrelated_call_does_not_back_it():
+    preview = [_ASK, _call("cron_create"), _result({"success": False, "error": "x", "would": {}})]
+    assert unbacked_schedule_claim("The schedule is active.", preview)
     other = [_ASK, _call("cron_delete"), _result({"success": True})]
     assert unbacked_schedule_claim("The schedule is active.", other)
+
+
+def test_a_refused_call_already_told_the_model_why():
+    refused = [_ASK, _call("cron_create"), _result({"success": False, "error": "Not in this chat."})]
+    assert not unbacked_schedule_claim("The schedule is active.", refused)
 
 
 def test_ordinary_replies_are_not_flagged():

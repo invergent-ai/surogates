@@ -274,62 +274,76 @@ async def recover_stalled_loops(
     And, given *session_store*, runs open past their time limit are failed
     first, so a stalled loop's run is not requeued past it.
     """
-    for schedule in await scheduled_store.plan_unscheduled(limit=limit):
-        logger.info("Planned schedule %s: next run %s", schedule.id, schedule.next_run_at)
+    async def plan() -> None:
+        for schedule in await scheduled_store.plan_unscheduled(limit=limit):
+            logger.info("Planned schedule %s: next run %s", schedule.id, schedule.next_run_at)
 
     # Every writer of a cancel (the runtime's own, the control plane writing
     # the row) is covered here, a tick later, instead of at each of them.
-    if session_store is not None:
+    async def stop_cancelled_runs() -> None:
         for run_id in await scheduled_store.end_runs_of_cancelled(limit=limit):
             if await session_store.pause_if_active(run_id, {"reason": "schedule_cancelled"}):
                 logger.info("Stopped run %s of a cancelled schedule", run_id)
             if redis is not None:
                 await redis.publish(f"{INTERRUPT_CHANNEL_PREFIX}:{run_id}", "schedule_cancelled")
 
-    if session_store is not None:
+    async def fail_overdue_runs() -> None:
         for run_id in await session_store.fail_overdue_scheduled_runs(
             default_seconds=DEFAULT_MAX_RUN_SECONDS, limit=limit,
         ):
             logger.warning("Failed scheduled run %s: past its time limit", run_id)
 
-    expired = await scheduled_store.expire_active_schedules(limit=limit)
-    for schedule in expired:
-        logger.info(
-            "Expired schedule %s (past expires_at) → completed",
-            schedule.id,
-        )
+    async def expire() -> None:
+        for schedule in await scheduled_store.expire_active_schedules(limit=limit):
+            logger.info("Expired schedule %s (past expires_at) → completed", schedule.id)
 
     # Every way a schedule ends on its own is covered here, the control
     # plane's writes included, a tick later.
-    if session_store is not None:
+    async def announce_endings() -> None:
         for schedule in await scheduled_store.claim_unannounced_endings(limit=limit):
             await _announce_ending(session_store, schedule)
 
-    retryable = await scheduled_store.find_retryable_stalled_dynamic_loop_runs(
-        stale_seconds=stale_seconds,
-        limit=limit,
-    )
-    for schedule in retryable:
-        if schedule.last_session_id is None:
-            continue
-        await enqueue_session(
-            redis,
-            org_id=str(schedule.org_id),
-            agent_id=schedule.agent_id,
-            session_id=schedule.last_session_id,
+    async def requeue_stalled() -> None:
+        retryable = await scheduled_store.find_retryable_stalled_dynamic_loop_runs(
+            stale_seconds=stale_seconds,
+            limit=limit,
         )
-        logger.warning(
-            "Requeued stalled dynamic loop session %s for schedule %s",
-            schedule.last_session_id,
-            schedule.id,
-        )
+        for schedule in retryable:
+            if schedule.last_session_id is None:
+                continue
+            await enqueue_session(
+                redis,
+                org_id=str(schedule.org_id),
+                agent_id=schedule.agent_id,
+                session_id=schedule.last_session_id,
+            )
+            logger.warning(
+                "Requeued stalled dynamic loop session %s for schedule %s",
+                schedule.last_session_id,
+                schedule.id,
+            )
 
-    recovered = await scheduled_store.recover_stalled_dynamic_loops(
-        stale_seconds=stale_seconds,
-        limit=limit,
-    )
-    for schedule in recovered:
-        logger.warning(
-            "Recovered terminal dynamic loop %s with fallback delay",
-            schedule.id,
+    async def recover_terminal() -> None:
+        recovered = await scheduled_store.recover_stalled_dynamic_loops(
+            stale_seconds=stale_seconds,
+            limit=limit,
         )
+        for schedule in recovered:
+            logger.warning(
+                "Recovered terminal dynamic loop %s with fallback delay",
+                schedule.id,
+            )
+
+    steps = [plan]
+    if session_store is not None:
+        steps += [stop_cancelled_runs, fail_overdue_runs]
+    steps.append(expire)
+    if session_store is not None:
+        steps.append(announce_endings)
+    steps += [requeue_stalled, recover_terminal]
+    # One step failing (a bad row, a lost connection) must not skip the rest.
+    for step in steps:
+        try:
+            await step()
+        except Exception:
+            logger.exception("Scheduled sweep step %s failed", step.__name__)

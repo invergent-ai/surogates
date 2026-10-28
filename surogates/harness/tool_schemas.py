@@ -88,6 +88,8 @@ _CRON_READ_TOOLS: frozenset[str] = frozenset({"cron_list", "cron_get"})
 CRON_WRITE_TOOLS: frozenset[str] = frozenset({
     "cron_create", "cron_update", "cron_pause", "cron_resume", "cron_run_now", "cron_delete",
 })
+#: What needs the user's yes, where the model cannot ask outside Studio.
+CRON_CONFIRMED_TOOLS: frozenset[str] = frozenset({"cron_create", "cron_update"})
 #: What a scheduled run may do to its own schedule, and only to that one.
 CRON_OWN_SCHEDULE_TOOLS: frozenset[str] = frozenset({"cron_update", "cron_pause", "cron_delete"})
 _WHITEBOARD_TOOLS: frozenset[str] = frozenset({
@@ -128,6 +130,7 @@ def drop_unusable_tools(
     has_channel: bool,
     makes_routines: bool,
     reads_routines: bool = True,
+    confirms_routines: bool = True,
     is_whiteboard: bool = False,
     is_voice: bool = False,
     has_forms: bool = False,
@@ -147,7 +150,9 @@ def drop_unusable_tools(
     The tools that make or change a schedule go to a session that
     *makes_routines*: a chat with an owner of its own.  Listing and reading
     them goes wherever someone owns the session (*reads_routines*),
-    scheduled runs and helpers included.
+    scheduled runs and helpers included.  Making or changing one needs a
+    yes the session can get (*confirms_routines*); without it those two
+    could only ever be refused.
 
     The office tools go only where ``has_file_pane``.
 
@@ -163,6 +168,8 @@ def drop_unusable_tools(
         drop |= CRON_WRITE_TOOLS
     if not reads_routines:
         drop |= _CRON_READ_TOOLS
+    if not confirms_routines:
+        drop |= CRON_CONFIRMED_TOOLS
     if not is_whiteboard:
         drop |= _WHITEBOARD_TOOLS
     if not is_voice:

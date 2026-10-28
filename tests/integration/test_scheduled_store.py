@@ -1,11 +1,14 @@
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
 from sqlalchemy import text
 
 from surogates.scheduled.schedule import (
+    DEFAULT_LOOP_EXPIRY_DAYS,
     DYNAMIC_LOOP_EXPIRY_DAYS,
     DYNAMIC_LOOP_FALLBACK_DELAY_SECONDS,
+    once_schedule,
     parse_dynamic_loop_schedule,
     parse_schedule,
 )
@@ -479,12 +482,15 @@ async def test_create_with_service_account_principal(session_factory):
 
 
 async def test_list_for_user_scopes_to_principal(session_factory):
-    """A person sees only their own schedules; a service account sees the
-    agent's, in its org."""
+    """A person, and an API key, see only their own schedules; a Studio
+    operator's chat account and the agent's own principal see the agent's."""
+    from surogates.tenant.auth.service_account import KIND_AGENT_PRINCIPAL, ServiceAccountStore
+
     org_id = await create_org(session_factory)
     user_id = await create_user(session_factory, org_id)
-    issued = await issue_service_account_token(
-        session_factory, org_id, name="loop-listing-sa",
+    api_key = await issue_service_account_token(session_factory, org_id, name="loop-listing-sa")
+    operator = await issue_service_account_token(
+        session_factory, org_id, name=f"ops-chat-{org_id}-{user_id}",
     )
     store = ScheduledSessionStore(session_factory)
 
@@ -493,23 +499,37 @@ async def test_list_for_user_scopes_to_principal(session_factory):
         prompt="user prompt", schedule=parse_schedule("10m"),
         created_from_session_id=None,
     )
-    sa_schedule = await store.create_loop(
-        org_id=org_id, service_account_id=issued.id, agent_id="agent-x",
+    key_schedule = await store.create_loop(
+        org_id=org_id, service_account_id=api_key.id, agent_id="agent-x",
         prompt="sa prompt", schedule=parse_schedule("15m"),
         created_from_session_id=None,
     )
 
-    user_rows = await store.list_for_user(
-        org_id=org_id, user_id=user_id, agent_id="agent-x",
-    )
-    assert {row.id for row in user_rows} == {user_schedule.id}
+    def listed(**principal):
+        return store.list_for_user(org_id=org_id, agent_id="agent-x", **principal)
 
-    # A service account works for the project: an operator manages every
-    # schedule of the agent, a channel user's too.
-    sa_rows = await store.list_for_user(
-        org_id=org_id, service_account_id=issued.id, agent_id="agent-x",
+    assert {row.id for row in await listed(user_id=user_id)} == {user_schedule.id}
+    assert {row.id for row in await listed(service_account_id=api_key.id)} == {key_schedule.id}
+    assert not await store.cancel(
+        org_id=org_id, agent_id="agent-x", schedule_id=user_schedule.id,
+        service_account_id=api_key.id, ended_by="key",
     )
-    assert {row.id for row in sa_rows} == {user_schedule.id, sa_schedule.id}
+    # An operator manages every schedule of the agent, a channel user's too.
+    assert {row.id for row in await listed(service_account_id=operator.id)} == {
+        user_schedule.id, key_schedule.id,
+    }
+
+    accounts = ServiceAccountStore(session_factory)
+    agent_itself = await accounts.create(
+        org_id=org_id, name="agent-x principal", agent_id="agent-x", kind=KIND_AGENT_PRINCIPAL,
+    )
+    another_agent = await accounts.create(
+        org_id=org_id, name="agent-y principal", agent_id="agent-y", kind=KIND_AGENT_PRINCIPAL,
+    )
+    assert {row.id for row in await listed(service_account_id=agent_itself.id)} == {
+        user_schedule.id, key_schedule.id,
+    }
+    assert await listed(service_account_id=another_agent.id) == []
 
 
 async def test_create_rejects_when_neither_principal(session_factory):
@@ -947,3 +967,71 @@ async def test_context_and_columns_are_stored(session_factory):
     assert row.context == {"browser": {"profile": "p1"}, "channel": "web"}
     assert (row.kind, row.max_run_seconds, row.consecutive_failures) == ("interval", 600, 0)
     assert row.cadence["seconds"] == 600
+
+
+async def test_changing_a_one_off_into_a_recurring_schedule_drops_its_single_run(session_factory):
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    store = ScheduledSessionStore(session_factory)
+    agent = _agent()
+    one_off = await store.create(
+        org_id=org_id, user_id=user_id, agent_id=agent, name="Once", prompt="Do it",
+        schedule=once_schedule(datetime.now(timezone.utc) + timedelta(days=1)), source="tool",
+        created_from_session_id=None, repeat_limit=1,
+    )
+    scope = dict(org_id=org_id, user_id=user_id, agent_id=agent, schedule_id=one_off.id)
+
+    recurring = await store.update(**scope, schedule=parse_schedule("2h"))
+    assert (recurring.kind, recurring.repeat_limit) == ("interval", None)
+    again = await store.update(**scope, schedule=once_schedule(datetime.now(timezone.utc) + timedelta(days=2)))
+    assert (again.kind, again.repeat_limit) == ("once", 1)
+
+
+async def test_a_loop_typed_in_a_chat_expires_and_a_made_schedule_does_not(session_factory):
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    store = ScheduledSessionStore(session_factory)
+    agent = _agent()
+    typed = await store.create_loop(
+        org_id=org_id, user_id=user_id, agent_id=agent, prompt="check the build",
+        schedule=parse_schedule("1m"), created_from_session_id=None,
+    )
+    made = await store.create(
+        org_id=org_id, user_id=user_id, agent_id=agent, name="Digest", prompt="digest",
+        schedule=parse_schedule("1h"), source="tool", created_from_session_id=None,
+    )
+    days = (typed.expires_at - typed.created_at).total_seconds() / 86400
+    assert DEFAULT_LOOP_EXPIRY_DAYS - 0.01 < days < DEFAULT_LOOP_EXPIRY_DAYS + 0.01
+    assert made.expires_at is None
+
+
+async def test_a_malformed_row_fails_alone_and_the_rest_are_planned(session_factory):
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    store = ScheduledSessionStore(session_factory)
+    agent = _agent()
+    good, bad = [
+        await store.create(
+            org_id=org_id, user_id=user_id, agent_id=agent, name=name, prompt=name,
+            schedule=parse_schedule("10m"), source="tool", created_from_session_id=None,
+        )
+        for name in ("good", "bad")
+    ]
+    async with session_factory() as db:
+        await db.execute(text(
+            "UPDATE scheduled_sessions SET next_run_at = NULL, kind = 'calendar', "
+            "cadence = CAST(:cadence AS jsonb) WHERE id = :id",
+        ), {"id": bad.id, "cadence": '{"days": [9], "times": ["09:00"]}'})
+        # A Studio row: days as numbers from Monday.
+        await db.execute(text(
+            "UPDATE scheduled_sessions SET next_run_at = NULL, kind = 'calendar', "
+            "cadence = CAST(:cadence AS jsonb) WHERE id = :id",
+        ), {"id": good.id, "cadence": '{"days": [0, 2, 4], "times": ["09:00"], "tz": "Europe/Bucharest"}'})
+        await db.commit()
+
+    await store.plan_unscheduled(limit=1000)
+
+    planned, failed = await store.get(good.id), await store.get(bad.id)
+    assert planned.status == "active" and planned.next_run_at is not None
+    assert planned.next_run_at.astimezone(ZoneInfo("Europe/Bucharest")).weekday() in {0, 2, 4}
+    assert failed.status == "failed" and "Cannot plan" in (failed.last_error or "")

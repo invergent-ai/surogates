@@ -121,10 +121,21 @@ async def test_the_policy_still_takes_a_runs_tools_away(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_neither_loop_off_nor_a_denied_question_tool_takes_them_away(monkeypatch):
-    assert ROUTINE_TOOLS <= await _offered(monkeypatch, _session(), loop=False)
+async def test_loop_off_keeps_schedules_readable_and_unchangeable(monkeypatch):
+    offered = await _offered(monkeypatch, _session(), loop=False)
+    assert READ_TOOLS <= offered
+    assert not WRITE_TOOLS & offered
+
+
+@pytest.mark.asyncio
+async def test_with_no_one_to_say_yes_a_channel_is_not_offered_what_needs_it(monkeypatch):
     offered = await _offered(monkeypatch, _session(), denied=frozenset({"ask_user_question"}))
-    assert ROUTINE_TOOLS <= offered and "ask_user_question" not in offered
+    assert not {"cron_create", "cron_update"} & offered
+    assert READ_TOOLS | {"cron_pause", "cron_resume", "cron_run_now", "cron_delete"} <= offered
+    studio = _session(service_account=True, user=False)
+    studio.channel = "studio"
+    # An operator's own word in Studio is the yes.
+    assert ROUTINE_TOOLS <= await _offered(monkeypatch, studio, denied=frozenset({"ask_user_question"}))
 
 
 @pytest.mark.asyncio

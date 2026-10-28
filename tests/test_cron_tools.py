@@ -41,6 +41,22 @@ YES = _answer("Da, programează")
 SAID = SimpleNamespace(id=9, type=EventType.USER_MESSAGE.value, data={"content": "and one more"})
 
 
+def _preview(name: str, would: dict, *, event_id: int = 5) -> SimpleNamespace:
+    """What a first call showed, before the question about it."""
+    return SimpleNamespace(id=event_id, type=EventType.TOOL_RESULT.value, data={
+        "name": name, "tool_call_id": f"call-{event_id}",
+        "content": json.dumps({"success": False, "error": "Not made yet.", "would": would}),
+    })
+
+
+async def _approved(handler, arguments: dict, principal, store, **extra) -> tuple[dict, dict]:
+    """Call *handler* the way a confirmed change goes: shown, asked, approved, called again."""
+    name = "cron_update" if handler is _cron_update_handler else "cron_create"
+    shown = json.loads(await handler(arguments, **_kwargs(FakeSessions(principal, []), store, **extra)))
+    kwargs = _kwargs(FakeSessions(principal, [_preview(name, shown["would"]), QUESTION, YES]), store, **extra)
+    return json.loads(await handler(arguments, **kwargs)), kwargs
+
+
 def _row(**fields):
     return SimpleNamespace(**{
         "id": uuid4(), "name": "Deploy check", "prompt": "check deploy", "schedule": {},
@@ -153,6 +169,29 @@ async def test_cron_create_makes_nothing_until_the_user_has_approved_it_this_tur
 
 
 @pytest.mark.asyncio
+async def test_a_yes_to_another_question_approves_nothing():
+    store = FakeStore()
+    other = _preview("cron_create", {"cadence": "Every hour", "timezone": "UTC", "runs": "until cancelled"})
+    result = json.loads(await _cron_create_handler(
+        DIGEST, **_kwargs(FakeSessions(USER, [other, QUESTION, YES]), store),
+    ))
+    unrelated = json.loads(await _cron_create_handler(DIGEST, **_kwargs(FakeSessions(USER, [QUESTION, YES]), store)))
+    assert result["success"] is False and unrelated["success"] is False and store.created == []
+
+
+@pytest.mark.asyncio
+async def test_a_yes_makes_one_schedule_not_many():
+    store = FakeStore()
+    made, kwargs = await _approved(_cron_create_handler, DIGEST, USER, store)
+    events = kwargs["session_store"].events
+    events.append(SimpleNamespace(id=8, type=EventType.TOOL_RESULT.value, data={
+        "name": "cron_create", "tool_call_id": "call-8", "content": json.dumps(made),
+    }))
+    again = json.loads(await _cron_create_handler(DIGEST, **kwargs))
+    assert made["success"] is True and again["success"] is False and len(store.created) == 1
+
+
+@pytest.mark.asyncio
 async def test_without_a_question_tool_an_operators_chat_makes_it_and_a_channel_cannot():
     offered = frozenset({"cron_create", "cron_list"})
     studio, whatsapp = FakeStore(), FakeStore()
@@ -182,8 +221,10 @@ async def test_cron_create_refuses_a_bad_schedule_before_asking():
 @pytest.mark.asyncio
 async def test_cron_create_once_approved_belongs_to_the_sender(principal):
     store = FakeStore()
-    kwargs = _kwargs(FakeSessions(principal), store, session_config={"browser": {"profile_id": "p-1"}}, channel="studio")
-    result = json.loads(await _cron_create_handler(DIGEST, **kwargs))
+    result, kwargs = await _approved(
+        _cron_create_handler, DIGEST, principal, store,
+        session_config={"browser": {"profile_id": "p-1"}}, channel="studio",
+    )
 
     assert result["success"] is True
     made = store.created[0]
@@ -202,10 +243,10 @@ async def test_cron_create_once_approved_belongs_to_the_sender(principal):
 @pytest.mark.asyncio
 async def test_a_one_off_is_one_instant_not_a_yearly_cron():
     store = FakeStore()
-    await _cron_create_handler({**DIGEST, "recurring": False}, **_kwargs(FakeSessions(USER), store))
-    await _cron_create_handler(
-        {"at": "2099-01-02T15:30", "timezone": "Europe/Bucharest", "prompt": "remind me"},
-        **_kwargs(FakeSessions(USER), store),
+    await _approved(_cron_create_handler, {**DIGEST, "recurring": False}, USER, store)
+    await _approved(
+        _cron_create_handler,
+        {"at": "2099-01-02T15:30", "timezone": "Europe/Bucharest", "prompt": "remind me"}, USER, store,
     )
     first, second = (made["schedule"] for made in store.created)
     assert first.kind == "once" and first.at.weekday() < 5
@@ -215,10 +256,11 @@ async def test_a_one_off_is_one_instant_not_a_yearly_cron():
 @pytest.mark.asyncio
 async def test_intervals_and_times_of_day_are_cadences_of_their_own():
     store = FakeStore()
-    await _cron_create_handler({"interval": "25h", "prompt": "ping"}, **_kwargs(FakeSessions(USER), store))
-    await _cron_create_handler(
+    await _approved(_cron_create_handler, {"interval": "25h", "prompt": "ping"}, USER, store)
+    await _approved(
+        _cron_create_handler,
         {"times": ["9:00", "17:30"], "days": ["mon", "wed"], "timezone": "Europe/Bucharest", "prompt": "digest"},
-        **_kwargs(FakeSessions(USER), store),
+        USER, store,
     )
     interval, calendar = (made["schedule"] for made in store.created)
     assert (interval.kind, interval.seconds) == ("interval", 25 * 3600)
@@ -256,10 +298,10 @@ async def test_cron_update_is_confirmed_like_a_new_one():
         {"id": str(store.row.id), "interval": "2h"}, **_kwargs(FakeSessions(USER, []), store),
     ))
     assert unconfirmed["success"] is False and not any(name == "update" for name, _ in store.calls)
-    done = json.loads(await _cron_update_handler(
-        {"id": str(store.row.id), "interval": "2h", "prompt": "check the deploy and the logs"},
-        **_kwargs(FakeSessions(USER), store),
-    ))
+    done, _ = await _approved(
+        _cron_update_handler,
+        {"id": str(store.row.id), "interval": "2h", "prompt": "check the deploy and the logs"}, USER, store,
+    )
     assert done["success"] is True
     update = next(asked for name, asked in store.calls if name == "update")
     assert update["schedule"].seconds == 7200 and update["prompt"] == "check the deploy and the logs"

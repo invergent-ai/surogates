@@ -710,7 +710,7 @@ async def test_a_run_open_past_its_time_limit_is_failed_and_one_within_it_is_not
     scheduled_store = ScheduledSessionStore(session_factory)
     session_store = SessionStore(session_factory, redis=redis_client)
     runs = {}
-    for name, limit in (("default", None), ("long", 7200)):
+    for name in ("default", "long"):
         await scheduled_store.create(
             org_id=org_id, user_id=user_id, agent_id="agent-a", name=name,
             prompt="post", schedule=parse_schedule("10m"), source="loop",
@@ -719,7 +719,7 @@ async def test_a_run_open_past_its_time_limit_is_failed_and_one_within_it_is_not
         )
     async with session_factory() as db:
         await db.execute(
-            text("UPDATE scheduled_sessions SET max_run_seconds = 7200 WHERE org_id = :o AND name = 'long'"),
+            text("UPDATE scheduled_sessions SET max_run_seconds = 14400 WHERE org_id = :o AND name = 'long'"),
             {"o": org_id},
         )
         await db.commit()
@@ -730,7 +730,7 @@ async def test_a_run_open_past_its_time_limit_is_failed_and_one_within_it_is_not
         )
     async with session_factory() as db:
         await db.execute(
-            text("UPDATE sessions SET created_at = now() - interval '45 minutes' WHERE id IN (:a, :b)"),
+            text("UPDATE sessions SET created_at = now() - interval '3 hours' WHERE id IN (:a, :b)"),
             {"a": runs["default"], "b": runs["long"]},
         )
         await db.commit()

@@ -3080,12 +3080,22 @@ class AgentHarness(
             # schedules, and a scheduled run changes its own (the tools it
             # may not call are taken off below); anything someone owns,
             # helpers included, can read them.  Whether a tool is allowed at
-            # all is the policy's, by name, above.  No evaluation row: no
-            # one is behind it.
+            # all is the policy's, by name, above; whether /loop is on, the
+            # agent's.  No evaluation row: no one is behind it.
             makes_routines=(
                 (session.parent_id is None or _is_scheduled_run(session))
                 and (session.user_id or session.service_account_id) is not None
                 and not is_eval_session(session)
+                # /loop switched off for the agent: its schedules stay
+                # readable, but none is made or changed.
+                and self._slash_command_enabled("loop", session)
+            ),
+            # A run changes only its own, unasked; elsewhere a yes comes from
+            # the question tool, or the operator's own word in Studio.
+            confirms_routines=(
+                _is_scheduled_run(session)
+                or session.channel == "studio"
+                or any(s["function"]["name"] == "ask_user_question" for s in tool_schemas)
             ),
             reads_routines=(
                 (session.user_id or session.service_account_id) is not None
@@ -6475,7 +6485,8 @@ class AgentHarness(
                         f"- Cadence: {created.schedule_display}\n"
                         f"- Timezone: {created.timezone}\n"
                         f"- Next run: {local_iso(created.next_run_at, created.timezone)}\n"
-                        f"- Runs until cancelled\n"
+                        f"- Ends: {local_iso(created.expires_at, created.timezone)}; "
+                        f"for one that runs until cancelled, ask me to schedule it\n"
                         f"- Pause: `/loop pause {created.id}` · Cancel: `/loop cancel {created.id}`"
                     )
         except (ValueError, ScheduledPromptBlocked) as exc:

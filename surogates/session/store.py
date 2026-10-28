@@ -875,7 +875,7 @@ class SessionStore:
                         SELECT s.id, COALESCE(sch.max_run_seconds, :default_seconds) AS limit_seconds
                         FROM sessions s
                         JOIN scheduled_sessions sch
-                          ON sch.id::text = s.config->>'scheduled_session_id'
+                          ON sch.last_session_id = s.id
                         WHERE s.channel = 'scheduled'
                           AND s.status IN ('active', 'paused')
                           AND s.created_at < now() - make_interval(

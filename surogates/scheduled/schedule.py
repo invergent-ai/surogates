@@ -18,7 +18,7 @@ DYNAMIC_LOOP_FALLBACK_DELAY_SECONDS = 600
 DYNAMIC_LOOP_STALE_RUN_SECONDS = 900
 MIN_INTERVAL_SECONDS = 60
 #: How long a run may go on before its schedule stops waiting for it.
-DEFAULT_MAX_RUN_SECONDS = 1800
+DEFAULT_MAX_RUN_SECONDS = 7200
 
 #: How a schedule's next run is computed (the ``kind`` column).
 CADENCE_KINDS = ("calendar", "interval", "once", "cron", "dynamic")
@@ -199,7 +199,12 @@ def parse_loop_command(raw: str, *, default_timezone: str = "UTC") -> LoopComman
     rest = rest.strip()
     # ``/loop stop the build if it is green`` is a prompt; ``/loop stop`` and
     # ``/loop cancel <id>`` are commands.
-    if verb is not None and (verb in {"list", "help"} or len(rest.split()) <= 1):
+    # ``/loop list new issues every hour`` and ``/loop help me triage …`` are
+    # requests: list and help are commands only on their own.
+    if verb in {"list", "help"}:
+        if not rest or (verb == "list" and rest.lower() == "all"):
+            return LoopCommand(verb=verb, target=rest or None)
+    elif verb is not None and len(rest.split()) <= 1:
         return LoopCommand(verb=verb, target=rest or None)
 
     schedule, prompt = _leading_cadence(_SCHEDULE_LABEL_RE.sub("", text, count=1), default_timezone)
@@ -269,10 +274,12 @@ def interval_schedule(
     )
 
 
-def calendar_schedule(days: list[str], times: list[str], *, timezone_name: str = "UTC") -> ParsedSchedule:
+def calendar_schedule(days: list, times: list[str], *, timezone_name: str = "UTC") -> ParsedSchedule:
+    """*days* are names (``mon``, what is stored) or numbers 0-6 from Monday."""
     resolve_timezone(timezone_name)
-    wanted = [d for d in WEEKDAYS if d in {d.lower()[:3] for d in days}]
-    if not wanted or len(wanted) != len({d.lower()[:3] for d in days}):
+    given = {weekday_name(d) for d in days}
+    wanted = [d for d in WEEKDAYS if d in given]
+    if not wanted:
         raise ValueError(f"Days must be among {', '.join(WEEKDAYS)}.")
     clean = sorted({_clock(t) for t in times})
     if not clean:
@@ -281,6 +288,15 @@ def calendar_schedule(days: list[str], times: list[str], *, timezone_name: str =
         kind="calendar", days=tuple(wanted), times=tuple(clean), timezone_name=timezone_name,
         display=_display_calendar(wanted, clean, timezone_name),
     )
+
+
+def weekday_name(day) -> str:
+    """``mon``..``sun`` from a stored day: a name, or a number 0-6 from Monday."""
+    if isinstance(day, int) and not isinstance(day, bool) and 0 <= day < 7:
+        return WEEKDAYS[day]
+    if isinstance(day, str) and day.strip().lower()[:3] in WEEKDAYS:
+        return day.strip().lower()[:3]
+    raise ValueError(f"Not a weekday: {day!r}. Days must be among {', '.join(WEEKDAYS)}.")
 
 
 def once_schedule(at: datetime, *, timezone_name: str = "UTC") -> ParsedSchedule:
@@ -327,7 +343,20 @@ def schedule_from_fields(
 
 def schedule_from_row(row) -> ParsedSchedule:
     """The cadence of a ``scheduled_sessions`` row, from its ``kind`` and
-    ``cadence`` columns, or from ``schedule`` for a row made before them."""
+    ``cadence`` columns, or from ``schedule`` for a row made before them.
+
+    Rows are written by the control plane too, so any malformed one is a
+    ValueError: its callers mark the schedule failed instead of crashing.
+    """
+    try:
+        return _schedule_from_row(row)
+    except ValueError:
+        raise
+    except (KeyError, TypeError, AttributeError) as exc:
+        raise ValueError(f"Malformed schedule cadence: {exc}") from exc
+
+
+def _schedule_from_row(row) -> ParsedSchedule:
     tz = getattr(row, "timezone", None) or "UTC"
     kind = getattr(row, "kind", None)
     cadence = getattr(row, "cadence", None) or {}
@@ -384,18 +413,24 @@ def _next_cron(cron: str, timezone_name: str, after: datetime) -> datetime:
 
     Iterated on naive local time so a wall time repeated by the autumn
     change fires once (its first occurrence), and one skipped by the
-    spring change fires at the instant it maps to.  A few candidates are
-    resolved and the earliest kept: across a spring gap the mapped
-    instants are not in wall-clock order.
+    spring change fires at the instant it maps to.  Across a spring gap the
+    mapped instants are not in wall-clock order, so the search goes on a
+    few wall hours past the first match and keeps the earliest; inside a
+    repeated hour the first matches map to instants already past, so it
+    walks on until one is after *after*.
     """
     tz = resolve_timezone(timezone_name)
     local = after.astimezone(tz).replace(tzinfo=None)
     it = croniter(cron, local)
     best: datetime | None = None
-    for _ in range(4):
-        candidate = it.get_next(datetime).replace(tzinfo=tz).astimezone(timezone.utc)
+    best_wall: datetime | None = None
+    for _ in range(2000):
+        wall = it.get_next(datetime)
+        if best_wall is not None and wall > best_wall + timedelta(hours=3):
+            break
+        candidate = wall.replace(tzinfo=tz).astimezone(timezone.utc)
         if candidate > after and (best is None or candidate < best):
-            best = candidate
+            best, best_wall = candidate, wall
     if best is None:
         raise ValueError(f"Schedule {cron!r} has no next run.")
     return best

@@ -460,15 +460,17 @@ async def _confirmation_refusal(
 ) -> str | None:
     """Why the schedule is not made or changed yet, or None to go ahead.
 
-    Where the model can ask, the user must have approved it this turn:
-    picked the first choice of the question asked last.  An operator's own
+    Where the model can ask, the user must have approved exactly this:
+    the first call returns what it *would* do, the model asks, and the
+    user's last word this turn picks the approving (first) choice of that
+    question.  The yes is spent by the call it approved.  An operator's own
     chat with no question tool goes ahead; any other chat without one
     cannot confirm, and is refused.
     """
     offered = kwargs.get("offered_tools")
     can_ask = offered is None or "ask_user_question" in offered
     if can_ask:
-        if await _approved_this_turn(context.session_store, context.session_id):
+        if await _approved(context.session_store, context.session_id, would):
             return None
         return _json({
             "success": False,
@@ -489,36 +491,69 @@ async def _confirmation_refusal(
     })
 
 
-async def _approved_this_turn(session_store: Any, session_id: UUID) -> bool:
-    """Whether the user's last word this turn is an answer that picked the
-    first choice of the first question asked: the approving one."""
+#: What may differ between the preview and the call it approved: an
+#: interval's next run counts from the moment of each call.
+_PREVIEW_DRIFT = frozenset({"next_run_at"})
+
+
+async def _approved(session_store: Any, session_id: UUID, would: dict[str, Any]) -> bool:
+    """Whether the user's last word this turn picked the approving choice
+    of a question asked about *would*, and no change has spent that yes."""
     said = await session_store.get_events(
         session_id,
         types=[EventType.USER_MESSAGE, EventType.ASK_USER_QUESTION_RESPONSE],
     )
     if not said or said[-1].type != EventType.ASK_USER_QUESTION_RESPONSE.value:
         return False
-    answer = said[-1].data or {}
-    responses = answer.get("responses") or []
+    answer = said[-1]
+    turn_start = max((e.id for e in said if e.type == EventType.USER_MESSAGE.value), default=0)
+    responses = (answer.data or {}).get("responses") or []
     if not responses or responses[0].get("is_other"):
         return False
     calls = await session_store.get_events(session_id, types=[EventType.TOOL_CALL])
-    for call in reversed(calls):
-        data = call.data or {}
-        if data.get("tool_call_id") != answer.get("tool_call_id"):
+    question = next((
+        call for call in reversed(calls)
+        if (call.data or {}).get("tool_call_id") == (answer.data or {}).get("tool_call_id")
+    ), None)
+    if question is None or not _picked_first(question.data or {}, responses[0]):
+        return False
+
+    preview: dict[str, Any] | None = None
+    for result in await session_store.get_events(session_id, types=[EventType.TOOL_RESULT]):
+        data = result.data or {}
+        if data.get("name") not in ("cron_create", "cron_update"):
             continue
-        arguments = data.get("arguments")
-        if isinstance(arguments, str):
-            try:
-                arguments = json.loads(arguments)
-            except ValueError:
-                return False
-        questions = (arguments or {}).get("questions") or []
-        choices = (questions[0].get("choices") or []) if questions else []
-        if not choices:
+        payload = _payload(data.get("content"))
+        if payload.get("success") is True and result.id > answer.id:
             return False
-        return str(responses[0].get("answer") or "").strip() == str(choices[0].get("label") or "").strip()
-    return False
+        if turn_start < result.id < question.id and isinstance(payload.get("would"), dict):
+            preview = payload["would"]
+    return preview is not None and _without_drift(preview) == _without_drift(_payload(_json(would)))
+
+
+def _picked_first(question_call: dict[str, Any], response: dict[str, Any]) -> bool:
+    arguments = question_call.get("arguments")
+    if isinstance(arguments, str):
+        arguments = _payload(arguments)
+    questions = (arguments or {}).get("questions") or []
+    choices = (questions[0].get("choices") or []) if questions else []
+    if not choices:
+        return False
+    return str(response.get("answer") or "").strip() == str(choices[0].get("label") or "").strip()
+
+
+def _payload(content: Any) -> dict[str, Any]:
+    if isinstance(content, dict):
+        return content
+    try:
+        value = json.loads(content or "")
+    except (TypeError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _without_drift(would: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in would.items() if k not in _PREVIEW_DRIFT}
 
 
 def _schedule_payload(row: Any, *, full: bool = False) -> dict[str, Any]:
