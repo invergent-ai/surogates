@@ -207,7 +207,6 @@ async def recover_stalled_loops(
     session_store: Any | None = None,
     stale_seconds: int = DYNAMIC_LOOP_STALE_RUN_SECONDS,
     limit: int = 100,
-    session_store: Any = None,
 ) -> None:
     """Sweep dynamic loops whose run stalled, across all tenants, and reap
     schedules that have passed their ``expires_at``.
