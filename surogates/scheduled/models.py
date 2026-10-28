@@ -46,5 +46,6 @@ class ScheduledSession(BaseModel):
     ended_by: str | None = None
     consecutive_failures: int = 0
     max_run_seconds: int | None = None
+    ended_announced_at: datetime | None = None
     created_at: datetime
     updated_at: datetime

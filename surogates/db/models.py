@@ -855,6 +855,8 @@ class ScheduledSession(Base):
     ended_by: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     consecutive_failures: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     max_run_seconds: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # When its creating chat was told it ended on its own (expired, limit, failed).
+    ended_announced_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

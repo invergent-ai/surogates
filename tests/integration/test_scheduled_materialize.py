@@ -748,3 +748,85 @@ async def test_a_run_open_past_its_time_limit_is_failed_and_one_within_it_is_not
         if e.type == EventType.SESSION_FAIL.value
     ]
     assert fails and fails[-1].data["reason"] == "run_time_limit"
+
+
+async def test_a_schedule_that_ends_on_its_own_tells_its_chat_once(session_factory, redis_client):
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    scheduled_store = ScheduledSessionStore(session_factory)
+    session_store = SessionStore(session_factory, redis=redis_client)
+    agent = _agent()
+    chat = await session_store.create_session(
+        user_id=user_id, org_id=org_id, agent_id=agent, channel="web",
+        config={
+            "storage_bucket": "agent-a-bucket", "storage_key_prefix": "",
+            "workspace_path": "/workspace/agent-a-bucket/sessions/C",
+        },
+    )
+    now = datetime.now(timezone.utc)
+    limited = await scheduled_store.create(
+        org_id=org_id, user_id=user_id, agent_id=agent, name="Twice", prompt="post",
+        schedule=parse_schedule("10m"), source="tool", created_from_session_id=chat.id,
+        repeat_limit=1, next_run_at=now - timedelta(minutes=1),
+    )
+    expired = await scheduled_store.create(
+        org_id=org_id, user_id=user_id, agent_id=agent, name="Week", prompt="post",
+        schedule=parse_schedule("10m"), source="loop", created_from_session_id=chat.id,
+        next_run_at=now + timedelta(hours=1), expires_at=now - timedelta(minutes=1),
+    )
+    cancelled = await scheduled_store.create(
+        org_id=org_id, user_id=user_id, agent_id=agent, name="Mine", prompt="post",
+        schedule=parse_schedule("10m"), source="tool", created_from_session_id=chat.id,
+    )
+    await scheduled_store.cancel(
+        org_id=org_id, user_id=user_id, agent_id=agent, schedule_id=cancelled.id, ended_by="user:x",
+    )
+    deps = _deps(session_factory, redis_client, scheduled_store, session_store)
+    [claimed] = await scheduled_store.claim_due(agent_id=agent, worker_id="w1", limit=5)
+    await materialize_scheduled_run(claimed, **deps)
+
+    for _ in range(2):
+        await recover_stalled_loops(
+            scheduled_store=scheduled_store, redis=redis_client, session_store=session_store, limit=1000,
+        )
+
+    notices = {
+        e.data["scheduled_session_id"]: e.data
+        for e in await session_store.get_events(chat.id)
+        if e.type == EventType.LOOP_RESULT.value
+    }
+    assert set(notices) == {str(limited.id), str(expired.id)}
+    assert notices[str(limited.id)]["ended_reason"] == "limit"
+    assert "ran all 1 times" in notices[str(limited.id)]["content"]
+    assert notices[str(expired.id)]["outcome"] == "schedule_ended"
+    assert "reached its end date" in notices[str(expired.id)]["content"]
+    assert len([
+        e for e in await session_store.get_events(chat.id) if e.type == EventType.LOOP_RESULT.value
+    ]) == 2
+
+
+async def test_a_failed_schedule_says_why_it_stopped(session_factory, redis_client):
+    from surogates.scheduled.materialize import ending_notice
+
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    scheduled_store = ScheduledSessionStore(session_factory)
+    agent = _agent()
+    schedule = await scheduled_store.create(
+        org_id=org_id, user_id=user_id, agent_id=agent, name="Digest", prompt="post",
+        schedule=parse_schedule("10m"), source="tool", created_from_session_id=None,
+    )
+    async with session_factory() as db:
+        await db.execute(
+            text(
+                "UPDATE scheduled_sessions SET status = 'failed', ended_reason = 'failed', "
+                "last_error = 'login rejected', run_count = 3 WHERE id = :id"
+            ),
+            {"id": schedule.id},
+        )
+        await db.commit()
+    [claimed] = [s for s in await scheduled_store.claim_unannounced_endings(limit=1000) if s.id == schedule.id]
+    assert ending_notice(claimed) == (
+        'The schedule "Digest" has stopped: its runs kept failing. The last error: login rejected. '
+        "It ran 3 times. Fix the cause, then make it again."
+    )

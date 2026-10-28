@@ -793,6 +793,30 @@ class ScheduledSessionStore:
             await db.commit()
             return [ScheduledSession.model_validate(row) for row in planned]
 
+    async def claim_unannounced_endings(self, *, limit: int = 100) -> list[ScheduledSession]:
+        """Schedules that ended in the last day with no person ending them
+        (expired, ran out of runs, failed) and whose chat was not told yet;
+        each is returned once, for the caller to tell it."""
+        now = _utcnow()
+        async with self._sf() as db:
+            rows = (await db.execute(
+                select(ScheduledSessionRow)
+                .where(
+                    ScheduledSessionRow.status.in_(("completed", "failed")),
+                    ScheduledSessionRow.ended_reason.in_(("expired", "limit", "failed")),
+                    ScheduledSessionRow.ended_announced_at.is_(None),
+                    ScheduledSessionRow.updated_at > now - timedelta(days=1),
+                )
+                .order_by(ScheduledSessionRow.updated_at)
+                .limit(limit)
+                .with_for_update(skip_locked=True)
+            )).scalars().all()
+            for row in rows:
+                row.ended_announced_at = now
+            ended = [ScheduledSession.model_validate(row) for row in rows]
+            await db.commit()
+            return ended
+
     async def end_runs_of_cancelled(self, *, limit: int = 100) -> list[UUID]:
         """Runs still going of schedules cancelled in the last day: their
         unanswered questions are retired here, and the caller stops them.
