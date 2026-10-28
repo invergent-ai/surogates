@@ -650,7 +650,8 @@ ALTER TABLE scheduled_sessions
     ADD COLUMN IF NOT EXISTS paused_at            timestamptz,
     ADD COLUMN IF NOT EXISTS ended_reason         text,
     ADD COLUMN IF NOT EXISTS ended_by             text,
-    ADD COLUMN IF NOT EXISTS consecutive_failures integer NOT NULL DEFAULT 0;
+    ADD COLUMN IF NOT EXISTS consecutive_failures integer NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS ended_announced_at   timestamptz;
 
 -- The ticker plans active rows with no next run (made or resumed by the
 -- control plane); dynamic loops waiting on their run look the same, and
@@ -855,8 +856,10 @@ WHERE d.type = 'expert.delegation';
 -- format training data exporters and chat-log renderers need.
 --
 -- Includes every event type that contributes to the conversation: user
--- messages, LLM responses, tool calls/results, expert delegation/outcome
--- and user feedback (both on expert output and on regular LLM turns).
+-- messages, LLM responses, tool calls/results, expert delegation/outcome,
+-- user feedback (both on expert output and on regular LLM turns), and what
+-- the chat shows of its routines and helpers (loop results, a browser login
+-- it could not use, a helper's progress).
 -- Context-engineering events (context.compact, harness.wake, etc.) and
 -- policy decision events are intentionally excluded; they have their own
 -- dedicated views.
@@ -887,7 +890,9 @@ WHERE e.type IN (
     'expert.endorse',
     'expert.override',
     'user.feedback',
-    'loop.result'
+    'loop.result',
+    'browser.profile_unavailable',
+    'delegation.progress'
 );
 
 

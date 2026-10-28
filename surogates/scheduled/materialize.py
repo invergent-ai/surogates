@@ -200,6 +200,52 @@ def _still_going(run: Any, schedule: Any) -> bool:
     return datetime.now(timezone.utc) - started < limit
 
 
+def ending_notice(schedule: Any) -> str:
+    """What the chat that made *schedule* is told when it ended on its own."""
+    name = schedule.name or "this schedule"
+    runs = schedule.run_count or 0
+    ran = f"It ran {runs} time{'' if runs == 1 else 's'}."
+    if schedule.ended_reason == "expired":
+        return (
+            f"The schedule \"{name}\" has ended: it reached its end date "
+            f"({local_iso(schedule.expires_at, schedule.timezone or 'UTC')}). {ran} "
+            "Make a new one to keep it going."
+        )
+    if schedule.ended_reason == "limit":
+        return (
+            f"The schedule \"{name}\" has ended: it ran all {schedule.repeat_limit} "
+            "times it was set to run."
+        )
+    reason = f" The last error: {schedule.last_error.rstrip('.')}." if schedule.last_error else ""
+    return (
+        f"The schedule \"{name}\" has stopped: its runs kept failing.{reason} {ran} "
+        "Fix the cause, then make it again."
+    )
+
+
+async def _announce_ending(session_store: Any, schedule: Any) -> None:
+    if schedule.created_from_session_id is None:
+        return
+    try:
+        await session_store.emit_event(
+            schedule.created_from_session_id,
+            EventType.LOOP_RESULT,
+            {
+                "run_session_id": str(schedule.last_session_id or ""),
+                "scheduled_session_id": str(schedule.id),
+                "content": ending_notice(schedule),
+                "outcome": "schedule_ended",
+                "ended_reason": schedule.ended_reason,
+                "run_completed_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+    except Exception:
+        logger.warning(
+            "Failed to tell session %s that schedule %s ended",
+            schedule.created_from_session_id, schedule.id, exc_info=True,
+        )
+
+
 async def recover_stalled_loops(
     *,
     scheduled_store: Any,
@@ -252,6 +298,12 @@ async def recover_stalled_loops(
             "Expired schedule %s (past expires_at) → completed",
             schedule.id,
         )
+
+    # Every way a schedule ends on its own is covered here, the control
+    # plane's writes included, a tick later.
+    if session_store is not None:
+        for schedule in await scheduled_store.claim_unannounced_endings(limit=limit):
+            await _announce_ending(session_store, schedule)
 
     retryable = await scheduled_store.find_retryable_stalled_dynamic_loop_runs(
         stale_seconds=stale_seconds,

@@ -84,10 +84,12 @@ _CHANNEL_TOOLS: frozenset[str] = frozenset({
     "followup_status", "followup_contacts", "followup_withdraw_consent",
 })
 _CRON_READ_TOOLS: frozenset[str] = frozenset({"cron_list", "cron_get"})
-#: What makes or changes a schedule; also what a scheduled run may not call.
+#: What makes or changes a schedule.
 CRON_WRITE_TOOLS: frozenset[str] = frozenset({
     "cron_create", "cron_update", "cron_pause", "cron_resume", "cron_run_now", "cron_delete",
 })
+#: What a scheduled run may do to its own schedule, and only to that one.
+CRON_OWN_SCHEDULE_TOOLS: frozenset[str] = frozenset({"cron_update", "cron_pause", "cron_delete"})
 _WHITEBOARD_TOOLS: frozenset[str] = frozenset({
     "whiteboard_draw",
 })

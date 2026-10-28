@@ -686,3 +686,36 @@ def test_a_schedule_captures_only_the_context_fields():
         {**_workspace_config(), **_STUDIO_CONTEXT, "allowed_tools": ["x"]}, "studio",
     )
     assert captured == {**_STUDIO_CONTEXT, "origin_channel": "studio"}
+
+
+@pytest.mark.asyncio
+async def test_a_schedule_made_by_a_sub_agent_runs_as_that_sub_agent():
+    from surogates.session.execution_context import capture_schedule_context
+    from surogates.tools.owner_scope import owner_scope_config_ok
+
+    made_in = {**_workspace_config(), **_STUDIO_CONTEXT, "agent_type": "writer"}
+    captured = capture_schedule_context(made_in, "studio")
+    assert captured["agent_type"] == "writer"
+    parent = _make_session(channel="studio", config={**_workspace_config(), **_STUDIO_CONTEXT})
+    store = SimpleNamespace(create_session=AsyncMock(return_value=SimpleNamespace(id=uuid4())))
+
+    await create_child_session(store=store, parent=parent, channel="scheduled", context=captured)
+
+    cfg = store.create_session.await_args.kwargs["config"]
+    assert cfg["agent_type"] == "writer"
+    # A sub-agent's run gets no operator-only surfaces, as the sub-agent had none.
+    assert not owner_scope_config_ok(uuid4(), cfg)
+
+
+@pytest.mark.asyncio
+async def test_a_helper_names_its_own_sub_agent_and_never_inherits_its_parents():
+    parent = _make_session(
+        channel="studio", config={**_workspace_config(), **_STUDIO_CONTEXT, "agent_type": "writer"},
+    )
+    store = SimpleNamespace(create_session=AsyncMock(return_value=SimpleNamespace(id=uuid4())))
+
+    await create_child_session(store=store, parent=parent, channel="delegation", config={"agent_type": "reviewer"})
+    assert store.create_session.await_args.kwargs["config"]["agent_type"] == "reviewer"
+
+    await create_child_session(store=store, parent=parent, channel="delegation")
+    assert "agent_type" not in store.create_session.await_args.kwargs["config"]
