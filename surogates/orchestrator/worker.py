@@ -761,6 +761,12 @@ async def _resolve_mcp_entitlement_scope(
         return None
 
 
+def _offered_by_policy(tools: set[str], gate: Any) -> set[str]:
+    """*tools* less those the policy refuses by name: the harness leaves them
+    out of the schemas, so the prompt must not name them either."""
+    return {name for name in tools if gate.offers(name)}
+
+
 def _entitlement_tool_exclusions(
     *,
     session_config: dict | None,
@@ -2129,6 +2135,7 @@ async def run_worker(settings: Settings) -> None:
         )
         if entitlement_excluded_tools:
             effective_tools.difference_update(entitlement_excluded_tools)
+        effective_tools = _offered_by_policy(effective_tools, governance_gate)
 
         # ``skill_step`` is bookkeeping for procedure skills: only offer it
         # (prompt surface here; schema surface is the harness's
