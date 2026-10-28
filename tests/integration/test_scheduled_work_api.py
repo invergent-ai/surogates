@@ -241,8 +241,9 @@ async def test_scheduled_work_can_be_read_changed_paused_and_resumed(
 
     changed = await client.patch(
         base, headers=auth,
-        json={"prompt": "check the price twice", "days": ["mon", "fri"], "times": ["09:00"],
-              "timezone": "Europe/Bucharest"},
+        json={"prompt": "check the price twice", "cadence": {
+            "kind": "calendar", "days": ["mon", "fri"], "times": ["09:00"], "tz": "Europe/Bucharest",
+        }},
     )
     assert changed.status_code == 200, changed.text
     body = changed.json()
@@ -250,8 +251,8 @@ async def test_scheduled_work_can_be_read_changed_paused_and_resumed(
     assert body["kind"] == "calendar"
     assert body["timezone"] == "Europe/Bucharest"
 
-    assert (await client.patch(base, headers=auth, json={"interval": "1h", "cron": "0 9 * * *"})).status_code == 422
-    assert (await client.patch(base, headers=auth, json={"interval": "30s"})).status_code == 422
+    assert (await client.patch(base, headers=auth, json={"cadence": {"kind": "cron", "cron": "daily"}})).status_code == 422
+    assert (await client.patch(base, headers=auth, json={"cadence": {"kind": "interval", "seconds": 30}})).status_code == 422
 
     assert (await client.post(f"{base}/pause", headers=auth)).status_code == 200
     assert (await client.post(f"{base}/pause", headers=auth)).status_code == 409
