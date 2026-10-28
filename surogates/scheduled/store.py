@@ -4,9 +4,11 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import func, or_, select, text, update
+from sqlalchemy import exists, func, or_, select, text, update
+from sqlalchemy.orm import aliased
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from surogates.channels.memory_boundary import CASE_BOUNDARY_PREFIX
 from surogates.db.models import Event as EventRow
 from surogates.db.models import InboxItem
 from surogates.db.models import Session as SessionRow
@@ -187,18 +189,22 @@ class ScheduledSessionStore:
         agent_id: str,
         user_id: UUID | None = None,
         service_account_id: UUID | None = None,
+        hide_cases: bool = False,
+        case_session_id: UUID | None = None,
     ) -> ScheduledSession | None:
-        """*schedule_id* when the principal may see it (:func:`_scope`), else None."""
+        """*schedule_id* when the principal may see it (:func:`_scope`), else
+        None.  *hide_cases*: as :func:`_not_a_case_schedule`."""
         _validate_principal(user_id, service_account_id, caller="ScheduledSessionStore.get_for")
+        stmt = select(ScheduledSessionRow).where(
+            ScheduledSessionRow.id == schedule_id,
+            ScheduledSessionRow.org_id == org_id,
+            ScheduledSessionRow.agent_id == agent_id,
+            _scope(user_id, service_account_id),
+        )
+        if hide_cases:
+            stmt = stmt.where(_not_a_case_schedule(case_session_id))
         async with self._sf() as db:
-            row = (await db.execute(
-                select(ScheduledSessionRow).where(
-                    ScheduledSessionRow.id == schedule_id,
-                    ScheduledSessionRow.org_id == org_id,
-                    ScheduledSessionRow.agent_id == agent_id,
-                    _scope(user_id, service_account_id),
-                )
-            )).scalar_one_or_none()
+            row = (await db.execute(stmt)).scalar_one_or_none()
         return None if row is None else ScheduledSession.model_validate(row)
 
     async def list_for_user(
@@ -213,8 +219,11 @@ class ScheduledSessionStore:
         limit: int | None = None,
         offset: int = 0,
         created_from_session_id: UUID | None = None,
+        hide_cases: bool = False,
+        case_session_id: UUID | None = None,
     ) -> list[ScheduledSession]:
         """The schedules the principal may see (:func:`_scope`), newest first.
+        *hide_cases*: as :func:`_not_a_case_schedule`.
 
         *status* is one status, a comma list, or ``all``; without it only
         active ones, or every one with *include_inactive*.
@@ -240,6 +249,8 @@ class ScheduledSessionStore:
             stmt = stmt.where(ScheduledSessionRow.status == "active")
         if created_from_session_id is not None:
             stmt = stmt.where(ScheduledSessionRow.created_from_session_id == created_from_session_id)
+        if hide_cases:
+            stmt = stmt.where(_not_a_case_schedule(case_session_id))
         if offset > 0:
             stmt = stmt.offset(offset)
         if limit is not None:
@@ -1122,6 +1133,21 @@ def _planned_run(schedule: ScheduledSession, now: datetime) -> datetime:
     if cadence.is_dynamic:
         return now
     return cadence.next_after(now) or now
+
+
+def _not_a_case_schedule(case_session_id: UUID | None):
+    """Not a schedule a Keel case's session made or ran last: case data is
+    Keel's.  The case session's own token (*case_session_id*) still sees
+    the ones it is part of."""
+    case = aliased(SessionRow)
+    is_case = case.config["memory_boundary"].astext.startswith(CASE_BOUNDARY_PREFIX, autoescape=True)
+    if case_session_id is not None:
+        is_case = is_case & (case.id != case_session_id)
+    return ~exists().where(
+        or_(case.id == ScheduledSessionRow.created_from_session_id,
+            case.id == ScheduledSessionRow.last_session_id),
+        is_case,
+    )
 
 
 def _scope(user_id: UUID | None, service_account_id: UUID | None):

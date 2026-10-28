@@ -332,6 +332,7 @@ async def test_operator_creates_with_context_and_the_agents_login(app, client: A
     item = made.json()
     assert (item["source"], item["owner_service_account_id"]) == ("studio", str(sa_id))
     assert item["owner_service_account_name"].startswith("ops-chat-")
+    assert item["browser_profile_id"] == str(agents_login.id)
     assert item["runs_logged_in_as"] == {
         "profile_id": str(agents_login.id), "name": "LinkedIn", "owner": "agent", "missing": True,
     }
@@ -370,3 +371,44 @@ async def test_cancel_stops_the_running_run_at_once(client: AsyncClient, session
     assert (await client.delete(f"/v1/scheduled-work/{schedule.id}?ended_by=ops_user:ana", headers=auth)).status_code == 204
     assert (await store.get(schedule.id)).ended_by == f"user:{user_id}"
     assert (await session_store.get_session(run.id)).status == "paused"
+
+
+async def test_a_keel_cases_schedules_are_hidden_from_all_but_its_own_session(
+    client: AsyncClient, session_factory, session_store,
+):
+    from surogates.tenant.auth.jwt import create_service_account_session_token
+    from surogates.tenant.auth.service_account import ServiceAccountStore
+
+    org_id = await create_org(session_factory)
+    _, operator = await _ops_chat(session_factory, org_id)
+    keel = await ServiceAccountStore(session_factory).create(org_id=org_id, name=f"keel-{uuid.uuid4().hex[:6]}")
+    case_session = await session_store.create_session(
+        user_id=None, service_account_id=keel.id, org_id=org_id, agent_id=_AGENT_ID,
+        config={"memory_boundary": "case:42"},
+    )
+    own = {"Authorization": "Bearer " + create_service_account_session_token(org_id, keel.id, case_session.id)}
+    store = ScheduledSessionStore(session_factory)
+    case_schedule = await store.create_loop(
+        org_id=org_id, service_account_id=keel.id, agent_id=_AGENT_ID, prompt="chase the documents",
+        schedule=parse_schedule("1h"), created_from_session_id=case_session.id,
+    )
+    plain = await store.create_loop(
+        org_id=org_id, service_account_id=keel.id, agent_id=_AGENT_ID, prompt="weekly digest",
+        schedule=parse_schedule("1h"), created_from_session_id=None,
+    )
+
+    listed = await client.get("/v1/scheduled-work?status=all", headers=operator)
+    assert {i["id"] for i in listed.json()["items"]} == {str(plain.id)}
+    base = f"/v1/scheduled-work/{case_schedule.id}"
+    for method, path, body in [
+        ("GET", base, None), ("GET", f"{base}/runs", None), ("PATCH", base, {"prompt": "x"}),
+        ("POST", f"{base}/pause", None), ("POST", f"{base}/resume", None),
+        ("POST", f"{base}/run-now", None), ("DELETE", base, None),
+    ]:
+        answer = await client.request(method, path, headers=operator, json=body)
+        assert answer.status_code == 404, (method, path, answer.text)
+    assert (await store.get(case_schedule.id)).status == "active"
+
+    assert (await client.get(base, headers=own)).status_code == 200
+    mine = await client.get("/v1/scheduled-work", headers=own)
+    assert str(case_schedule.id) in {i["id"] for i in mine.json()["items"]}

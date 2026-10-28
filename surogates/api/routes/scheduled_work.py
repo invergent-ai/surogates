@@ -93,6 +93,7 @@ class ScheduledWorkItem(BaseModel):
     owner_service_account_id: UUID | None = None
     owner_user_name: str | None = None
     owner_service_account_name: str | None = None
+    browser_profile_id: UUID | None = None
     runs_logged_in_as: RunsLoggedInAs | None = None
 
 
@@ -166,6 +167,24 @@ def _scheduled_store(request: Request) -> ScheduledSessionStore:
             detail="Scheduled work store is not available.",
         )
     return ScheduledSessionStore(session_factory)
+
+
+def _visible_to(tenant: TenantContext) -> dict[str, Any]:
+    """The caller, for a read: its principal, and a Keel case's schedules
+    hidden from all but that case session's own token."""
+    return {**_principal(tenant), "hide_cases": True,
+            "case_session_id": getattr(tenant, "session_scope_id", None)}
+
+
+async def _visible(
+    request: Request, tenant: TenantContext, agent_id: str, schedule_id: UUID,
+) -> ScheduledSession:
+    row = await _scheduled_store(request).get_for(
+        schedule_id, org_id=tenant.org_id, agent_id=agent_id, **_visible_to(tenant),
+    )
+    if row is None:
+        raise _not_found(schedule_id)
+    return row
 
 
 def _principal(tenant: TenantContext) -> dict[str, UUID | None]:
@@ -269,6 +288,7 @@ def _item(row: ScheduledSession, login: RunsLoggedInAs | None) -> ScheduledWorkI
         next_fires=fires,
         owner_user_id=row.user_id,
         owner_service_account_id=row.service_account_id,
+        browser_profile_id=_bound_profile(row),
         runs_logged_in_as=login,
     )
 
@@ -331,7 +351,7 @@ async def list_scheduled_work(
 ) -> ScheduledWorkListResponse:
     rows = await _scheduled_store(request).list_for_user(
         org_id=tenant.org_id,
-        **_principal(tenant),
+        **_visible_to(tenant),
         agent_id=agent_runtime.agent_id,
         status="active,paused" if status_filter == "live" else status_filter,
         limit=limit,
@@ -415,6 +435,7 @@ async def run_scheduled_work_now(
     tenant: TenantContext = Depends(get_current_tenant),
     agent_runtime: AgentRuntimeContext = Depends(agent_runtime_context_dep),
 ) -> RunScheduledWorkNowResponse:
+    await _visible(request, tenant, agent_runtime.agent_id, schedule_id)
     queued = await _scheduled_store(request).run_now(
         org_id=tenant.org_id,
         **_principal(tenant),
@@ -433,12 +454,7 @@ async def get_scheduled_work(
     tenant: TenantContext = Depends(get_current_tenant),
     agent_runtime: AgentRuntimeContext = Depends(agent_runtime_context_dep),
 ) -> ScheduledWorkItem:
-    row = await _scheduled_store(request).get_for(
-        schedule_id, org_id=tenant.org_id, agent_id=agent_runtime.agent_id, **_principal(tenant),
-    )
-    if row is None:
-        raise _not_found(schedule_id)
-    return await _one(request, row)
+    return await _one(request, await _visible(request, tenant, agent_runtime.agent_id, schedule_id))
 
 
 @router.get("/scheduled-work/{schedule_id}/runs", response_model=ScheduledRunsResponse)
@@ -449,13 +465,8 @@ async def list_scheduled_work_runs(
     agent_runtime: AgentRuntimeContext = Depends(agent_runtime_context_dep),
     limit: int = Query(20, ge=1, le=100),
 ) -> ScheduledRunsResponse:
-    store = _scheduled_store(request)
-    row = await store.get_for(
-        schedule_id, org_id=tenant.org_id, agent_id=agent_runtime.agent_id, **_principal(tenant),
-    )
-    if row is None:
-        raise _not_found(schedule_id)
-    runs = await store.list_runs(
+    await _visible(request, tenant, agent_runtime.agent_id, schedule_id)
+    runs = await _scheduled_store(request).list_runs(
         schedule_id, org_id=tenant.org_id, agent_id=agent_runtime.agent_id, limit=limit,
     )
     return ScheduledRunsResponse(items=[ScheduledRun(**run) for run in runs])
@@ -471,10 +482,8 @@ async def update_scheduled_work(
 ) -> ScheduledWorkItem:
     store = _scheduled_store(request)
     principal = _principal(tenant)
-    current = await store.get_for(
-        schedule_id, org_id=tenant.org_id, agent_id=agent_runtime.agent_id, **principal,
-    )
-    if current is None or current.status not in ("active", "paused"):
+    current = await _visible(request, tenant, agent_runtime.agent_id, schedule_id)
+    if current.status not in ("active", "paused"):
         raise _not_found(schedule_id)
     if body.max_run_seconds not in (None, 0) and not (
         MIN_RUN_SECONDS <= body.max_run_seconds <= MAX_RUN_SECONDS
@@ -547,16 +556,12 @@ async def _transition(
     request: Request, tenant: TenantContext, agent_runtime: AgentRuntimeContext,
     schedule_id: UUID, action: str,
 ) -> ScheduledWorkItem:
-    store = _scheduled_store(request)
-    principal = _principal(tenant)
-    changed = await getattr(store, action)(
-        org_id=tenant.org_id, agent_id=agent_runtime.agent_id, schedule_id=schedule_id, **principal,
+    await _visible(request, tenant, agent_runtime.agent_id, schedule_id)
+    changed = await getattr(_scheduled_store(request), action)(
+        org_id=tenant.org_id, agent_id=agent_runtime.agent_id, schedule_id=schedule_id,
+        **_principal(tenant),
     )
-    row = await store.get_for(
-        schedule_id, org_id=tenant.org_id, agent_id=agent_runtime.agent_id, **principal,
-    )
-    if row is None:
-        raise _not_found(schedule_id)
+    row = await _visible(request, tenant, agent_runtime.agent_id, schedule_id)
     if not changed:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -578,13 +583,9 @@ async def cancel_scheduled_work(
 ) -> Response:
     """Cancel: the row is kept, with who cancelled it, and its runs still
     going are stopped now.  Only an operator's account names the Studio user."""
+    await _visible(request, tenant, agent_runtime.agent_id, schedule_id)
     store = _scheduled_store(request)
     principal = _principal(tenant)
-    row = await store.get_for(
-        schedule_id, org_id=tenant.org_id, agent_id=agent_runtime.agent_id, **principal,
-    )
-    if row is None:
-        raise _not_found(schedule_id)
     if ended_by is not None and not await _is_operator(request, tenant):
         ended_by = None
     if await store.cancel(
