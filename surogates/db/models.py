@@ -847,8 +847,9 @@ class ScheduledSession(Base):
     # its parameters; NULL on rows made before them, read from ``schedule``.
     kind: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     cadence: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONB, nullable=True)
-    # What a run acts with, captured from the creating session when made.
-    context: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONB, nullable=True)
+    # Who a run acts for and what it logs in as, captured at creation
+    # (surogates.session.execution_context).
+    context: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
     paused_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     ended_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     ended_by: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
@@ -1725,6 +1726,11 @@ class BrowserProfile(Base):
     )
     cookie_domains: Mapped[list[Any]] = mapped_column(
         JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
+    # An agent-owned profile is used, without being bound, by every session
+    # of the agent on these channels: the operator's grant of its login.
+    use_in_channels: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, server_default=text("'{}'::text[]")
     )
     created_at: Mapped[datetime] = mapped_column(
         nullable=False, server_default=func.now()

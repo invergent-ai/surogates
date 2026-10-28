@@ -857,6 +857,56 @@ class SessionStore:
             await db.commit()
             return result.rowcount == 1
 
+    async def fail_overdue_scheduled_runs(
+        self, *, default_seconds: int, limit: int = 100,
+    ) -> list[UUID]:
+        """Fail every scheduled run still open past its schedule's time limit.
+
+        A run nobody answers never ends by itself; left open it keeps its
+        browser and its claim on the agent.  The limit is the schedule's
+        ``max_run_seconds``, else *default_seconds*.  Each failed run gets a
+        ``session.fail`` and an interrupt, so a worker still on it stops.
+        """
+        async with self._sf() as db:
+            rows = (await db.execute(
+                text(
+                    """
+                    WITH overdue AS (
+                        SELECT s.id, COALESCE(sch.max_run_seconds, :default_seconds) AS limit_seconds
+                        FROM sessions s
+                        JOIN scheduled_sessions sch
+                          ON sch.id::text = s.config->>'scheduled_session_id'
+                        WHERE s.channel = 'scheduled'
+                          AND s.status IN ('active', 'paused')
+                          AND s.created_at < now() - make_interval(
+                              secs => COALESCE(sch.max_run_seconds, :default_seconds))
+                        LIMIT :limit
+                        FOR UPDATE OF s SKIP LOCKED
+                    )
+                    UPDATE sessions s SET status = 'failed', updated_at = now()
+                    FROM overdue
+                    WHERE s.id = overdue.id
+                    RETURNING s.id, overdue.limit_seconds
+                    """
+                ),
+                {"default_seconds": default_seconds, "limit": limit},
+            )).all()
+            await db.commit()
+        for session_id, limit_seconds in rows:
+            await self.emit_event(
+                session_id,
+                EventType.SESSION_FAIL,
+                {"reason": "run_time_limit", "limit_seconds": int(limit_seconds), "retryable": False},
+            )
+            if self._redis is not None:
+                from surogates.config import INTERRUPT_CHANNEL_PREFIX
+
+                await self._redis.publish(
+                    f"{INTERRUPT_CHANNEL_PREFIX}:{session_id}",
+                    json.dumps({"reason": "run_time_limit"}),
+                )
+        return [session_id for session_id, _ in rows]
+
     async def pause_if_active(self, session_id: UUID, data: dict) -> bool:
         """Pause *session_id* if it is still active, with a ``session.pause``
         whose data is *data*; whether it was.

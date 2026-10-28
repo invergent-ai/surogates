@@ -50,11 +50,16 @@ PROVISION_GRACE_SECONDS = 30.0
 FAILURES_BEFORE_PRUNE = 2
 PROBE_TIMEOUT_SECONDS = 1.5
 PROBE_CONCURRENCY = 50
+# A browser no tool has used for this long is closed: a chat whose person
+# went away, a run that died without ending.  Its saved login comes back on
+# the next provision.
+IDLE_CLOSE_SECONDS = 30 * 60
 
 LOCK_KEY = "surogates:browser:reaper-lock"
 FAILURES_KEY = "surogates:browser:reaper-failures"
 
 EmitEvent = Callable[[str, str, dict], Awaitable[None]]
+CloseBrowser = Callable[[str], Awaitable[None]]
 Probe = Callable[[BrowserEntry], Awaitable[bool]]
 
 
@@ -161,6 +166,31 @@ async def sweep_browser_registry(
     return pruned
 
 
+async def close_idle_browsers(
+    *,
+    registry: Any,
+    close: CloseBrowser,
+    idle_seconds: float = IDLE_CLOSE_SECONDS,
+) -> int:
+    """Close every registered browser idle for *idle_seconds*. Returns how many."""
+    now = datetime.now(timezone.utc)
+    closed = 0
+    for session_id, entry in (await registry.entries()).items():
+        used = entry.last_used_at or entry.provisioned_at
+        if used.tzinfo is None:
+            used = used.replace(tzinfo=timezone.utc)
+        if (now - used).total_seconds() < idle_seconds:
+            continue
+        try:
+            await close(session_id)
+        except Exception:  # noqa: BLE001 - one stuck browser must not keep the rest open
+            logger.warning("Could not close idle browser of session %s", session_id, exc_info=True)
+            continue
+        closed += 1
+        logger.info("Closed browser of session %s: idle since %s", session_id, used.isoformat())
+    return closed
+
+
 async def run_browser_reaper_loop(
     *,
     registry: Any,
@@ -168,6 +198,7 @@ async def run_browser_reaper_loop(
     emit: EmitEvent,
     probe: Probe = tcp_probe,
     interval_seconds: float = DEFAULT_SWEEP_INTERVAL_SECONDS,
+    close: CloseBrowser | None = None,
 ) -> None:
     """Sweep forever, one worker at a time."""
 
@@ -186,6 +217,8 @@ async def run_browser_reaper_loop(
                 await sweep_browser_registry(
                     registry=registry, redis=redis, emit=emit, probe=probe,
                 )
+                if close is not None:
+                    await close_idle_browsers(registry=registry, close=close)
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 - a bad sweep must not end the loop

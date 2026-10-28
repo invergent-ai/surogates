@@ -40,7 +40,7 @@ class ScheduledSession(BaseModel):
     created_from_session_id: UUID | None = None
     kind: str | None = None
     cadence: dict | None = None
-    context: dict | None = None
+    context: dict = Field(default_factory=dict)
     paused_at: datetime | None = None
     ended_reason: str | None = None
     ended_by: str | None = None

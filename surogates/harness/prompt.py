@@ -1257,8 +1257,5 @@ def scheduled_run_block(run: dict) -> str:
         lines.append(f"- The schedule ends at {run['expires_at']}")
     if run.get("last_error"):
         lines.append(f"- Last problem: {run['last_error']}")
-    lines.append(
-        "The schedule already exists: do not make another for the same work. "
-        "Your final answer is what the person who made it reads."
-    )
+    lines.append("The schedule already exists: do not make another for the same work.")
     return "\n".join(lines)

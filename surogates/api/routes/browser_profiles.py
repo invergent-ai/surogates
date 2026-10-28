@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
+from typing import Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 
 from surogates.api.routes.browser import reaches_its_browser
@@ -20,10 +21,13 @@ from surogates.browser.base import BrowserCreditsExhaustedError
 from surogates.browser.client import KernelBrowserClient
 from surogates.browser.profiles import BrowserProfileRow
 from surogates.db.ops_credits import assert_browser_minutes_available
+from surogates.runtime.agent_principal import find_agent_principal
+from surogates.runtime.resolver import resolve_agent_id_soft
 from surogates.session.provisioning import create_agent_session
 from surogates.session.store import SessionNotFoundError
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import TenantContext
+from surogates.tools.owner_scope import is_ops_chat_service_account
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +44,14 @@ class CreateProfileRequest(BaseModel):
 
 
 class RenameProfileRequest(BaseModel):
-    name: str
+    name: str | None = None
+    # Only an agent-owned profile: the channels whose sessions use it unbound.
+    use_in_channels: list[str] | None = Field(default=None, max_length=32)
+
+
+#: ``me``: the caller's own login.  ``agent``: one the agent owns, usable by
+#: every session of the agent; managed only by its operators (through ops).
+Owner = Literal["me", "agent"]
 
 
 class BrowserProfileOut(BaseModel):
@@ -51,9 +62,11 @@ class BrowserProfileOut(BaseModel):
     created_at: str
     last_used_at: str | None
     has_state: bool
+    owner: Owner = "me"
+    use_in_channels: list[str] = []
 
     @classmethod
-    def of(cls, row: BrowserProfileRow) -> "BrowserProfileOut":
+    def of(cls, row: BrowserProfileRow, owner: Owner = "me") -> "BrowserProfileOut":
         return cls(
             id=str(row.id),
             name=row.name,
@@ -64,6 +77,8 @@ class BrowserProfileOut(BaseModel):
                 row.last_used_at.isoformat() if row.last_used_at else None
             ),
             has_state=row.has_state,
+            owner=owner,
+            use_in_channels=row.use_in_channels,
         )
 
 
@@ -78,6 +93,29 @@ def _principal(tenant: TenantContext) -> tuple[UUID | None, UUID | None]:
     )
 
 
+async def _owner_principal(
+    request: Request, tenant: TenantContext, owner: Owner,
+) -> tuple[UUID | None, UUID | None]:
+    """The principal that owns the profiles *owner* names for this caller."""
+    if owner == "me":
+        return _principal(tenant)
+    if not await is_ops_chat_service_account(
+        request.app.state.session_store, tenant.service_account_id,
+    ):
+        raise HTTPException(
+            status_code=403, detail="Only the agent's operators manage its own browser logins.",
+        )
+    agent_id = await resolve_agent_id_soft(request)
+    if not agent_id:
+        raise HTTPException(status_code=400, detail="no agent_id in request")
+    principal = await find_agent_principal(request.app.state.session_factory, tenant.org_id, agent_id)
+    if principal is None:
+        raise HTTPException(
+            status_code=404, detail="This agent has no identity of its own to keep a browser login.",
+        )
+    return None, principal.id
+
+
 def _store(request: Request):
     store = getattr(request.app.state, "browser_profile_store", None)
     if store is None:
@@ -87,13 +125,15 @@ def _store(request: Request):
 
 @router.get("/browser-profiles")
 async def list_profiles(
-    request: Request, tenant: TenantContext = Depends(get_current_tenant)
+    request: Request,
+    tenant: TenantContext = Depends(get_current_tenant),
+    owner: Owner = Query("me"),
 ) -> list[BrowserProfileOut]:
-    user_id, sa_id = _principal(tenant)
+    user_id, sa_id = await _owner_principal(request, tenant, owner)
     rows = await _store(request).list(
         tenant.org_id, user_id=user_id, service_account_id=sa_id
     )
-    return [BrowserProfileOut.of(r) for r in rows]
+    return [BrowserProfileOut.of(r, owner) for r in rows]
 
 
 @router.post("/browser-profiles", status_code=201)
@@ -101,8 +141,9 @@ async def create_profile(
     body: CreateProfileRequest,
     request: Request,
     tenant: TenantContext = Depends(get_current_tenant),
+    owner: Owner = Query("me"),
 ) -> BrowserProfileOut:
-    user_id, sa_id = _principal(tenant)
+    user_id, sa_id = await _owner_principal(request, tenant, owner)
     try:
         row = await _store(request).create(
             tenant.org_id,
@@ -114,27 +155,43 @@ async def create_profile(
         raise HTTPException(
             status_code=409, detail="A profile with that name already exists."
         ) from exc
-    return BrowserProfileOut.of(row)
+    return BrowserProfileOut.of(row, owner)
 
 
 @router.patch("/browser-profiles/{profile_id}")
-async def rename_profile(
+async def update_profile(
     profile_id: UUID,
     body: RenameProfileRequest,
     request: Request,
     tenant: TenantContext = Depends(get_current_tenant),
+    owner: Owner = Query("me"),
 ) -> dict[str, bool]:
-    user_id, sa_id = _principal(tenant)
-    ok = await _store(request).rename(
-        profile_id,
-        tenant.org_id,
-        user_id=user_id,
-        service_account_id=sa_id,
-        name=body.name.strip(),
-    )
-    if not ok:
-        raise HTTPException(status_code=404, detail="Profile not found")
-    return {"renamed": True}
+    user_id, sa_id = await _owner_principal(request, tenant, owner)
+    store = _store(request)
+    if body.use_in_channels is not None:
+        if owner != "agent":
+            raise HTTPException(
+                status_code=422,
+                detail="Only a login the agent owns is used without being chosen; a personal one is chosen per chat.",
+            )
+        channels = [c.strip() for c in body.use_in_channels]
+        if any(not c or len(c) > 32 or not c.replace("_", "").isalpha() for c in channels):
+            raise HTTPException(status_code=422, detail="Channels are names like slack, whatsapp or scheduled.")
+        if not await store.set_use_in_channels(
+            profile_id, tenant.org_id, service_account_id=sa_id, channels=channels,
+        ):
+            raise HTTPException(status_code=404, detail="Profile not found")
+    if body.name is not None:
+        ok = await store.rename(
+            profile_id,
+            tenant.org_id,
+            user_id=user_id,
+            service_account_id=sa_id,
+            name=body.name.strip(),
+        )
+        if not ok:
+            raise HTTPException(status_code=404, detail="Profile not found")
+    return {"renamed": body.name is not None, "updated": True}
 
 
 @router.delete("/browser-profiles/{profile_id}", status_code=204)
@@ -142,8 +199,9 @@ async def delete_profile(
     profile_id: UUID,
     request: Request,
     tenant: TenantContext = Depends(get_current_tenant),
+    owner: Owner = Query("me"),
 ) -> None:
-    user_id, sa_id = _principal(tenant)
+    user_id, sa_id = await _owner_principal(request, tenant, owner)
     await _store(request).delete(
         profile_id, tenant.org_id, user_id=user_id, service_account_id=sa_id
     )
@@ -161,12 +219,15 @@ async def create_setup_session(
     body: SetupSessionRequest,
     request: Request,
     tenant: TenantContext = Depends(get_current_tenant),
+    owner_kind: Owner = Query("me", alias="owner"),
 ) -> dict[str, str]:
+    # The setup browser is always the caller's own, whoever will own the login.
     user_id, sa_id = _principal(tenant)
+    owner_user_id, owner_sa_id = await _owner_principal(request, tenant, owner_kind)
     store = _store(request)
 
-    # The profile must exist and belong to the caller before we burn a pod.
-    rows = await store.list(tenant.org_id, user_id=user_id, service_account_id=sa_id)
+    # The profile must exist and belong to its owner before we burn a pod.
+    rows = await store.list(tenant.org_id, user_id=owner_user_id, service_account_id=owner_sa_id)
     if not any(r.id == profile_id for r in rows):
         raise HTTPException(status_code=404, detail="Profile not found")
 
@@ -234,8 +295,9 @@ async def capture_profile(
     body: CaptureRequest,
     request: Request,
     tenant: TenantContext = Depends(get_current_tenant),
+    owner_kind: Owner = Query("me", alias="owner"),
 ) -> BrowserProfileOut:
-    user_id, sa_id = _principal(tenant)
+    user_id, sa_id = await _owner_principal(request, tenant, owner_kind)
     store = _store(request)
 
     owner = body.owner_user_id or (
@@ -303,4 +365,4 @@ async def capture_profile(
             "browser_setup teardown wake failed for %s", session_id, exc_info=True
         )
 
-    return BrowserProfileOut.of(row)
+    return BrowserProfileOut.of(row, owner_kind)

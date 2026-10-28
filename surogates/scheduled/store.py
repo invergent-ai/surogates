@@ -87,7 +87,7 @@ class ScheduledSessionStore:
             timezone=schedule.timezone_name,
             kind=schedule.kind,
             cadence=schedule.cadence(),
-            context=context or None,
+            context=context or {},
             max_run_seconds=max_run_seconds,
             status="active",
             source=source,
@@ -125,7 +125,7 @@ class ScheduledSessionStore:
             schedule=schedule,
             source="loop",
             created_from_session_id=created_from_session_id,
-            context=context,
+            context=context or {},
         )
 
     async def create_dynamic_loop(
@@ -156,7 +156,7 @@ class ScheduledSessionStore:
             created_from_session_id=created_from_session_id,
             next_run_at=now,
             expires_at=now + timedelta(days=DYNAMIC_LOOP_EXPIRY_DAYS),
-            context=context,
+            context=context or {},
         )
 
     async def get(self, schedule_id: UUID) -> ScheduledSession:
@@ -334,7 +334,7 @@ class ScheduledSessionStore:
         if prompt is not None:
             values["prompt"] = prompt
         if context is not None:
-            values["context"] = context or None
+            values["context"] = context
         if max_run_seconds is not None:
             values["max_run_seconds"] = max_run_seconds or None
         if schedule is not None:

@@ -17,6 +17,7 @@ from surogates.scheduled.schedule import (
 )
 from surogates.scheduled.store import ScheduledSessionStore
 from surogates.session.events import EventType
+from surogates.session.execution_context import capture_schedule_context
 from surogates.tools.registry import ToolRegistry, ToolSchema
 
 #: The channel of an operator's own chat with their agent.
@@ -219,7 +220,7 @@ async def _cron_create_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
         schedule=schedule,
         source="tool",
         created_from_session_id=context.session_id,
-        context=creation_context(kwargs.get("session_config"), kwargs.get("channel")),
+        context=capture_schedule_context(kwargs.get("session_config"), kwargs.get("channel")),
     )
     return _json({"success": True, "schedule": _schedule_payload(created)})
 
@@ -464,17 +465,6 @@ async def _approved_this_turn(session_store: Any, session_id: UUID) -> bool:
             return False
         return str(responses[0].get("answer") or "").strip() == str(choices[0].get("label") or "").strip()
     return False
-
-
-def creation_context(config: dict[str, Any] | None, channel: str | None) -> dict[str, Any]:
-    """What a run of a schedule made in a session with *config* on
-    *channel* acts with: stored on the schedule, so its runs keep it
-    whatever becomes of that session."""
-    config = config or {}
-    captured = {key: config[key] for key in ("browser", "ops", "operator", "agent_type") if key in config}
-    if channel:
-        captured["channel"] = channel
-    return captured
 
 
 def _schedule_payload(row: Any, *, full: bool = False) -> dict[str, Any]:

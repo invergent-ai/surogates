@@ -155,8 +155,18 @@ class Context:
         if parts:
             return " · ".join(parts)
         if self.user_id is None:
+            # No end user: the agent's own operator chat or one of its
+            # scheduled runs raised it, and the team must not hunt for a person.
+            if self.channel in _NO_PERSON_LABELS:
+                return followup_store.wording(texts, _NO_PERSON_LABELS[self.channel])
             return followup_store.wording(texts, "label_unnamed")
         return f"user {self.user_id}"
+
+
+_NO_PERSON_LABELS = {
+    "studio": "label_operator_chat",
+    "scheduled": "label_scheduled_run",
+}
 
 
 async def load_context(kwargs: dict) -> tuple[Context | None, Any]:

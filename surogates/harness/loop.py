@@ -119,6 +119,7 @@ from surogates.workstreams import is_project_master, is_project_thread, master_r
 from surogates.workstreams.spend import admit_turn, admitted_at_wake
 from surogates.channels.capabilities import capabilities_for
 from surogates.channels.memory_boundary import is_eval_session
+from surogates.session.execution_context import is_unattended
 from surogates.tools.builtin.case_item import item_awaiting_report
 from surogates.tools.builtin.case_step import step_awaiting_report, step_given_back
 from surogates.tools.builtin.send_form import SENT as FORM_SENT
@@ -5525,7 +5526,7 @@ class AgentHarness(
         so a call to that tool parks the turn until the tool's own
         30-minute deadline and the caller reports a stalled agent.
         """
-        if not is_eval_session(session):
+        if not (is_eval_session(session) or is_unattended(session)):
             return tool_filter
         names = (
             set(self._tools.tool_names) if tool_filter is None
@@ -6401,7 +6402,7 @@ class AgentHarness(
         )
         from surogates.scheduled.schedule import parse_loop_command
         from surogates.scheduled.store import ScheduledSessionStore
-        from surogates.tools.builtin.cron import creation_context
+        from surogates.session.execution_context import capture_schedule_context
 
         owner = {
             "user_id": self._acting_principal.user_id,
@@ -6445,7 +6446,7 @@ class AgentHarness(
                         )
                         if row.prompt == command.prompt and _aware(row.created_at) >= _aware(typed_on)
                     ), None)
-                context = creation_context(session.config, session.channel)
+                context = capture_schedule_context(session.config, session.channel)
                 if command.schedule is None:
                     created = made or await store.create_dynamic_loop(
                         **scope, prompt=command.prompt,

@@ -9,6 +9,7 @@ from uuid import UUID, uuid4
 from surogates.channels.memory_boundary import CASE_AGENT_KEY, MANAGED_CHANNELS
 from surogates.keel.steps import CASE_ITEM_KEY, CASE_SCOPE_KEY, CASE_STEP_KEY
 from surogates.sandbox.pool import sandbox_session_key
+from surogates.session.execution_context import CONTEXT_FIELDS, inherit_context
 from surogates.session.models import Session
 from surogates.session.store import SessionStore
 from surogates.storage.tenant import agent_session_bucket
@@ -214,6 +215,7 @@ async def create_child_session(
     idempotency_key: str | None = None,
     session_id: UUID | None = None,
     task_id: UUID | None = None,
+    context: dict | None = None,
 ) -> Session:
     """Create a session that shares its parent's workspace.
 
@@ -234,6 +236,9 @@ async def create_child_session(
     *task_id* links the child to a ``tasks`` row when the spawn is a
     subagent task attempt.  Plain ``spawn_worker`` children pass
     ``None`` (the default), keeping their existing semantics unchanged.
+
+    *context* is what a schedule captured when it was made; without it the
+    child takes the parent's (see :mod:`surogates.session.execution_context`).
     """
     merged_config = dict(config or {})
     # A child runs where its root runs: on the same computer, when it names one.
@@ -252,6 +257,10 @@ async def create_child_session(
         )
     for field in _WORKSPACE_SHARING_FIELDS:
         merged_config[field] = parent_config[field]
+
+    for field in CONTEXT_FIELDS:
+        merged_config.pop(field, None)
+    merged_config.update(inherit_context(parent_config, getattr(parent, "channel", None), context))
 
     # A boundary comes from the parent only: one named in *config* would
     # reach another conversation's or project's memory.

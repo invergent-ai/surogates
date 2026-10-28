@@ -86,7 +86,8 @@ async def test_generate_image_saves_png_and_returns_path(tmp_path):
     assert result["text"] == "here is your image"
     extra_body = client.last_create_kwargs["extra_body"]
     assert extra_body["modalities"] == ["image", "text"]
-    assert extra_body["aspect_ratio"] == "1:1"
+    assert extra_body["image_config"] == {"aspect_ratio": "1:1"}
+    assert (result["width"], result["height"]) == (1, 1)
 
 
 @pytest.mark.asyncio

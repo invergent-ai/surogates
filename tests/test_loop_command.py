@@ -115,7 +115,7 @@ async def test_a_fixed_cadence_makes_a_loop_with_the_session_context(monkeypatch
     assert name == "create_loop"
     assert kw["prompt"] == "check the inbox"
     assert kw["schedule"].timezone_name == "Europe/Bucharest"
-    assert kw["context"] == {"browser": {"profile": "p1"}, "channel": "api"}
+    assert kw["context"] == {"browser": {"profile": "p1"}, "origin_channel": "api"}
     assert "Timezone: Europe/Bucharest" in reply
     assert "/loop pause" in reply
 

@@ -187,7 +187,7 @@ async def test_cron_create_once_approved_belongs_to_the_sender(principal):
     assert str(made["created_from_session_id"]) == kwargs["session_id"]
     assert made["prompt"] == DIGEST["prompt"]
     # What its runs act with is kept on it.
-    assert made["context"] == {"browser": {"profile_id": "p-1"}, "channel": "studio"}
+    assert made["context"] == {"browser": {"profile_id": "p-1"}, "origin_channel": "studio"}
     # Its next run on its own clock, to restate in any language.
     assert result["schedule"]["next_run_at"] == "2026-10-14T08:30:00+03:00"
     assert result["schedule"]["timezone"] == "Europe/Bucharest"

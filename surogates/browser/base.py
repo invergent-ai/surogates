@@ -143,7 +143,9 @@ class BrowserSpec:
     cpu_limit: str = "2"
     memory_limit: str = "4Gi"
     pod_ready_timeout: int = 60
-    active_deadline_seconds: int = 3600
+    # A backstop against a browser nobody closes: idle ones are closed after
+    # ``IDLE_CLOSE_SECONDS`` (``jobs.browser_reaper``), a run's when it ends.
+    active_deadline_seconds: int = 8 * 3600
     timeout: int = 60
     workspace_path: str | None = None
     workspace_source_ref: str | None = None
