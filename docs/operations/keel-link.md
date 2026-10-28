@@ -1,6 +1,6 @@
 # keel-link
 
-`surogates keel-link` is Keel's private door into the runtime. Keel, the case engine, calls it to start an agent's session for one step of a case, and then to answer it, ask it for a revision, send it a plain message, give it a comment that mentions its agent, cancel it, and read its status, its events and its progress. It starts an agent's item session too, on a work item a case gives the agent as it gives a person one, and then sends it a plain message, cancels it, and reads its status, its events and its progress. It starts a person's case agent session, gives it the person's messages, stops its turn, and reads its status and its events. It also groups an agent's raised hands by reason, and drafts a passage of policy from agreeing answers, with the agent's own model. It also lists, reads and writes a case's files, opens a case's document in the document editor for a person, and invites staff into an organisation. It is a process of its own, on a port of its own, and it serves nothing else.
+`surogates keel-link` is Keel's private door into the runtime. Keel, the case engine, calls it to start an agent's session for one step of a case, and then to answer it, ask it for a revision, send it a plain message, give it a comment that mentions its agent, cancel it, and read its status, its events and its progress. It starts an agent's item session too, on a work item a case gives the agent as it gives a person one, and then sends it a plain message, cancels it, and reads its status, its events and its progress. It starts a person's case agent session, gives it the person's messages, stops its turn, and reads its status and its events. It also groups an agent's raised hands by reason, and drafts a passage of policy from agreeing answers, with the agent's own model. It also lists, reads and writes a case's files, and keeps the version of every file it hands Keel; runs reruns and trials, an agent's step again; opens a case's document in the document editor for a person, and invites staff into an organisation. It is a process of its own, on a port of its own, and it serves nothing else.
 
 ## What it serves
 
@@ -36,6 +36,9 @@
 | `POST /v1/keel/cases/{case_id}/versions/missing` | Takes `{"sha256": [hash]}` (1 to 500 hashes) and answers `200 {"missing": [hash]}`: each hash the case holds no version of, once, in the order asked. |
 | `DELETE /v1/keel/cases/{case_id}/versions` | Deletes every version the case holds, and no file of its workspace: `200 {"deleted": <count>}`, `0` for a case that has none. |
 | `POST /v1/keel/cases/{case_id}/editor` | Takes `{"org_id", "path", "user_id", "access", "theme", "mentionable"}` and answers `200 {"document_server_url", "config", "mentionable_users"}`: one person's editor config for the document at the path, and the agents it offers to mention. See [A case's document in the editor](#a-cases-document-in-the-editor). |
+| `POST /v1/keel/reruns?agent_id=<agent>` | Starts a rerun or a trial of the agent's step, in a case of its own id, on the files of a past case as they were: `201` made, `200` found by its key, each `{"session_id", "service_account_id", "bundle_version", "created"}`. See [Reruns and trials](#reruns-and-trials). |
+| `PUT /v1/keel/reruns/{session_id}/files/content?org_id=<org>&path=<path>` | Writes the body at the path in a trial's workspace, before or after the trial is created: `200 {"name", "uri", "sha256", "size"}`, as a case's file write answers. |
+| `POST /v1/keel/reruns/{session_id}/start` | Writes a rerun's first message and queues it: `202 {"started": bool}`, true when this call wrote it. `409 step-finished` once the rerun was cancelled. |
 | `POST /v1/keel/orgs/{org_id}/members` | Takes `{"email", "display_name"}` and answers `200 {"user_id", "created", "joined", "sign_in", "set_password_token", "expires_at"}`: the org's user with that email, found, joined from another org or created. See [Inviting staff](#inviting-staff). |
 | `GET /health`, `GET /health/ready` | The same liveness and readiness probes as the API. |
 
@@ -55,18 +58,20 @@ Errors answer `{"detail": {"code", "message"}}`, and a message never repeats the
 | 404 | `unknown-user` | The editor was asked for a user who does not belong to the org. |
 | 404 | `unknown-org` | An invitation into an org that does not exist. |
 | 409 | `agent-stopped` | The agent is stopped. Never for the analysis routes, which serve a stopped agent too. |
-| 409 | `key-in-use` | The key, or the session id, names another session: another step's, item's or case agent's, or one of another agent. |
+| 409 | `key-in-use` | The key, or the session id, names another session: another step's, item's, case agent's or rerun's, or one of another agent. |
 | 409 | `not-a-member` | A case agent was asked for a person who is not a user of the org. |
 | 409 | `step-finished` | A message or a mention for a step that is over: its inputs were redacted. |
 | 409 | `no-office` | A mention for a step whose agent does not edit the case's documents: not a draft step's, or the runtime has no agent editing. |
+| 409 | `case-exists` | A rerun's or a trial's id names a case, or another org's rerun or trial, or one of the other kind. |
 | 409 | `file-open` | A write over a file that is open in the document editor. |
+| 409 | `file-version-gone` | A rerun's file has no version in the case it comes from. The answer's `missing` lists the indexes of those files, and nothing was written. |
 | 409 | `document-closing` | The document's last save is still landing; ask for the editor again in a moment. |
 | 409 | `ambiguous-email` | An invitation for an email that two or more users of other orgs have: none is chosen. |
 | 409 | `other-firebase-project` | An invitation for an account that signs in with a Firebase project the org does not sign in with. |
 | 413 | `too-large` | A file to write or read over `SUROGATES_KEEL_MAX_FILE_BYTES`. |
 | 415 | `not-a-document` | The editor was asked for a file that is not an office document, or a mention names a file that is not a document an agent edits. |
 | 422 | `inputs-blocked` | The prompt-injection screen blocked the step's inputs, or the item's inputs, question, choices or evidence; or a policy passage's reason or gist, or every one of its hands. |
-| 422 | `invalid-path` | A file's path Keel may not name: see [A case's files](#a-cases-files). |
+| 422 | `invalid-path` | A file's path Keel may not name, a rerun's `files` paths among them: see [A case's files](#a-cases-files). |
 | 422 | `invalid-request` | The body does not validate (an invitation's email that is not one among them), a case id or an org id is not a UUID, a version's hash is not 64 lowercase hex digits, or a session's events were asked for with a cursor or a page size out of range. |
 | 500 | `internal-error` | The database failed, other than while a step, item or case agent session's events or progress were read. Only the error's class name is logged. |
 | 502 | `model-failed` | An analysis route's model sent no completion: the provider failed, refused, or ran out of credit. A policy passage's model gave no valid object, or a text that is empty or over 6,000 characters. |
@@ -412,6 +417,25 @@ An invitation never changes an existing account: not its password, its way of si
 For a password account without a password whose home is the org, `set_password_token` is a new token and `expires_at` when it lapses, 7 days on; otherwise both are null. An account whose home is another org gets no token: its password is its home org's to set, since one password signs in to every org the account belongs to. Keel gives the token to the person, who sets their password through the runtime's public `POST /v1/auth/orgs/{org_id}/set-password`; see [Invited staff](../multi-tenancy/index.md#invited-staff). The token works once, and not after the password changed. The answer carries `Cache-Control: no-store`, and the token is never logged or stored. Neither is the email.
 
 A person joined from another org who has no password yet gets no link from the org that joined them. Their home org invites them again: they are found there, and that invitation gives a fresh link. A re-invitation never revokes a link: an earlier one stays valid until a password is set or its 7 days pass.
+
+## Reruns and trials
+
+A rerun runs an agent's step again on the files a past step read, as they were. A trial runs a draft's step on inputs a builder typed. Either is a step session of a case that exists nowhere else: its id, which Keel gives, is the session's own and its case's, and its boundary `case:<session id>` holds the files it works on. Memory starts empty, in the agent's own storage under that boundary, and the agent runs as it is configured now: nothing pins the bundle it ran before. The session reports to Keel's door as any step session does, `POST /api/harness/sessions/{session id}/complete`, `raise-hand` and `ended`, with the same bodies; nothing in a report says it is a rerun, and Keel tells by the session id. A raised hand rests with the session's inputs until Keel cancels it.
+
+The session is fenced. No session of a rerun, a helper included, is offered `terminal`, `process` or a browser tool, whatever the contract's `tools` name; its MCP servers are off unless the create asks for them (`mcp`), in which case the contract's `mcp_servers` say which. A draft rerun keeps the office tools, which edit its own documents. A rerun's wakes, and its helpers', are queued at 2, behind every case's work, and a trial's at 0. The step routes answer `404 unknown-session` for a rerun's session.
+
+`POST /v1/keel/reruns?agent_id=<agent>` takes `{"org_id", "case_type", "idempotency_key", "session_id", "kind", "contract", "files", "of_case_id", "mcp", "start"}`: `kind` is `rerun` or `trial`; `contract` is a step's contract, whose `case_id` is `session_id`; `files` are up to 200 `{"path", "sha256"}`, with distinct paths, and need `of_case_id`, the case whose versions they come from and never `session_id`; `mcp` and `start` default to false and true. A body out of this shape is `422 invalid-request`. It checks, in this order:
+
+1. the agent: `404 unknown-agent`, `409 agent-stopped`;
+2. each path as the case file routes check it, `422 invalid-path`;
+3. the contract's inputs, which the prompt-injection screen reads, `422 inputs-blocked`;
+4. that a session with the id does not exist: `409 key-in-use`;
+5. the id's boundary folder: a case's, or another org's or kind's rerun's, is `409 case-exists`;
+6. the files: each must have a version in `of_case_id`, a case recorded under the same org that is no rerun's, or the answer is `409 file-version-gone` with `missing`, the indexes into `files` that have none, and nothing is written.
+
+Only then does it mark the boundary folder as the org's rerun of that kind, in the record beside the workspace, copy the files, a piece at a time, and create the session. A version that is gone by the time it is copied is `409 file-version-gone` too; the files already copied stay under the mark until Keel purges the rerun. Keel waits long for this call, and sends the same body again with the same key on a timeout: a repeat that finds the session answers `200` and copies nothing, and one after a create that died before its session copies again over the same paths. The session is queued when it is made, so its first report can reach Keel's door before Keel has the answer. A key held by another session, or by a rerun of the other kind, is `409 key-in-use`.
+
+A trial's files may come first: `PUT /v1/keel/reruns/{session_id}/files/content` writes one, marking the folder as the org's trial's with the first, and keeps its version as a case's file write does. A folder that is a case's, another org's, or a rerun's is `409 case-exists`. A trial created with `start` false writes no first message, and queues nothing, until `POST /v1/keel/reruns/{session_id}/start`, which writes it once.
 
 ## Keep it internal
 

@@ -512,7 +512,7 @@ async def create_or_find(
         existing = await store.get_session_by_idempotency_key(body.org_id, body.idempotency_key)
         if existing is not None:
             return await found(existing)
-        if await _exists(store, body.session_id):
+        if await session_exists(store, body.session_id):
             raise _key_in_use() from None
         # Another constraint broke: the route answers it as any database failure.
         raise
@@ -520,7 +520,7 @@ async def create_or_find(
     return session, True
 
 
-async def _exists(store: Any, session_id: UUID) -> bool:
+async def session_exists(store: Any, session_id: UUID) -> bool:
     try:
         await store.get_session(session_id)
     except SessionNotFoundError:
@@ -542,7 +542,7 @@ async def note_case_org(request: Request, case_id: UUID, org_id: UUID) -> None:
         logger.warning("keel-link: the org of case %s could not be recorded (%s)", case_id, type(exc).__name__)
 
 
-def _answer(session: Any, *, created: bool, bundle_version: str | None) -> JSONResponse:
+def created_answer(session: Any, *, created: bool, bundle_version: str | None) -> JSONResponse:
     answer = StepSessionCreated(
         session_id=session.id,
         service_account_id=str(session.service_account_id),
@@ -597,7 +597,7 @@ async def create_step_session(request: Request) -> JSONResponse:
             message="The step session could not be created.",
         ) from None
     await note_case_org(request, contract.case_id, body.org_id)
-    return _answer(session, created=created, bundle_version=bundle_version_in(agent.get("bundle_version")))
+    return created_answer(session, created=created, bundle_version=bundle_version_in(agent.get("bundle_version")))
 
 
 async def create_case_session(
@@ -755,7 +755,7 @@ async def mention_step_agent(session_id: str, request: Request) -> JSONResponse:
     try:
         session = await _step_session(request, session_id)
         body = await read_body(request, MentionRequest)
-        path = _checked_path(request, step_contract_of(session).case_id, body.path)
+        path = checked_path(request, step_contract_of(session).case_id, body.path)
         kind = office_kind(path)
         if kind is None or kind.file_type not in AGENT_KINDS:
             raise refused(
@@ -1016,7 +1016,7 @@ async def read_step_session_progress(session_id: str, request: Request) -> JSONR
 # ---------------------------------------------------------------------------
 
 
-def _case_id(case_id: str) -> UUID:
+def case_uuid(case_id: str) -> UUID:
     try:
         return UUID(case_id)
     except ValueError:
@@ -1025,7 +1025,7 @@ def _case_id(case_id: str) -> UUID:
         ) from None
 
 
-def _checked_path(request: Request, case: UUID, path: str) -> str:
+def checked_path(request: Request, case: UUID, path: str) -> str:
     """*path*, relative to the case's workspace: 422 ``invalid-path`` for one Keel may not name."""
     try:
         relative = case_path(path)
@@ -1039,7 +1039,7 @@ def _checked_path(request: Request, case: UUID, path: str) -> str:
 
 def _case_path(request: Request, case: UUID) -> str:
     """The ``path`` query parameter, relative to the case's workspace: 422 ``invalid-path`` for one Keel may not name."""
-    return _checked_path(request, case, request.query_params.get("path") or "")
+    return checked_path(request, case, request.query_params.get("path") or "")
 
 
 def _storage_failed(exc: Exception, case: UUID) -> HTTPException:
@@ -1073,7 +1073,7 @@ def _editing(document: OpenDocument) -> list[str]:
 async def list_files_of_case(case_id: str, request: Request) -> JSONResponse:
     """The files of a case's workspace, by path, each with who is in its editor now."""
     require_link(request)
-    case = _case_id(case_id)
+    case = case_uuid(case_id)
     state = request.app.state
     try:
         files = await list_case_files(state.storage, state.settings, case)
@@ -1153,7 +1153,7 @@ async def read_file_of_case(case_id: str, request: Request) -> StreamingResponse
     kept the answer is 503, and no digest has left.
     """
     require_link(request)
-    case = _case_id(case_id)
+    case = case_uuid(case_id)
     relative = _case_path(request, case)
     state = request.app.state
     limit = state.settings.keel.max_file_bytes
@@ -1180,7 +1180,7 @@ async def read_file_of_case(case_id: str, request: Request) -> StreamingResponse
     )
 
 
-async def _body_within(request: Request, limit: int) -> bytes:
+async def body_within(request: Request, limit: int) -> bytes:
     """The request's body, read no further than one byte past *limit*: 413 ``too-large`` past it."""
     too_large = _too_large(limit)
     declared = request.headers.get("content-length", "")
@@ -1202,9 +1202,9 @@ async def write_file_of_case(case_id: str, request: Request) -> JSONResponse:
     save would land over a file it never saw.
     """
     require_link(request)
-    case = _case_id(case_id)
+    case = case_uuid(case_id)
     relative = _case_path(request, case)
-    data = await _body_within(request, request.app.state.settings.keel.max_file_bytes)
+    data = await body_within(request, request.app.state.settings.keel.max_file_bytes)
     return await write_case_file_answer(request, case, relative, data)
 
 
@@ -1253,7 +1253,7 @@ async def read_version_of_case(case_id: str, sha256: str, request: Request) -> S
     Past the size Keel may write it is 413 ``too-large``.
     """
     require_link(request)
-    case = _case_id(case_id)
+    case = case_uuid(case_id)
     if not SHA256_HEX.fullmatch(sha256):
         raise refused(status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid-request", "The hash is not a SHA-256 digest.")
     state = request.app.state
@@ -1281,7 +1281,7 @@ async def read_version_of_case(case_id: str, sha256: str, request: Request) -> S
 async def versions_missing_of_case(case_id: str, request: Request) -> JSONResponse:
     """Which of the hashes Keel names the case holds no version of, each once, in the order asked."""
     require_link(request)
-    case = _case_id(case_id)
+    case = case_uuid(case_id)
     asked = await read_body(request, MissingVersions)
     state = request.app.state
     try:
@@ -1295,7 +1295,7 @@ async def versions_missing_of_case(case_id: str, request: Request) -> JSONRespon
 async def delete_versions_of_case(case_id: str, request: Request) -> JSONResponse:
     """Delete every version the case holds, and no file of its workspace: how many.  Keel asks once the case's retention ends."""
     require_link(request)
-    case = _case_id(case_id)
+    case = case_uuid(case_id)
     state = request.app.state
     try:
         deleted = await case_versions(state.settings, case).delete_all(state.storage)
@@ -1345,13 +1345,13 @@ async def open_case_document(case_id: str, request: Request) -> JSONResponse:
     document an agent edits.
     """
     require_link(request)
-    case = _case_id(case_id)
+    case = case_uuid(case_id)
     body = await read_body(request, CaseEditorRequest)
     state = request.app.state
     office = state.settings.office
     if not office.enabled:
         raise refused(status.HTTP_503_SERVICE_UNAVAILABLE, "office-off", "No document server is configured.")
-    relative = _checked_path(request, case, body.path)
+    relative = checked_path(request, case, body.path)
     kind = office_kind(relative)
     if kind is None:
         raise refused(
