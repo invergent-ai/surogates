@@ -15,16 +15,20 @@ caller hands out no digest.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from uuid import UUID
 
-from surogates.keel.case_files import case_boundary_folder
+from botocore.exceptions import ClientError
+
+from surogates.keel.case_files import case_boundary_folder, no_such_bucket
 from surogates.session.attachment_ingest import workspace_root_id
 from surogates.storage.tenant import boundary_workspace_prefix
 
 __all__ = [
+    "MAX_ASKED",
     "SHA256_HEX",
     "VERSIONS_FOLDER",
     "CaseVersions",
@@ -36,6 +40,8 @@ __all__ = [
 #: The folder of a case's boundary that holds its versions, beside ``workspace/``.
 VERSIONS_FOLDER = "versions/"
 SHA256_HEX = re.compile(r"[0-9a-f]{64}")
+#: The most hashes Keel may ask about in one call.
+MAX_ASKED = 500
 _WORKSPACE_FOLDER = "workspace/"
 
 
@@ -73,6 +79,46 @@ class CaseVersions:
                 await storage.upload(self.bucket, key, source)
         except Exception as exc:
             raise VersionNotKept("the version could not be kept") from exc
+
+    async def download(self, storage: Any, sha256: str, target: Path, *, limit: int | None) -> int:
+        """Copy a version into the file *target*, a piece at a time; its size.
+
+        Raises ``KeyError`` when the case holds no such version, and
+        :class:`~surogates.storage.backend.TooLarge`, with *target* removed,
+        for one over *limit* bytes.
+        """
+        try:
+            return await storage.download(self.bucket, self.key(sha256), target, limit=limit)
+        except ClientError as exc:
+            if no_such_bucket(exc):
+                raise KeyError(sha256) from None
+            raise
+
+    async def missing(self, storage: Any, hashes: Sequence[str]) -> list[str]:
+        """Which of *hashes* the case holds no version of: each once, in the order asked.
+
+        The case's versions are listed once, whatever the number asked.  A
+        bucket not made yet holds none.
+        """
+        for sha256 in hashes:
+            self.key(sha256)
+        try:
+            entries = await storage.list_entries(self.bucket, prefix=self.prefix)
+        except ClientError as exc:
+            if not no_such_bucket(exc):
+                raise
+            entries = []
+        held = {entry["key"][len(self.prefix):] for entry in entries if entry["key"].startswith(self.prefix)}
+        return [sha256 for sha256 in dict.fromkeys(hashes) if sha256 not in held]
+
+    async def delete_all(self, storage: Any) -> int:
+        """Delete every version the case holds, and nothing else; how many.  A bucket not made yet holds none."""
+        try:
+            return await storage.delete_prefix(self.bucket, self.prefix)
+        except ClientError as exc:
+            if no_such_bucket(exc):
+                return 0
+            raise
 
 
 def case_versions(settings: Any, case_id: UUID) -> CaseVersions:

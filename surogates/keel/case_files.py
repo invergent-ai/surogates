@@ -47,6 +47,7 @@ __all__ = [
     "case_workspace",
     "download_case_file",
     "list_case_files",
+    "no_such_bucket",
     "record_case_org",
     "write_case_file",
 ]
@@ -144,7 +145,8 @@ def case_workspace(storage: Any, settings: Any, case_id: UUID) -> StorageWorkspa
     return StorageWorkspaceIO(storage, bucket=bucket, prefix=prefix)
 
 
-def _no_bucket(exc: ClientError) -> bool:
+def no_such_bucket(exc: ClientError) -> bool:
+    """Whether the store's *exc* says the bucket is not there: a case nothing was written to yet."""
     return exc.response.get("Error", {}).get("Code") == "NoSuchBucket"
 
 
@@ -174,7 +176,7 @@ async def list_case_files(storage: Any, settings: Any, case_id: UUID) -> list[Ca
     try:
         entries = await storage.list_entries(bucket, prefix=prefix)
     except ClientError as exc:
-        if _no_bucket(exc):
+        if no_such_bucket(exc):
             return []
         raise
     files = [
@@ -201,7 +203,7 @@ async def download_case_file(
     except KeyError:
         raise FileNotFoundError(path) from None
     except ClientError as exc:
-        if _no_bucket(exc):
+        if no_such_bucket(exc):
             raise FileNotFoundError(path) from None
         raise
 
@@ -245,7 +247,7 @@ async def record_case_org(storage: Any, settings: Any, case_id: UUID, org_id: UU
     except KeyError:
         recorded = None
     except ClientError as exc:
-        if not _no_bucket(exc):
+        if not no_such_bucket(exc):
             raise
         recorded = None
     if recorded is not None:

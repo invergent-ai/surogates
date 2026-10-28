@@ -32,6 +32,9 @@
 | `GET /v1/keel/cases/{case_id}/files` | The case's files, by path: `{"files": [{"path", "name", "size", "modified_at", "editing"}]}`. `editing` names who is in the file's editor now, by display name, sorted; someone the runtime has no name for is `Someone`, or `An agent` for an agent. A case no session has written to yet has `{"files": []}`. The platform's own folders are left out. |
 | `GET /v1/keel/cases/{case_id}/files/content?path=<path>` | The file's bytes, as `application/octet-stream`, with their SHA-256 hex digest in `X-Content-SHA256`. A file over `SUROGATES_KEEL_MAX_FILE_BYTES` is not read. |
 | `PUT /v1/keel/cases/{case_id}/files/content?path=<path>` | Writes the body at the path, over any file there. `200 {"name", "uri", "sha256", "size"}`, where `uri` is `case-file://<case id>/<path>`: the value a step's file field holds. |
+| `GET /v1/keel/cases/{case_id}/versions/{sha256}` | A kept version of a file of the case, by its hash, as `application/octet-stream`, with the hash in `X-Content-SHA256`. `404 unknown-version` when the case holds none; a version over `SUROGATES_KEEL_MAX_FILE_BYTES` is not read. See [A case's file versions](#a-cases-file-versions). |
+| `POST /v1/keel/cases/{case_id}/versions/missing` | Takes `{"sha256": [hash]}` (1 to 500 hashes) and answers `200 {"missing": [hash]}`: each hash the case holds no version of, once, in the order asked. |
+| `DELETE /v1/keel/cases/{case_id}/versions` | Deletes every version the case holds, and no file of its workspace: `200 {"deleted": <count>}`, `0` for a case that has none. |
 | `POST /v1/keel/cases/{case_id}/editor` | Takes `{"org_id", "path", "user_id", "access", "theme", "mentionable"}` and answers `200 {"document_server_url", "config", "mentionable_users"}`: one person's editor config for the document at the path, and the agents it offers to mention. See [A case's document in the editor](#a-cases-document-in-the-editor). |
 | `POST /v1/keel/orgs/{org_id}/members` | Takes `{"email", "display_name"}` and answers `200 {"user_id", "created", "joined", "sign_in", "set_password_token", "expires_at"}`: the org's user with that email, found, joined from another org or created. See [Inviting staff](#inviting-staff). |
 | `GET /health`, `GET /health/ready` | The same liveness and readiness probes as the API. |
@@ -48,6 +51,7 @@ Errors answer `{"detail": {"code", "message"}}`, and a message never repeats the
 | 404 | `unknown-agent` | No such agent, or it belongs to another org. |
 | 404 | `unknown-session` | No such session, or it is not the own session of a step, for a step route, of a work item, for an item route, or of a person's case agent, for a case agent route. |
 | 404 | `unknown-file` | No file at the path in the case's workspace, or the editor was asked for a case recorded under another org. |
+| 404 | `unknown-version` | The case holds no version with the hash. |
 | 404 | `unknown-user` | The editor was asked for a user who does not belong to the org. |
 | 404 | `unknown-org` | An invitation into an org that does not exist. |
 | 409 | `agent-stopped` | The agent is stopped. Never for the analysis routes, which serve a stopped agent too. |
@@ -63,7 +67,7 @@ Errors answer `{"detail": {"code", "message"}}`, and a message never repeats the
 | 415 | `not-a-document` | The editor was asked for a file that is not an office document, or a mention names a file that is not a document an agent edits. |
 | 422 | `inputs-blocked` | The prompt-injection screen blocked the step's inputs, or the item's inputs, question, choices or evidence; or a policy passage's reason or gist, or every one of its hands. |
 | 422 | `invalid-path` | A file's path Keel may not name: see [A case's files](#a-cases-files). |
-| 422 | `invalid-request` | The body does not validate (an invitation's email that is not one among them), a case id or an org id is not a UUID, or a session's events were asked for with a cursor or a page size out of range. |
+| 422 | `invalid-request` | The body does not validate (an invitation's email that is not one among them), a case id or an org id is not a UUID, a version's hash is not 64 lowercase hex digits, or a session's events were asked for with a cursor or a page size out of range. |
 | 500 | `internal-error` | The database failed, other than while a step, item or case agent session's events or progress were read. Only the error's class name is logged. |
 | 502 | `model-failed` | An analysis route's model sent no completion: the provider failed, refused, or ran out of credit. A policy passage's model gave no valid object, or a text that is empty or over 6,000 characters. |
 | 503 | `office-off` | The editor was asked for, and no document server is configured. |
@@ -364,6 +368,14 @@ The listing names only files these routes can read by the path it gives.
 A write takes up to `SUROGATES_KEEL_MAX_FILE_BYTES`, and makes the bucket when it is not there yet. It is refused while the file is open in the document editor: the editor's next save would land over a file it never saw. A read is copied to a scratch file first, so its digest is sent before its bytes. A read of a file over `SUROGATES_KEEL_MAX_FILE_BYTES` is `413 too-large`, copied no further. None of these routes logs a path or a file's bytes.
 
 Every digest keel-link or a step session hands Keel (a write's answer, a read's `X-Content-SHA256` header, an output's file value) names bytes the runtime keeps. They are written under the case's `versions/<sha256>`, beside the workspace in the case's boundary, before the digest leaves; once per case, however many paths hold the bytes. A version is never mounted in a sandbox and never listed as a case file. A write or a read whose version cannot be kept is `503 unavailable`, a write leaves no file, and a read sends no digest. An output file whose version cannot be kept fails the `complete_step` or `complete_item` call with an error the model reads, and nothing is sent to Keel; the model calls again.
+
+## A case's file versions
+
+A version is a file as it was when its digest was handed to Keel, kept as [A case's files](#a-cases-files) describes. Keel reads one by its hash to compare a re-run's file with the original's, asks which of the hashes it holds are gone, and, when the case's retention ends, deletes all of the case's versions at once.
+
+A hash is 64 lowercase hex digits; anything else is `422 invalid-request`. Reading one streams it as a file's read does, so a version over `SUROGATES_KEEL_MAX_FILE_BYTES` is `413 too-large`. The question about missing versions lists the case's versions once, however many hashes it names, and names each missing hash once, in the order Keel asked. A case nothing was written to has no versions, and the question names every hash. Deleting removes only the case's `versions/` folder: no file of the workspace, and nothing of another case. The object store refusing or not answering is `503 unavailable` on all three routes.
+
+Retention is the case engine's. The runtime deletes no version of its own accord, and a version stays until Keel asks.
 
 ## A case's document in the editor
 

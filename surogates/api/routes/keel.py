@@ -69,7 +69,7 @@ from surogates.keel.case_files import (
     write_case_file,
 )
 from surogates.keel.files import file_value
-from surogates.keel.versions import VersionNotKept, case_versions
+from surogates.keel.versions import MAX_ASKED, SHA256_HEX, VersionNotKept, case_versions
 from surogates.keel.run_facts import bundle_version_in
 from surogates.keel.steps import (
     ANSWER_MARKER,
@@ -260,6 +260,20 @@ class CaseEditorRequest(BaseModel):
     theme: Literal["light", "dark"] = "light"
     # The agents the editor offers to mention: a draft step's, whose agent answers in the comment's thread.
     mentionable: list[MentionableAgent] = Field(default=[], max_length=20)
+
+
+def _sha256_hex(value: str) -> str:
+    if not SHA256_HEX.fullmatch(value):
+        raise ValueError("not a SHA-256 digest")
+    return value
+
+
+class MissingVersions(BaseModel):
+    """Keel's question about which versions of a case's files the runtime no longer holds.  Keys this runtime does not know are ignored."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    sha256: Annotated[list[Annotated[str, AfterValidator(_sha256_hex)]], Field(min_length=1, max_length=MAX_ASKED)]
 
 
 class MemberInvitationRequest(BaseModel):
@@ -1218,6 +1232,68 @@ async def write_case_file_answer(request: Request, case: UUID, relative: str, da
     except (ClientError, BotoCoreError) as exc:
         raise _storage_failed(exc, case) from None
     return JSONResponse({**value, "size": len(data)})
+
+
+def _unknown_version() -> HTTPException:
+    return refused(status.HTTP_404_NOT_FOUND, "unknown-version", "No such version of the case's files.")
+
+
+@router.get("/keel/cases/{case_id}/versions/{sha256}")
+async def read_version_of_case(case_id: str, sha256: str, request: Request) -> StreamingResponse:
+    """A version of a file of the case, by its hash, streamed as a file's read is, with the hash in ``X-Content-SHA256``.
+
+    Past the size Keel may write it is 413 ``too-large``.
+    """
+    require_link(request)
+    case = _case_id(case_id)
+    if not SHA256_HEX.fullmatch(sha256):
+        raise refused(status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid-request", "The hash is not a SHA-256 digest.")
+    state = request.app.state
+    limit = state.settings.keel.max_file_bytes
+    target = await asyncio.to_thread(_scratch_file)
+    try:
+        size = await case_versions(state.settings, case).download(state.storage, sha256, target, limit=limit)
+        source = await asyncio.to_thread(_opened_and_removed, target)
+    except KeyError:
+        raise _unknown_version() from None
+    except TooLarge:
+        raise _too_large(limit) from None
+    except (ClientError, BotoCoreError) as exc:
+        raise _storage_failed(exc, case) from None
+    finally:
+        target.unlink(missing_ok=True)
+    return StreamingResponse(
+        _streamed(source),
+        media_type="application/octet-stream",
+        headers={"X-Content-SHA256": sha256, "Content-Length": str(size)},
+    )
+
+
+@router.post("/keel/cases/{case_id}/versions/missing")
+async def versions_missing_of_case(case_id: str, request: Request) -> JSONResponse:
+    """Which of the hashes Keel names the case holds no version of, each once, in the order asked."""
+    require_link(request)
+    case = _case_id(case_id)
+    asked = await read_body(request, MissingVersions)
+    state = request.app.state
+    try:
+        gone = await case_versions(state.settings, case).missing(state.storage, asked.sha256)
+    except (ClientError, BotoCoreError) as exc:
+        raise _storage_failed(exc, case) from None
+    return JSONResponse({"missing": gone})
+
+
+@router.delete("/keel/cases/{case_id}/versions")
+async def delete_versions_of_case(case_id: str, request: Request) -> JSONResponse:
+    """Delete every version the case holds, and no file of its workspace: how many.  Keel asks once the case's retention ends."""
+    require_link(request)
+    case = _case_id(case_id)
+    state = request.app.state
+    try:
+        deleted = await case_versions(state.settings, case).delete_all(state.storage)
+    except (ClientError, BotoCoreError) as exc:
+        raise _storage_failed(exc, case) from None
+    return JSONResponse({"deleted": deleted})
 
 
 async def org_member_name(request: Request, org_id: UUID, user_id: UUID) -> str | None:
