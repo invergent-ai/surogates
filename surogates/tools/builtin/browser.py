@@ -209,11 +209,17 @@ async def _resolve_session_browser(
         store = browser_profile_store or getattr(
             browser_pool, "browser_profile_store", None
         )
-        profile_id, state, problem = await _saved_login(
-            store, tenant=tenant, session_config=session_config, channel=channel,
-        )
-        if state is not None:
-            browser_spec.storage_state = state
+        # Loaded only when the pool provisions a fresh browser: a reused one
+        # already holds its login, and every action of a session goes through here.
+        missing: list[tuple[str, str]] = []
+
+        async def login() -> dict | None:
+            profile_id, state, problem = await _saved_login(
+                store, tenant=tenant, session_config=session_config, channel=channel,
+            )
+            if problem:
+                missing.append((profile_id, problem))
+            return state
 
         tenant_user_id = getattr(tenant, "user_id", None) if tenant else None
         result = await browser_pool.ensure(
@@ -223,8 +229,9 @@ async def _resolve_session_browser(
             # (it used to leak into the pod's user-id label).
             user_id=str(tenant_user_id) if tenant_user_id is not None else "",
             spec=browser_spec,
+            login=login,
         )
-        if problem and result.newly_provisioned:
+        for profile_id, problem in missing:
             await browser_pool.report_profile_problem(sid, profile_id, problem)
     except BrowserBudgetExhaustedError as exc:
         # Subclasses of BrowserUnavailableError — caught first so the
