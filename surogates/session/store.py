@@ -33,7 +33,7 @@ from surogates.channels.constants import (
     INTERACTIVE_PROMPT_CHANNELS,
     outbound_dm,
 )
-from surogates.channels.memory_boundary import CASE_BOUNDARY_PREFIX
+from surogates.channels.memory_boundary import CASE_BOUNDARY_PREFIX, rerun_kind_in
 from surogates.db.agent_users import (
     ENROLLMENT_CHANNELS,
     SOURCE_SESSION,
@@ -41,6 +41,8 @@ from surogates.db.agent_users import (
 )
 from surogates.db.models import (
     ApprovalGrant,
+    BoardNote,
+    DeliveryOutbox,
     Event as EventRow,
     IdeaNode,
     InboxItem,
@@ -93,6 +95,10 @@ class SessionNotFoundError(Exception):
 
 class StepFinishedError(Exception):
     """Raised when a message would wake a step or a work item that is over: its inputs are redacted."""
+
+
+class RerunRunning(Exception):
+    """Raised when a rerun cannot be purged: a session of its tree is held by a worker, mid-turn."""
 
 
 class KeyedMessage(NamedTuple):
@@ -1136,6 +1142,63 @@ class SessionStore:
                 {"id": session_id},
             )
         return [row[0] for row in rows]
+
+    async def delete_rerun_tree(self, session_id: UUID) -> int:
+        """Delete a rerun's session tree and everything that points at it: how many sessions.
+
+        One transaction, under the tree's row locks: the rerun's root session,
+        its helpers at any depth, their events, the inbox items and outbox
+        rows on them, their leases and cursors, the board notes they wrote,
+        and the task rows they stand in.  Raises :class:`SessionNotFoundError`,
+        and deletes nothing, when *session_id* is not a root session marked as
+        a rerun's, and :class:`RerunRunning` when a worker holds a session of
+        the tree.  Missions, research runs and workstreams cannot exist under
+        a case's session, so none is looked for: one that did makes the
+        delete fail on its foreign key, and nothing is deleted.
+        """
+        async with self._sf() as db, db.begin():
+            root = (await db.execute(
+                select(SessionRow.config, SessionRow.parent_id).where(SessionRow.id == session_id).with_for_update()
+            )).one_or_none()
+            if root is None or root.parent_id is not None or rerun_kind_in(root.config) is None:
+                raise SessionNotFoundError(f"session {session_id} is no rerun's")
+            tree = (await db.execute(
+                text(
+                    """
+                    WITH RECURSIVE tree(id) AS (
+                        SELECT id FROM sessions WHERE id = :id
+                        UNION
+                        SELECT s.id FROM sessions s JOIN tree t ON s.parent_id = t.id
+                    )
+                    SELECT id FROM tree
+                    """
+                ),
+                {"id": session_id},
+            )).scalars().all()
+            await db.execute(select(SessionRow.id).where(SessionRow.id.in_(tree)).with_for_update())
+            # The lease rows too, expired ones among them: a worker taking an expired lease updates its row in
+            # place, so without the lock it could take one between the look below and the delete.
+            await db.execute(select(LeaseRow.session_id).where(LeaseRow.session_id.in_(tree)).with_for_update())
+            held = (await db.execute(
+                select(LeaseRow.session_id).where(LeaseRow.session_id.in_(tree), LeaseRow.expires_at > func.now()).limit(1)
+            )).first()
+            if held is not None:
+                raise RerunRunning(f"a session of the tree of {session_id} is mid-turn")
+            tasks = (await db.execute(
+                select(TaskRow.id).where(or_(TaskRow.parent_session_id.in_(tree), TaskRow.current_session_id.in_(tree)))
+            )).scalars().all()
+            if tasks:
+                await db.execute(update(SessionRow).where(SessionRow.task_id.in_(tasks)).values(task_id=None))
+                await db.execute(delete(TaskLink).where(or_(TaskLink.parent_id.in_(tasks), TaskLink.child_id.in_(tasks))))
+                await db.execute(delete(TaskRow).where(TaskRow.id.in_(tasks)))
+            await db.execute(delete(InboxItem).where(InboxItem.session_id.in_(tree)))
+            await db.execute(delete(DeliveryOutbox).where(DeliveryOutbox.session_id.in_(tree)))
+            await db.execute(delete(LeaseRow).where(LeaseRow.session_id.in_(tree)))
+            await db.execute(delete(SessionCursor).where(SessionCursor.session_id.in_(tree)))
+            await db.execute(delete(BoardNote).where(BoardNote.writer_session_id.in_(tree)))
+            await db.execute(delete(EventRow).where(EventRow.session_id.in_(tree)))
+            deleted = await db.execute(delete(SessionRow).where(SessionRow.id.in_(tree)))
+            return deleted.rowcount
 
     async def session_tree_usage(self, session_id: UUID) -> TreeUsage:
         """What the session and every session under it by ``parent_id`` used, at any depth.

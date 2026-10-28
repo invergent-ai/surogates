@@ -73,9 +73,9 @@ async def test_the_overview_reads_where_each_thread_stands(api):
             "Convert the old reports": ("waiting", "failed", "The PDF could not be opened: it is encrypted"),
             "Draft the summary": ("working", None, None),
             "Tidy the shared folder": ("working", "computer", "Waiting for thinkpad"),
-            "Collect the sales data": ("idle", None, "Did the work."),
-            "Book the room": ("resolved", None, "Did the work."),
-            "Book the review meeting": ("resolved", None, "Did the work."),
+            "Collect the sales data": ("idle", None, "All done."),
+            "Book the room": ("resolved", None, "All done."),
+            "Book the review meeting": ("resolved", None, "All done."),
         }.items()
     }
     # Newest first, every time in UTC with its Z, and each thread's own files.
@@ -171,7 +171,7 @@ async def test_a_question_that_expired_waits_until_the_reply(api):
     await answered(api, thread, "Used 2025.")
     await turn_ends(api, thread)
     [row] = await rows(api, project)
-    assert (row["group"], row["status_line"]) == ("idle", "Did the work.")
+    assert (row["group"], row["status_line"]) == ("idle", "Used 2025.")
 
 
 async def test_a_coordinators_follow_up_ends_the_wait_on_a_question_that_expired(api):
@@ -417,14 +417,14 @@ async def test_a_threads_question_and_its_turns_end_reach_the_projects_stream(ap
         await answered(api, thread, "Drafted the memo.")
         await turn_ends(api, thread)
 
-    sent = await streamed(api, monkeypatch, project, 6, act)
+    # A turn that delivered no file writes no turn summary.
+    sent = await streamed(api, monkeypatch, project, 5, act)
     tid = str(thread.id)
     assert sent == [
         ("ready", {}),
         ("change", {"thread_id": tid, "type": "iteration.summary"}),
         ("change", {"thread_id": tid, "type": "user.message"}),
         ("change", {"thread_id": tid, "type": "inbox.input_required"}),
-        ("change", {"thread_id": tid, "type": "turn.summary"}),
         ("change", {"thread_id": tid, "type": "session.complete"}),
         # The master's, after the thread's status: the change a client hears last.
         ("change", {"thread_id": None, "type": "worker.complete"}),

@@ -29,6 +29,7 @@ __all__ = [
     "SessionLLMClients",
     "_close_partial_bundle",
     "build_session_llm_clients",
+    "resolve_org_llm",
     "resolve_video_endpoint",
 ]
 
@@ -145,6 +146,32 @@ async def _resolve_vault_ref(
     if user_id is not None:
         return await vault.resolve_ref(ref, org_id=org_id, user_id=None)
     return None
+
+
+async def resolve_org_llm(
+    endpoint: LLMEndpoint,
+    *,
+    vault: Any,
+    org_id: Any,
+    timeout: float,
+) -> ResolvedLLM:
+    """One slot's client outside any session, keyed at org scope.
+
+    A call with no session has no user or service account to resolve the
+    key under, so the slot's vault ref is read with both principal ids
+    null -- how every platform slot's key is stored.  The client waits
+    *timeout* seconds and never retries: the caller bounds the whole call.
+    Raises :class:`LookupError` when the vault holds no key for the ref.
+    """
+    key = await _resolve_vault_ref(vault, endpoint.api_key_ref, org_id=org_id)
+    if key is None:
+        raise LookupError("the vault holds no key for the slot")
+    client = AsyncOpenAI(
+        api_key=key, base_url=endpoint.base_url, timeout=timeout, max_retries=0,
+    )
+    return ResolvedLLM(
+        client=client, model=endpoint.model, context_window=endpoint.context_window,
+    )
 
 
 _TIER_RANK = {"basic": 0, "pro": 1}

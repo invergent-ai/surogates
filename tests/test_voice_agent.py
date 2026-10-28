@@ -1,6 +1,10 @@
 """Per-call settings come from the ops routing row and survive whatever is in it."""
-from surogates.voice.agent import CallConfig
-from surogates.voice.lines import default_lines
+import pytest
+
+pytest.importorskip("livekit.agents", reason="the voice extra is not installed")
+
+from surogates.voice.agent import CallConfig  # noqa: E402
+from surogates.voice.lines import default_lines  # noqa: E402
 
 
 def test_call_config_reads_the_routing_row():

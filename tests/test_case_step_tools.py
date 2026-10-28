@@ -35,6 +35,7 @@ import httpx
 import pytest
 
 import surogates.harness.loop as loop_module
+from surogates.channels.memory_boundary import CASE_RERUN_KEY
 from surogates.harness.budget import IterationBudget
 from surogates.keel.client import KeelClient, keel_client, use_keel_client
 from surogates.keel.steps import render_kickoff, step_contract_in, work_contract_key
@@ -62,6 +63,13 @@ CASE = CONTRACT["case_id"]
 BUCKET = "case-workspaces"
 PAGE = {"kb_id": "kb-uuid", "path": "policies/income.md", "sha256": "a" * 64}
 OTHER_PAGE = {"kb_id": "kb-uuid", "path": "policies/applicants.md", "sha256": "b" * 64}
+C1 = "11111111-1111-4111-8111-111111111111"
+C2 = "22222222-2222-4222-8222-222222222222"
+
+
+def reported(page: dict, compile_id: str | None = None) -> dict:
+    """A page as the step's report carries it: always with the compile that wrote it, null when unknown."""
+    return {**page, "compile_id": compile_id}
 ACCEPTED = {"result": "completed", "message": "Keel completed the step."}
 #: What the step's session row says it used, when its log holds no cache read: the usage a report of the step carries.
 USAGE = {"input_tokens": 1200, "output_tokens": 340, "cache_read_tokens": 0, "estimated_cost_usd": "0.0123"}
@@ -377,7 +385,7 @@ async def test_an_accepted_completion_carries_its_call_pages_and_usage(fake_keel
     assert json.loads(request.content) == {
         "call_id": "c1",
         **COMPLETION,
-        "pages_read": [OTHER_PAGE, PAGE],
+        "pages_read": [reported(OTHER_PAGE), reported(PAGE)],
         "usage": USAGE,
         "bundle_version": None,
     }
@@ -394,7 +402,25 @@ async def test_a_page_read_without_a_sha256_digest_is_left_out_of_the_report(fak
 
     assert result == "Step ended: Keel completed the step."
     [request] = fake_keel.requests
-    assert json.loads(request.content)["pages_read"] == [PAGE]
+    assert json.loads(request.content)["pages_read"] == [reported(PAGE)]
+
+
+async def test_a_page_read_names_its_compile_or_none(fake_keel, store):
+    # A compile id is a lowercase hyphenated UUID or nothing: an event written before reads named one, and
+    # any other value, report as null and never make Keel refuse the report.
+    for compile_id in (C1, C1, C2):
+        store.write(EventType.KB_PAGE_READ, {**PAGE, "compile_id": compile_id})
+    store.write(EventType.KB_PAGE_READ, PAGE)
+    store.write(EventType.KB_PAGE_READ, {**OTHER_PAGE, "compile_id": "published"})
+    store.write(EventType.KB_PAGE_READ, {**OTHER_PAGE, "compile_id": 12})
+
+    result = await _call("complete_step", COMPLETION, store)
+
+    assert result == "Step ended: Keel completed the step."
+    [request] = fake_keel.requests
+    assert json.loads(request.content)["pages_read"] == [
+        reported(OTHER_PAGE), reported(PAGE), reported(PAGE, C1), reported(PAGE, C2),
+    ]
 
 
 async def test_a_page_read_beyond_keels_bounds_is_left_out_of_the_report(fake_keel, store):
@@ -414,7 +440,7 @@ async def test_a_page_read_beyond_keels_bounds_is_left_out_of_the_report(fake_ke
 
     assert result == "Step ended: Keel completed the step."
     [request] = fake_keel.requests
-    assert json.loads(request.content)["pages_read"] == [PAGE, at_the_bounds]
+    assert json.loads(request.content)["pages_read"] == [reported(PAGE), reported(at_the_bounds)]
 
 
 async def test_a_file_field_becomes_a_case_file(fake_keel, tmp_path):
@@ -487,6 +513,52 @@ async def test_an_empty_file_is_a_case_file(fake_keel, store):
     assert body["output"]["offer"] == {
         "name": "offer.pdf", "uri": f"case-file://{CASE}/out/offer.pdf", "sha256": hashlib.sha256(b"").hexdigest(),
     }
+
+
+OFFER = b"%PDF-1.7 offer"
+
+
+def _kept_for(tmp_path, data: bytes):
+    """Where the case's boundary keeps *data* by its hash: the file, and what it holds, or ``None``."""
+    kept = tmp_path / BUCKET / f"boundaries/case:{CASE}/versions/{hashlib.sha256(data).hexdigest()}"
+    return kept.read_bytes() if kept.exists() else None
+
+
+async def test_an_output_file_is_kept_before_keel_hears_of_it(fake_keel, tmp_path):
+    store = _store_for(tmp_path, files={"offer": "one"})
+    await store.put("out/offer.pdf", OFFER)
+    kept_when_keel_heard: list[bytes | None] = []
+    fake_keel.during = lambda: kept_when_keel_heard.append(_kept_for(tmp_path, OFFER))
+
+    result = await _call("complete_step", {**COMPLETION, "output": {**COMPLETION["output"], "offer": "out/offer.pdf"}}, store)
+
+    assert result.startswith("Step ended:")
+    assert kept_when_keel_heard == [OFFER]
+
+
+class _RefusesVersions(LocalBackend):
+    """A store that takes the workspace's files and refuses a version of one."""
+
+    async def write(self, bucket: str, key: str, data: bytes) -> None:
+        if "/versions/" in key:
+            raise OSError("refused secret-key")
+        await super().write(bucket, key, data)
+
+
+async def test_an_output_file_that_cannot_be_kept_never_reaches_keel(fake_keel, tmp_path, caplog):
+    store = _store_for(tmp_path, files={"offer": "one"})
+    await store.put("out/offer.pdf", OFFER)
+    store.storage = _RefusesVersions(str(tmp_path))
+
+    with caplog.at_level(logging.INFO):
+        result = await _call(
+            "complete_step", {**COMPLETION, "output": {**COMPLETION["output"], "offer": "out/offer.pdf"}}, store,
+        )
+
+    assert json.loads(result)["error"] == "offer: the file could not be kept for Keel just now; call again."
+    assert fake_keel.requests == []
+    assert "secret-key" not in caplog.text
+    assert "OSError" in caplog.text
 
 
 async def test_a_report_larger_than_keel_takes_is_never_sent(fake_keel, store):
@@ -660,7 +732,7 @@ async def test_raise_hand_parks_the_step(fake_keel, store):
     assert request.url.path == f"/api/harness/sessions/{store.row.id}/raise-hand"
     assert request.headers["authorization"] == "Bearer door-key"
     assert json.loads(request.content) == {
-        "call_id": "c7", **hand, "pages_read": [PAGE], "usage": USAGE, "bundle_version": None,
+        "call_id": "c7", **hand, "pages_read": [reported(PAGE)], "usage": USAGE, "bundle_version": None,
     }
     # The step resumes in this session once a person answers: its inputs stay.
     assert not store.redacted()
@@ -676,6 +748,42 @@ async def test_raise_hand_parks_the_step(fake_keel, store):
     ):
         assert "error" in json.loads(await _call("raise_hand", bad, store)), bad
     assert len(fake_keel.requests) == 1
+
+
+async def test_a_rerun_reports_to_the_door_under_its_own_id(fake_keel, tmp_path):
+    rerun = {"kind": "rerun", "memory_prefix": "p/a"}
+
+    def a_rerun() -> _StepStore:
+        marked = _store_for(tmp_path)
+        marked.row.config[CASE_RERUN_KEY] = dict(rerun)
+        return marked
+
+    finished = a_rerun()
+    finished.write(EventType.KB_PAGE_READ, PAGE)
+    result = await _call("complete_step", COMPLETION, finished)
+
+    assert result == "Step ended: Keel completed the step."
+    [request] = fake_keel.requests
+    assert request.url.path == f"/api/harness/sessions/{finished.row.id}/complete"
+    assert json.loads(request.content) == {
+        "call_id": "c1", **COMPLETION, "pages_read": [reported(PAGE)], "usage": USAGE, "bundle_version": None,
+    }
+
+    fake_keel.answer(200, {"result": "hand-raised", "message": "A person will answer."})
+    stuck = a_rerun()
+    hand = {
+        "question": "Which income counts?",
+        "choices": ["Both", "The current employer only"],
+        "evidence": [{"label": "Employer", "value": "the first one", "source": {"file": "in/payslips/03.pdf"}}],
+    }
+    result = await _call("raise_hand", hand, stuck, tool_call_id="c7")
+
+    assert result == "Step ended: A person will answer."
+    request = fake_keel.requests[-1]
+    assert request.url.path == f"/api/harness/sessions/{stuck.row.id}/raise-hand"
+    assert json.loads(request.content) == {
+        "call_id": "c7", **hand, "pages_read": [], "usage": USAGE, "bundle_version": None,
+    }
 
 
 PAYSLIP = {"label": "Payslip · September", "value": "€6,180 net", "source": {"file": "/workspace/payslips/sep.pdf", "page": 1}}

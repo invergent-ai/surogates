@@ -2,11 +2,14 @@
 import json
 
 import httpx
-import numpy as np
 import pytest
-from livekit.agents import APIConnectOptions, APIError
 
-from surogates.voice.tts import RoTTS
+pytest.importorskip("livekit.agents", reason="the voice extra is not installed")
+
+import numpy as np  # noqa: E402
+from livekit.agents import APIConnectOptions, APIError  # noqa: E402
+
+from surogates.voice.tts import RoTTS  # noqa: E402
 
 RATE = 24000
 

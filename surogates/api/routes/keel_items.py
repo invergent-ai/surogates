@@ -37,6 +37,7 @@ from surogates.api.routes.keel import (
     progress_answer,
     queue_session,
     read_body,
+    refuse_a_reruns_folder,
     require_link,
     resolve_agent,
     screen,
@@ -110,6 +111,7 @@ async def create_item_session(request: Request) -> JSONResponse:
     agent = await resolve_agent(request, agent_id, body.org_id)
     contract = body.contract
     screen(contract.model_dump(mode="json", include=_SCREENED), case_id=contract.case_id)
+    await refuse_a_reruns_folder(request, contract.case_id)
 
     def this_item(existing: Any) -> bool:
         held = item_contract_of(existing)

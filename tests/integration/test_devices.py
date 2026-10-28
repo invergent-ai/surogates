@@ -105,13 +105,29 @@ async def add_user(session_factory, org_id: UUID) -> tuple[UUID, str]:
     return user_id, create_access_token(org_id, user_id, {"sessions:read", "sessions:write"}, auth_time=int(time.time()))
 
 
+_APP: FastAPI | None = None
+_APP_STATE: dict | None = None
+
+
+def _shared_app() -> FastAPI:
+    """The real app, built once in a process: registering its routes takes about half a second, and the
+    fixture below is set up by thousands of tests.  A test sets everything it needs on ``app.state`` and in
+    ``dependency_overrides``, and the fixture puts both back as they were built."""
+    global _APP, _APP_STATE
+    if _APP is None:
+        from surogates.api.app import create_app
+
+        _APP = create_app()
+        _APP_STATE = dict(_APP.state._state)
+    return _APP
+
+
 @pytest_asyncio.fixture(loop_scope="session")
 async def api(session_factory, redis_client, pg_url, redis_url):
     """The real app, wired to the test containers, serving one agent of a fresh org."""
     os.environ["SUROGATES_DB_URL"] = pg_url
     os.environ["SUROGATES_REDIS_URL"] = redis_url
 
-    from surogates.api.app import create_app
     from surogates.config import Settings
     from surogates.runtime import agent_runtime_context_dep, build_agent_runtime_context
     from surogates.storage.backend import create_backend
@@ -119,7 +135,7 @@ async def api(session_factory, redis_client, pg_url, redis_url):
     org_id = await create_org(session_factory)
     user_id, token = await add_user(session_factory, org_id)
 
-    app = create_app()
+    app = _shared_app()
     app.state.session_factory = session_factory
     app.state.redis = redis_client
     app.state.session_store = SessionStore(session_factory)
@@ -135,8 +151,13 @@ async def api(session_factory, redis_client, pg_url, redis_url):
         "version": 1,
         "storage_key_prefix": "",
     })
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        yield Api(client, app, org_id, user_id, token)
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            yield Api(client, app, org_id, user_id, token)
+    finally:
+        app.state._state.clear()
+        app.state._state.update(_APP_STATE)
+        app.dependency_overrides.clear()
 
 
 async def register(api: Api, name: str = "Flavius's ThinkPad", token: str | None = None) -> dict:

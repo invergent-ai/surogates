@@ -54,7 +54,7 @@ from sse_starlette.sse import EventSourceResponse
 from surogates.api.routes.events import session_event_stream
 from surogates.api.routes.office import agent_display_name
 from surogates.channels.constants import API_CHANNEL, session_queue_priority
-from surogates.channels.memory_boundary import CASE_BOUNDARY_PREFIX
+from surogates.channels.memory_boundary import CASE_BOUNDARY_PREFIX, rerun_kind_of
 from surogates.config import INTERRUPT_CHANNEL_PREFIX, enqueue_session
 from surogates.db.models import User
 from surogates.harness.tool_schemas import FILE_PANE_KEY
@@ -69,6 +69,8 @@ from surogates.keel.case_files import (
     write_case_file,
 )
 from surogates.keel.files import file_value
+from surogates.keel.versions import MAX_ASKED, SHA256_HEX, VersionNotKept, case_versions
+from surogates.keel.reruns import read_case_record
 from surogates.keel.run_facts import bundle_version_in
 from surogates.keel.steps import (
     ANSWER_MARKER,
@@ -78,6 +80,7 @@ from surogates.keel.steps import (
     REVISION_MARKER,
     StepContract,
     is_case_step,
+    is_rerun,
     render_kickoff,
     render_message,
     rests_on_its_report,
@@ -261,6 +264,20 @@ class CaseEditorRequest(BaseModel):
     mentionable: list[MentionableAgent] = Field(default=[], max_length=20)
 
 
+def _sha256_hex(value: str) -> str:
+    if not SHA256_HEX.fullmatch(value):
+        raise ValueError("not a SHA-256 digest")
+    return value
+
+
+class MissingVersions(BaseModel):
+    """Keel's question about which versions of a case's files the runtime no longer holds.  Keys this runtime does not know are ignored."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    sha256: Annotated[list[Annotated[str, AfterValidator(_sha256_hex)]], Field(min_length=1, max_length=MAX_ASKED)]
+
+
 class MemberInvitationRequest(BaseModel):
     """Keel's invitation of one person into an organisation.  Keys this runtime does not know are ignored."""
 
@@ -359,7 +376,7 @@ async def read_body(request: Request, model: type[_Body]) -> _Body:
 
 
 def agent_id_of(request: Request) -> str:
-    """The ``agent_id`` query parameter of a create: 422 ``invalid-request`` when it is missing."""
+    """The ``agent_id`` query parameter of a create or an analysis call: 422 ``invalid-request`` when it is missing."""
     agent_id = request.query_params.get("agent_id") or ""
     if not agent_id:
         raise refused(
@@ -368,8 +385,15 @@ def agent_id_of(request: Request) -> str:
     return agent_id
 
 
-async def resolve_agent(request: Request, agent_id: str, org_id: UUID) -> dict[str, Any]:
-    """The agent's runtime config, when it is the org's and running."""
+async def resolve_agent(
+    request: Request, agent_id: str, org_id: UUID, *, running: bool = True,
+) -> dict[str, Any]:
+    """The agent's runtime config, when it is the org's and, unless *running* is false, running.
+
+    A call that only analyses what the agent already did (labelling its
+    raised hands, say) passes ``running=False`` and is served for a
+    stopped agent too.
+    """
     cache = request.app.state.runtime_config_cache
     unknown = refused(status.HTTP_404_NOT_FOUND, "unknown-agent", "No such agent in this org.")
     for attempt in (1, 2):
@@ -393,7 +417,7 @@ async def resolve_agent(request: Request, agent_id: str, org_id: UUID) -> dict[s
     # Another org's agent is not told apart from no agent at all.
     if not same_org:
         raise unknown
-    if not payload.get("enabled"):
+    if running and not payload.get("enabled"):
         raise refused(status.HTTP_409_CONFLICT, "agent-stopped", "The agent is stopped.")
     return payload
 
@@ -409,6 +433,23 @@ def screen(value: object, *, case_id: UUID) -> None:
         raise refused(
             status.HTTP_422_UNPROCESSABLE_CONTENT, "inputs-blocked", "The case's inputs were blocked.",
         )
+
+
+async def refuse_a_reruns_folder(request: Request, case_id: UUID) -> None:
+    """409 ``case-exists`` for a case id whose boundary folder is a rerun's or a trial's.
+
+    A case's session made under a rerun's id would share the rerun's folder and memory, and the rerun's purge
+    would then delete the case's files.  A case's folder, even one with no record yet, is never marked.  A record
+    the store will not give is no reason to refuse a case's session, as :func:`note_case_org` never refuses on it;
+    that call, which follows, logs the same failure.
+    """
+    state = request.app.state
+    try:
+        record = await read_case_record(state.storage, state.settings, case_id)
+    except (ClientError, BotoCoreError):
+        return
+    if record is not None and record.rerun is not None:
+        raise refused(status.HTTP_409_CONFLICT, "case-exists", "The case id names a rerun or a trial.")
 
 
 def _key_in_use() -> HTTPException:
@@ -489,7 +530,7 @@ async def create_or_find(
         existing = await store.get_session_by_idempotency_key(body.org_id, body.idempotency_key)
         if existing is not None:
             return await found(existing)
-        if await _exists(store, body.session_id):
+        if await session_exists(store, body.session_id):
             raise _key_in_use() from None
         # Another constraint broke: the route answers it as any database failure.
         raise
@@ -497,7 +538,7 @@ async def create_or_find(
     return session, True
 
 
-async def _exists(store: Any, session_id: UUID) -> bool:
+async def session_exists(store: Any, session_id: UUID) -> bool:
     try:
         await store.get_session(session_id)
     except SessionNotFoundError:
@@ -519,7 +560,7 @@ async def note_case_org(request: Request, case_id: UUID, org_id: UUID) -> None:
         logger.warning("keel-link: the org of case %s could not be recorded (%s)", case_id, type(exc).__name__)
 
 
-def _answer(session: Any, *, created: bool, bundle_version: str | None) -> JSONResponse:
+def created_answer(session: Any, *, created: bool, bundle_version: str | None) -> JSONResponse:
     answer = StepSessionCreated(
         session_id=session.id,
         service_account_id=str(session.service_account_id),
@@ -541,11 +582,13 @@ async def create_step_session(request: Request) -> JSONResponse:
     agent = await resolve_agent(request, agent_id, body.org_id)
     contract = body.contract
     screen(contract.inputs, case_id=contract.case_id)
+    await refuse_a_reruns_folder(request, contract.case_id)
 
     def this_step(existing: Any) -> bool:
         held = step_contract_of(existing)
         return (
             existing.agent_id == agent_id
+            and rerun_kind_of(existing) is None
             and held is not None
             and held.case_id == contract.case_id
             and held.token == contract.token
@@ -573,7 +616,7 @@ async def create_step_session(request: Request) -> JSONResponse:
             message="The step session could not be created.",
         ) from None
     await note_case_org(request, contract.case_id, body.org_id)
-    return _answer(session, created=created, bundle_version=bundle_version_in(agent.get("bundle_version")))
+    return created_answer(session, created=created, bundle_version=bundle_version_in(agent.get("bundle_version")))
 
 
 async def create_case_session(
@@ -653,12 +696,18 @@ async def watched_session(request: Request, session_id: str, holds: Callable[[An
         ) from None
 
 
+def _is_a_step(session: Any) -> bool:
+    """Whether *session* is a step Keel started for a case, and no rerun's: a rerun is another route's."""
+    return is_case_step(session) and not is_rerun(session)
+
+
 async def _step_session(request: Request, session_id: str) -> Any:
     """The step session *session_id* names: 404 ``unknown-session`` for any other id.
 
     A child of the step works on the case, and a chat on none: neither is the step's.
+    A rerun's session is a step's too, but never this route's.
     """
-    return await session_where(request, session_id, is_case_step)
+    return await session_where(request, session_id, _is_a_step)
 
 
 @router.post("/keel/step-sessions/{session_id}/messages")
@@ -725,7 +774,7 @@ async def mention_step_agent(session_id: str, request: Request) -> JSONResponse:
     try:
         session = await _step_session(request, session_id)
         body = await read_body(request, MentionRequest)
-        path = _checked_path(request, step_contract_of(session).case_id, body.path)
+        path = checked_path(request, step_contract_of(session).case_id, body.path)
         kind = office_kind(path)
         if kind is None or kind.file_type not in AGENT_KINDS:
             raise refused(
@@ -879,7 +928,7 @@ async def events_stream(request: Request, session: Any) -> EventSourceResponse:
 async def read_step_session_events(session_id: str, request: Request) -> JSONResponse:
     """A page of a step session's events after the cursor ``after``, without ``llm.delta`` (:func:`events_page`)."""
     require_link(request)
-    return await events_page(request, await watched_session(request, session_id, is_case_step))
+    return await events_page(request, await watched_session(request, session_id, _is_a_step))
 
 
 @router.get("/keel/step-sessions/{session_id}/events/stream")
@@ -889,7 +938,7 @@ async def stream_step_session_events(session_id: str, request: Request) -> Event
     A step at rest between its turns does not end the stream.
     """
     require_link(request)
-    return await events_stream(request, await watched_session(request, session_id, is_case_step))
+    return await events_stream(request, await watched_session(request, session_id, _is_a_step))
 
 
 #: The events whose ``data["name"]`` names the tool they call or answer.
@@ -978,7 +1027,7 @@ async def read_step_session_progress(session_id: str, request: Request) -> JSONR
     Only the step's own session is read: a helper it started keeps its own list.
     """
     require_link(request)
-    return await progress_answer(request, await watched_session(request, session_id, is_case_step))
+    return await progress_answer(request, await watched_session(request, session_id, _is_a_step))
 
 
 # ---------------------------------------------------------------------------
@@ -986,7 +1035,7 @@ async def read_step_session_progress(session_id: str, request: Request) -> JSONR
 # ---------------------------------------------------------------------------
 
 
-def _case_id(case_id: str) -> UUID:
+def case_uuid(case_id: str) -> UUID:
     try:
         return UUID(case_id)
     except ValueError:
@@ -995,7 +1044,7 @@ def _case_id(case_id: str) -> UUID:
         ) from None
 
 
-def _checked_path(request: Request, case: UUID, path: str) -> str:
+def checked_path(request: Request, case: UUID, path: str) -> str:
     """*path*, relative to the case's workspace: 422 ``invalid-path`` for one Keel may not name."""
     try:
         relative = case_path(path)
@@ -1009,7 +1058,7 @@ def _checked_path(request: Request, case: UUID, path: str) -> str:
 
 def _case_path(request: Request, case: UUID) -> str:
     """The ``path`` query parameter, relative to the case's workspace: 422 ``invalid-path`` for one Keel may not name."""
-    return _checked_path(request, case, request.query_params.get("path") or "")
+    return checked_path(request, case, request.query_params.get("path") or "")
 
 
 def _storage_failed(exc: Exception, case: UUID) -> HTTPException:
@@ -1043,7 +1092,7 @@ def _editing(document: OpenDocument) -> list[str]:
 async def list_files_of_case(case_id: str, request: Request) -> JSONResponse:
     """The files of a case's workspace, by path, each with who is in its editor now."""
     require_link(request)
-    case = _case_id(case_id)
+    case = case_uuid(case_id)
     state = request.app.state
     try:
         files = await list_case_files(state.storage, state.settings, case)
@@ -1084,19 +1133,24 @@ def _scratch_file() -> Path:
     return Path(name)
 
 
-def _opened_digest(path: Path) -> tuple[BinaryIO, str]:
-    """*path* opened, and removed, so nothing is left behind however its reader ends; and its digest."""
+def _file_digest(path: Path) -> str:
+    """The SHA-256 of the file at *path*, read a piece at a time."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as source:
+        while chunk := source.read(_CHUNK):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _opened_and_removed(path: Path) -> BinaryIO:
+    """*path* opened, and removed, so nothing is left behind however its reader ends."""
     source = open(path, "rb")
     try:
         path.unlink()
-        digest = hashlib.sha256()
-        while chunk := source.read(_CHUNK):
-            digest.update(chunk)
-        source.seek(0)
     except BaseException:
         source.close()
         raise
-    return source, digest.hexdigest()
+    return source
 
 
 async def _streamed(source: BinaryIO) -> AsyncIterator[bytes]:
@@ -1114,20 +1168,26 @@ async def read_file_of_case(case_id: str, request: Request) -> StreamingResponse
     The file is copied to a scratch file first, a piece at a time: its digest
     is known before its first byte is sent, and none of it is held whole.
     One over the size Keel may write is 413 ``too-large``, copied no further.
+    The bytes are kept under that digest before it is sent: with no version
+    kept the answer is 503, and no digest has left.
     """
     require_link(request)
-    case = _case_id(case_id)
+    case = case_uuid(case_id)
     relative = _case_path(request, case)
     state = request.app.state
     limit = state.settings.keel.max_file_bytes
     target = await asyncio.to_thread(_scratch_file)
     try:
         size = await download_case_file(state.storage, state.settings, case, relative, target, limit=limit)
-        source, digest = await asyncio.to_thread(_opened_digest, target)
+        digest = await asyncio.to_thread(_file_digest, target)
+        await case_versions(state.settings, case).keep_file(state.storage, digest, target)
+        source = await asyncio.to_thread(_opened_and_removed, target)
     except FileNotFoundError:
         raise _unknown_file() from None
     except TooLarge:
         raise _too_large(limit) from None
+    except VersionNotKept as exc:
+        raise _storage_failed(exc.__cause__ or exc, case) from None
     except (ClientError, BotoCoreError) as exc:
         raise _storage_failed(exc, case) from None
     finally:
@@ -1139,7 +1199,7 @@ async def read_file_of_case(case_id: str, request: Request) -> StreamingResponse
     )
 
 
-async def _body_within(request: Request, limit: int) -> bytes:
+async def body_within(request: Request, limit: int) -> bytes:
     """The request's body, read no further than one byte past *limit*: 413 ``too-large`` past it."""
     too_large = _too_large(limit)
     declared = request.headers.get("content-length", "")
@@ -1161,10 +1221,21 @@ async def write_file_of_case(case_id: str, request: Request) -> JSONResponse:
     save would land over a file it never saw.
     """
     require_link(request)
-    case = _case_id(case_id)
+    case = case_uuid(case_id)
     relative = _case_path(request, case)
+    data = await body_within(request, request.app.state.settings.keel.max_file_bytes)
+    return await write_case_file_answer(request, case, relative, data)
+
+
+async def write_case_file_answer(request: Request, case: UUID, relative: str, data: bytes) -> JSONResponse:
+    """Write *data* at *relative* in *case*'s workspace, and answer with the file's Keel value and size.
+
+    A file open in the editor is refused, 409 ``file-open``.  The bytes are
+    kept under their digest before the file is written, so the digest in the
+    answer names bytes the runtime holds: with no version kept, or a store
+    that would not answer, the answer is 503 and the file is not written.
+    """
     state = request.app.state
-    data = await _body_within(request, state.settings.keel.max_file_bytes)
     location = case_workspace(state.storage, state.settings, case).location(relative)
     try:
         open_now = await open_at(state.session_factory, location)
@@ -1176,12 +1247,80 @@ async def write_file_of_case(case_id: str, request: Request) -> JSONResponse:
         ) from None
     if open_now is not None:
         raise refused(status.HTTP_409_CONFLICT, "file-open", "The file is open in the editor.")
+    value = await asyncio.to_thread(file_value, case, relative, data)
+    versions = case_versions(state.settings, case)
     try:
+        # Keel may write a case's files before its first step session makes the bucket.
+        await state.storage.create_bucket(versions.bucket)
+        await versions.keep(state.storage, value["sha256"], data)
         await write_case_file(state.storage, state.settings, case, relative, data)
+    except VersionNotKept as exc:
+        raise _storage_failed(exc.__cause__ or exc, case) from None
     except (ClientError, BotoCoreError) as exc:
         raise _storage_failed(exc, case) from None
-    value = await asyncio.to_thread(file_value, case, relative, data)
     return JSONResponse({**value, "size": len(data)})
+
+
+def _unknown_version() -> HTTPException:
+    return refused(status.HTTP_404_NOT_FOUND, "unknown-version", "No such version of the case's files.")
+
+
+@router.get("/keel/cases/{case_id}/versions/{sha256}")
+async def read_version_of_case(case_id: str, sha256: str, request: Request) -> StreamingResponse:
+    """A version of a file of the case, by its hash, streamed as a file's read is, with the hash in ``X-Content-SHA256``.
+
+    Past the size Keel may write it is 413 ``too-large``.
+    """
+    require_link(request)
+    case = case_uuid(case_id)
+    if not SHA256_HEX.fullmatch(sha256):
+        raise refused(status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid-request", "The hash is not a SHA-256 digest.")
+    state = request.app.state
+    limit = state.settings.keel.max_file_bytes
+    target = await asyncio.to_thread(_scratch_file)
+    try:
+        size = await case_versions(state.settings, case).download(state.storage, sha256, target, limit=limit)
+        source = await asyncio.to_thread(_opened_and_removed, target)
+    except KeyError:
+        raise _unknown_version() from None
+    except TooLarge:
+        raise _too_large(limit) from None
+    except (ClientError, BotoCoreError) as exc:
+        raise _storage_failed(exc, case) from None
+    finally:
+        target.unlink(missing_ok=True)
+    return StreamingResponse(
+        _streamed(source),
+        media_type="application/octet-stream",
+        headers={"X-Content-SHA256": sha256, "Content-Length": str(size)},
+    )
+
+
+@router.post("/keel/cases/{case_id}/versions/missing")
+async def versions_missing_of_case(case_id: str, request: Request) -> JSONResponse:
+    """Which of the hashes Keel names the case holds no version of, each once, in the order asked."""
+    require_link(request)
+    case = case_uuid(case_id)
+    asked = await read_body(request, MissingVersions)
+    state = request.app.state
+    try:
+        gone = await case_versions(state.settings, case).missing(state.storage, asked.sha256)
+    except (ClientError, BotoCoreError) as exc:
+        raise _storage_failed(exc, case) from None
+    return JSONResponse({"missing": gone})
+
+
+@router.delete("/keel/cases/{case_id}/versions")
+async def delete_versions_of_case(case_id: str, request: Request) -> JSONResponse:
+    """Delete every version the case holds, and no file of its workspace: how many.  Keel asks once the case's retention ends."""
+    require_link(request)
+    case = case_uuid(case_id)
+    state = request.app.state
+    try:
+        deleted = await case_versions(state.settings, case).delete_all(state.storage)
+    except (ClientError, BotoCoreError) as exc:
+        raise _storage_failed(exc, case) from None
+    return JSONResponse({"deleted": deleted})
 
 
 async def org_member_name(request: Request, org_id: UUID, user_id: UUID) -> str | None:
@@ -1225,13 +1364,13 @@ async def open_case_document(case_id: str, request: Request) -> JSONResponse:
     document an agent edits.
     """
     require_link(request)
-    case = _case_id(case_id)
+    case = case_uuid(case_id)
     body = await read_body(request, CaseEditorRequest)
     state = request.app.state
     office = state.settings.office
     if not office.enabled:
         raise refused(status.HTTP_503_SERVICE_UNAVAILABLE, "office-off", "No document server is configured.")
-    relative = _checked_path(request, case, body.path)
+    relative = checked_path(request, case, body.path)
     kind = office_kind(relative)
     if kind is None:
         raise refused(

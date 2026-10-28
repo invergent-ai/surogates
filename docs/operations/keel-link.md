@@ -1,6 +1,6 @@
 # keel-link
 
-`surogates keel-link` is Keel's private door into the runtime. Keel, the case engine, calls it to start an agent's session for one step of a case, and then to answer it, ask it for a revision, send it a plain message, give it a comment that mentions its agent, cancel it, and read its status, its events and its progress. It starts an agent's item session too, on a work item a case gives the agent as it gives a person one, and then sends it a plain message, cancels it, and reads its status, its events and its progress. It starts a person's case agent session, gives it the person's messages, stops its turn, and reads its status and its events. It also lists, reads and writes a case's files, opens a case's document in the document editor for a person, and invites staff into an organisation. It is a process of its own, on a port of its own, and it serves nothing else.
+`surogates keel-link` is Keel's private door into the runtime. Keel, the case engine, calls it to start an agent's session for one step of a case, and then to answer it, ask it for a revision, send it a plain message, give it a comment that mentions its agent, cancel it, and read its status, its events and its progress. It starts an agent's item session too, on a work item a case gives the agent as it gives a person one, and then sends it a plain message, cancels it, and reads its status, its events and its progress. It starts a person's case agent session, gives it the person's messages, stops its turn, and reads its status and its events. It also groups an agent's raised hands by reason, and drafts a passage of policy from agreeing answers, with the agent's own model. It also lists, reads and writes a case's files, and keeps the version of every file it hands Keel; runs reruns and trials, an agent's step again; opens a case's document in the document editor for a person, and invites staff into an organisation. It is a process of its own, on a port of its own, and it serves nothing else.
 
 ## What it serves
 
@@ -27,10 +27,24 @@
 | `GET /v1/keel/case-agent-sessions/{session_id}` | The case agent session's `session_id` and `status`. |
 | `GET /v1/keel/case-agent-sessions/{session_id}/events?after=<id>&limit=<n>` | A page of the case agent session's events, as a step session's page. See [Watching a step session](#watching-a-step-session). |
 | `GET /v1/keel/case-agent-sessions/{session_id}/events/stream?after=<id>` | The case agent session's events after the cursor `after`, then live, as a step session's stream. See [Watching a step session](#watching-a-step-session). |
+| `POST /v1/keel/hand-reasons?agent_id=<agent>` | Takes `{"org_id", "hands": [{"id", "question", "choices", "answer"}], "vocabulary": [str]}` (1 to 25 hands) and answers `200 {"labels": [{"id", "reason", "answer_gist", "policy_silent"}], "usage": {"input_tokens", "output_tokens", "cost_usd"}}`: a reason in policy terms for each hand the model labelled usably, and the gist of its answer. A hand with no label was not labelled this time. See [Raised hands, grouped](#raised-hands-grouped). |
+| `POST /v1/keel/policy-text?agent_id=<agent>` | Takes `{"org_id", "reason", "gist", "hands": [{"question", "answer"}]}` (1 to 50 hands) and answers `200 {"text", "usage"}`: one passage of written policy in Markdown, 1 to 6,000 characters, that states the rule the answers applied, and what the call used (as for hand labelling). See [A policy passage](#a-policy-passage). |
 | `GET /v1/keel/cases/{case_id}/files` | The case's files, by path: `{"files": [{"path", "name", "size", "modified_at", "editing"}]}`. `editing` names who is in the file's editor now, by display name, sorted; someone the runtime has no name for is `Someone`, or `An agent` for an agent. A case no session has written to yet has `{"files": []}`. The platform's own folders are left out. |
 | `GET /v1/keel/cases/{case_id}/files/content?path=<path>` | The file's bytes, as `application/octet-stream`, with their SHA-256 hex digest in `X-Content-SHA256`. A file over `SUROGATES_KEEL_MAX_FILE_BYTES` is not read. |
 | `PUT /v1/keel/cases/{case_id}/files/content?path=<path>` | Writes the body at the path, over any file there. `200 {"name", "uri", "sha256", "size"}`, where `uri` is `case-file://<case id>/<path>`: the value a step's file field holds. |
+| `GET /v1/keel/cases/{case_id}/versions/{sha256}` | A kept version of a file of the case, by its hash, as `application/octet-stream`, with the hash in `X-Content-SHA256`. `404 unknown-version` when the case holds none; a version over `SUROGATES_KEEL_MAX_FILE_BYTES` is not read. See [A case's file versions](#a-cases-file-versions). |
+| `POST /v1/keel/cases/{case_id}/versions/missing` | Takes `{"sha256": [hash]}` (1 to 500 hashes) and answers `200 {"missing": [hash]}`: each hash the case holds no version of, once, in the order asked. |
+| `DELETE /v1/keel/cases/{case_id}/versions` | Deletes every version the case holds, and no file of its workspace: `200 {"deleted": <count>}`, `0` for a case that has none. |
 | `POST /v1/keel/cases/{case_id}/editor` | Takes `{"org_id", "path", "user_id", "access", "theme", "mentionable"}` and answers `200 {"document_server_url", "config", "mentionable_users"}`: one person's editor config for the document at the path, and the agents it offers to mention. See [A case's document in the editor](#a-cases-document-in-the-editor). |
+| `POST /v1/keel/reruns?agent_id=<agent>` | Starts a rerun or a trial of the agent's step, in a case of its own id, on the files of a past case as they were: `201` made, `200` found by its key, each `{"session_id", "service_account_id", "bundle_version", "created"}`. See [Reruns and trials](#reruns-and-trials). |
+| `PUT /v1/keel/reruns/{session_id}/files/content?org_id=<org>&path=<path>` | Writes the body at the path in a trial's workspace, before or after the trial is created: `200 {"name", "uri", "sha256", "size"}`, as a case's file write answers. |
+| `POST /v1/keel/reruns/{session_id}/start` | Writes a rerun's first message and queues it: `202 {"started": bool}`, true when this call wrote it. `409 step-finished` once the rerun was cancelled. |
+| `GET /v1/keel/reruns/{session_id}` | A rerun's `{"status", "updated_at"}`, as a step session's status. |
+| `GET /v1/keel/reruns/{session_id}/events?after=<id>&limit=<n>` | A page of the rerun's events, as a step session's page. See [Watching a step session](#watching-a-step-session). |
+| `GET /v1/keel/reruns/{session_id}/events/stream?after=<id>` | The rerun's events after the cursor, then live, as a step session's stream. |
+| `GET /v1/keel/reruns/{session_id}/progress` | The rerun's status, todo list and last activity, as a step session's progress. See [Progress](#progress). |
+| `POST /v1/keel/reruns/{session_id}/cancel` | Ends the rerun as a step's cancel ends a step: `200 {"status": "paused"}`, also when it was paused already. |
+| `DELETE /v1/keel/reruns/{session_id}` | Deletes a rerun or a trial whole: `200 {"sessions", "objects"}`, the sessions deleted and the boundary objects deleted, zeros for an id that names nothing. See [Purging a rerun](#purging-a-rerun). |
 | `POST /v1/keel/orgs/{org_id}/members` | Takes `{"email", "display_name"}` and answers `200 {"user_id", "created", "joined", "sign_in", "set_password_token", "expires_at"}`: the org's user with that email, found, joined from another org or created. See [Inviting staff](#inviting-staff). |
 | `GET /health`, `GET /health/ready` | The same liveness and readiness probes as the API. |
 
@@ -44,27 +58,33 @@ Errors answer `{"detail": {"code", "message"}}`, and a message never repeats the
 |---|---|---|
 | 401 | `bad-link-key` | The bearer is not the link key, or no link key is set. |
 | 404 | `unknown-agent` | No such agent, or it belongs to another org. |
-| 404 | `unknown-session` | No such session, or it is not the own session of a step, for a step route, of a work item, for an item route, or of a person's case agent, for a case agent route. |
+| 404 | `unknown-session` | No such session, or it is not the own session of a step (never a rerun's), for a step route, of a work item, for an item route, of a person's case agent, for a case agent route, or of a rerun, for a rerun route. |
 | 404 | `unknown-file` | No file at the path in the case's workspace, or the editor was asked for a case recorded under another org. |
+| 404 | `unknown-version` | The case holds no version with the hash. |
 | 404 | `unknown-user` | The editor was asked for a user who does not belong to the org. |
 | 404 | `unknown-org` | An invitation into an org that does not exist. |
-| 409 | `agent-stopped` | The agent is stopped. |
-| 409 | `key-in-use` | The key, or the session id, names another session: another step's, item's or case agent's, or one of another agent. |
+| 409 | `agent-stopped` | The agent is stopped. Never for the analysis routes, which serve a stopped agent too. |
+| 409 | `key-in-use` | The key, or the session id, names another session: another step's, item's, case agent's or rerun's, or one of another agent. |
 | 409 | `not-a-member` | A case agent was asked for a person who is not a user of the org. |
+| 409 | `rerun-running` | A purge of a rerun whose session is in a turn, or one of whose documents is open in the editor. Cancel it, then purge it later. |
 | 409 | `step-finished` | A message or a mention for a step that is over: its inputs were redacted. |
 | 409 | `no-office` | A mention for a step whose agent does not edit the case's documents: not a draft step's, or the runtime has no agent editing. |
+| 409 | `case-exists` | A rerun's or a trial's id names a case, or another org's rerun or trial, or one of the other kind; or a step, an item or a case agent is started on a case id that is a rerun's or a trial's. |
 | 409 | `file-open` | A write over a file that is open in the document editor. |
+| 409 | `file-version-gone` | A rerun's file has no version in the case it comes from. The answer's `missing` lists the indexes of those files, and nothing was written. |
 | 409 | `document-closing` | The document's last save is still landing; ask for the editor again in a moment. |
 | 409 | `ambiguous-email` | An invitation for an email that two or more users of other orgs have: none is chosen. |
 | 409 | `other-firebase-project` | An invitation for an account that signs in with a Firebase project the org does not sign in with. |
 | 413 | `too-large` | A file to write or read over `SUROGATES_KEEL_MAX_FILE_BYTES`. |
 | 415 | `not-a-document` | The editor was asked for a file that is not an office document, or a mention names a file that is not a document an agent edits. |
-| 422 | `inputs-blocked` | The prompt-injection screen blocked the step's inputs, or the item's inputs, question, choices or evidence. |
-| 422 | `invalid-path` | A file's path Keel may not name: see [A case's files](#a-cases-files). |
-| 422 | `invalid-request` | The body does not validate (an invitation's email that is not one among them), a case id or an org id is not a UUID, or a session's events were asked for with a cursor or a page size out of range. |
-| 500 | `internal-error` | The database failed, other than while a step, item or case agent session's events or progress were read. Only the error's class name is logged. |
+| 422 | `inputs-blocked` | The prompt-injection screen blocked the step's inputs, or the item's inputs, question, choices or evidence; or a policy passage's reason or gist, or every one of its hands. |
+| 422 | `invalid-path` | A file's path Keel may not name, a rerun's `files` paths among them: see [A case's files](#a-cases-files). |
+| 422 | `invalid-request` | The body does not validate (an invitation's email that is not one among them), a case id or an org id is not a UUID, a version's hash is not 64 lowercase hex digits, or a session's events were asked for with a cursor or a page size out of range. |
+| 500 | `internal-error` | The database failed, other than while a step, item, case agent or rerun session's events, status or progress were read, or while a purge first read the rerun. Only the error's class name is logged. |
+| 502 | `model-failed` | An analysis route's model sent no completion: the provider failed, refused, or ran out of credit. A policy passage's model gave no valid object, or a text that is empty or over 6,000 characters. |
 | 503 | `office-off` | The editor was asked for, and no document server is configured. |
-| 503 | `unavailable` | The agent's runtime config could not be read, twice; the object store refused or did not answer a case's files; an invitation could not read the org's Firebase config; or the database failed while a step, item or case agent session's events or progress were read. Only the error's class name, and the case id, the org id or the session id, are logged. |
+| 503 | `unavailable` | The agent's runtime config could not be read, twice; an analysis route's agent names no model, or the vault holds no key for it, or the runtime has no vault; the object store refused or did not answer a case's files; an invitation could not read the org's Firebase config; or the database failed while a step, item, case agent or rerun session's events, status or progress were read, or while a purge first read the rerun. Only the error's class name, and the case id, the org id, the session id or, for an analysis route, the agent id, are logged. |
+| 504 | `model-timeout` | An analysis route's model work took longer than 22 seconds. |
 
 ## A step's inputs
 
@@ -263,6 +283,32 @@ A read or a save without its path is never sent, nor is a save whose content is 
 
 An agent gets the designer's tools only through an allow-list naming them: its policy's `allowed_tools`. An agent with no policy, or a policy with only a deny-list, is offered none, and a session's own config never adds them. No session of a case is offered them, whatever its agent's policy, and one called from a case's session reaches no Keel. A worker without both settings has no link to Keel: each designer tool answers `This runtime has no link to Keel.`
 
+## Raised hands, grouped
+
+`POST /v1/keel/hand-reasons?agent_id=<agent>` has the agent's own model name what each of up to 25 raised hands turns on. Keel sends the hands an agent raised (the question, its choices, and the answer people gave once they did) with the reasons its project already uses, and stores what comes back. Nothing is stored here: no table, no session, no key.
+
+- **Which model, and who pays.** The agent's summary slot, else its main slot as the runtime config names it; there is no session, so no tier swap. The call goes to the slot's `base_url`, with the slot's key read from the vault at org scope. For a platform agent that is the management plane's proxy, which bills the agent's project. A stopped agent is served too: grouping hands it raised before it stopped is not the agent working.
+- **What it takes.** `org_id` (the agent must be the org's, else `404 unknown-agent`), 1 to 25 hands with distinct `id`s of 1 to 200 characters, a `question` of 1 to 2,000 characters, at most 20 `choices` of at most 200, an `answer` of 1 to 20,000 characters or null, and at most 200 `vocabulary` entries of 1 to 120 characters. Anything else is `422 invalid-request`.
+- **Numbering.** The model sees each hand as `n` (1, 2, …) and answers by `n`; Keel's ids never reach it.
+- **What a label is.** For each hand the model gives a `reason` and, when the hand has an answer, an `answer_gist`, each read on one line (white space runs become one space, one trailing full stop goes) and 1 to 120 characters, and whether the policy should have settled the hand (`policy_silent`). The first label for a number is the only one kept; a number that names no hand sent is dropped. A reason that equals a vocabulary entry without regard to case takes the entry's spelling. A hand with an answer needs a usable gist, or its label is dropped; a hand without one answers `answer_gist: null`. The labels follow the order of the hands.
+- **The screen.** Each hand (question, each choice and answer) and each vocabulary entry passes the prompt-injection screen, each text as written and on its own, before the prompt is built, because hand text is case content and can carry instructions. A blocked hand or entry is left out of the call: a blocked hand gets no label, and the batch goes on. When every hand is blocked the answer is `200` with no labels and zero usage, and the model is not asked. The log says how many hands were blocked, never which.
+- **Identifiers stay out.** A reason or a gist that holds an identifier of any hand of the request is dropped: a word of the hand's question, choices or answer (white space ends it), once punctuation and currency signs are stripped from its ends, or a run of letters, digits and `@ . , - / +` in it, once those signs and `_` are stripped from its ends, that is 4 characters or more and holds a digit or an `@` (a reference number, an e-mail address, an amount); or any run of 4 or more digits, compared without regard to case. Quotes, markdown signs, apostrophes and colons end a run, so `**AB-12-34**` and `jane.doe@example.com's` name what they hold, and a word such as `#482` or `INV#123` stands as written. A reason that is one of the vocabulary's is not checked; a gist always is. Names cannot be told apart from other words: only the prompt, which asks for general terms, keeps them out.
+- **What the model reads of an answer.** Each answer is cut to its first 2,000 characters.
+- **A hand with no entry was not labelled this time.** The model gave nothing usable for it. Keel asks again later.
+- **Usage.** `usage` adds up the tokens of every completion the call received, the cache reads included; `cost_usd` is a decimal string with six places, estimated against the model that served the call, and null when no price is known for it. A call that reached no model answers zeros and `"0.000000"`.
+- **Bounds and failures.** The model work, both attempts together, takes at most 22 seconds: past that the answer is `504 model-timeout`, before Keel's own wait ends. No completion at all is `502 model-failed`; completions that held no valid object are a `200` with no labels and their usage.
+- **Logs.** A line names the agent, a count or an error's class, never a question, an answer, a reason or what the model said. The `openai` client library logs the body of each request at DEBUG: keep its logger at INFO or above.
+
+## A policy passage
+
+`POST /v1/keel/policy-text?agent_id=<agent>` has the agent's own model write one passage of written policy from the answers people gave a reason's raised hands, so the knowledge base can hold the rule they applied. Keel sends the reason, the gist most answers agree on and up to 50 questions with their answers; the passage is a draft a builder reviews.
+
+- **The same model and bound as hand labelling:** the agent's summary slot, else its main slot, keyed at org scope, billed where the slot's endpoint meters it, a stopped agent served too, and at most 22 seconds for both attempts (`504 model-timeout` past that). `org_id` must be the agent's. `reason` and `gist` are 1 to 120 characters, each `question` 1 to 2,000 and each `answer` 1 to 20,000.
+- **The screen.** A blocked `reason` or `gist`, or every hand blocked, is `422 inputs-blocked`. One blocked hand is left out of the call. Each answer reaches the model cut to its first 2,000 characters.
+- **The passage.** It states the rule in general terms (when it applies, any exception the answers show), never quotes a question or an answer, and states only what the answers share when they differ. Every identifier of a hand of the request that the passage still holds (see [Raised hands, grouped](#raised-hands-grouped)) is replaced by `[omitted]`, without regard to case, and the passage's length is checked after that: 1 to 6,000 characters.
+- **When there is none.** A model that gave no valid object, or a text that is empty or over 6,000 characters, is `502 model-failed`: a passage is all or nothing.
+- **Logs and storage** are as for hand labelling: nothing is stored, and a line never holds a question, an answer or the passage.
+
 ## Watching a step session
 
 Keel reads a step session's events, by page and live, and its progress, to show what the agent does on the step. The same reads serve an item session, at `GET /v1/keel/item-sessions/{session_id}/events`, `…/events/stream` and `…/progress`, and a case agent session, at `GET /v1/keel/case-agent-sessions/{session_id}/events` and `…/events/stream`: each answers as the step session's route below does, and is refused the same way. The runtime keeps each session's events as an append-only log, and an event never changes once written:
@@ -333,6 +379,16 @@ The listing names only files these routes can read by the path it gives.
 
 A write takes up to `SUROGATES_KEEL_MAX_FILE_BYTES`, and makes the bucket when it is not there yet. It is refused while the file is open in the document editor: the editor's next save would land over a file it never saw. A read is copied to a scratch file first, so its digest is sent before its bytes. A read of a file over `SUROGATES_KEEL_MAX_FILE_BYTES` is `413 too-large`, copied no further. None of these routes logs a path or a file's bytes.
 
+Every digest keel-link or a step session hands Keel (a write's answer, a read's `X-Content-SHA256` header, an output's file value) names bytes the runtime keeps. They are written under the case's `versions/<sha256>`, beside the workspace in the case's boundary, before the digest leaves; once per case, however many paths hold the bytes. A version is never mounted in a sandbox and never listed as a case file. A write or a read whose version cannot be kept is `503 unavailable`, a write leaves no file, and a read sends no digest. An output file whose version cannot be kept fails the `complete_step` or `complete_item` call with an error the model reads, and nothing is sent to Keel; the model calls again.
+
+## A case's file versions
+
+A version is a file as it was when its digest was handed to Keel, kept as [A case's files](#a-cases-files) describes. A version can be read by its hash, Keel asks which of the hashes it holds are gone, and, when the case's retention ends, deletes all of the case's versions at once.
+
+A hash is 64 lowercase hex digits; anything else is `422 invalid-request`. Reading one streams it as a file's read does, so a version over `SUROGATES_KEEL_MAX_FILE_BYTES` is `413 too-large`. The question about missing versions lists the case's versions once, however many hashes it names, and names each missing hash once, in the order Keel asked. A case nothing was written to has no versions, and the question names every hash. Deleting removes only the case's `versions/` folder: no file of the workspace, and nothing of another case. The object store refusing or not answering is `503 unavailable` on all three routes.
+
+Retention is the case engine's. The runtime deletes no version of its own accord, and a version stays until Keel asks.
+
 ## A case's document in the editor
 
 `POST /v1/keel/cases/{case_id}/editor` gives Keel the editor config of one person for one document of the case's files, to open in the document server at `document_server_url`. The body is `{"org_id", "path", "user_id", "access", "theme", "mentionable"}`: `access` is `edit`, `comment` or `view`, `theme` is `light` (the default) or `dark`, and `mentionable` is optional. The path is checked as the file routes check it.
@@ -369,6 +425,38 @@ For a password account without a password whose home is the org, `set_password_t
 
 A person joined from another org who has no password yet gets no link from the org that joined them. Their home org invites them again: they are found there, and that invitation gives a fresh link. A re-invitation never revokes a link: an earlier one stays valid until a password is set or its 7 days pass.
 
+## Reruns and trials
+
+A rerun runs an agent's step again on the files a past step read, as they were. A trial runs a draft's step on inputs a builder typed. Either is a step session of a case that exists nowhere else: its id, which Keel gives, is the session's own and its case's, and its boundary `case:<session id>` holds the files it works on. Memory starts empty, in the agent's own storage under that boundary, and the agent runs as it is configured now: nothing pins the bundle it ran before. The session reports to Keel's door as any step session does, `POST /api/harness/sessions/{session id}/complete`, `raise-hand` and `ended`, with the same bodies; nothing in a report says it is a rerun, and Keel tells by the session id. A raised hand rests with the session's inputs until Keel cancels or purges it. The files a rerun's output names are kept as versions of its own case, `case-file://<session id>/<path>`, and stay readable through the version routes until the purge.
+
+The session is fenced. No session of a rerun, a helper included, is offered `terminal`, `process` or a browser tool, whatever the contract's `tools` name; its MCP servers are off unless the create asks for them (`mcp`), in which case the contract's `mcp_servers` say which. A draft rerun keeps the office tools, which edit its own documents. A rerun's wakes, and its helpers', are queued at 2, behind every case's work, and a trial's at 0. The step routes answer `404 unknown-session` for a rerun's session.
+
+`POST /v1/keel/reruns?agent_id=<agent>` takes `{"org_id", "case_type", "idempotency_key", "session_id", "kind", "contract", "files", "of_case_id", "mcp", "start"}`: `kind` is `rerun` or `trial`; `contract` is a step's contract, whose `case_id` is `session_id`; `files` are up to 200 `{"path", "sha256"}`, with distinct paths, and need `of_case_id`, the case whose versions they come from and never `session_id`; `mcp` and `start` default to false and true. A body out of this shape is `422 invalid-request`. It checks, in this order:
+
+1. the agent: `404 unknown-agent`, `409 agent-stopped`;
+2. each path as the case file routes check it, `422 invalid-path`;
+3. the contract's inputs, which the prompt-injection screen reads, `422 inputs-blocked`;
+4. that a session with the id does not exist: `409 key-in-use`;
+5. the id's boundary folder: a case's, or another org's or kind's rerun's, is `409 case-exists`;
+6. the files: each must have a version in `of_case_id`, a case recorded under the same org that is no rerun's, or the answer is `409 file-version-gone` with `missing`, the indexes into `files` that have none, and nothing is written.
+
+Only then does it mark the boundary folder as the org's rerun of that kind, in the record beside the workspace, copy the files, a piece at a time, and create the session. A version that is gone by the time it is copied is `409 file-version-gone` too; the files already copied stay under the mark until Keel purges the rerun. Keel waits long for this call, and sends the same body again with the same key on a timeout: a repeat that finds the session answers `200` and copies nothing, and one after a create that died before its session copies again over the same paths. The session is queued when it is made, so its first report can reach Keel's door before Keel has the answer. A key held by another session, or by a rerun of the other kind, is `409 key-in-use`.
+
+A trial's files may come first: `PUT /v1/keel/reruns/{session_id}/files/content` writes one, marking the folder as the org's trial's with the first, and keeps its version as a case's file write does. A folder that is a case's, another org's, or a rerun's is `409 case-exists`. A trial created with `start` false writes no first message, and queues nothing, until `POST /v1/keel/reruns/{session_id}/start`, which writes it once.
+
+## Purging a rerun
+
+`DELETE /v1/keel/reruns/{session_id}` deletes a rerun or a trial, which Keel keeps for a while and then lets go of. It answers `200 {"sessions", "objects"}`: how many sessions it deleted, and how many objects of the boundary folder. It deletes, in this order:
+
+1. the rerun's memory objects, under the agent's storage prefix the session was created with;
+2. every row of the rerun's session tree, in one transaction: the sessions, their events, the inbox items and outbox rows on them, their leases and cursors, the board notes they wrote, and the task rows they stand in. A session's title and a task's goal and result hold case text, so the rows go, not only the events;
+3. the closed editor rows of the rerun's documents;
+4. the folder's `workspace/`, then its `versions/`, then its record.
+
+The record goes last. The mark in it is what tells a purge the folder is a rerun's, so a purge that failed part-way, when the store stopped answering after the workspace was gone, leaves it: `503 unavailable`, and a retry finds the mark and finishes. A purge of what is already gone answers zeros, so a retry of a finished purge does too.
+
+A purge refuses what is not a rerun's. An id that names a session that is not a rerun's own session (a step's, or a helper's), or a folder recorded as a case's, is `404 unknown-session` and nothing is deleted. A rerun whose session, or a helper's, is in a turn is `409 rerun-running`, and so is one with a document open in the editor: a save landing after the purge would write under the folder again. Keel cancels the rerun first and purges it on a later pass. Each purge logs the rerun's id and the counts.
+
 ## Keep it internal
 
 Run keel-link where only Keel can reach it: an internal service, never a public ingress or load balancer. Whoever holds the link key can start sessions on any agent of any org, start a case agent session for any person of any org, send any step's or item's agent, or any case agent, a message, read every step, item or case agent session's events and progress (its inputs and all its tools read among them), read and write any case's files, open them in the editor as any user, and invite anyone into any org, with the token that sets a new account's password.
@@ -403,7 +491,7 @@ A report Keel would refuse whole is never sent, and the model is told what to fi
 
 What each report carries. Besides what the model gave, `complete_step` and `raise_hand` carry:
 
-- `pages_read`: the knowledge pages the case's sessions read, each once, sorted, at most 500.
+- `pages_read`: the knowledge pages the case's sessions read, each once for each compile that wrote the text read, sorted, at most 500. Each entry is `{"kb_id", "path", "sha256", "compile_id"}`. `compile_id` is the knowledge base compile that last wrote the text of the page read: a later compile that leaves the page unchanged does not change it. It is null when the page was published before compiles kept versions, or the read was recorded before reads named their compile. A passage read is recorded as its page. The same page can be listed once under each compile id its reads named, and once under null.
 - `usage`: `{"input_tokens", "output_tokens", "cache_read_tokens", "estimated_cost_usd"}`, what the step's session and every helper under it, at any depth, used so far. The tokens and the cost are those the sessions' rows count; the cache reads are those their model calls' responses name. Counts are at most 2^63−1, and the cost is a plain decimal in USD, never with an exponent. Each report carries the total so far, so a later one is never below an earlier one; Keel replaces what it kept, and does not add them. A helper still working after the last report spends what Keel is not told.
 - `bundle_version`: the agent's bundle version that the session's latest wake ran with, null when no wake recorded one (an agent with no bundle, or a session whose wakes came before wakes recorded it), and at most 200 characters.
 
@@ -436,7 +524,7 @@ A report Keel would refuse whole is never sent, as a step's is not: one over 256
 
 What each report carries. Besides what the model gave:
 
-- `item/complete` carries `pages_read`: the knowledge pages the item's session and its helpers read, each once, sorted, at most 500, for a step, a vote and a raised hand's answer alike. `item/return` carries none.
+- `item/complete` carries `pages_read` as a step's report does (`{"kb_id", "path", "sha256", "compile_id"}`): the knowledge pages the item's session and its helpers read, each once for each compile, sorted, at most 500, for a step, a vote and a raised hand's answer alike. `item/return` carries none.
 - `item/complete` and `item/return` carry `usage`: `{"input_tokens", "output_tokens", "cache_read_tokens", "estimated_cost_usd"}`, what the item's session and every helper under it, at any depth, used so far. It is counted as a step's is: each report carries the total so far, and Keel replaces what it kept, and does not add them. A helper still working after the last report spends what Keel is not told.
 - Both also carry `bundle_version`: the agent's bundle version that the session's latest wake ran with, null when no wake recorded one (an agent with no bundle, or a session whose wakes came before wakes recorded it), and at most 200 characters.
 
@@ -463,4 +551,4 @@ A start Keel would refuse whole is never sent: one over 256,000 bytes of JSON, o
 
 ## Step sessions wait behind people
 
-Every wake of a step session or an item session, and of each session either starts, is queued at priority 1. Interactive work is queued at 0 and phone calls at -1, and a lower score is taken first. A case's work therefore waits while people are waiting on the agent. A person's case agent does not wait: a person waits on it, so its wakes are queued at 0, as interactive work is.
+Every wake of a step session or an item session, and of each session either starts, is queued at priority 1. Interactive work is queued at 0 and phone calls at -1, and a lower score is taken first. A case's work therefore waits while people are waiting on the agent. A person's case agent does not wait: a person waits on it, so its wakes are queued at 0, as interactive work is. A rerun's wakes, and its helpers', are queued at 2, behind every case's work, because nobody waits on one; a trial's are queued at 0, as interactive work is, because a builder waits on it.

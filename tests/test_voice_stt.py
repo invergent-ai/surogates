@@ -2,11 +2,14 @@
 import json
 
 import pytest
-from livekit import rtc
-from livekit.agents import APIConnectOptions, APIError, stt
-from websockets.asyncio.server import serve
 
-from surogates.voice.stt import RoSTT, translate
+pytest.importorskip("livekit.agents", reason="the voice extra is not installed")
+
+from livekit import rtc  # noqa: E402
+from livekit.agents import APIConnectOptions, APIError, stt  # noqa: E402
+from websockets.asyncio.server import serve  # noqa: E402
+
+from surogates.voice.stt import RoSTT, translate  # noqa: E402
 
 T = stt.SpeechEventType
 

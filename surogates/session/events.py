@@ -169,8 +169,8 @@ class EventType(str, Enum):
     # canvas replays a session over the skill's graph from these.
     SKILL_STEP = "skill.step"
 
-    # A knowledge-base page a session of a case read: its KB, its path and the
-    # SHA-256 of the content read.  Written on the case's root session, so the
+    # A knowledge-base page a session of a case read: its KB, its path, the
+    # SHA-256 of the content read and the compile that last wrote that text.  Written on the case's root session, so the
     # step's report to Keel carries every page its sessions read.
     KB_PAGE_READ = "kb.page_read"
 

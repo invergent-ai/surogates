@@ -33,12 +33,15 @@ from surogates.tools.builtin.case_item import report_item_failed, report_item_no
 from tests.test_case_step_isolation import CONTRACT
 from tests.test_case_step_tools import (  # noqa: F401 - fake_keel is a fixture
     CASE,
+    OFFER,
     OTHER_PAGE,
     PAGE,
+    reported,
     USAGE,
     _calls,
     _ended_with,
     _FakeKeel,
+    _kept_for,
     _registry,
     _step,
     _StepStore,
@@ -195,6 +198,19 @@ async def test_a_file_field_of_a_step_item_becomes_a_case_file(fake_keel: _FakeK
     error = json.loads(await _call("complete_item", missing, _store(tmp_path, STEP_ITEM, files={"offer": "one"})))
     assert error["error"] == "offer: no file out/missing.pdf in the workspace"
     assert len(fake_keel.requests) == 1
+
+
+async def test_an_items_output_file_is_kept_before_keel_hears_of_it(fake_keel: _FakeKeel, tmp_path):
+    store = _store(tmp_path, STEP_ITEM, files={"offer": "one"})
+    await store.put("out/offer.pdf", OFFER)
+    kept_when_keel_heard: list[bytes | None] = []
+    fake_keel.during = lambda: kept_when_keel_heard.append(_kept_for(tmp_path, OFFER))
+    completion = {**STEP_COMPLETION, "output": {**STEP_COMPLETION["output"], "offer": "/workspace/out/offer.pdf"}}
+
+    result = await _call("complete_item", completion, store)
+
+    assert result == "Item ended: Keel recorded it."
+    assert kept_when_keel_heard == [OFFER]
 
 
 @pytest.mark.parametrize(("rejection", "shown"), [
@@ -386,7 +402,7 @@ async def test_an_items_completion_carries_its_usage_pages_read_and_bundle_versi
 
     assert result == "Item ended: Keel recorded it."
     [body] = fake_keel.bodies("/item/complete")
-    assert body["pages_read"] == [OTHER_PAGE, PAGE]
+    assert body["pages_read"] == [reported(OTHER_PAGE), reported(PAGE)]
     assert body["usage"] == used
     assert body["bundle_version"] == "v7"
 

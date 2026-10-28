@@ -15,6 +15,7 @@ from typing import Any
 
 from surogates.channels.channel_media import normalize_workspace_path
 from surogates.keel.case_files import WORKSPACE_ROOTS, case_path
+from surogates.keel.versions import session_versions
 from surogates.session.attachment_ingest import workspace_root_id
 from surogates.storage.tenant import boundary_workspace_key
 
@@ -35,7 +36,9 @@ async def case_file_value(storage: Any, session: Any, case_id: object, path: str
     Raises :class:`ValueError` for a path outside the workspace;
     :class:`~surogates.keel.case_files.CaseFileError`, a ``ValueError``, for
     one the case's files never show, such as a hidden file or folder or the
-    platform's own; and :class:`FileNotFoundError` when no file is there.
+    platform's own; :class:`FileNotFoundError` when no file is there; and
+    :class:`~surogates.keel.versions.VersionNotKept` when the bytes read
+    could not be kept under their digest, which no value is given without.
     """
     relative = workspace_path(path)
     if relative is None:
@@ -50,7 +53,9 @@ async def case_file_value(storage: Any, session: Any, case_id: object, path: str
         data = await storage.read(bucket, key)
     except KeyError:
         raise FileNotFoundError(relative) from None
-    return file_value(case_id, relative, data)
+    value = file_value(case_id, relative, data)
+    await session_versions(session).keep(storage, value["sha256"], data)
+    return value
 
 
 def file_value(case_id: object, relative: str, data: bytes) -> dict[str, str]:
