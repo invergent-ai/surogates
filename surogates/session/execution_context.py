@@ -21,6 +21,11 @@ UNATTENDED_CHANNELS: frozenset[str] = frozenset({"scheduled", "delegation", "wor
 #: Every kind of child inherits all four.
 CONTEXT_FIELDS: tuple[str, ...] = ("ops", "operator", "browser", "origin_channel")
 
+#: A schedule also keeps which sub-agent made it: its runs act as that one,
+#: with what it is offered and denied (``user_reports``, owner scope).  A
+#: helper is not given its parent's: it names its own, or is the agent itself.
+SCHEDULE_FIELDS: tuple[str, ...] = (*CONTEXT_FIELDS, "agent_type")
+
 
 def is_unattended(session: Any) -> bool:
     return getattr(session, "channel", None) in UNATTENDED_CHANNELS
@@ -35,7 +40,7 @@ def capture_schedule_context(session_config: dict | None, channel: str | None) -
     captured = {
         field: value
         for field, value in (session_config or {}).items()
-        if field in CONTEXT_FIELDS and field != "origin_channel"
+        if field in SCHEDULE_FIELDS and field != "origin_channel"
     }
     origin = (session_config or {}).get("origin_channel") or channel
     if origin:
@@ -50,7 +55,10 @@ def inherit_context(
 ) -> dict[str, Any]:
     """The context fields a child session gets.
 
-    *captured* (a schedule's) wins over the parent's current config.
+    *captured* (a schedule's) wins over the parent's current config, and
+    alone carries an ``agent_type``.
     """
-    source = captured if captured else capture_schedule_context(parent_config, parent_channel)
+    if captured:
+        return {field: captured[field] for field in SCHEDULE_FIELDS if field in captured}
+    source = capture_schedule_context(parent_config, parent_channel)
     return {field: source[field] for field in CONTEXT_FIELDS if field in source}
