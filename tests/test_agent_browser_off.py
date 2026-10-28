@@ -55,3 +55,12 @@ def test_the_model_is_offered_no_browser_tool_when_the_browser_is_off() -> None:
 
     assert offered is not None
     assert offered.isdisjoint(_browser_tools(registry))
+
+
+def test_a_tool_the_policy_denies_is_not_on_the_prompts_tool_list() -> None:
+    from surogates.orchestrator.worker import _offered_by_policy
+    from surogates.runtime.governance import build_governance_gate
+
+    gate = build_governance_gate({"denied_tools": ["ask_user_question", "cron_create"]})
+    tools = {"ask_user_question", "cron_create", "cron_list", "read_file"}
+    assert _offered_by_policy(tools, gate) == {"cron_list", "read_file"}
