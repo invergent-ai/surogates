@@ -1,9 +1,13 @@
 """LiveKit's LLM slot speaks to the call's session: one utterance in, the turn's text out, a barge-in stops it."""
 import asyncio
 
-from livekit.agents import llm
+import pytest
 
-from surogates.voice.llm import SurogatesLLM
+pytest.importorskip("livekit.agents", reason="the voice extra is not installed")
+
+from livekit.agents import llm  # noqa: E402
+
+from surogates.voice.llm import SurogatesLLM  # noqa: E402
 
 
 class _Call:

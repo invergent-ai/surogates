@@ -1,7 +1,11 @@
 """TTS speech made fit for a phone line: no padding silence, telephone level, never clipped."""
-import numpy as np
+import pytest
 
-from surogates.voice.audio import PhoneVoice
+pytest.importorskip("livekit.agents", reason="the voice extra is not installed")
+
+import numpy as np  # noqa: E402
+
+from surogates.voice.audio import PhoneVoice  # noqa: E402
 
 RATE = 24000
 

@@ -1,6 +1,10 @@
 """Which of our numbers was called, and by whom, from the SIP participant LiveKit puts in the room."""
-from surogates.voice.agent import CallConfig
-from surogates.voice.worker import CallInfo, call_info
+import pytest
+
+pytest.importorskip("livekit.agents", reason="the voice extra is not installed")
+
+from surogates.voice.agent import CallConfig  # noqa: E402
+from surogates.voice.worker import CallInfo, call_info  # noqa: E402
 
 
 def test_call_info_from_sip_attributes():
