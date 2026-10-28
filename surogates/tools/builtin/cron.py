@@ -67,7 +67,7 @@ _CRON_CREATE_SCHEMA = ToolSchema(
         "it with this. Where you can ask the user, nothing is made until "
         "they approve it in this turn: until then this returns what it "
         "would make, with its next run on the schedule's own clock. Ask "
-        "with ask_user_question, in their language, giving the cadence in "
+        "the user, in their language, giving the cadence in "
         "plain words, the timezone, the next run, a one-line summary of "
         "the prompt and that it runs until cancelled (once, for a one-off), "
         "with the approving choice FIRST; then call again with the same "

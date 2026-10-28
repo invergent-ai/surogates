@@ -537,12 +537,17 @@ def _seconds(amount: int, unit: str) -> int:
 
 
 def _display_seconds(seconds: int) -> str:
+    return f"Every {duration_words(seconds).removeprefix('1 ')}"
+
+
+def duration_words(seconds: int) -> str:
+    """``2 hours``, ``1 minute``: *seconds* in the largest whole unit."""
     for unit in ("d", "h", "m", "s"):
         size = _UNIT_SECONDS[unit]
         if seconds % size == 0:
             n = seconds // size
-            return f"Every {_UNIT_NAMES[unit]}" if n == 1 else f"Every {n} {_UNIT_NAMES[unit]}s"
-    return f"Every {seconds} seconds"
+            return f"{n} {_UNIT_NAMES[unit]}" + ("" if n == 1 else "s")
+    return f"{seconds} seconds"
 
 
 def _display_calendar(days: list[str], times: list[str], timezone_name: str) -> str:

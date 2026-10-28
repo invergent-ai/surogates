@@ -859,7 +859,7 @@ class SessionStore:
 
     async def fail_overdue_scheduled_runs(
         self, *, default_seconds: int, limit: int = 100,
-    ) -> list[UUID]:
+    ) -> list[tuple[UUID, int]]:
         """Fail every scheduled run still open past its schedule's time limit.
 
         A run nobody answers never ends by itself; left open it keeps its
@@ -905,7 +905,7 @@ class SessionStore:
                     f"{INTERRUPT_CHANNEL_PREFIX}:{session_id}",
                     json.dumps({"reason": "run_time_limit"}),
                 )
-        return [session_id for session_id, _ in rows]
+        return [(session_id, int(limit_seconds)) for session_id, limit_seconds in rows]
 
     async def pause_if_active(self, session_id: UUID, data: dict) -> bool:
         """Pause *session_id* if it is still active, with a ``session.pause``
