@@ -39,6 +39,11 @@
 | `POST /v1/keel/reruns?agent_id=<agent>` | Starts a rerun or a trial of the agent's step, in a case of its own id, on the files of a past case as they were: `201` made, `200` found by its key, each `{"session_id", "service_account_id", "bundle_version", "created"}`. See [Reruns and trials](#reruns-and-trials). |
 | `PUT /v1/keel/reruns/{session_id}/files/content?org_id=<org>&path=<path>` | Writes the body at the path in a trial's workspace, before or after the trial is created: `200 {"name", "uri", "sha256", "size"}`, as a case's file write answers. |
 | `POST /v1/keel/reruns/{session_id}/start` | Writes a rerun's first message and queues it: `202 {"started": bool}`, true when this call wrote it. `409 step-finished` once the rerun was cancelled. |
+| `GET /v1/keel/reruns/{session_id}` | A rerun's `{"status", "updated_at"}`, as a step session's status. |
+| `GET /v1/keel/reruns/{session_id}/events?after=<id>&limit=<n>` | A page of the rerun's events, as a step session's page. See [Watching a step session](#watching-a-step-session). |
+| `GET /v1/keel/reruns/{session_id}/events/stream?after=<id>` | The rerun's events after the cursor, then live, as a step session's stream. |
+| `GET /v1/keel/reruns/{session_id}/progress` | The rerun's status, todo list and last activity, as a step session's progress. See [Progress](#progress). |
+| `POST /v1/keel/reruns/{session_id}/cancel` | Ends the rerun as a step's cancel ends a step: `200 {"status": "paused"}`, also when it was paused already. |
 | `POST /v1/keel/orgs/{org_id}/members` | Takes `{"email", "display_name"}` and answers `200 {"user_id", "created", "joined", "sign_in", "set_password_token", "expires_at"}`: the org's user with that email, found, joined from another org or created. See [Inviting staff](#inviting-staff). |
 | `GET /health`, `GET /health/ready` | The same liveness and readiness probes as the API. |
 
@@ -52,7 +57,7 @@ Errors answer `{"detail": {"code", "message"}}`, and a message never repeats the
 |---|---|---|
 | 401 | `bad-link-key` | The bearer is not the link key, or no link key is set. |
 | 404 | `unknown-agent` | No such agent, or it belongs to another org. |
-| 404 | `unknown-session` | No such session, or it is not the own session of a step (never a rerun's), for a step route, of a work item, for an item route, or of a person's case agent, for a case agent route. |
+| 404 | `unknown-session` | No such session, or it is not the own session of a step (never a rerun's), for a step route, of a work item, for an item route, of a person's case agent, for a case agent route, or of a rerun, for a rerun route. |
 | 404 | `unknown-file` | No file at the path in the case's workspace, or the editor was asked for a case recorded under another org. |
 | 404 | `unknown-version` | The case holds no version with the hash. |
 | 404 | `unknown-user` | The editor was asked for a user who does not belong to the org. |

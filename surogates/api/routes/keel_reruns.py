@@ -19,19 +19,25 @@ from uuid import UUID
 from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import JSONResponse
+from sse_starlette.sse import EventSourceResponse
 from sqlalchemy.exc import DBAPIError
 
 from surogates.channels.memory_boundary import rerun_kind_of
 from surogates.api.routes.keel import (
+    StepSessionStatus,
     agent_id_of,
     body_within,
+    cancel_work_session,
     case_uuid,
     checked_path,
     create_case_session,
     create_or_find,
     created_answer,
     database_failed,
+    events_page,
+    events_stream,
     kick_off,
+    progress_answer,
     queue_session,
     read_body,
     refused,
@@ -41,6 +47,7 @@ from surogates.api.routes.keel import (
     session_exists,
     session_where,
     unknown_session,
+    watched_session,
     write_case_file_answer,
 )
 from surogates.keel.reruns import (
@@ -224,3 +231,49 @@ async def start_rerun(session_id: str, request: Request) -> JSONResponse:
     if written is not None:
         await queue_session(request, session)
     return JSONResponse({"started": written is not None}, status_code=status.HTTP_202_ACCEPTED)
+
+
+@router.get("/keel/reruns/{session_id}")
+async def read_rerun(session_id: str, request: Request) -> JSONResponse:
+    """A rerun's status, and when it last changed."""
+    require_link(request)
+    session = await watched_session(request, session_id, is_rerun)
+    answer = StepSessionStatus(status=session.status, updated_at=session.updated_at)
+    return JSONResponse(answer.model_dump(mode="json"))
+
+
+@router.get("/keel/reruns/{session_id}/events")
+async def read_rerun_events(session_id: str, request: Request) -> JSONResponse:
+    """A page of a rerun's events after the cursor, as a step's page."""
+    require_link(request)
+    return await events_page(request, await watched_session(request, session_id, is_rerun))
+
+
+@router.get("/keel/reruns/{session_id}/events/stream")
+async def stream_rerun_events(session_id: str, request: Request) -> EventSourceResponse:
+    """A rerun's events after the cursor, then each new one as it is written, as a step's stream."""
+    require_link(request)
+    return await events_stream(request, await watched_session(request, session_id, is_rerun))
+
+
+@router.get("/keel/reruns/{session_id}/progress")
+async def read_rerun_progress(session_id: str, request: Request) -> JSONResponse:
+    """A rerun's status, its todo list as its agent last wrote it, and its last activity."""
+    require_link(request)
+    return await progress_answer(request, await watched_session(request, session_id, is_rerun))
+
+
+@router.post("/keel/reruns/{session_id}/cancel")
+async def cancel_rerun(session_id: str, request: Request) -> JSONResponse:
+    """End a rerun: remove its inputs, pause it and interrupt its turn: ``200 {"status": "paused"}``, also when it
+    was paused already."""
+    require_link(request)
+    try:
+        session = await session_where(request, session_id, is_rerun)
+    except DBAPIError as exc:
+        raise database_failed(
+            exc,
+            logged=f"the rerun {session_id} could not be cancelled",
+            message="The rerun could not be cancelled.",
+        ) from None
+    return await cancel_work_session(request, session)

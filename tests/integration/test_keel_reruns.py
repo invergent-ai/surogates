@@ -8,29 +8,39 @@ names a recorded case is ever written over.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import json
 import uuid
 from uuid import UUID
 
 import pytest
 
+from surogates.channels.constants import API_CHANNEL
 from surogates.channels.memory_boundary import CASE_RERUN_KEY, rerun_kind_of, session_memory_boundary
+from surogates.config import INTERRUPT_CHANNEL_PREFIX
 from surogates.keel.case_files import case_boundary_folder, case_workspace, record_case_org, write_case_file
 from surogates.keel.reruns import CaseRecord, read_case_record
 from surogates.keel.steps import step_contract_of
 from surogates.keel.versions import case_versions
 from surogates.runtime.memory_protocol import memory_object_key
+from surogates.session.events import EventType
+from surogates.session.provisioning import create_child_session
 from surogates.session.store import SessionNotFoundError
 from surogates.tenant.auth.service_account import ServiceAccountStore
 
+from .test_events_stream import _read_sse_events
 from .test_keel_case_files import listed_paths, listing, upload
 from .test_keel_case_versions import drop, version
+from .test_keel_watch import short_streams
 from .test_keel_step_sessions import (  # noqa: F401  (link, link_app, org, session_store and redis_client are fixtures)
     AGENT,
     LINK_KEY,
     body,
     code_of,
     contract_of,
+    interrupt_listener,
+    interrupts_heard,
     link,
     link_app,
     link_headers,
@@ -402,3 +412,104 @@ async def test_keel_link_refuses_a_rerun_it_cannot_start(link, link_app, org, se
 
     assert (refused.status_code, code_of(refused)) == (status, code)
     await nothing_made(link_app, session_store, request["session_id"])
+
+
+def rerun_route(session_id, action: str = "") -> str:
+    return f"{RERUNS}/{session_id}" + (f"/{action}" if action else "")
+
+
+async def watched_stream(link, session_id) -> list[tuple[str, str]]:
+    """What a rerun's event stream sends until it times out, bounded as a whole so a stream that never ended fails."""
+
+    async def read():
+        async with link.stream(
+            "GET", rerun_route(session_id, "events/stream"), params={"after": 0}, headers=link_headers(LINK_KEY),
+        ) as response:
+            assert response.status_code == 200
+            assert response.headers["content-type"].startswith("text/event-stream")
+            return await _read_sse_events(response, until_types={"stream.timeout"}, deadline_s=8.0)
+
+    return await asyncio.wait_for(read(), 10)
+
+
+async def test_keel_reads_and_watches_a_rerun_as_a_step(link, link_app, org, session_store, monkeypatch):
+    short_streams(monkeypatch, duration=1)
+    request = rerun_body(org)
+    assert (await create_rerun(link, request)).status_code == 201
+    rid = UUID(request["session_id"])
+    kickoff = (await session_store.get_events(rid))[0]
+    headers = link_headers(LINK_KEY)
+
+    status = await link.get(rerun_route(rid), headers=headers)
+    page = await link.get(rerun_route(rid, "events"), params={"after": 0}, headers=headers)
+    progress = await link.get(rerun_route(rid, "progress"), headers=headers)
+
+    assert status.status_code == 200, status.text
+    assert set(status.json()) == {"status", "updated_at"}
+    assert status.json()["status"] == "active"
+    assert page.status_code == 200, page.text
+    assert [event["type"] for event in page.json()["events"]] == ["user.message"]
+    assert page.json()["events"][0]["data"]["synthetic"] == "keel_step"
+    assert page.json()["has_more"] is False
+    assert progress.status_code == 200, progress.text
+    assert set(progress.json()) == {"status", "todos", "todos_at", "last_activity"}
+    assert (progress.json()["todos"], progress.json()["todos_at"]) == (None, None)
+    assert progress.json()["last_activity"]["event_id"] == kickoff.id
+
+    frames = await watched_stream(link, rid)
+
+    assert [kind for kind, _data in frames] == ["stream.start", "user.message", "stream.live", "stream.timeout"]
+    assert json.loads(frames[1][1])["synthetic"] == "keel_step"
+
+
+async def test_the_rerun_routes_serve_only_a_reruns_own_session(link, link_app, org, session_store):
+    step = await post(link, body(org))
+    assert step.status_code == 201, step.text
+    request = rerun_body(org, key="keel:r:2:0")
+    assert (await create_rerun(link, request)).status_code == 201
+    rerun = await session_store.get_session(UUID(request["session_id"]))
+    helper = await create_child_session(store=session_store, parent=rerun, channel=API_CHANNEL)
+    headers = link_headers(LINK_KEY)
+
+    for session_id in (step.json()["session_id"], helper.id, uuid.uuid4(), "not-a-uuid"):
+        answers = [
+            await link.post(rerun_route(session_id, "start"), headers=headers),
+            await link.get(rerun_route(session_id), headers=headers),
+            await link.get(rerun_route(session_id, "events"), headers=headers),
+            await link.get(rerun_route(session_id, "events/stream"), headers=headers),
+            await link.get(rerun_route(session_id, "progress"), headers=headers),
+            await link.post(rerun_route(session_id, "cancel"), headers=headers),
+        ]
+        assert [(a.status_code, code_of(a)) for a in answers] == [(404, "unknown-session")] * 6, session_id
+
+    # Nothing of either session changed.
+    assert (await session_store.get_session(helper.id)).status == helper.status
+    assert (await session_store.get_session(UUID(step.json()["session_id"]))).config["case_step"]["inputs"] != {}
+
+
+async def test_cancelling_a_rerun_mid_run_pauses_it_and_takes_its_inputs(link, link_app, org, session_store, redis_client):
+    request = rerun_body(org)
+    assert (await create_rerun(link, request)).status_code == 201
+    rid = UUID(request["session_id"])
+    listener = await interrupt_listener(redis_client)
+    try:
+        first = await link.post(rerun_route(rid, "cancel"), headers=link_headers(LINK_KEY))
+        again = await link.post(rerun_route(rid, "cancel"), headers=link_headers(LINK_KEY))
+        heard = await interrupts_heard(listener)
+    finally:
+        await listener.aclose()
+
+    for answer in (first, again):
+        assert (answer.status_code, answer.json()) == (200, {"status": "paused"})
+    session = await session_store.get_session(rid)
+    assert session.status == "paused"
+    assert session.config["case_step"]["inputs"] == {}
+    assert session.config["case_step"]["inputs_redacted"] is True
+    assert heard == [(f"{INTERRUPT_CHANNEL_PREFIX}:{rid}", {"reason": "case_step_cancelled"})] * 2
+    pauses = await session_store.get_events(rid, types=[EventType.SESSION_PAUSE])
+    assert len(pauses) == 1
+
+    started = await start_rerun(link, rid)
+
+    assert (started.status_code, code_of(started)) == (409, "step-finished")
+    assert len(await user_messages(session_store, rid)) == 1
