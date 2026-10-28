@@ -136,13 +136,15 @@ def _current_turn(messages: list[dict]) -> list[dict]:
     return messages
 
 
-def _saved_to_memory(turn: list[dict]) -> bool:
+def _called_successfully(turn: list[dict], names: frozenset[str]) -> bool:
+    """Whether the turn made a call of one of *names* that did not report
+    ``success: false``."""
     calls = {
         call.get("id")
         for m in turn if isinstance(m, dict)
         for call in m.get("tool_calls") or []
         if isinstance(call, dict)
-        and (call.get("function") or {}).get("name") == "memory"
+        and (call.get("function") or {}).get("name") in names
     }
     for m in turn:
         if not (isinstance(m, dict) and m.get("role") == "tool"):
@@ -163,10 +165,53 @@ def unbacked_save_claim(final_text: str, messages: list[dict]) -> bool:
     successful memory call. The caller checks the tool is available."""
     if not final_text or not _SAVE_CLAIM_RE.search(final_text.replace("’", "'")):
         return False
-    return not _saved_to_memory(_current_turn(messages))
+    return not _called_successfully(_current_turn(messages), frozenset({"memory"}))
 
 
 SAVE_CLAIM_NUDGE = (
     "[System: You said you saved this but made no memory call. Call memory "
     "now, or correct your reply.]"
 )
+
+
+#: A reply telling the person a schedule exists or runs.  Narrow as the
+#: memory claim is: "I can schedule it" offers, it does not claim.
+_SCHEDULE_CLAIM_RE = re.compile(
+    r"\b(?:i've|i have|i)\s+(?:now\s+)?(?:scheduled|set up (?:a|the|your) (?:schedule|loop|cron|routine|recurring))\b"
+    r"|\b(?:schedule|loop|cron(?: job)?|routine)s?\s+(?:is|are|has been|have been)\s+(?:now\s+)?"
+    r"(?:set up|created|running|active|scheduled|live|in place)\b"
+    r"|\bscheduled (?:it|this|that|them) (?:to|for)\b"
+    r"|\bwill (?:now )?run (?:every|daily|each|hourly)\b"
+    r"|\bam programat\b"
+    r"|\b(?:bucla|programarea|rutina)\s+(?:este|e)\s+(?:acum\s+)?(?:activ[ăa]|pornit[ăa]|creat[ăa]|setat[ăa])\b"
+    r"|\b(?:bucla|programarea|rutina)\s+ruleaz[ăa]\b"
+    r"|\b(?:este|e|sunt) (?:acum )?programat[ăae]?\b"
+    r"|\bam (?:creat|setat|pornit) (?:o|un|bucla|rutina) ?(?:programare|rutin[ăa]|bucl[ăa]|loop)?\b",
+    re.IGNORECASE,
+)
+
+#: What backs a claim that a schedule exists: one made or changed, or one
+#: looked up, in the same turn.
+SCHEDULE_TOOLS = frozenset({
+    "cron_create", "cron_update", "cron_resume", "cron_run_now", "cron_list", "cron_get",
+})
+
+
+def unbacked_schedule_claim(final_text: str, messages: list[dict]) -> bool:
+    """The reply says a schedule exists or runs and this turn neither made
+    one nor looked one up successfully."""
+    if not final_text or not _SCHEDULE_CLAIM_RE.search(final_text.replace("’", "'")):
+        return False
+    return not _called_successfully(_current_turn(messages), SCHEDULE_TOOLS)
+
+
+def schedule_claim_nudge(can_schedule: bool) -> str:
+    if can_schedule:
+        return (
+            "[System: You said a schedule is set up, but no tool made or showed one this "
+            "turn. Make it with cron_create (or check cron_list), or correct your reply.]"
+        )
+    return (
+        "[System: You said a schedule is set up, but you have no tool that makes "
+        "schedules here and none was made. Correct your reply: say it is not scheduled.]"
+    )

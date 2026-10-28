@@ -215,7 +215,7 @@ COMMANDS = {
     "/compress": Command("/compress", "_handle_compress_command", ("Context compressed", "Nothing to compress"), made="a_compaction"),
     "/clear": Command("/clear", "_handle_clear_command", ("Conversation cleared.",), made="a_clearing"),
     "/loop <prompt>": Command("/loop 1d Check the cash report", "_handle_loop_command", ("Loop scheduled: ",), made="a_routine"),
-    "/loop list": Command("/loop list", "_handle_loop_command", ("No active loops.",)),
+    "/loop list": Command("/loop list", "_handle_loop_command", ("No active or paused loops.",)),
     "/code status": Command("/code status", "_handle_code_command", ("",)),
     "/mission <text> in a thread": Command(MISSION, "_handle_mission_command", ("Mission ",), made="a_mission", in_a_thread=True),
     # Refused there, by the wake itself: no handler is run for it.

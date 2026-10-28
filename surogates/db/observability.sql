@@ -642,6 +642,23 @@ BEGIN
     END IF;
 END $$;
 
+-- A schedule's cadence kind and parameters, and how it ended.  NULL ``kind``
+-- is a row made before these: its cadence is read from ``schedule``.
+ALTER TABLE scheduled_sessions
+    ADD COLUMN IF NOT EXISTS kind                 text,
+    ADD COLUMN IF NOT EXISTS cadence              jsonb,
+    ADD COLUMN IF NOT EXISTS paused_at            timestamptz,
+    ADD COLUMN IF NOT EXISTS ended_reason         text,
+    ADD COLUMN IF NOT EXISTS ended_by             text,
+    ADD COLUMN IF NOT EXISTS consecutive_failures integer NOT NULL DEFAULT 0;
+
+-- The ticker plans active rows with no next run (made or resumed by the
+-- control plane); dynamic loops waiting on their run look the same, and
+-- ``plan_unscheduled`` tells them apart.
+CREATE INDEX IF NOT EXISTS idx_scheduled_sessions_unplanned
+    ON scheduled_sessions (updated_at)
+    WHERE status = 'active' AND next_run_at IS NULL;
+
 
 -- ----------------------------------------------------------------------------
 -- v_session_tree -- recursive ancestry of sessions via parent_id.

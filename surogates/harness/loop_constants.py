@@ -57,6 +57,10 @@ _MAX_DELIVERABLE_RETRIES: int = 1
 #: the nudge is taken at its word.
 _MAX_SAVE_CLAIM_RETRIES: int = 1
 
+#: Nudges for a reply claiming a schedule that no tool made or showed; one,
+#: on the same terms as the memory claim.
+_MAX_SCHEDULE_CLAIM_RETRIES: int = 1
+
 #: Retries for a provider that returns finish_reason="error" and no content.
 #: Low because the common cause is not transient -- an over-sized request
 #: fails identically however many times it is re-sent -- so the value of the
@@ -79,11 +83,6 @@ _EMPTY_RESPONSE_NUDGE: str = (
     "output (SVG, HTML, chart, table, markdown document), invoke "
     "create_artifact — do NOT paste the content as a code fence.]"
 )
-_DYNAMIC_LOOP_EXCLUDED_TOOLS: frozenset[str] = frozenset({
-    "cron_create",
-    "cron_delete",
-    "cron_list",
-})
 
 _UNFINISHED_RESPONSE_NUDGE: str = (
     "[System: Your last message described what you were about to do but "

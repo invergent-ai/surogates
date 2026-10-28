@@ -35,11 +35,6 @@ _USER_ACTION_RESCUE_SYSTEM: str = (
     "question string, title string, instructions string, context string, "
     "action_type string, target string."
 )
-_DYNAMIC_LOOP_EXCLUDED_TOOLS: frozenset[str] = frozenset({
-    "cron_create",
-    "cron_delete",
-    "cron_list",
-})
 
 
 class _UserActionRescueDecision(BaseModel):

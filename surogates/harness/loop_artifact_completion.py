@@ -1811,7 +1811,13 @@ class ArtifactCompletionMixin:
             schedule = await store.get(schedule_id)
         except KeyError:
             return
-        if schedule.next_run_at is not None or schedule.last_session_id != session.id:
+        # A loop that ended (the run's own ``completed``, a person's pause or
+        # cancel) or was already given its next run is left as it is.
+        if (
+            schedule.status != "active"
+            or schedule.next_run_at is not None
+            or schedule.last_session_id != session.id
+        ):
             return
 
         await store.mark_dynamic_run_finished(

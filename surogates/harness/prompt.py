@@ -338,6 +338,8 @@ class PromptBuilder:
             # new tool registration would tell the LLM to call a tool
             # that doesn't exist.
             parts.append(self._prompts.get("guidance/cron_loop"))
+        if self._session is not None and self._session.config.get("scheduled_run"):
+            parts.append(scheduled_run_block(self._session.config["scheduled_run"]))
 
         # Coordinator guidance — injected when the session is in coordinator
         # mode.  A project's master runs threads, not workers, so it gets its
@@ -1236,3 +1238,24 @@ def _base64_looks_suspicious(candidate: str) -> bool:
         return False
     lowered = decoded.lower()
     return any(kw in lowered for kw in _B64_SUSPICIOUS_KEYWORDS)
+
+
+def scheduled_run_block(run: dict) -> str:
+    """What a scheduled run is told about the schedule it is a run of."""
+    previous = run.get("previous_run") or {}
+    lines = [
+        "## This is a scheduled run",
+        f"- Schedule: {run.get('name')} (id {run.get('id')})",
+        f"- Cadence: {run.get('cadence')}, timezone {run.get('timezone')}",
+        f"- Run number: {run.get('run_number')}"
+        + (f" of {run['repeat_limit']}" if run.get("repeat_limit") else ""),
+        f"- Previous run: {previous.get('status')} (started {previous.get('started_at')})"
+        if previous else "- Previous run: none, this is the first",
+        f"- Next run: {run.get('next_run_at') or 'none planned'}",
+    ]
+    if run.get("expires_at"):
+        lines.append(f"- The schedule ends at {run['expires_at']}")
+    if run.get("last_error"):
+        lines.append(f"- Last problem: {run['last_error']}")
+    lines.append("The schedule already exists: do not make another for the same work.")
+    return "\n".join(lines)
