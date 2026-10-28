@@ -439,13 +439,15 @@ async def refuse_a_reruns_folder(request: Request, case_id: UUID) -> None:
     """409 ``case-exists`` for a case id whose boundary folder is a rerun's or a trial's.
 
     A case's session made under a rerun's id would share the rerun's folder and memory, and the rerun's purge
-    would then delete the case's files.  A case's folder, even one with no record yet, is never marked.
+    would then delete the case's files.  A case's folder, even one with no record yet, is never marked.  A record
+    the store will not give is no reason to refuse a case's session, as :func:`note_case_org` never refuses on it;
+    that call, which follows, logs the same failure.
     """
     state = request.app.state
     try:
         record = await read_case_record(state.storage, state.settings, case_id)
-    except (ClientError, BotoCoreError) as exc:
-        raise _storage_failed(exc, case_id) from None
+    except (ClientError, BotoCoreError):
+        return
     if record is not None and record.rerun is not None:
         raise refused(status.HTTP_409_CONFLICT, "case-exists", "The case id names a rerun or a trial.")
 
