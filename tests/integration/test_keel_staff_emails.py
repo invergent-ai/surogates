@@ -141,6 +141,12 @@ async def test_the_route_refuses_what_it_cannot_answer(link, org, session_factor
     bad_org = await post({"user_ids": [str(ana)]}, "not-a-uuid")
     assert bad_org.status_code == 422
     assert code_of(bad_org) == "invalid-request"
+    assert bad_org.json()["detail"]["message"] == "The org id is not a UUID."
+    # The org id is checked before the body, and the body before the org's existence.
+    org_first = await post({"user_ids": []}, "not-a-uuid")
+    assert org_first.json()["detail"]["message"] == "The org id is not a UUID."
+    body_first = await post({"user_ids": []}, uuid4())
+    assert body_first.json()["detail"]["message"] == "The request body does not validate."
 
     unknown = await ask(link, uuid4(), [ana])
     assert unknown.status_code == 404

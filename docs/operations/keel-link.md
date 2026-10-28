@@ -430,7 +430,7 @@ A person joined from another org who has no password yet gets no link from the o
 
 Keel keeps no address of its staff. It asks for the addresses when it sends mail: `POST /v1/keel/orgs/{org_id}/emails` takes `{"user_ids": [id, ...]}`, 1 to 100 ids a call, and answers `{"emails": {"<user id>": "<address>"}}`.
 
-An id is answered when its user belongs to the org, as a home user or as a member, and has an address that mail can reach. The address is returned as stored, with its case. Each id is answered once, under its lowercase form, however it was sent; the bound of 100 counts the ids as sent.
+An id is answered when its user belongs to the org, as a home user or as a member, and has an address that mail can reach. The address is returned as stored, with its case. Each id is answered once, under its canonical form (lowercase and hyphenated), however it was sent; the bound of 100 counts the ids as sent.
 
 These are left out of the answer, and are never an error: a user of another org, an id that names nobody, and an address mail cannot reach. The runtime stores stand-in addresses for users that have no mailbox: a channel user's (`<platform>-<id>@<org>.channels.surogate.local`) and a followed person's (`person-<id>@<org>.people.surogate.local`). It also uses `.invalid` addresses for agents. So an address under `surogate.local`, an address under `.invalid` and a value that is not `name@domain` are left out. An id that is not a UUID is `422 invalid-request`.
 
