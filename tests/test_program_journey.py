@@ -6,6 +6,7 @@ from __future__ import annotations
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import pytest
 import sqlalchemy as sa
@@ -381,8 +382,8 @@ async def test_quiet_hours_hold_the_opener_until_morning(sf, make_invitation):
         return 1
 
     lookup = _lookup({("whatsapp", inv.user_id): "40746148303"})
-    # 04:30 UTC is 07:30 in Bucharest: still quiet.
-    night = datetime.now(timezone.utc).replace(hour=4, minute=30)
+    # 07:30 in Bucharest is still quiet, 08:30 is not: at whatever offset from UTC the zone has today.
+    night = datetime.now(ZoneInfo("Europe/Bucharest")).replace(hour=7, minute=30, second=0, microsecond=0)
     await send_queued_openers(sf, identity_lookup=lookup, now=night, enqueue=enqueue)
     assert sent == [] and (await _reload(sf, inv.id)).delivery_state == "queued"
     await send_queued_openers(sf, identity_lookup=lookup, now=night + timedelta(hours=1), enqueue=enqueue)
