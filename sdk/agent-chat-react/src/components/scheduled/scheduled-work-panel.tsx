@@ -56,9 +56,10 @@ function fingerprint(items: AgentChatScheduledWorkItem[]): string {
 }
 
 function formatKind(value: string | null | undefined): string {
-  if (value === "dynamic_loop") return "Dynamic loop";
+  // `dynamic_loop` and `one_shot` are what runtimes older than the cadence kinds send.
+  if (value === "dynamic" || value === "dynamic_loop") return "Dynamic loop";
   if (value === "cron") return "Cron";
-  if (value === "one_shot") return "One-shot";
+  if (value === "once" || value === "one_shot") return "One-shot";
   if (value === "scheduled") return "Scheduled";
   if (!value) return "Scheduled";
   return value
@@ -95,7 +96,7 @@ function canRunScheduleNow(item: AgentChatScheduledWorkItem): boolean {
 }
 
 function scheduleDisplay(item: AgentChatScheduledWorkItem): string | null {
-  if (item.kind === "dynamic_loop") return null;
+  if (item.kind === "dynamic" || item.kind === "dynamic_loop") return null;
   return item.scheduleDisplay;
 }
 

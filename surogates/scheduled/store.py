@@ -7,10 +7,14 @@ from uuid import UUID
 from sqlalchemy import func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from surogates.db.models import Event as EventRow
 from surogates.db.models import InboxItem
+from surogates.db.models import Session as SessionRow
 from surogates.db.models import ScheduledSession as ScheduledSessionRow
 from surogates.db.models import ServiceAccount as ServiceAccountRow
+from surogates.db.models import User as UserRow
 from surogates.scheduled.models import ScheduledSession
+from surogates.session.events import EventType
 from surogates.tenant.auth.service_account import KIND_AGENT_PRINCIPAL
 from surogates.tools.owner_scope import OPS_CHAT_SA_PREFIX
 from surogates.scheduled.schedule import (
@@ -861,9 +865,12 @@ class ScheduledSessionStore:
             await db.commit()
             return ended
 
-    async def end_runs_of_cancelled(self, *, limit: int = 100) -> list[UUID]:
-        """Runs still going of schedules cancelled in the last day: their
-        unanswered questions are retired here, and the caller stops them.
+    async def end_runs_of_cancelled(
+        self, *, limit: int = 100, schedule_id: UUID | None = None,
+    ) -> list[UUID]:
+        """Runs still going of schedules cancelled in the last day (or of
+        the one *schedule_id*): their unanswered questions are retired here,
+        and the caller stops them.
         """
         query = text(
             """
@@ -873,14 +880,16 @@ class ScheduledSessionStore:
               ON (r.parent_id = s.created_from_session_id OR r.id = s.last_session_id)
             WHERE s.status = 'cancelled'
               AND s.updated_at > now() - interval '1 day'
+              AND (CAST(:schedule_id AS uuid) IS NULL OR s.id = CAST(:schedule_id AS uuid))
               AND r.channel = 'scheduled'
               AND r.status = 'active'
               AND r.config->>'scheduled_session_id' = s.id::text
             LIMIT :limit
             """
         )
+        params = {"limit": int(limit), "schedule_id": str(schedule_id) if schedule_id else None}
         async with self._sf() as db:
-            ids = [row[0] for row in await db.execute(query, {"limit": int(limit)})]
+            ids = [row[0] for row in await db.execute(query, params)]
             if ids:
                 await db.execute(
                     update(InboxItem)
@@ -893,6 +902,53 @@ class ScheduledSessionStore:
                 )
                 await db.commit()
         return ids
+
+    async def owner_names(
+        self, schedules: list[ScheduledSession],
+    ) -> tuple[dict[UUID, str], dict[UUID, str]]:
+        """``(user display names, service account names)`` of the schedules' owners."""
+        user_ids = {s.user_id for s in schedules if s.user_id}
+        sa_ids = {s.service_account_id for s in schedules if s.service_account_id}
+        async with self._sf() as db:
+            users = dict((await db.execute(
+                select(UserRow.id, UserRow.display_name).where(UserRow.id.in_(user_ids))
+            )).all()) if user_ids else {}
+            accounts = dict((await db.execute(
+                select(ServiceAccountRow.id, ServiceAccountRow.name).where(ServiceAccountRow.id.in_(sa_ids))
+            )).all()) if sa_ids else {}
+        return users, accounts
+
+    async def list_runs(
+        self, schedule_id: UUID, *, org_id: UUID, agent_id: str, limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """The sessions a schedule started, newest first, a failed one with
+        why it failed in words."""
+        stmt = (
+            select(SessionRow.id, SessionRow.status, SessionRow.title,
+                   SessionRow.created_at, SessionRow.updated_at)
+            .where(
+                SessionRow.org_id == org_id,
+                SessionRow.agent_id == agent_id,
+                SessionRow.channel == "scheduled",
+                SessionRow.config["scheduled_session_id"].astext == str(schedule_id),
+            )
+            .order_by(SessionRow.created_at.desc())
+            .limit(limit)
+        )
+        async with self._sf() as db:
+            runs = [dict(row._mapping) for row in await db.execute(stmt)]
+            failed = [run["id"] for run in runs if run["status"] == "failed"]
+            errors: dict[UUID, str] = {}
+            if failed:
+                failures = await db.execute(
+                    select(EventRow.session_id, EventRow.data)
+                    .where(EventRow.session_id.in_(failed), EventRow.type == EventType.SESSION_FAIL.value)
+                    .order_by(EventRow.id)
+                )
+                for session_id, data in failures.all():
+                    if words := _failure_words(data or {}):
+                        errors[session_id] = words[:500]
+        return [{**run, "error": errors.get(run["id"])} for run in runs]
 
     async def recover_stalled_dynamic_loops(
         self,
@@ -1096,6 +1152,19 @@ def _scope(user_id: UUID | None, service_account_id: UUID | None):
         .exists()
     )
     return or_(ScheduledSessionRow.service_account_id == service_account_id, works_for_the_project)
+
+
+def _failure_words(data: dict) -> str | None:
+    """Why a scheduled run failed, in words a person reads."""
+    reason = data.get("error_title") or data.get("error") or data.get("reason")
+    if reason == "run_time_limit":
+        seconds = int(data.get("limit_seconds") or 0)
+        limit = (f" of {seconds // 3600} h" if seconds and seconds % 3600 == 0
+                 else f" of {seconds // 60} min" if seconds else "")
+        return f"Stopped at its time limit{limit} before it finished"
+    if reason == "schedule_cancelled":
+        return "Stopped because the schedule was cancelled"
+    return str(reason) if reason else None
 
 
 def _default_name(prompt: str) -> str:

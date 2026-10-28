@@ -317,7 +317,11 @@ export interface AgentChatSessionTree {
 }
 
 export type AgentChatScheduledWorkKind =
+  | "calendar"
+  | "interval"
+  | "once"
   | "cron"
+  | "dynamic"
   | "dynamic_loop"
   | "one_shot"
   | "scheduled"

@@ -281,11 +281,7 @@ async def recover_stalled_loops(
     # Every writer of a cancel (the runtime's own, the control plane writing
     # the row) is covered here, a tick later, instead of at each of them.
     async def stop_cancelled_runs() -> None:
-        for run_id in await scheduled_store.end_runs_of_cancelled(limit=limit):
-            if await session_store.pause_if_active(run_id, {"reason": "schedule_cancelled"}):
-                logger.info("Stopped run %s of a cancelled schedule", run_id)
-            if redis is not None:
-                await redis.publish(f"{INTERRUPT_CHANNEL_PREFIX}:{run_id}", "schedule_cancelled")
+        await stop_runs_of_cancelled(scheduled_store, session_store, redis, limit=limit)
 
     async def fail_overdue_runs() -> None:
         for run_id, limit_seconds in await session_store.fail_overdue_scheduled_runs(
@@ -348,3 +344,15 @@ async def recover_stalled_loops(
             await step()
         except Exception:
             logger.exception("Scheduled sweep step %s failed", step.__name__)
+
+
+async def stop_runs_of_cancelled(
+    scheduled_store: Any, session_store: Any, redis: Any,
+    *, limit: int = 100, schedule_id: UUID | None = None,
+) -> None:
+    """Stop the runs still going of cancelled schedules (or of one)."""
+    for run_id in await scheduled_store.end_runs_of_cancelled(limit=limit, schedule_id=schedule_id):
+        if await session_store.pause_if_active(run_id, {"reason": "schedule_cancelled"}):
+            logger.info("Stopped run %s of a cancelled schedule", run_id)
+        if redis is not None:
+            await redis.publish(f"{INTERRUPT_CHANNEL_PREFIX}:{run_id}", "schedule_cancelled")
