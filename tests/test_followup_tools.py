@@ -453,7 +453,8 @@ async def test_escalate_with_nobody_configured_fails_visibly(sf, patient):
     assert "contact the business directly" in result
     # The agent is told what is missing and where it is fixed, never "(None)".
     assert "no Studio inbox" in result and "no team members are configured" in result
-    assert "Programs page" in result
+    # Fixed on the agent's Inbox; outside a Program's check-in, no Programs.
+    assert "agent's Inbox" in result and "Programs" not in result
     assert "None" not in result
 
 
