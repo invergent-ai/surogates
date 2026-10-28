@@ -221,7 +221,7 @@ export interface ScheduledWorkItem {
   name: string | null;
   prompt: string;
   status: "active" | "paused" | "completed" | "failed" | string;
-  kind: "cron" | "dynamic_loop" | "one_shot" | "scheduled" | string;
+  kind: "calendar" | "interval" | "once" | "cron" | "dynamic" | string;
   source: string | null;
   schedule_display: string;
   timezone: string | null;

@@ -6506,11 +6506,9 @@ class AgentHarness(
             schedule_id = UUID(command.target)
         except ValueError:
             return f"Loop {command.target} was not found."
-        extra = {"ended_by": f"session:{session.id}"} if verb == "cancel" else {}
-        done = await getattr(store, verb)(schedule_id=schedule_id, **scope, **extra)
+        done, row = await store.apply(verb, schedule_id=schedule_id, ended_by=f"session:{session.id}", **scope)
         if done:
             return f"Loop {schedule_id} {_LOOP_VERB_DONE[verb]}."
-        row = await store.get_for(schedule_id, **scope)
         if row is None:
             return f"Loop {schedule_id} was not found."
         return f"Loop {schedule_id} is {row.status}; it cannot be {_LOOP_VERB_DONE[verb]}."

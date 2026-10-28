@@ -345,15 +345,14 @@ async def _transition(arguments: dict[str, Any], kwargs: dict[str, Any], action:
             session_id=context.session_id, reason=str(arguments.get("reason") or "Ended by its run."),
             **context.owner,
         )
-    else:
-        extra = {"ended_by": f"session:{context.session_id}"} if action == "cancel" else {}
-        changed = await getattr(context.store, action)(
-            org_id=context.org_id, agent_id=context.agent_id, schedule_id=schedule_id,
-            **context.owner, **extra,
+        row = await context.store.get_for(
+            schedule_id, org_id=context.org_id, agent_id=context.agent_id, **context.owner,
         )
-    row = await context.store.get_for(
-        schedule_id, org_id=context.org_id, agent_id=context.agent_id, **context.owner,
-    )
+    else:
+        changed, row = await context.store.apply(
+            action, org_id=context.org_id, agent_id=context.agent_id, schedule_id=schedule_id,
+            ended_by=f"session:{context.session_id}", **context.owner,
+        )
     if row is None:
         return _not_found(schedule_id)
     if not changed:
@@ -580,7 +579,7 @@ def _schedule_payload(row: Any, *, full: bool = False) -> dict[str, Any]:
         payload["ended"] = row.ended_reason
     if full:
         payload.update(
-            kind=getattr(row, "kind", None) or ("dynamic" if row.schedule.get("kind") == "dynamic_loop" else "cron"),
+            kind=row.kind,
             cadence=getattr(row, "cadence", None),
             last_run_session_id=str(row.last_session_id) if row.last_session_id else None,
             paused_at=local_iso(getattr(row, "paused_at", None), timezone_name),

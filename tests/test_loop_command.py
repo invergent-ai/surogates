@@ -64,6 +64,11 @@ class _Loops:
     async def get_for(self, schedule_id, **kw):
         return self._row()
 
+    async def apply(self, verb, *, ended_by=None, **kw):
+        extra = {"ended_by": ended_by} if verb == "cancel" else {}
+        changed = await getattr(self, verb)(**kw, **extra)
+        return bool(changed), await self.get_for(kw["schedule_id"])
+
 
 async def _loop(monkeypatch, text: str, loops: _Loops) -> str:
     monkeypatch.setattr(store_module, "ScheduledSessionStore", loops)

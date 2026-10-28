@@ -581,27 +581,27 @@ async def test_sa_principal_cancel_and_pause_resume_round_trip(session_factory):
         org_id=org_id, user_id=user_id, agent_id="agent-x",
         schedule_id=sa_schedule.id,
     )
-    assert rejected is False
+    assert rejected is None
 
     paused = await store.pause(
         org_id=org_id, service_account_id=issued.id, agent_id="agent-x",
         schedule_id=sa_schedule.id,
     )
-    assert paused is True
+    assert paused.status == "paused"
     assert (await store.get(sa_schedule.id)).status == "paused"
 
     resumed = await store.resume(
         org_id=org_id, service_account_id=issued.id, agent_id="agent-x",
         schedule_id=sa_schedule.id,
     )
-    assert resumed is True
+    assert resumed.status == "active"
     assert (await store.get(sa_schedule.id)).status == "active"
 
     cancelled = await store.cancel(
         org_id=org_id, service_account_id=issued.id, agent_id="agent-x",
         schedule_id=sa_schedule.id, ended_by="test",
     )
-    assert cancelled is True
+    assert cancelled.ended_by == "test"
     assert (await store.get(sa_schedule.id)).status == "cancelled"
 
 

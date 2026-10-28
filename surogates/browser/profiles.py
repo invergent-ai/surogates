@@ -184,6 +184,25 @@ class BrowserProfileStore:
                 )
             ).scalar_one_or_none()
 
+    async def owners(
+        self, org_id: UUID, profile_ids: list[UUID],
+    ) -> dict[UUID, tuple[BrowserProfileRow, UUID | None, UUID | None]]:
+        """Each of *profile_ids* in the org with its ``(user_id,
+        service_account_id)`` owner; for callers that check the owner
+        themselves (who may bind a profile, whose login a schedule uses)."""
+        if not profile_ids:
+            return {}
+        async with self._session_factory() as s:
+            rows = (
+                await s.execute(
+                    select(BrowserProfile).where(
+                        BrowserProfile.org_id == org_id,
+                        BrowserProfile.id.in_(profile_ids),
+                    )
+                )
+            ).scalars().all()
+        return {p.id: (_row(p), p.user_id, p.service_account_id) for p in rows}
+
     async def delete(
         self, profile_id, org_id, *, user_id, service_account_id
     ) -> bool:

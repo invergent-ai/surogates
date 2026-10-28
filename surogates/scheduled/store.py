@@ -4,13 +4,19 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import func, or_, select, text, update
+from sqlalchemy import exists, func, or_, select, text, update
+from sqlalchemy.orm import aliased
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from surogates.channels.memory_boundary import CASE_BOUNDARY_PREFIX
+from surogates.db.models import Event as EventRow
 from surogates.db.models import InboxItem
+from surogates.db.models import Session as SessionRow
 from surogates.db.models import ScheduledSession as ScheduledSessionRow
 from surogates.db.models import ServiceAccount as ServiceAccountRow
+from surogates.db.models import User as UserRow
 from surogates.scheduled.models import ScheduledSession
+from surogates.session.events import EventType
 from surogates.tenant.auth.service_account import KIND_AGENT_PRINCIPAL
 from surogates.tools.owner_scope import OPS_CHAT_SA_PREFIX
 from surogates.scheduled.schedule import (
@@ -183,18 +189,22 @@ class ScheduledSessionStore:
         agent_id: str,
         user_id: UUID | None = None,
         service_account_id: UUID | None = None,
+        hide_cases: bool = False,
+        case_session_id: UUID | None = None,
     ) -> ScheduledSession | None:
-        """*schedule_id* when the principal may see it (:func:`_scope`), else None."""
+        """*schedule_id* when the principal may see it (:func:`_scope`), else
+        None.  *hide_cases*: as :func:`_not_a_case_schedule`."""
         _validate_principal(user_id, service_account_id, caller="ScheduledSessionStore.get_for")
+        stmt = select(ScheduledSessionRow).where(
+            ScheduledSessionRow.id == schedule_id,
+            ScheduledSessionRow.org_id == org_id,
+            ScheduledSessionRow.agent_id == agent_id,
+            _scope(user_id, service_account_id),
+        )
+        if hide_cases:
+            stmt = stmt.where(_not_a_case_schedule(case_session_id))
         async with self._sf() as db:
-            row = (await db.execute(
-                select(ScheduledSessionRow).where(
-                    ScheduledSessionRow.id == schedule_id,
-                    ScheduledSessionRow.org_id == org_id,
-                    ScheduledSessionRow.agent_id == agent_id,
-                    _scope(user_id, service_account_id),
-                )
-            )).scalar_one_or_none()
+            row = (await db.execute(stmt)).scalar_one_or_none()
         return None if row is None else ScheduledSession.model_validate(row)
 
     async def list_for_user(
@@ -209,8 +219,11 @@ class ScheduledSessionStore:
         limit: int | None = None,
         offset: int = 0,
         created_from_session_id: UUID | None = None,
+        hide_cases: bool = False,
+        case_session_id: UUID | None = None,
     ) -> list[ScheduledSession]:
         """The schedules the principal may see (:func:`_scope`), newest first.
+        *hide_cases*: as :func:`_not_a_case_schedule`.
 
         *status* is one status, a comma list, or ``all``; without it only
         active ones, or every one with *include_inactive*.
@@ -236,6 +249,8 @@ class ScheduledSessionStore:
             stmt = stmt.where(ScheduledSessionRow.status == "active")
         if created_from_session_id is not None:
             stmt = stmt.where(ScheduledSessionRow.created_from_session_id == created_from_session_id)
+        if hide_cases:
+            stmt = stmt.where(_not_a_case_schedule(case_session_id))
         if offset > 0:
             stmt = stmt.offset(offset)
         if limit is not None:
@@ -245,6 +260,28 @@ class ScheduledSessionStore:
             rows = result.scalars().all()
         return [ScheduledSession.model_validate(row) for row in rows]
 
+    async def apply(
+        self,
+        verb: str,
+        *,
+        org_id: UUID,
+        agent_id: str,
+        schedule_id: UUID,
+        user_id: UUID | None = None,
+        service_account_id: UUID | None = None,
+        ended_by: str | None = None,
+    ) -> tuple[bool, ScheduledSession | None]:
+        """``pause``, ``resume``, ``cancel`` or ``run_now`` a schedule: whether
+        it changed, and the schedule as it now is (None when the principal
+        may not see it)."""
+        scope = {"org_id": org_id, "agent_id": agent_id,
+                 "user_id": user_id, "service_account_id": service_account_id}
+        extra = {"ended_by": ended_by} if verb == "cancel" else {}
+        changed = await getattr(self, verb)(schedule_id=schedule_id, **scope, **extra)
+        if changed is not None:
+            return True, changed
+        return False, await self.get_for(schedule_id, **scope)
+
     async def pause(
         self,
         *,
@@ -253,7 +290,7 @@ class ScheduledSessionStore:
         schedule_id: UUID,
         user_id: UUID | None = None,
         service_account_id: UUID | None = None,
-    ) -> bool:
+    ) -> ScheduledSession | None:
         """Stop an active schedule from starting runs until resumed."""
         return await self._transition(
             org_id=org_id, agent_id=agent_id, schedule_id=schedule_id,
@@ -270,7 +307,7 @@ class ScheduledSessionStore:
         schedule_id: UUID,
         user_id: UUID | None = None,
         service_account_id: UUID | None = None,
-    ) -> bool:
+    ) -> ScheduledSession | None:
         """Start a paused schedule again from its next run after now: a
         missed one-off runs now."""
         schedule = await self.get_for(
@@ -278,7 +315,7 @@ class ScheduledSessionStore:
             user_id=user_id, service_account_id=service_account_id,
         )
         if schedule is None or schedule.status != "paused":
-            return False
+            return None
         return await self._transition(
             org_id=org_id, agent_id=agent_id, schedule_id=schedule_id,
             user_id=user_id, service_account_id=service_account_id,
@@ -298,7 +335,7 @@ class ScheduledSessionStore:
         user_id: UUID | None = None,
         service_account_id: UUID | None = None,
         ended_by: str | None = None,
-    ) -> bool:
+    ) -> ScheduledSession | None:
         """End an active or paused schedule for good, keeping its row.
 
         Its run still going is ended by the ticker's sweep
@@ -365,12 +402,11 @@ class ScheduledSessionStore:
                 values["next_run_at"] = next_run_at
         if not values:
             return current
-        await self._transition(
+        return await self._transition(
             org_id=org_id, agent_id=agent_id, schedule_id=schedule_id,
             user_id=user_id, service_account_id=service_account_id,
             from_statuses=(current.status,), values=values,
         )
-        return await self.get(schedule_id)
 
     async def run_now(
         self,
@@ -380,7 +416,7 @@ class ScheduledSessionStore:
         schedule_id: UUID,
         user_id: UUID | None = None,
         service_account_id: UUID | None = None,
-    ) -> bool:
+    ) -> ScheduledSession | None:
         return await self._transition(
             org_id=org_id, agent_id=agent_id, schedule_id=schedule_id,
             user_id=user_id, service_account_id=service_account_id,
@@ -726,7 +762,7 @@ class ScheduledSessionStore:
                 or row.agent_id != agent_id
                 or row.last_session_id != session_id
                 or row.status != "active"
-                or row.schedule.get("kind") != "dynamic_loop"
+                or row.kind != "dynamic"
             ):
                 return False
 
@@ -812,10 +848,7 @@ class ScheduledSessionStore:
                     ScheduledSessionRow.status == "active",
                     ScheduledSessionRow.next_run_at.is_(None),
                     ~(
-                        func.coalesce(
-                            ScheduledSessionRow.kind,
-                            ScheduledSessionRow.schedule["kind"].astext,
-                        ).in_(("dynamic", "dynamic_loop"))
+                        (func.coalesce(ScheduledSessionRow.kind, "") == "dynamic")
                         & ScheduledSessionRow.last_session_id.is_not(None)
                     ),
                 )
@@ -861,9 +894,12 @@ class ScheduledSessionStore:
             await db.commit()
             return ended
 
-    async def end_runs_of_cancelled(self, *, limit: int = 100) -> list[UUID]:
-        """Runs still going of schedules cancelled in the last day: their
-        unanswered questions are retired here, and the caller stops them.
+    async def end_runs_of_cancelled(
+        self, *, limit: int = 100, schedule_id: UUID | None = None,
+    ) -> list[UUID]:
+        """Runs still going of schedules cancelled in the last day (or of
+        the one *schedule_id*): their unanswered questions are retired here,
+        and the caller stops them.
         """
         query = text(
             """
@@ -873,14 +909,16 @@ class ScheduledSessionStore:
               ON (r.parent_id = s.created_from_session_id OR r.id = s.last_session_id)
             WHERE s.status = 'cancelled'
               AND s.updated_at > now() - interval '1 day'
+              AND (CAST(:schedule_id AS uuid) IS NULL OR s.id = CAST(:schedule_id AS uuid))
               AND r.channel = 'scheduled'
               AND r.status = 'active'
               AND r.config->>'scheduled_session_id' = s.id::text
             LIMIT :limit
             """
         )
+        params = {"limit": int(limit), "schedule_id": str(schedule_id) if schedule_id else None}
         async with self._sf() as db:
-            ids = [row[0] for row in await db.execute(query, {"limit": int(limit)})]
+            ids = [row[0] for row in await db.execute(query, params)]
             if ids:
                 await db.execute(
                     update(InboxItem)
@@ -893,6 +931,53 @@ class ScheduledSessionStore:
                 )
                 await db.commit()
         return ids
+
+    async def owner_names(
+        self, schedules: list[ScheduledSession],
+    ) -> tuple[dict[UUID, str], dict[UUID, str]]:
+        """``(user display names, service account names)`` of the schedules' owners."""
+        user_ids = {s.user_id for s in schedules if s.user_id}
+        sa_ids = {s.service_account_id for s in schedules if s.service_account_id}
+        async with self._sf() as db:
+            users = dict((await db.execute(
+                select(UserRow.id, UserRow.display_name).where(UserRow.id.in_(user_ids))
+            )).all()) if user_ids else {}
+            accounts = dict((await db.execute(
+                select(ServiceAccountRow.id, ServiceAccountRow.name).where(ServiceAccountRow.id.in_(sa_ids))
+            )).all()) if sa_ids else {}
+        return users, accounts
+
+    async def list_runs(
+        self, schedule_id: UUID, *, org_id: UUID, agent_id: str, limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """The sessions a schedule started, newest first, a failed one with
+        why it failed in words."""
+        stmt = (
+            select(SessionRow.id, SessionRow.status, SessionRow.title,
+                   SessionRow.created_at, SessionRow.updated_at)
+            .where(
+                SessionRow.org_id == org_id,
+                SessionRow.agent_id == agent_id,
+                SessionRow.channel == "scheduled",
+                SessionRow.config["scheduled_session_id"].astext == str(schedule_id),
+            )
+            .order_by(SessionRow.created_at.desc())
+            .limit(limit)
+        )
+        async with self._sf() as db:
+            runs = [dict(row._mapping) for row in await db.execute(stmt)]
+            failed = [run["id"] for run in runs if run["status"] == "failed"]
+            errors: dict[UUID, str] = {}
+            if failed:
+                failures = await db.execute(
+                    select(EventRow.session_id, EventRow.data)
+                    .where(EventRow.session_id.in_(failed), EventRow.type == EventType.SESSION_FAIL.value)
+                    .order_by(EventRow.id)
+                )
+                for session_id, data in failures.all():
+                    if words := _failure_words(data or {}):
+                        errors[session_id] = words[:500]
+        return [{**run, "error": errors.get(run["id"])} for run in runs]
 
     async def recover_stalled_dynamic_loops(
         self,
@@ -923,7 +1008,7 @@ class ScheduledSessionStore:
                   {agent_filter}
                   AND s.next_run_at IS NULL
                   AND s.last_session_id IS NOT NULL
-                  AND s.schedule->>'kind' = 'dynamic_loop'
+                  AND s.kind = 'dynamic'
                   AND (s.expires_at IS NULL OR s.expires_at > now())
                   AND run_session.status IN ('completed', 'failed', 'idle', 'archived')
                 ORDER BY s.last_run_at ASC NULLS FIRST
@@ -988,7 +1073,7 @@ class ScheduledSessionStore:
               {agent_filter}
               AND s.next_run_at IS NULL
               AND s.last_session_id IS NOT NULL
-              AND s.schedule->>'kind' = 'dynamic_loop'
+              AND s.kind = 'dynamic'
               AND (s.expires_at IS NULL OR s.expires_at > now())
               AND run_session.status = 'active'
               AND active_lease.session_id IS NULL
@@ -1020,9 +1105,9 @@ class ScheduledSessionStore:
         user_id: UUID | None = None,
         service_account_id: UUID | None = None,
         unlocked: bool = True,
-    ) -> bool:
+    ) -> ScheduledSession | None:
         """Write *values* to the schedule the principal may change, only from
-        *from_statuses*; whether it did.  *unlocked* releases a claim."""
+        *from_statuses*; the changed row, or None.  *unlocked* releases a claim."""
         _validate_principal(
             user_id, service_account_id,
             caller="ScheduledSessionStore._transition",
@@ -1031,7 +1116,7 @@ class ScheduledSessionStore:
         if unlocked:
             values.update(locked_by=None, locked_until=None)
         async with self._sf() as db:
-            result = await db.execute(
+            row = (await db.execute(
                 update(ScheduledSessionRow)
                 .where(
                     ScheduledSessionRow.id == schedule_id,
@@ -1041,9 +1126,11 @@ class ScheduledSessionStore:
                     ScheduledSessionRow.status.in_(from_statuses),
                 )
                 .values(**values)
-            )
+                .returning(ScheduledSessionRow)
+            )).scalar_one_or_none()
+            changed = None if row is None else ScheduledSession.model_validate(row)
             await db.commit()
-        return bool(result.rowcount)
+        return changed
 
 
 def _schedule_to_dict(schedule: ParsedSchedule) -> dict[str, str]:
@@ -1071,6 +1158,21 @@ def _planned_run(schedule: ScheduledSession, now: datetime) -> datetime:
     return cadence.next_after(now) or now
 
 
+def _not_a_case_schedule(case_session_id: UUID | None):
+    """Not a schedule a Keel case's session made or ran last: case data is
+    Keel's.  The case session's own token (*case_session_id*) still sees
+    the ones it is part of."""
+    case = aliased(SessionRow)
+    is_case = case.config["memory_boundary"].astext.startswith(CASE_BOUNDARY_PREFIX, autoescape=True)
+    if case_session_id is not None:
+        is_case = is_case & (case.id != case_session_id)
+    return ~exists().where(
+        or_(case.id == ScheduledSessionRow.created_from_session_id,
+            case.id == ScheduledSessionRow.last_session_id),
+        is_case,
+    )
+
+
 def _scope(user_id: UUID | None, service_account_id: UUID | None):
     """The schedules a principal sees and manages.
 
@@ -1096,6 +1198,19 @@ def _scope(user_id: UUID | None, service_account_id: UUID | None):
         .exists()
     )
     return or_(ScheduledSessionRow.service_account_id == service_account_id, works_for_the_project)
+
+
+def _failure_words(data: dict) -> str | None:
+    """Why a scheduled run failed, in words a person reads."""
+    reason = data.get("error_title") or data.get("error") or data.get("reason")
+    if reason == "run_time_limit":
+        seconds = int(data.get("limit_seconds") or 0)
+        limit = (f" of {seconds // 3600} h" if seconds and seconds % 3600 == 0
+                 else f" of {seconds // 60} min" if seconds else "")
+        return f"Stopped at its time limit{limit} before it finished"
+    if reason == "schedule_cancelled":
+        return "Stopped because the schedule was cancelled"
+    return str(reason) if reason else None
 
 
 def _default_name(prompt: str) -> str:

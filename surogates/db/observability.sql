@@ -642,8 +642,7 @@ BEGIN
     END IF;
 END $$;
 
--- A schedule's cadence kind and parameters, and how it ended.  NULL ``kind``
--- is a row made before these: its cadence is read from ``schedule``.
+-- A schedule's cadence kind and parameters, and how it ended.
 ALTER TABLE scheduled_sessions
     ADD COLUMN IF NOT EXISTS kind                 text,
     ADD COLUMN IF NOT EXISTS cadence              jsonb,
@@ -652,6 +651,20 @@ ALTER TABLE scheduled_sessions
     ADD COLUMN IF NOT EXISTS ended_by             text,
     ADD COLUMN IF NOT EXISTS consecutive_failures integer NOT NULL DEFAULT 0,
     ADD COLUMN IF NOT EXISTS ended_announced_at   timestamptz;
+
+-- Rows made before ``kind`` keep their cadence in ``schedule``: a cron, or a
+-- dynamic loop.  Every reader goes by ``kind`` alone.
+UPDATE scheduled_sessions
+SET kind = CASE WHEN schedule->>'kind' = 'dynamic_loop' THEN 'dynamic' ELSE 'cron' END,
+    cadence = CASE WHEN schedule->>'kind' = 'dynamic_loop' THEN '{}'::jsonb
+                   ELSE jsonb_build_object('cron', schedule->>'cron') END,
+    timezone = COALESCE(schedule->>'timezone_name', timezone)
+WHERE kind IS NULL;
+
+-- A schedule's runs, looked up by the schedule they belong to.
+CREATE INDEX IF NOT EXISTS idx_sessions_scheduled_session
+    ON sessions ((config->>'scheduled_session_id'))
+    WHERE channel = 'scheduled';
 
 -- The ticker plans active rows with no next run (made or resumed by the
 -- control plane); dynamic loops waiting on their run look the same, and

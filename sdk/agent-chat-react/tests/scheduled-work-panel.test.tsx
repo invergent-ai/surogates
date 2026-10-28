@@ -112,7 +112,7 @@ describe("ScheduledWorkPanel", () => {
     const adapter = createAdapter([
       scheduledWork({
         id: "loop-1",
-        kind: "dynamic_loop",
+        kind: "dynamic",
         name: "Bitcoin monitor",
         prompt: "check bitcoin price",
         scheduleDisplay: "Dynamic loop (1 minute to 1 hour)",
@@ -240,7 +240,7 @@ describe("ScheduledWorkPanel", () => {
     let items = [
       scheduledWork({
         id: "one-shot-1",
-        kind: "one_shot",
+        kind: "once",
         name: "Deploy check",
         lastSessionId: "run-1",
         repeatLimit: 1,
