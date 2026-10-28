@@ -859,6 +859,42 @@ async def test_a_successful_run_resets_the_failure_count(session_factory):
     assert (await store.get(created.id)).consecutive_failures == 0
 
 
+async def test_runs_stopped_at_their_limit_count_until_one_ends_well(session_factory, session_store):
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    store = ScheduledSessionStore(session_factory)
+    agent = _agent()
+    created = await _due(store, org_id, user_id, agent, parse_schedule("10m"))
+
+    async def run(final_status: str) -> None:
+        async with session_factory() as db:
+            await db.execute(
+                text("UPDATE scheduled_sessions SET next_run_at = now() - interval '1 minute' WHERE id = :id"),
+                {"id": created.id},
+            )
+            await db.commit()
+        claimed = (await store.claim_due(agent_id=agent, worker_id="w1", limit=1))[0]
+        session = await session_store.create_session(
+            user_id=user_id, org_id=org_id, agent_id=agent, channel="scheduled",
+            config={"scheduled_session_id": str(created.id)},
+        )
+        await store.mark_run_created(claimed, session_id=session.id)
+        async with session_factory() as db:
+            await db.execute(text("UPDATE sessions SET status = :s WHERE id = :id"),
+                             {"s": final_status, "id": session.id})
+            await db.commit()
+        if final_status == "failed":
+            await store.mark_run_timed_out(session.id, limit_seconds=60)
+
+    await run("failed")
+    await run("failed")
+    assert (await store.get(created.id)).consecutive_failures == 2
+    await run("completed")
+    assert (await store.get(created.id)).consecutive_failures == 2
+    await run("completed")
+    assert (await store.get(created.id)).consecutive_failures == 0
+
+
 async def test_pause_update_resume_round_trip(session_factory):
     org_id = await create_org(session_factory)
     user_id = await create_user(session_factory, org_id)

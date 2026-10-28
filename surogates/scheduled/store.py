@@ -599,11 +599,16 @@ class ScheduledSessionStore:
             row = await db.get(ScheduledSessionRow, schedule.id, with_for_update=True)
             if row is None:
                 return
+            # A run that ended well ends the failure streak; a failed one is
+            # counted where it failed (mark_run_timed_out).
+            if row.last_session_id is None or await db.scalar(
+                select(SessionRow.status).where(SessionRow.id == row.last_session_id)
+            ) != "failed":
+                row.consecutive_failures = 0
             row.run_count = (row.run_count or 0) + 1
             row.last_run_at = now
             row.last_session_id = session_id
             row.last_error = None
-            row.consecutive_failures = 0
             row.locked_by = None
             row.locked_until = None
             row.updated_at = now
@@ -622,8 +627,7 @@ class ScheduledSessionStore:
                     ended = "done"
                 row.next_run_at = next_run_at
                 if ended is not None:
-                    row.status = "completed"
-                    row.ended_reason = ended
+                    _end(row, ended)
             await db.commit()
 
     async def mark_run_failed(
@@ -656,9 +660,7 @@ class ScheduledSessionStore:
                 cadence = _schedule_of(ScheduledSession.model_validate(row))
                 limit = MAX_ONCE_ATTEMPTS if cadence.kind == "once" else MAX_CONSECUTIVE_FAILURES
                 if failures >= limit:
-                    row.status = "failed"
-                    row.ended_reason = "failed"
-                    row.next_run_at = None
+                    _end(row, "failed")
                 elif cadence.kind == "once" or cadence.is_dynamic:
                     delay = min(DYNAMIC_LOOP_FALLBACK_DELAY_SECONDS, 60 * 2 ** (failures - 1))
                     row.next_run_at = now + timedelta(seconds=delay)
@@ -691,18 +693,10 @@ class ScheduledSessionStore:
                 "before it finished."
             )
             row.updated_at = now
-            # Each start resets the count, so the streak is read off the runs.
-            recent = (await db.execute(text(
-                "SELECT status FROM sessions WHERE agent_id = :agent AND channel = 'scheduled' "
-                "AND config->>'scheduled_session_id' = :sid ORDER BY created_at DESC LIMIT :n"
-            ), {"agent": row.agent_id, "sid": str(row.id), "n": MAX_CONSECUTIVE_FAILURES})).scalars().all()
-            streak = next((i for i, status in enumerate(recent) if status != "failed"), len(recent))
             if row.status == "active":
-                row.consecutive_failures = max(streak, 1)
+                row.consecutive_failures = (row.consecutive_failures or 0) + 1
                 if row.consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
-                    row.status = "failed"
-                    row.ended_reason = "failed"
-                    row.next_run_at = None
+                    _end(row, "failed")
             await db.commit()
 
     async def mark_run_skipped(self, schedule: ScheduledSession, *, reason: str) -> None:
@@ -773,10 +767,9 @@ class ScheduledSessionStore:
                 "last_delay_reason": reason.strip()[:500] or "No reason provided.",
                 "last_delay_set_at": now.isoformat(),
             }
-            row.next_run_at = None if completed or expired else now + timedelta(seconds=delay)
+            row.next_run_at = now + timedelta(seconds=delay)
             if completed or expired:
-                row.status = "completed"
-                row.ended_reason = "done" if completed else "expired"
+                _end(row, "done" if completed else "expired")
             row.locked_by = None
             row.locked_until = None
             row.updated_at = now
@@ -827,9 +820,7 @@ class ScheduledSessionStore:
                 "last_completed_reason": reason.strip()[:500] or "No reason provided.",
                 "last_completed_at": now.isoformat(),
             }
-            row.next_run_at = None
-            row.status = "completed"
-            row.ended_reason = "done"
+            _end(row, "done")
             row.locked_by = None
             row.locked_until = None
             row.updated_at = now
@@ -862,8 +853,7 @@ class ScheduledSessionStore:
                 try:
                     row.next_run_at = _planned_run(current, now)
                 except ValueError as exc:
-                    row.status = "failed"
-                    row.ended_reason = "failed"
+                    _end(row, "failed")
                     row.last_error = f"Cannot plan this schedule: {exc}"[:2000]
                 row.updated_at = now
                 planned.append(row)
@@ -1198,6 +1188,13 @@ def _scope(user_id: UUID | None, service_account_id: UUID | None):
         .exists()
     )
     return or_(ScheduledSessionRow.service_account_id == service_account_id, works_for_the_project)
+
+
+def _end(row: ScheduledSessionRow, reason: str) -> None:
+    """End *row* on its own: ``failed``, or completed as *reason* says."""
+    row.status = "failed" if reason == "failed" else "completed"
+    row.ended_reason = reason
+    row.next_run_at = None
 
 
 def _failure_words(data: dict) -> str | None:
