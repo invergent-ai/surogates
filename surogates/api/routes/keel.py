@@ -70,6 +70,7 @@ from surogates.keel.case_files import (
 )
 from surogates.keel.files import file_value
 from surogates.keel.versions import MAX_ASKED, SHA256_HEX, VersionNotKept, case_versions
+from surogates.keel.reruns import read_case_record
 from surogates.keel.run_facts import bundle_version_in
 from surogates.keel.steps import (
     ANSWER_MARKER,
@@ -434,6 +435,21 @@ def screen(value: object, *, case_id: UUID) -> None:
         )
 
 
+async def refuse_a_reruns_folder(request: Request, case_id: UUID) -> None:
+    """409 ``case-exists`` for a case id whose boundary folder is a rerun's or a trial's.
+
+    A case's session made under a rerun's id would share the rerun's folder and memory, and the rerun's purge
+    would then delete the case's files.  A case's folder, even one with no record yet, is never marked.
+    """
+    state = request.app.state
+    try:
+        record = await read_case_record(state.storage, state.settings, case_id)
+    except (ClientError, BotoCoreError) as exc:
+        raise _storage_failed(exc, case_id) from None
+    if record is not None and record.rerun is not None:
+        raise refused(status.HTTP_409_CONFLICT, "case-exists", "The case id names a rerun or a trial.")
+
+
 def _key_in_use() -> HTTPException:
     return refused(
         status.HTTP_409_CONFLICT, "key-in-use", "The key or the session id names another session.",
@@ -564,6 +580,7 @@ async def create_step_session(request: Request) -> JSONResponse:
     agent = await resolve_agent(request, agent_id, body.org_id)
     contract = body.contract
     screen(contract.inputs, case_id=contract.case_id)
+    await refuse_a_reruns_folder(request, contract.case_id)
 
     def this_step(existing: Any) -> bool:
         held = step_contract_of(existing)

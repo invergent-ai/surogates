@@ -9,6 +9,7 @@ import re
 from datetime import datetime
 from uuid import UUID
 
+from surogates.channels.memory_boundary import rerun_kind_of
 from surogates.devices.binding import device_of
 from surogates.devices.browser import of_a_sub_agent, resumes_the_agent, takes_the_browser_over
 from surogates.harness.context import NOOP_STRATEGIES
@@ -1054,7 +1055,8 @@ class ContextReplayMixin:
         # Tell the agent which SSH hosts its terminal is authenticated for.
         from surogates.ssh_access.resolve import render_ssh_targets_prompt
 
-        ssh_section = render_ssh_targets_prompt(self._ssh_targets)
+        # A rerun has no terminal, so it is promised no hosts to reach from one.
+        ssh_section = "" if rerun_kind_of(session) else render_ssh_targets_prompt(self._ssh_targets)
         if ssh_section:
             prompt = f"{prompt}\n\n{ssh_section}"
         # Session-level instruction from ``POST /v1/sessions {"system": ...}``.

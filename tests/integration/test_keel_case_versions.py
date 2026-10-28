@@ -1,9 +1,9 @@
 """Keel reads, checks and deletes the versions of a case's files through ``keel-link``.
 
 A version is a file as it was when its digest was handed to Keel, kept by its
-hash beside the case's workspace.  Keel reads one to compare a re-run with
-the original, asks which of the hashes it holds are gone, and drops them all
-once the case's retention ends.
+hash beside the case's workspace.  A version can be read by its hash, Keel
+asks which of the hashes it holds are gone, and drops them all once the
+case's retention ends.
 """
 
 from __future__ import annotations

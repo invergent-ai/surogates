@@ -34,6 +34,7 @@ from surogates.api.routes.keel import (
     org_member_name,
     queue_session,
     read_body,
+    refuse_a_reruns_folder,
     refused,
     require_link,
     resolve_agent,
@@ -95,6 +96,7 @@ async def create_case_agent_session(request: Request) -> JSONResponse:
     body = await read_body(request, CaseAgentSessionRequest)
     agent_id = agent_id_of(request)
     await resolve_agent(request, agent_id, body.org_id)
+    await refuse_a_reruns_folder(request, body.case_id)
     ref = CaseAgentRef(case_id=body.case_id, case_number=body.case_number, person_id=body.person_id)
 
     def this_agent(existing: Any) -> bool:

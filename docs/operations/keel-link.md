@@ -69,7 +69,7 @@ Errors answer `{"detail": {"code", "message"}}`, and a message never repeats the
 | 409 | `rerun-running` | A purge of a rerun whose session is in a turn, or one of whose documents is open in the editor. Cancel it, then purge it later. |
 | 409 | `step-finished` | A message or a mention for a step that is over: its inputs were redacted. |
 | 409 | `no-office` | A mention for a step whose agent does not edit the case's documents: not a draft step's, or the runtime has no agent editing. |
-| 409 | `case-exists` | A rerun's or a trial's id names a case, or another org's rerun or trial, or one of the other kind. |
+| 409 | `case-exists` | A rerun's or a trial's id names a case, or another org's rerun or trial, or one of the other kind; or a step, an item or a case agent is started on a case id that is a rerun's or a trial's. |
 | 409 | `file-open` | A write over a file that is open in the document editor. |
 | 409 | `file-version-gone` | A rerun's file has no version in the case it comes from. The answer's `missing` lists the indexes of those files, and nothing was written. |
 | 409 | `document-closing` | The document's last save is still landing; ask for the editor again in a moment. |
@@ -80,10 +80,10 @@ Errors answer `{"detail": {"code", "message"}}`, and a message never repeats the
 | 422 | `inputs-blocked` | The prompt-injection screen blocked the step's inputs, or the item's inputs, question, choices or evidence; or a policy passage's reason or gist, or every one of its hands. |
 | 422 | `invalid-path` | A file's path Keel may not name, a rerun's `files` paths among them: see [A case's files](#a-cases-files). |
 | 422 | `invalid-request` | The body does not validate (an invitation's email that is not one among them), a case id or an org id is not a UUID, a version's hash is not 64 lowercase hex digits, or a session's events were asked for with a cursor or a page size out of range. |
-| 500 | `internal-error` | The database failed, other than while a step, item or case agent session's events or progress were read. Only the error's class name is logged. |
+| 500 | `internal-error` | The database failed, other than while a step, item, case agent or rerun session's events, status or progress were read, or while a purge first read the rerun. Only the error's class name is logged. |
 | 502 | `model-failed` | An analysis route's model sent no completion: the provider failed, refused, or ran out of credit. A policy passage's model gave no valid object, or a text that is empty or over 6,000 characters. |
 | 503 | `office-off` | The editor was asked for, and no document server is configured. |
-| 503 | `unavailable` | The agent's runtime config could not be read, twice; an analysis route's agent names no model, or the vault holds no key for it, or the runtime has no vault; the object store refused or did not answer a case's files; an invitation could not read the org's Firebase config; or the database failed while a step, item or case agent session's events or progress were read. Only the error's class name, and the case id, the org id, the session id or, for an analysis route, the agent id, are logged. |
+| 503 | `unavailable` | The agent's runtime config could not be read, twice; an analysis route's agent names no model, or the vault holds no key for it, or the runtime has no vault; the object store refused or did not answer a case's files; an invitation could not read the org's Firebase config; or the database failed while a step, item, case agent or rerun session's events, status or progress were read, or while a purge first read the rerun. Only the error's class name, and the case id, the org id, the session id or, for an analysis route, the agent id, are logged. |
 | 504 | `model-timeout` | An analysis route's model work took longer than 22 seconds. |
 
 ## A step's inputs
@@ -383,7 +383,7 @@ Every digest keel-link or a step session hands Keel (a write's answer, a read's 
 
 ## A case's file versions
 
-A version is a file as it was when its digest was handed to Keel, kept as [A case's files](#a-cases-files) describes. Keel reads one by its hash to compare a re-run's file with the original's, asks which of the hashes it holds are gone, and, when the case's retention ends, deletes all of the case's versions at once.
+A version is a file as it was when its digest was handed to Keel, kept as [A case's files](#a-cases-files) describes. A version can be read by its hash, Keel asks which of the hashes it holds are gone, and, when the case's retention ends, deletes all of the case's versions at once.
 
 A hash is 64 lowercase hex digits; anything else is `422 invalid-request`. Reading one streams it as a file's read does, so a version over `SUROGATES_KEEL_MAX_FILE_BYTES` is `413 too-large`. The question about missing versions lists the case's versions once, however many hashes it names, and names each missing hash once, in the order Keel asked. A case nothing was written to has no versions, and the question names every hash. Deleting removes only the case's `versions/` folder: no file of the workspace, and nothing of another case. The object store refusing or not answering is `503 unavailable` on all three routes.
 
@@ -427,7 +427,7 @@ A person joined from another org who has no password yet gets no link from the o
 
 ## Reruns and trials
 
-A rerun runs an agent's step again on the files a past step read, as they were. A trial runs a draft's step on inputs a builder typed. Either is a step session of a case that exists nowhere else: its id, which Keel gives, is the session's own and its case's, and its boundary `case:<session id>` holds the files it works on. Memory starts empty, in the agent's own storage under that boundary, and the agent runs as it is configured now: nothing pins the bundle it ran before. The session reports to Keel's door as any step session does, `POST /api/harness/sessions/{session id}/complete`, `raise-hand` and `ended`, with the same bodies; nothing in a report says it is a rerun, and Keel tells by the session id. A raised hand rests with the session's inputs until Keel cancels it.
+A rerun runs an agent's step again on the files a past step read, as they were. A trial runs a draft's step on inputs a builder typed. Either is a step session of a case that exists nowhere else: its id, which Keel gives, is the session's own and its case's, and its boundary `case:<session id>` holds the files it works on. Memory starts empty, in the agent's own storage under that boundary, and the agent runs as it is configured now: nothing pins the bundle it ran before. The session reports to Keel's door as any step session does, `POST /api/harness/sessions/{session id}/complete`, `raise-hand` and `ended`, with the same bodies; nothing in a report says it is a rerun, and Keel tells by the session id. A raised hand rests with the session's inputs until Keel cancels or purges it. The files a rerun's output names are kept as versions of its own case, `case-file://<session id>/<path>`, and stay readable through the version routes until the purge.
 
 The session is fenced. No session of a rerun, a helper included, is offered `terminal`, `process` or a browser tool, whatever the contract's `tools` name; its MCP servers are off unless the create asks for them (`mcp`), in which case the contract's `mcp_servers` say which. A draft rerun keeps the office tools, which edit its own documents. A rerun's wakes, and its helpers', are queued at 2, behind every case's work, and a trial's at 0. The step routes answer `404 unknown-session` for a rerun's session.
 

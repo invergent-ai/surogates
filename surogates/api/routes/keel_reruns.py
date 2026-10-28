@@ -20,7 +20,7 @@ from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 from sse_starlette.sse import EventSourceResponse
-from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 
 from surogates.channels.memory_boundary import CASE_RERUN_KEY, rerun_kind_of
 from surogates.api.routes.keel import (
@@ -53,8 +53,11 @@ from surogates.api.routes.keel import (
 )
 from surogates.keel.case_files import case_workspace
 from surogates.keel.reruns import (
+    NotDeleted,
+    RerunFile,
     RerunRequest,
     delete_boundary,
+    delete_checked,
     mark_rerun,
     may_hold_rerun,
     missing_files,
@@ -114,6 +117,8 @@ async def create_rerun(request: Request) -> JSONResponse:
     if len(set(paths)) != len(paths):
         # Two names for one path, once its dots are dropped.
         raise refused(status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid-request", "Two files name one path.")
+    # Seeded where the case files name them: a store does not fold `in/./a.pdf` into `in/a.pdf` as a disk does.
+    body = body.model_copy(update={"files": [RerunFile(path=path, sha256=file.sha256) for path, file in zip(paths, body.files)]})
     screen(body.contract.inputs, case_id=body.session_id)
     contract = body.contract if body.mcp else body.contract.model_copy(update={"mcp_servers": []})
     state = request.app.state
@@ -129,9 +134,9 @@ async def create_rerun(request: Request) -> JSONResponse:
 
     async def make() -> Any:
         if await session_exists(state.session_store, body.session_id):
-            raise refused(
-                status.HTTP_409_CONFLICT, "key-in-use", "The key or the session id names another session.",
-            )
+            # The id is taken: by the session this call's own key holds, made by a call that raced this one, or by
+            # another.  Writing nothing, let create_or_find tell which, as it does for an insert that collides.
+            raise IntegrityError("session id taken", None, Exception("the session id is taken"))
         record = await read_case_record(state.storage, state.settings, body.session_id)
         if not may_hold_rerun(record, body.org_id, body.kind):
             raise _case_exists()
@@ -338,7 +343,7 @@ async def purge_rerun(session_id: str, request: Request) -> JSONResponse:
                 if memory_prefix is not None:
                     bucket = state.settings.storage.memory_bucket or state.settings.storage.bucket
                     for key in rerun_memory_keys(memory_prefix, rerun):
-                        await state.storage.delete(bucket, key)
+                        await delete_checked(state.storage, bucket, key)
                 try:
                     sessions = await state.session_store.delete_rerun_tree(rerun)
                 except RerunRunning:
@@ -351,7 +356,7 @@ async def purge_rerun(session_id: str, request: Request) -> JSONResponse:
                 exc, logged=f"the rerun {session_id} could not be purged", message="The rerun could not be purged.",
             ) from None
         objects = await delete_boundary(state.storage, state.settings, rerun)
-    except (ClientError, BotoCoreError) as exc:
+    except (ClientError, BotoCoreError, NotDeleted) as exc:
         raise _unavailable(exc, rerun) from None
     logger.info("keel-link: rerun %s purged (%d sessions, %d objects)", rerun, sessions, objects)
     return JSONResponse({"sessions": sessions, "objects": objects})

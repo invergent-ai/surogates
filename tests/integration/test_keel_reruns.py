@@ -21,7 +21,13 @@ from sqlalchemy import text
 from surogates.channels.constants import API_CHANNEL
 from surogates.channels.memory_boundary import CASE_RERUN_KEY, rerun_kind_of, session_memory_boundary
 from surogates.config import INTERRUPT_CHANNEL_PREFIX
-from surogates.keel.case_files import case_boundary_folder, case_workspace, record_case_org, write_case_file
+from surogates.keel.case_files import (
+    case_boundary_folder,
+    case_key,
+    case_workspace,
+    record_case_org,
+    write_case_file,
+)
 from surogates.db.models import BoardNote, DeliveryOutbox, InboxItem, OfficeSession, Task
 from surogates.keel.files import case_file_value
 from surogates.keel.reruns import CaseRecord, read_case_record, rerun_memory_keys
@@ -30,12 +36,14 @@ from surogates.keel.versions import case_versions
 from surogates.runtime.memory_protocol import memory_object_key
 from surogates.session.events import EventType
 from surogates.session.provisioning import create_child_session
-from surogates.session.store import SessionNotFoundError
+from surogates.session.store import RerunRunning, SessionNotFoundError
 from surogates.tenant.auth.service_account import ServiceAccountStore
 
 from .test_events_stream import _read_sse_events
+from .test_keel_case_agent_sessions import agent_body, post as post_case_agent
 from .test_keel_case_files import listed_paths, listing, upload
 from .test_keel_case_versions import drop, version
+from .test_keel_item_sessions import item_body, post as post_item
 from .test_keel_watch import short_streams
 from .test_keel_step_sessions import (  # noqa: F401  (link, link_app, org, session_store and redis_client are fixtures)
     AGENT,
@@ -762,3 +770,144 @@ async def test_a_rerun_with_a_document_open_is_not_purged(link, link_app, org, s
             {"prefix": location.removesuffix("out/draft.docx") + "%"},
         )).scalar_one()
     assert left == 0
+
+
+class _SwallowsDeletes:
+    """A store that answers a delete it did not do with nothing, as an S3 backend does when the store refuses one."""
+
+    def __init__(self, inner, *, keys=(), prefixes=()) -> None:
+        self._inner, self._keys, self._prefixes = inner, tuple(keys), tuple(prefixes)
+
+    def __getattr__(self, name: str):
+        return getattr(self._inner, name)
+
+    async def delete(self, bucket: str, key: str, **kwargs) -> None:
+        if not key.endswith(self._keys):
+            await self._inner.delete(bucket, key, **kwargs)
+
+    async def delete_prefix(self, bucket: str, prefix: str) -> int:
+        if prefix.endswith(self._prefixes):
+            return 0
+        return await self._inner.delete_prefix(bucket, prefix)
+
+
+@pytest.mark.parametrize(("swallowed", "sessions_gone"), [
+    ({"keys": ("/memory.json", "/user.json")}, False),
+    ({"prefixes": ("/workspace/",)}, True),
+    ({"prefixes": ("/versions/",)}, True),
+    ({"keys": ("/org.json",)}, True),
+], ids=["memory", "workspace", "versions", "record"])
+async def test_a_purge_whose_store_refuses_a_delete_is_not_done(
+    link, link_app, org, session_store, session_factory, swallowed, sessions_gone,
+):
+    original = await kept_case(link_app, org, **{"in/payslip.pdf": OLD})
+    rid, helper, memory = await a_worked_rerun(
+        link, link_app, org, session_store, session_factory, original, key="keel:r:1:0",
+    )
+    working = link_app.state.storage
+    link_app.state.storage = _SwallowsDeletes(working, **swallowed)
+
+    refused = await purge(link, rid)
+
+    assert (refused.status_code, code_of(refused)) == (503, "unavailable")
+    assert (sum((await rows_naming(session_factory, rid, helper.id)).values()) == 0) is sessions_gone
+    link_app.state.storage = working
+
+    finished = await purge(link, rid)
+
+    assert finished.status_code == 200, finished.text
+    assert set((await rows_naming(session_factory, rid, helper.id)).values()) == {0}
+    assert await objects_under(link_app, rid) == {}
+    assert await memory.present() == [False, False]
+
+
+async def test_a_purge_waits_for_a_lease_a_worker_is_taking(link, link_app, org, session_store, session_factory):
+    original = await kept_case(link_app, org, **{"in/payslip.pdf": OLD})
+    rid, helper, _ = await a_worked_rerun(
+        link, link_app, org, session_store, session_factory, original, key="keel:r:1:0",
+    )
+    async with session_factory() as db, db.begin():
+        await db.execute(text(
+            "INSERT INTO session_leases (session_id, owner_id, lease_token, expires_at) "
+            "VALUES (:id, 'worker-gone', :token, now() - interval '1 minute')"
+        ), {"id": helper.id, "token": uuid.uuid4()})
+    taking = session_factory()
+    await taking.execute(text("SELECT 1 FROM session_leases WHERE session_id = :id FOR UPDATE"), {"id": helper.id})
+    await taking.execute(text(
+        "UPDATE session_leases SET owner_id = 'worker-2', expires_at = now() + interval '60 seconds' "
+        "WHERE session_id = :id"
+    ), {"id": helper.id})
+
+    purging = asyncio.create_task(session_store.delete_rerun_tree(rid))
+    await asyncio.sleep(0.5)
+    still_waiting = not purging.done()
+    await taking.commit()
+    await taking.close()
+
+    assert still_waiting
+    with pytest.raises(RerunRunning):
+        await asyncio.wait_for(purging, 10)
+    assert (await rows_naming(session_factory, rid, helper.id))["sessions"] == 2
+
+
+class _RecordsUploads:
+    """A store that notes the key of each object uploaded: a disk folds `in/./a.pdf` into `in/a.pdf`, S3 does not."""
+
+    def __init__(self, inner) -> None:
+        self._inner = inner
+        self.keys: list[str] = []
+
+    def __getattr__(self, name: str):
+        return getattr(self._inner, name)
+
+    async def upload(self, bucket: str, key: str, *args, **kwargs) -> None:
+        self.keys.append(key)
+        await self._inner.upload(bucket, key, *args, **kwargs)
+
+
+async def test_a_file_is_seeded_where_the_case_files_name_it(link, link_app, org):
+    original = await kept_case(link_app, org, **{"in/payslip.pdf": OLD})
+    request = rerun_body(org, files=[file_of("in/./payslip.pdf", OLD)], of_case_id=original)
+    recording = _RecordsUploads(link_app.state.storage)
+    link_app.state.storage = recording
+
+    created = await create_rerun(link, request)
+
+    assert created.status_code == 201, created.text
+    rid = UUID(request["session_id"])
+    assert recording.keys == [case_key(link_app.state.settings, rid, "in/payslip.pdf")]
+
+
+async def test_a_repeat_that_races_the_first_create_finds_its_rerun(link, link_app, org, monkeypatch):
+    request = rerun_body(org)
+    assert (await create_rerun(link, request)).status_code == 201
+    store = link_app.state.session_store
+    real, asked = store.get_session_by_idempotency_key, []
+
+    async def not_yet_visible(org_id, key):
+        # The repeat looked for its key before the first call committed the session.
+        asked.append(key)
+        return None if len(asked) == 1 else await real(org_id, key)
+
+    monkeypatch.setattr(store, "get_session_by_idempotency_key", not_yet_visible)
+
+    repeated = await create_rerun(link, request)
+
+    assert (repeated.status_code, repeated.json()["created"]) == (200, False), repeated.text
+
+
+async def test_a_case_session_cannot_take_a_reruns_folder(link, link_app, org, session_store):
+    request = rerun_body(org)
+    assert (await create_rerun(link, request)).status_code == 201
+    rid = UUID(request["session_id"])
+    objects = await objects_under(link_app, rid)
+    refused = [
+        await post(link, body(org, "keel:c:9:0", case_id=str(rid))),
+        await post_item(link, item_body(org, "keel:i:9:0", case_id=str(rid))),
+        await post_case_agent(link, agent_body(org, uuid.uuid4(), "keel:a:9:0", case_id=str(rid))),
+    ]
+
+    assert [(answer.status_code, code_of(answer)) for answer in refused] == [(409, "case-exists")] * 3
+    for key in ("keel:c:9:0", "keel:i:9:0", "keel:a:9:0"):
+        assert await session_store.get_session_by_idempotency_key(org, key) is None
+    assert await objects_under(link_app, rid) == objects

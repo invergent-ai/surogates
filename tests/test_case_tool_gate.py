@@ -47,6 +47,7 @@ from surogates.tools.registry import ToolRegistry, ToolSchema
 from surogates.tools.runtime import ToolRuntime
 from tests.test_case_step_isolation import CONTRACT, ITEM_CONTRACT, _SessionStore
 from tests.test_eval_session_seeding import _route_fixtures
+from tests.test_harness_resilience import _make_harness
 from tests.test_steer_loop import _final_response, _make_loop_harness
 
 MCP_TOOL = "mcp__crm__lookup"
@@ -443,6 +444,18 @@ async def test_a_rerun_and_its_helpers_never_reach_the_terminal_or_the_browser()
     for offered in (_prompt_tools(draft, registry), _schema_tools(draft, registry)):
         assert OFFICE_TOOLS | STEP_TOOLS <= offered
         assert offered.isdisjoint(refused)
+
+
+async def test_a_reruns_prompt_promises_no_ssh_terminal():
+    store = _SessionStore()
+    plain = await _step(store)
+    rerun = await _case_session(store, case_step={**CONTRACT, "tools": None}, case_rerun={"kind": "rerun"})
+    harness = _make_harness(prompt_builder=SimpleNamespace(build=lambda: "BASE", folder_context=None))
+    harness._ssh_targets = [{"alias": "prod", "host": "prod.invalid", "user": "deploy"}]
+
+    # A step is told its terminal is authenticated for the agent's hosts; a rerun has no terminal.
+    assert "SSH remote hosts" in await harness._build_system_prompt(plain)
+    assert "SSH" not in await harness._build_system_prompt(rerun)
 
 
 async def test_a_draft_step_gets_the_office_tools():

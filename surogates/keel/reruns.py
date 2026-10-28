@@ -37,9 +37,11 @@ from surogates.runtime.memory_protocol import memory_object_key
 __all__ = [
     "MAX_RERUN_FILES",
     "CaseRecord",
+    "NotDeleted",
     "RerunFile",
     "RerunRequest",
     "delete_boundary",
+    "delete_checked",
     "mark_rerun",
     "may_hold_rerun",
     "missing_files",
@@ -224,6 +226,33 @@ def rerun_memory_keys(memory_prefix: str, case_id: UUID) -> list[str]:
     ]
 
 
+class NotDeleted(Exception):
+    """The store answered a delete without doing it: the objects are still there, and a retry must run."""
+
+
+async def delete_checked(storage: Any, bucket: str, key: str) -> bool:
+    """Delete the object at *key*, and look: whether it was there.
+
+    An S3 backend answers a refused delete with nothing, so a purge that took
+    that for done would answer 200 and leave what it promised to remove.
+    Raises :class:`NotDeleted` when the object is still there.
+    """
+    if not await storage.exists(bucket, key):
+        return False
+    await storage.delete(bucket, key)
+    if await storage.exists(bucket, key):
+        raise NotDeleted
+    return True
+
+
+async def _prefix_deleted(storage: Any, bucket: str, prefix: str) -> int:
+    """Delete every object under *prefix*, and look: how many.  :class:`NotDeleted` when any is left."""
+    deleted = await storage.delete_prefix(bucket, prefix)
+    if await storage.list_keys(bucket, prefix):
+        raise NotDeleted
+    return deleted
+
+
 async def delete_boundary(storage: Any, settings: Any, case_id: UUID) -> int:
     """Delete *case_id*'s boundary folder: its workspace, then its versions, then its record: how many objects.
 
@@ -231,17 +260,16 @@ async def delete_boundary(storage: Any, settings: Any, case_id: UUID) -> int:
     tells a retry the folder is a rerun's.  A store deletes a prefix in
     listing order, a batch at a time, and the record sorts before the rest:
     one delete of the folder could take it first and leave files unmarked.
-    A bucket not made yet holds nothing.
+    Each delete is looked at after (:func:`delete_checked`): a store that
+    refuses one is :class:`NotDeleted`, not a purge done.  A bucket not made
+    yet holds nothing.
     """
     bucket, folder = case_boundary_folder(settings, case_id)
     deleted = 0
     try:
-        deleted += await storage.delete_prefix(bucket, folder + "workspace/")
-        deleted += await storage.delete_prefix(bucket, folder + VERSIONS_FOLDER)
-        record = folder + CASE_ORG_OBJECT
-        if await storage.exists(bucket, record):
-            await storage.delete(bucket, record)
-            deleted += 1
+        deleted += await _prefix_deleted(storage, bucket, folder + "workspace/")
+        deleted += await _prefix_deleted(storage, bucket, folder + VERSIONS_FOLDER)
+        deleted += int(await delete_checked(storage, bucket, folder + CASE_ORG_OBJECT))
     except ClientError as exc:
         if not no_such_bucket(exc):
             raise

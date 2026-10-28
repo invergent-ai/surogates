@@ -1122,6 +1122,9 @@ class SessionStore:
                 {"id": session_id},
             )).scalars().all()
             await db.execute(select(SessionRow.id).where(SessionRow.id.in_(tree)).with_for_update())
+            # The lease rows too, expired ones among them: a worker taking an expired lease updates its row in
+            # place, so without the lock it could take one between the look below and the delete.
+            await db.execute(select(LeaseRow.session_id).where(LeaseRow.session_id.in_(tree)).with_for_update())
             held = (await db.execute(
                 select(LeaseRow.session_id).where(LeaseRow.session_id.in_(tree), LeaseRow.expires_at > func.now()).limit(1)
             )).first()
