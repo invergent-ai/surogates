@@ -12,6 +12,7 @@ tried, and the shape that worked is remembered for the next call.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import io
@@ -207,9 +208,10 @@ async def _via_chat(
     if not url:
         raise ImageRequestError("The image model returned no image")
     data = await _image_bytes(url)
-    return inspect(
-        data, text=_extract_response_content(response), model=str(getattr(response, "model", "") or model),
-        cost_cents=_reported_cents(response),
+    # Decoding a multi-megapixel image is CPU work: off the event loop.
+    return await asyncio.to_thread(
+        inspect, data, text=_extract_response_content(response),
+        model=str(getattr(response, "model", "") or model), cost_cents=_reported_cents(response),
     )
 
 
@@ -233,7 +235,7 @@ async def _via_images(
         data = await _image_bytes(url)
     else:
         raise ImageRequestError("The image model returned no image")
-    return inspect(data, model=model, cost_cents=_reported_cents(response))
+    return await asyncio.to_thread(inspect, data, model=model, cost_cents=_reported_cents(response))
 
 
 def _images_size(aspect_ratio: str) -> str:

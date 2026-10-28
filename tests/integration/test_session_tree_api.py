@@ -434,7 +434,7 @@ async def test_delete_parent_session_archives_descendants_and_cancels_schedules(
         )
 
     schedule_store = ScheduledSessionStore(session_factory)
-    root_schedule = await schedule_store.create_dynamic_loop(
+    root_schedule = await schedule_store.create_loop(
         org_id=org_id,
         user_id=user_id,
         agent_id=_AGENT_ID,
@@ -442,7 +442,7 @@ async def test_delete_parent_session_archives_descendants_and_cancels_schedules(
         schedule=parse_dynamic_loop_schedule(),
         created_from_session_id=root.id,
     )
-    child_schedule = await schedule_store.create_dynamic_loop(
+    child_schedule = await schedule_store.create_loop(
         org_id=org_id,
         user_id=user_id,
         agent_id=_AGENT_ID,

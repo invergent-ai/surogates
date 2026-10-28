@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
@@ -201,12 +202,13 @@ async def _cron_create_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
         schedule = _cadence(arguments)
         if schedule is None:
             raise ValueError("Give one of cron, interval, at, or times.")
+        now = _now()
         if not recurring and schedule.kind != "once":
-            first = schedule.anchored(_now()).next_after(_now())
+            first = schedule.anchored(now).next_after(now)
             if first is None:
                 raise ValueError("That schedule has no next run.")
             schedule = once_schedule(first, timezone_name=schedule.timezone_name)
-        next_run = schedule.anchored(_now()).next_after(_now())
+        next_run = schedule.anchored(now).next_after(now)
         if next_run is None:
             raise ValueError("That time has already passed.")
     except (ScheduledPromptBlocked, ValueError) as exc:
@@ -364,19 +366,16 @@ async def _transition(arguments: dict[str, Any], kwargs: dict[str, Any], action:
     return _json({"success": True, "schedule": _schedule_payload(row)})
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
 class _Context:
-    def __init__(
-        self, *, org_id: Any, principal: Any, agent_id: str, session_id: UUID,
-        session_store: Any, store: Any, own_schedule: UUID | None = None,
-    ) -> None:
-        #: Set in a scheduled run: the one schedule it may change.
-        self.own_schedule = own_schedule
-        self.org_id = org_id
-        self.principal = principal
-        self.agent_id = agent_id
-        self.session_id = session_id
-        self.session_store = session_store
-        self.store = store
+    org_id: Any
+    principal: Any
+    agent_id: str
+    session_id: UUID
+    session_store: Any
+    store: Any
+    #: Set in a scheduled run: the one schedule it may change.
+    own_schedule: UUID | None = None
 
     @property
     def owner(self) -> dict[str, Any]:

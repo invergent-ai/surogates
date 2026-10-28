@@ -119,16 +119,20 @@ class ScheduledSessionStore:
         org_id: UUID,
         agent_id: str,
         prompt: str,
-        schedule: ParsedSchedule,
         created_from_session_id: UUID | None,
+        schedule: ParsedSchedule | None = None,
         user_id: UUID | None = None,
         service_account_id: UUID | None = None,
         context: dict[str, Any] | None = None,
     ) -> ScheduledSession:
-        """A fixed-cadence ``/loop``.  It expires after
-        :data:`DEFAULT_LOOP_EXPIRY_DAYS`: a loop typed in passing should not
-        outlive the work it was for; a schedule meant to last is made with
-        ``cron_create`` or in Studio."""
+        """A ``/loop``: on *schedule*, or with none, one whose runs pick
+        their own next delay.  A loop typed in passing should not outlive
+        the work it was for: a fixed one expires after
+        :data:`DEFAULT_LOOP_EXPIRY_DAYS`, a dynamic one, bounded by nothing
+        but the model, after :data:`DYNAMIC_LOOP_EXPIRY_DAYS`.  A schedule
+        meant to last is made with ``cron_create`` or in Studio."""
+        schedule = schedule or parse_dynamic_loop_schedule()
+        days = DYNAMIC_LOOP_EXPIRY_DAYS if schedule.is_dynamic else DEFAULT_LOOP_EXPIRY_DAYS
         return await self.create(
             org_id=org_id,
             user_id=user_id,
@@ -139,38 +143,7 @@ class ScheduledSessionStore:
             schedule=schedule,
             source="loop",
             created_from_session_id=created_from_session_id,
-            expires_at=_utcnow() + timedelta(days=DEFAULT_LOOP_EXPIRY_DAYS),
-            context=context or {},
-        )
-
-    async def create_dynamic_loop(
-        self,
-        *,
-        org_id: UUID,
-        agent_id: str,
-        prompt: str,
-        created_from_session_id: UUID | None,
-        user_id: UUID | None = None,
-        service_account_id: UUID | None = None,
-        schedule: ParsedSchedule | None = None,
-        context: dict[str, Any] | None = None,
-    ) -> ScheduledSession:
-        """A ``/loop`` whose runs pick their own next delay.  It expires
-        after :data:`DYNAMIC_LOOP_EXPIRY_DAYS`: nothing but the model
-        bounds how often it runs."""
-        now = _utcnow()
-        return await self.create(
-            org_id=org_id,
-            user_id=user_id,
-            service_account_id=service_account_id,
-            agent_id=agent_id,
-            name=f"Loop: {prompt[:60]}",
-            prompt=prompt,
-            schedule=schedule or parse_dynamic_loop_schedule(),
-            source="loop",
-            created_from_session_id=created_from_session_id,
-            next_run_at=now,
-            expires_at=now + timedelta(days=DYNAMIC_LOOP_EXPIRY_DAYS),
+            expires_at=_utcnow() + timedelta(days=days),
             context=context or {},
         )
 
@@ -599,11 +572,16 @@ class ScheduledSessionStore:
             row = await db.get(ScheduledSessionRow, schedule.id, with_for_update=True)
             if row is None:
                 return
+            # A run that ended well ends the failure streak; a failed one is
+            # counted where it failed (mark_run_timed_out).
+            if row.last_session_id is None or await db.scalar(
+                select(SessionRow.status).where(SessionRow.id == row.last_session_id)
+            ) != "failed":
+                row.consecutive_failures = 0
             row.run_count = (row.run_count or 0) + 1
             row.last_run_at = now
             row.last_session_id = session_id
             row.last_error = None
-            row.consecutive_failures = 0
             row.locked_by = None
             row.locked_until = None
             row.updated_at = now
@@ -622,8 +600,7 @@ class ScheduledSessionStore:
                     ended = "done"
                 row.next_run_at = next_run_at
                 if ended is not None:
-                    row.status = "completed"
-                    row.ended_reason = ended
+                    _end(row, ended)
             await db.commit()
 
     async def mark_run_failed(
@@ -656,9 +633,7 @@ class ScheduledSessionStore:
                 cadence = _schedule_of(ScheduledSession.model_validate(row))
                 limit = MAX_ONCE_ATTEMPTS if cadence.kind == "once" else MAX_CONSECUTIVE_FAILURES
                 if failures >= limit:
-                    row.status = "failed"
-                    row.ended_reason = "failed"
-                    row.next_run_at = None
+                    _end(row, "failed")
                 elif cadence.kind == "once" or cadence.is_dynamic:
                     delay = min(DYNAMIC_LOOP_FALLBACK_DELAY_SECONDS, 60 * 2 ** (failures - 1))
                     row.next_run_at = now + timedelta(seconds=delay)
@@ -691,18 +666,10 @@ class ScheduledSessionStore:
                 "before it finished."
             )
             row.updated_at = now
-            # Each start resets the count, so the streak is read off the runs.
-            recent = (await db.execute(text(
-                "SELECT status FROM sessions WHERE agent_id = :agent AND channel = 'scheduled' "
-                "AND config->>'scheduled_session_id' = :sid ORDER BY created_at DESC LIMIT :n"
-            ), {"agent": row.agent_id, "sid": str(row.id), "n": MAX_CONSECUTIVE_FAILURES})).scalars().all()
-            streak = next((i for i, status in enumerate(recent) if status != "failed"), len(recent))
             if row.status == "active":
-                row.consecutive_failures = max(streak, 1)
+                row.consecutive_failures = (row.consecutive_failures or 0) + 1
                 if row.consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
-                    row.status = "failed"
-                    row.ended_reason = "failed"
-                    row.next_run_at = None
+                    _end(row, "failed")
             await db.commit()
 
     async def mark_run_skipped(self, schedule: ScheduledSession, *, reason: str) -> None:
@@ -773,10 +740,9 @@ class ScheduledSessionStore:
                 "last_delay_reason": reason.strip()[:500] or "No reason provided.",
                 "last_delay_set_at": now.isoformat(),
             }
-            row.next_run_at = None if completed or expired else now + timedelta(seconds=delay)
+            row.next_run_at = now + timedelta(seconds=delay)
             if completed or expired:
-                row.status = "completed"
-                row.ended_reason = "done" if completed else "expired"
+                _end(row, "done" if completed else "expired")
             row.locked_by = None
             row.locked_until = None
             row.updated_at = now
@@ -827,9 +793,7 @@ class ScheduledSessionStore:
                 "last_completed_reason": reason.strip()[:500] or "No reason provided.",
                 "last_completed_at": now.isoformat(),
             }
-            row.next_run_at = None
-            row.status = "completed"
-            row.ended_reason = "done"
+            _end(row, "done")
             row.locked_by = None
             row.locked_until = None
             row.updated_at = now
@@ -862,8 +826,7 @@ class ScheduledSessionStore:
                 try:
                     row.next_run_at = _planned_run(current, now)
                 except ValueError as exc:
-                    row.status = "failed"
-                    row.ended_reason = "failed"
+                    _end(row, "failed")
                     row.last_error = f"Cannot plan this schedule: {exc}"[:2000]
                 row.updated_at = now
                 planned.append(row)
@@ -1198,6 +1161,13 @@ def _scope(user_id: UUID | None, service_account_id: UUID | None):
         .exists()
     )
     return or_(ScheduledSessionRow.service_account_id == service_account_id, works_for_the_project)
+
+
+def _end(row: ScheduledSessionRow, reason: str) -> None:
+    """End *row* on its own: ``failed``, or completed as *reason* says."""
+    row.status = "failed" if reason == "failed" else "completed"
+    row.ended_reason = reason
+    row.next_run_at = None
 
 
 def _failure_words(data: dict) -> str | None:

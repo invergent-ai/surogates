@@ -44,10 +44,6 @@ class _Loops:
         self.calls.append(("create_loop", kw))
         return self._row(**kw)
 
-    async def create_dynamic_loop(self, **kw):
-        self.calls.append(("create_dynamic_loop", kw))
-        return self._row(**kw)
-
     async def _transition(self, verb, kw):
         self.calls.append((verb, kw))
         return self.transitions
@@ -128,7 +124,8 @@ async def test_a_fixed_cadence_makes_a_loop_with_the_session_context(monkeypatch
 async def test_no_cadence_makes_a_dynamic_loop(monkeypatch):
     loops = _Loops()
     reply = await _loop(monkeypatch, "/loop watch the build until it is green", loops)
-    assert loops.calls[-1][0] == "create_dynamic_loop"
+    name, kw = loops.calls[-1]
+    assert (name, kw["schedule"]) == ("create_loop", None)
     assert "dynamic" in reply
 
 

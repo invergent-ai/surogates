@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 from surogates.harness.prompt_library import PromptLibrary
+from surogates.session.execution_context import channel_kind, platform_hint_channel
 from surogates.orchestrator.worker import _filter_effective_tools
 from surogates.tenant.context import TenantContext
 from surogates.tools.registry import ToolRegistry
@@ -62,7 +63,7 @@ def test_a_conversation_keeps_its_questions(channel):
 
 @pytest.mark.parametrize("channel", UNATTENDED)
 def test_an_unattended_session_is_told_nobody_is_there(channel):
-    hint = PromptLibrary().platform_hint(channel)
+    hint = PromptLibrary().platform_hint(platform_hint_channel(channel, {}))
     assert hint and "cannot ask questions" in hint
 
 
@@ -70,3 +71,13 @@ def test_a_project_thread_on_the_worker_channel_still_asks_its_user():
     thread = {"workstream_role": "thread", "workstream_id": str(uuid.uuid4())}
     assert "ask_user_question" in _prompt_surface("worker", thread)
     assert "ask_user_question" in _schema_surface("worker", thread)
+
+
+def test_who_is_behind_a_session():
+    thread = {"workstream_role": "thread", "workstream_id": str(uuid.uuid4())}
+    assert channel_kind("scheduled", {}) == "scheduled"
+    assert channel_kind("web", {"scheduled_session_id": "x"}) == "scheduled"
+    assert channel_kind("worker", {}) == "helper"
+    assert channel_kind("worker", thread) == "person"
+    assert channel_kind("slack", {}) == "person"
+    assert platform_hint_channel("worker", thread) is None

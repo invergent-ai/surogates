@@ -193,7 +193,7 @@ class LoopCommand:
     target: str | None = None
 
 
-def parse_loop_command(raw: str, *, default_timezone: str = "UTC") -> LoopCommand:
+def parse_loop_command(raw: str) -> LoopCommand:
     text = raw.strip()
     if not text:
         return LoopCommand(verb="help")
@@ -212,11 +212,11 @@ def parse_loop_command(raw: str, *, default_timezone: str = "UTC") -> LoopComman
         return LoopCommand(verb=verb, target=rest or None)
 
     labelled = _SCHEDULE_LABEL_RE.match(text) is not None
-    schedule, prompt = _leading_cadence(_SCHEDULE_LABEL_RE.sub("", text, count=1), default_timezone)
+    schedule, prompt = _leading_cadence(_SCHEDULE_LABEL_RE.sub("", text, count=1), "UTC")
     if schedule is not None and labelled:
         prompt = _PROMPT_LABEL_RE.sub("", _NAME_LINE_RE.sub("", prompt)).strip()
     if schedule is None:
-        schedule, prompt = _trailing_cadence(text, default_timezone)
+        schedule, prompt = _trailing_cadence(text, "UTC")
     if schedule is not None:
         if not prompt:
             raise ValueError("Say what to run after the cadence, e.g. /loop every day at 9 check the inbox")

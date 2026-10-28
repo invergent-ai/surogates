@@ -30,14 +30,13 @@ from surogates.harness.delivery_manifest import (
 from surogates.harness.loop_constants import _BACKGROUND_DRAIN_TIMEOUT_SECONDS
 from surogates.harness.loop_messages import (
     _as_aware_utc,
-    _is_scheduled_run,
     _last_assistant_message_excerpt,
     _seconds_since,
     _should_notify_parent_on_completion,
 )
 from surogates.harness.message_utils import extract_final_response
 from surogates.session.events import EventType
-from surogates.session.execution_context import is_unattended
+from surogates.session.execution_context import is_scheduled_run, is_unattended
 from surogates.session.files import HARNESS_WITHIN_S, gave_up_level, session_files
 from surogates.devices.workspace import WALK_MARGIN_NS
 from surogates.tools.builtin.case_item import report_item_failed, report_item_no_outcome
@@ -117,7 +116,7 @@ async def resolve_loop_result_parent(store: Any, session: Any) -> Any | None:
     reaches the user through the channel's own outbound adapter, so
     delivering it here as well would double-post.
     """
-    if not _is_scheduled_run(session) or session.parent_id is None:
+    if not is_scheduled_run(session) or session.parent_id is None:
         return None
 
     from surogates.session.store import SessionNotFoundError
@@ -177,7 +176,7 @@ async def announce_result(store: Any, session: Any, *, outcome: str, summary: st
     # A scheduled run keeps announcing itself whatever its channel: it
     # is unwatched work by construction, and the branch above already
     # took the web/api parents that receive the result inline instead.
-    if not (_is_scheduled_run(session) or raises_completion_inbox_item(session)):
+    if not (is_scheduled_run(session) or raises_completion_inbox_item(session)):
         return None
     return await store.emit_event(
         session.id,
@@ -228,7 +227,7 @@ async def announce_failure(store: Any, session: Any, *, error: str, summary: str
                 "Failed to emit loop.result on parent %s for run %s",
                 parent.id, session.id, exc_info=True,
             )
-    elif _is_scheduled_run(session) or raises_completion_inbox_item(session):
+    elif is_scheduled_run(session) or raises_completion_inbox_item(session):
         await store.emit_event(
             session.id,
             EventType.INBOX_TASK_COMPLETE,

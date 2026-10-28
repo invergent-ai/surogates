@@ -29,7 +29,7 @@ from surogates.harness.prompt_library import PromptLibrary, default_library
 from surogates.runtime.context import SlashCommandConfig
 from surogates.tools.loader import AGENT_SOURCE_PLATFORM
 from surogates.tools.skill_visibility import fallback_hidden
-from surogates.session.execution_context import UNATTENDED_CHANNELS, is_unattended
+from surogates.session.execution_context import platform_hint_channel
 from surogates.workstreams import is_project_master, is_project_thread
 
 if TYPE_CHECKING:
@@ -340,7 +340,9 @@ class PromptBuilder:
             # that doesn't exist.
             parts.append(self._prompts.get("guidance/cron_loop"))
         if self._session is not None and self._session.config.get("scheduled_run"):
-            parts.append(scheduled_run_block(self._session.config["scheduled_run"]))
+            parts.append(scheduled_run_block(
+                self._session.config["scheduled_run"], offered=self._available_tools,
+            ))
 
         # Coordinator guidance — injected when the session is in coordinator
         # mode.  A project's master runs threads, not workers, so it gets its
@@ -909,8 +911,8 @@ class PromptBuilder:
             parts.append("\n" + self._prompts.get("identity/workspace_rules"))
 
         # Platform hint based on session channel.
-        channel = self._get_channel()
-        if channel and (channel not in UNATTENDED_CHANNELS or is_unattended(self._session)):
+        channel = platform_hint_channel(self._get_channel(), getattr(self._session, "config", None))
+        if channel:
             hint = self._prompts.platform_hint(channel)
             if hint:
                 parts.append(f"\n## Platform\n{hint}")
@@ -1248,7 +1250,7 @@ def _base64_looks_suspicious(candidate: str) -> bool:
     return any(kw in lowered for kw in _B64_SUSPICIOUS_KEYWORDS)
 
 
-def scheduled_run_block(run: dict) -> str:
+def scheduled_run_block(run: dict, *, offered: Any = None) -> str:
     """What a scheduled run is told about the schedule it is a run of."""
     previous = run.get("previous_run") or {}
     lines = [
@@ -1265,9 +1267,11 @@ def scheduled_run_block(run: dict) -> str:
         lines.append(f"- The schedule ends at {run['expires_at']}")
     if run.get("last_error"):
         lines.append(f"- Last problem: {run['last_error']}")
-    lines.append(
-        "The schedule already exists: do not make another for the same work. "
-        "If its prompt says when to pause, change or stop it, use cron_pause, "
-        f"cron_update or cron_delete with id {run.get('id')}; no other schedule."
-    )
+    lines.append("The schedule already exists: do not make another for the same work.")
+    own = [t for t in ("cron_pause", "cron_update", "cron_delete") if offered is None or t in offered]
+    if own:
+        lines.append(
+            "If its prompt says when to pause, change or stop it, use "
+            f"{', '.join(own)} with id {run.get('id')}; no other schedule."
+        )
     return "\n".join(lines)

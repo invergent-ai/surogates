@@ -119,7 +119,7 @@ from surogates.workstreams import is_project_master, is_project_thread, master_r
 from surogates.workstreams.spend import admit_turn, admitted_at_wake
 from surogates.channels.capabilities import capabilities_for
 from surogates.channels.memory_boundary import is_eval_session
-from surogates.session.execution_context import is_unattended
+from surogates.session.execution_context import is_scheduled_run, is_unattended
 from surogates.tools.builtin.case_item import item_awaiting_report
 from surogates.tools.builtin.case_step import step_awaiting_report, step_given_back
 from surogates.tools.builtin.send_form import SENT as FORM_SENT
@@ -232,7 +232,6 @@ from surogates.harness.loop_deep_research import (
 )
 from surogates.harness.loop_messages import (
     _initial_system_message,
-    _is_scheduled_run,
     _last_assistant_message_excerpt,
     _latest_message_is_a_follow_up,
     _latest_user_event_data,
@@ -3083,7 +3082,7 @@ class AgentHarness(
             # all is the policy's, by name, above; whether /loop is on, the
             # agent's.  No evaluation row: no one is behind it.
             makes_routines=(
-                (session.parent_id is None or _is_scheduled_run(session))
+                (session.parent_id is None or is_scheduled_run(session))
                 and (session.user_id or session.service_account_id) is not None
                 and not is_eval_session(session)
                 # /loop switched off for the agent: its schedules stay
@@ -3093,7 +3092,7 @@ class AgentHarness(
             # A run changes only its own, unasked; elsewhere a yes comes from
             # the question tool, or the operator's own word in Studio.
             confirms_routines=(
-                _is_scheduled_run(session)
+                is_scheduled_run(session)
                 or session.channel == "studio"
                 or any(s["function"]["name"] == "ask_user_question" for s in tool_schemas)
             ),
@@ -6313,7 +6312,7 @@ class AgentHarness(
         and a command its user typed there is none.  Nor a chat's own inbox
         item: its user is reading the answer.
         """
-        if _is_scheduled_run(session):
+        if is_scheduled_run(session):
             said = extract_final_response(events, fallback="")
             try:
                 await announce_result(
@@ -6460,11 +6459,11 @@ class AgentHarness(
                         if row.prompt == command.prompt and _aware(row.created_at) >= _aware(typed_on)
                     ), None)
                 context = capture_schedule_context(session.config, session.channel)
+                created = made or await store.create_loop(
+                    **scope, prompt=command.prompt, schedule=command.schedule,
+                    created_from_session_id=session.id, context=context,
+                )
                 if command.schedule is None:
-                    created = made or await store.create_dynamic_loop(
-                        **scope, prompt=command.prompt,
-                        created_from_session_id=session.id, context=context,
-                    )
                     message = (
                         f"Loop scheduled: `{created.id}`\n\n"
                         f"- Prompt: {command.prompt}\n"
@@ -6475,10 +6474,6 @@ class AgentHarness(
                         f"- Cancel: `/loop cancel {created.id}`"
                     )
                 else:
-                    created = made or await store.create_loop(
-                        **scope, prompt=command.prompt, schedule=command.schedule,
-                        created_from_session_id=session.id, context=context,
-                    )
                     message = (
                         f"Loop scheduled: `{created.id}`\n\n"
                         f"- Prompt: {command.prompt}\n"

@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 
 import sqlalchemy as sa
 
+from surogates.channels.constants import STUDIO_CHANNEL
 from surogates.channels.capabilities import capabilities_for, channel_names
 from surogates.channels.identity import readable_phone
 from surogates.db.models import (
@@ -164,7 +165,7 @@ class Context:
 
 
 _NO_PERSON_LABELS = {
-    "studio": "label_operator_chat",
+    STUDIO_CHANNEL: "label_operator_chat",
     "scheduled": "label_scheduled_run",
 }
 

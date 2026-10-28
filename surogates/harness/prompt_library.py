@@ -48,7 +48,6 @@ PROMPTS_ROOT: Path = Path(
 _FRONTMATTER_FENCE = "---"
 
 #: Helpers share one hint: none of them has a person to talk to.
-_PLATFORM_HINT_ALIASES = {"worker": "delegation", "task": "delegation"}
 
 # Fragments every worker/API pod must be able to load at boot.  Checked by
 # :meth:`PromptLibrary.validate` so a missing or malformed fragment fails
@@ -144,7 +143,6 @@ class PromptLibrary:
         """
         if not channel:
             return None
-        channel = _PLATFORM_HINT_ALIASES.get(channel, channel)
         path = self._root / "platforms" / f"{channel}.md"
         if not path.is_file():
             return None

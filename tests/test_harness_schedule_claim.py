@@ -93,6 +93,12 @@ def test_a_scheduled_run_is_told_which_schedule_and_run_it_is():
     assert "none planned" in first
 
 
+def test_a_scheduled_run_is_pointed_only_at_the_tools_it_has():
+    run = {"id": "s1", "name": "digest", "run_number": 1}
+    assert "cron_pause, cron_delete with id s1" in scheduled_run_block(run, offered={"cron_pause", "cron_delete"})
+    assert "cron_" not in scheduled_run_block(run, offered={"web_search"})
+
+
 def _session(config: dict) -> Session:
     now = datetime.now(timezone.utc)
     return Session(
