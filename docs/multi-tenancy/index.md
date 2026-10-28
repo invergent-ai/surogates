@@ -102,6 +102,8 @@ Keel invites a person into an org through keel-link (see [keel-link](../operatio
 
 A new account's email is stored trimmed and lowercased. Only an account's home org sets its password: a person who joined from another org with no password yet sets it through a link of their home org.
 
+Keel stores no address of its staff. To mail one, it asks keel-link for the address by user id (see [Staff addresses](../operations/keel-link.md#staff-addresses)). A channel user's or a followed person's stand-in address is never given.
+
 ## JWT Token Flow
 
 Surogates issues its own JWTs regardless of the upstream auth provider. The flow:

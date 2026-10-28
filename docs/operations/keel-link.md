@@ -1,6 +1,6 @@
 # keel-link
 
-`surogates keel-link` is Keel's private door into the runtime. Keel, the case engine, calls it to start an agent's session for one step of a case, and then to answer it, ask it for a revision, send it a plain message, give it a comment that mentions its agent, cancel it, and read its status, its events and its progress. It starts an agent's item session too, on a work item a case gives the agent as it gives a person one, and then sends it a plain message, cancels it, and reads its status, its events and its progress. It starts a person's case agent session, gives it the person's messages, stops its turn, and reads its status and its events. It also groups an agent's raised hands by reason, and drafts a passage of policy from agreeing answers, with the agent's own model. It also lists, reads and writes a case's files, and keeps the version of every file it hands Keel; runs reruns and trials, an agent's step again; opens a case's document in the document editor for a person, and invites staff into an organisation. It is a process of its own, on a port of its own, and it serves nothing else.
+`surogates keel-link` is Keel's private door into the runtime. Keel, the case engine, calls it to start an agent's session for one step of a case, and then to answer it, ask it for a revision, send it a plain message, give it a comment that mentions its agent, cancel it, and read its status, its events and its progress. It starts an agent's item session too, on a work item a case gives the agent as it gives a person one, and then sends it a plain message, cancels it, and reads its status, its events and its progress. It starts a person's case agent session, gives it the person's messages, stops its turn, and reads its status and its events. It also groups an agent's raised hands by reason, and drafts a passage of policy from agreeing answers, with the agent's own model. It also lists, reads and writes a case's files, and keeps the version of every file it hands Keel; runs reruns and trials, an agent's step again; opens a case's document in the document editor for a person, invites staff into an organisation, and gives Keel the mail addresses of the org's users it names. It is a process of its own, on a port of its own, and it serves nothing else.
 
 ## What it serves
 
@@ -46,6 +46,7 @@
 | `POST /v1/keel/reruns/{session_id}/cancel` | Ends the rerun as a step's cancel ends a step: `200 {"status": "paused"}`, also when it was paused already. |
 | `DELETE /v1/keel/reruns/{session_id}` | Deletes a rerun or a trial whole: `200 {"sessions", "objects"}`, the sessions deleted and the boundary objects deleted, zeros for an id that names nothing. See [Purging a rerun](#purging-a-rerun). |
 | `POST /v1/keel/orgs/{org_id}/members` | Takes `{"email", "display_name"}` and answers `200 {"user_id", "created", "joined", "sign_in", "set_password_token", "expires_at"}`: the org's user with that email, found, joined from another org or created. See [Inviting staff](#inviting-staff). |
+| `POST /v1/keel/orgs/{org_id}/emails` | Takes `{"user_ids": [id]}` (1 to 100 user ids) and answers `200 {"emails": {"<user id>": "<address>"}}`: the address of each named user of the org who has one that mail can reach. Every other id is left out. See [Staff addresses](#staff-addresses). |
 | `GET /health`, `GET /health/ready` | The same liveness and readiness probes as the API. |
 
 It has no JWT authentication, no web UI and no OpenAPI schema. Each route checks the link key instead. The public API never serves `/v1/keel/`.
@@ -62,7 +63,7 @@ Errors answer `{"detail": {"code", "message"}}`, and a message never repeats the
 | 404 | `unknown-file` | No file at the path in the case's workspace, or the editor was asked for a case recorded under another org. |
 | 404 | `unknown-version` | The case holds no version with the hash. |
 | 404 | `unknown-user` | The editor was asked for a user who does not belong to the org. |
-| 404 | `unknown-org` | An invitation into an org that does not exist. |
+| 404 | `unknown-org` | An invitation into, or a request for the addresses of, an org that does not exist. |
 | 409 | `agent-stopped` | The agent is stopped. Never for the analysis routes, which serve a stopped agent too. |
 | 409 | `key-in-use` | The key, or the session id, names another session: another step's, item's, case agent's or rerun's, or one of another agent. |
 | 409 | `not-a-member` | A case agent was asked for a person who is not a user of the org. |
@@ -79,11 +80,11 @@ Errors answer `{"detail": {"code", "message"}}`, and a message never repeats the
 | 415 | `not-a-document` | The editor was asked for a file that is not an office document, or a mention names a file that is not a document an agent edits. |
 | 422 | `inputs-blocked` | The prompt-injection screen blocked the step's inputs, or the item's inputs, question, choices or evidence; or a policy passage's reason or gist, or every one of its hands. |
 | 422 | `invalid-path` | A file's path Keel may not name, a rerun's `files` paths among them: see [A case's files](#a-cases-files). |
-| 422 | `invalid-request` | The body does not validate (an invitation's email that is not one among them), a case id or an org id is not a UUID, a version's hash is not 64 lowercase hex digits, or a session's events were asked for with a cursor or a page size out of range. |
-| 500 | `internal-error` | The database failed, other than while a step, item, case agent or rerun session's events, status or progress were read, or while a purge first read the rerun. Only the error's class name is logged. |
+| 422 | `invalid-request` | The body does not validate (an invitation's email that is not one, an address request's `user_ids` that is not 1 to 100 UUIDs, among them), a case id or an org id is not a UUID, a version's hash is not 64 lowercase hex digits, or a session's events were asked for with a cursor or a page size out of range. |
+| 500 | `internal-error` | The database failed, other than while a step, item, case agent or rerun session's events, status or progress were read, while a purge first read the rerun, or while an org's addresses were read. Only the error's class name is logged. |
 | 502 | `model-failed` | An analysis route's model sent no completion: the provider failed, refused, or ran out of credit. A policy passage's model gave no valid object, or a text that is empty or over 6,000 characters. |
 | 503 | `office-off` | The editor was asked for, and no document server is configured. |
-| 503 | `unavailable` | The agent's runtime config could not be read, twice; an analysis route's agent names no model, or the vault holds no key for it, or the runtime has no vault; the object store refused or did not answer a case's files; an invitation could not read the org's Firebase config; or the database failed while a step, item, case agent or rerun session's events, status or progress were read, or while a purge first read the rerun. Only the error's class name, and the case id, the org id, the session id or, for an analysis route, the agent id, are logged. |
+| 503 | `unavailable` | The agent's runtime config could not be read, twice; an analysis route's agent names no model, or the vault holds no key for it, or the runtime has no vault; the object store refused or did not answer a case's files; an invitation could not read the org's Firebase config; or the database failed while a step, item, case agent or rerun session's events, status or progress were read, while a purge first read the rerun, or while an org's addresses were read. Only the error's class name, and the case id, the org id, the session id or, for an analysis route, the agent id, are logged. |
 | 504 | `model-timeout` | An analysis route's model work took longer than 22 seconds. |
 
 ## A step's inputs
@@ -425,6 +426,16 @@ For a password account without a password whose home is the org, `set_password_t
 
 A person joined from another org who has no password yet gets no link from the org that joined them. Their home org invites them again: they are found there, and that invitation gives a fresh link. A re-invitation never revokes a link: an earlier one stays valid until a password is set or its 7 days pass.
 
+## Staff addresses
+
+Keel keeps no address of its staff. It asks for the addresses when it sends mail: `POST /v1/keel/orgs/{org_id}/emails` takes `{"user_ids": [id, ...]}`, 1 to 100 ids a call, and answers `{"emails": {"<user id>": "<address>"}}`.
+
+An id is answered when its user belongs to the org, as a home user or as a member, and has an address that mail can reach. The address is returned as stored, with its case. Each id is answered once, under its lowercase form, however it was sent; the bound of 100 counts the ids as sent.
+
+These are left out of the answer, and are never an error: a user of another org, an id that names nobody, and an address mail cannot reach. The runtime stores stand-in addresses for users that have no mailbox: a channel user's (`<platform>-<id>@<org>.channels.surogate.local`) and a followed person's (`person-<id>@<org>.people.surogate.local`). It also uses `.invalid` addresses for agents. So an address under `surogate.local`, an address under `.invalid` and a value that is not `name@domain` are left out. An id that is not a UUID is `422 invalid-request`.
+
+The answer carries `Cache-Control: no-store`. No address is logged: a database failure is `503 unavailable`, which Keel retries, and only the error's class name and the org id are logged.
+
 ## Reruns and trials
 
 A rerun runs an agent's step again on the files a past step read, as they were. A trial runs a draft's step on inputs a builder typed. Either is a step session of a case that exists nowhere else: its id, which Keel gives, is the session's own and its case's, and its boundary `case:<session id>` holds the files it works on. Memory starts empty, in the agent's own storage under that boundary, and the agent runs as it is configured now: nothing pins the bundle it ran before. The session reports to Keel's door as any step session does, `POST /api/harness/sessions/{session id}/complete`, `raise-hand` and `ended`, with the same bodies; nothing in a report says it is a rerun, and Keel tells by the session id. A raised hand rests with the session's inputs until Keel cancels or purges it. The files a rerun's output names are kept as versions of its own case, `case-file://<session id>/<path>`, and stay readable through the version routes until the purge.
@@ -459,7 +470,7 @@ A purge refuses what is not a rerun's. An id that names a session that is not a 
 
 ## Keep it internal
 
-Run keel-link where only Keel can reach it: an internal service, never a public ingress or load balancer. Whoever holds the link key can start sessions on any agent of any org, start a case agent session for any person of any org, send any step's or item's agent, or any case agent, a message, read every step, item or case agent session's events and progress (its inputs and all its tools read among them), read and write any case's files, open them in the editor as any user, and invite anyone into any org, with the token that sets a new account's password.
+Run keel-link where only Keel can reach it: an internal service, never a public ingress or load balancer. Whoever holds the link key can start sessions on any agent of any org, start a case agent session for any person of any org, send any step's or item's agent, or any case agent, a message, read every step, item or case agent session's events and progress (its inputs and all its tools read among them), read and write any case's files, open them in the editor as any user, read the mail address of any user of any org, by id, and invite anyone into any org, with the token that sets a new account's password.
 
 keel-link reads the same state as the API (database, Redis, storage, the platform API), so it takes the same settings, plus its own:
 

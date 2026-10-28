@@ -9,7 +9,16 @@ Both sit under :data:`STAND_IN_DOMAIN`. The runtime's agent addresses sit under 
 
 from __future__ import annotations
 
-__all__ = ["STAND_IN_DOMAIN", "deliverable"]
+from collections.abc import Iterable
+from uuid import UUID
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from surogates.db.models import Org, User
+from surogates.tenant.memberships import MembershipError, belongs_to
+
+__all__ = ["STAND_IN_DOMAIN", "deliverable", "org_addresses"]
 
 #: The domain every stand-in address of the runtime is under.
 STAND_IN_DOMAIN = "surogate.local"
@@ -29,3 +38,19 @@ def deliverable(email: str) -> bool:
     if domain == STAND_IN_DOMAIN or domain.endswith(f".{STAND_IN_DOMAIN}"):
         return False
     return domain.rsplit(".", 1)[-1] != "invalid"
+
+
+async def org_addresses(db: AsyncSession, org_id: UUID, user_ids: Iterable[UUID]) -> dict[UUID, str]:
+    """The address of each of *user_ids* that belongs to *org_id* and that mail can reach, as stored.
+
+    A user belongs to the org as a home user or as a member. An id that names nobody, a user of another org and an
+    address that is no mailbox are left out. Raises :class:`MembershipError` ``unknown-org`` when the org does not
+    exist. It reads only: the caller commits nothing.
+    """
+    if await db.get(Org, org_id) is None:
+        raise MembershipError("unknown-org")
+    wanted = set(user_ids)
+    if not wanted:
+        return {}
+    rows = await db.execute(select(User.id, User.email).where(User.id.in_(wanted), belongs_to(org_id)))
+    return {user_id: email for user_id, email in rows if deliverable(email)}
