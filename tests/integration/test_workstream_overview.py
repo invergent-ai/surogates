@@ -417,14 +417,14 @@ async def test_a_threads_question_and_its_turns_end_reach_the_projects_stream(ap
         await answered(api, thread, "Drafted the memo.")
         await turn_ends(api, thread)
 
-    sent = await streamed(api, monkeypatch, project, 6, act)
+    # A turn that delivered no file writes no turn summary.
+    sent = await streamed(api, monkeypatch, project, 5, act)
     tid = str(thread.id)
     assert sent == [
         ("ready", {}),
         ("change", {"thread_id": tid, "type": "iteration.summary"}),
         ("change", {"thread_id": tid, "type": "user.message"}),
         ("change", {"thread_id": tid, "type": "inbox.input_required"}),
-        ("change", {"thread_id": tid, "type": "turn.summary"}),
         ("change", {"thread_id": tid, "type": "session.complete"}),
         # The master's, after the thread's status: the change a client hears last.
         ("change", {"thread_id": None, "type": "worker.complete"}),
