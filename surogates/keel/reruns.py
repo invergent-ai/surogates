@@ -30,18 +30,22 @@ from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validat
 
 from surogates.keel.case_files import CASE_ORG_OBJECT, case_boundary_folder, case_key, no_such_bucket
 from surogates.keel.steps import StepContract
-from surogates.keel.versions import SHA256_HEX, case_versions
+from surogates.keel.versions import SHA256_HEX, VERSIONS_FOLDER, case_versions
+from surogates.memory.r2_store import MEMORY_TARGETS
+from surogates.runtime.memory_protocol import memory_object_key
 
 __all__ = [
     "MAX_RERUN_FILES",
     "CaseRecord",
     "RerunFile",
     "RerunRequest",
+    "delete_boundary",
     "mark_rerun",
     "may_hold_rerun",
     "missing_files",
     "read_case_record",
     "rerun_config",
+    "rerun_memory_keys",
     "seed_files",
 ]
 
@@ -205,3 +209,40 @@ async def seed_files(
 def rerun_config(kind: str, agent: Mapping[str, Any]) -> dict[str, Any]:
     """The mark a rerun's session carries: its kind, and the agent's storage prefix, from which its memory is found."""
     return {"kind": kind, "memory_prefix": agent.get("storage_key_prefix")}
+
+
+def rerun_memory_keys(memory_prefix: str, case_id: UUID) -> list[str]:
+    """The object keys of a rerun's memory, as the worker keys them under the agent's storage prefix.
+
+    An empty prefix is a prefix: the keys then start with ``/boundaries/``.
+    """
+    return [
+        memory_object_key(
+            storage_key_prefix=memory_prefix, user_id=None, boundary=f"case:{case_id}", target=target,
+        )
+        for target in MEMORY_TARGETS
+    ]
+
+
+async def delete_boundary(storage: Any, settings: Any, case_id: UUID) -> int:
+    """Delete *case_id*'s boundary folder: its workspace, then its versions, then its record: how many objects.
+
+    The record goes last, so a purge that failed part-way leaves the mark that
+    tells a retry the folder is a rerun's.  A store deletes a prefix in
+    listing order, a batch at a time, and the record sorts before the rest:
+    one delete of the folder could take it first and leave files unmarked.
+    A bucket not made yet holds nothing.
+    """
+    bucket, folder = case_boundary_folder(settings, case_id)
+    deleted = 0
+    try:
+        deleted += await storage.delete_prefix(bucket, folder + "workspace/")
+        deleted += await storage.delete_prefix(bucket, folder + VERSIONS_FOLDER)
+        record = folder + CASE_ORG_OBJECT
+        if await storage.exists(bucket, record):
+            await storage.delete(bucket, record)
+            deleted += 1
+    except ClientError as exc:
+        if not no_such_bucket(exc):
+            raise
+    return deleted

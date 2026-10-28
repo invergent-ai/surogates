@@ -44,6 +44,7 @@
 | `GET /v1/keel/reruns/{session_id}/events/stream?after=<id>` | The rerun's events after the cursor, then live, as a step session's stream. |
 | `GET /v1/keel/reruns/{session_id}/progress` | The rerun's status, todo list and last activity, as a step session's progress. See [Progress](#progress). |
 | `POST /v1/keel/reruns/{session_id}/cancel` | Ends the rerun as a step's cancel ends a step: `200 {"status": "paused"}`, also when it was paused already. |
+| `DELETE /v1/keel/reruns/{session_id}` | Deletes a rerun or a trial whole: `200 {"sessions", "objects"}`, the sessions deleted and the boundary objects deleted, zeros for an id that names nothing. See [Purging a rerun](#purging-a-rerun). |
 | `POST /v1/keel/orgs/{org_id}/members` | Takes `{"email", "display_name"}` and answers `200 {"user_id", "created", "joined", "sign_in", "set_password_token", "expires_at"}`: the org's user with that email, found, joined from another org or created. See [Inviting staff](#inviting-staff). |
 | `GET /health`, `GET /health/ready` | The same liveness and readiness probes as the API. |
 
@@ -65,6 +66,7 @@ Errors answer `{"detail": {"code", "message"}}`, and a message never repeats the
 | 409 | `agent-stopped` | The agent is stopped. Never for the analysis routes, which serve a stopped agent too. |
 | 409 | `key-in-use` | The key, or the session id, names another session: another step's, item's, case agent's or rerun's, or one of another agent. |
 | 409 | `not-a-member` | A case agent was asked for a person who is not a user of the org. |
+| 409 | `rerun-running` | A purge of a rerun whose session is in a turn, or one of whose documents is open in the editor. Cancel it, then purge it later. |
 | 409 | `step-finished` | A message or a mention for a step that is over: its inputs were redacted. |
 | 409 | `no-office` | A mention for a step whose agent does not edit the case's documents: not a draft step's, or the runtime has no agent editing. |
 | 409 | `case-exists` | A rerun's or a trial's id names a case, or another org's rerun or trial, or one of the other kind. |
@@ -441,6 +443,19 @@ The session is fenced. No session of a rerun, a helper included, is offered `ter
 Only then does it mark the boundary folder as the org's rerun of that kind, in the record beside the workspace, copy the files, a piece at a time, and create the session. A version that is gone by the time it is copied is `409 file-version-gone` too; the files already copied stay under the mark until Keel purges the rerun. Keel waits long for this call, and sends the same body again with the same key on a timeout: a repeat that finds the session answers `200` and copies nothing, and one after a create that died before its session copies again over the same paths. The session is queued when it is made, so its first report can reach Keel's door before Keel has the answer. A key held by another session, or by a rerun of the other kind, is `409 key-in-use`.
 
 A trial's files may come first: `PUT /v1/keel/reruns/{session_id}/files/content` writes one, marking the folder as the org's trial's with the first, and keeps its version as a case's file write does. A folder that is a case's, another org's, or a rerun's is `409 case-exists`. A trial created with `start` false writes no first message, and queues nothing, until `POST /v1/keel/reruns/{session_id}/start`, which writes it once.
+
+## Purging a rerun
+
+`DELETE /v1/keel/reruns/{session_id}` deletes a rerun or a trial, which Keel keeps for a while and then lets go of. It answers `200 {"sessions", "objects"}`: how many sessions it deleted, and how many objects of the boundary folder. It deletes, in this order:
+
+1. the rerun's memory objects, under the agent's storage prefix the session was created with;
+2. every row of the rerun's session tree, in one transaction: the sessions, their events, the inbox items and outbox rows on them, their leases and cursors, the board notes they wrote, and the task rows they stand in. A session's title and a task's goal and result hold case text, so the rows go, not only the events;
+3. the closed editor rows of the rerun's documents;
+4. the folder's `workspace/`, then its `versions/`, then its record.
+
+The record goes last. The mark in it is what tells a purge the folder is a rerun's, so a purge that failed part-way, when the store stopped answering after the workspace was gone, leaves it: `503 unavailable`, and a retry finds the mark and finishes. A purge of what is already gone answers zeros, so a retry of a finished purge does too.
+
+A purge refuses what is not a rerun's. An id that names a session that is not a rerun's own session (a step's, or a helper's), or a folder recorded as a case's, is `404 unknown-session` and nothing is deleted. A rerun whose session, or a helper's, is in a turn is `409 rerun-running`, and so is one with a document open in the editor: a save landing after the purge would write under the folder again. Keel cancels the rerun first and purges it on a later pass. Each purge logs the rerun's id and the counts.
 
 ## Keep it internal
 

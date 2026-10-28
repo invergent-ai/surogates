@@ -22,7 +22,7 @@ from fastapi.responses import JSONResponse
 from sse_starlette.sse import EventSourceResponse
 from sqlalchemy.exc import DBAPIError
 
-from surogates.channels.memory_boundary import rerun_kind_of
+from surogates.channels.memory_boundary import CASE_RERUN_KEY, rerun_kind_of
 from surogates.api.routes.keel import (
     StepSessionStatus,
     agent_id_of,
@@ -34,6 +34,7 @@ from surogates.api.routes.keel import (
     create_or_find,
     created_answer,
     database_failed,
+    database_unavailable,
     events_page,
     events_stream,
     kick_off,
@@ -50,18 +51,22 @@ from surogates.api.routes.keel import (
     watched_session,
     write_case_file_answer,
 )
+from surogates.keel.case_files import case_workspace
 from surogates.keel.reruns import (
     RerunRequest,
+    delete_boundary,
     mark_rerun,
     may_hold_rerun,
     missing_files,
     read_case_record,
     rerun_config,
+    rerun_memory_keys,
     seed_files,
 )
 from surogates.keel.run_facts import bundle_version_in
 from surogates.keel.steps import CASE_STEP_KEY, KICKOFF_MARKER, is_rerun, render_kickoff, step_contract_of
-from surogates.session.store import SessionNotFoundError
+from surogates.office.sessions import forget_closed_under, open_under
+from surogates.session.store import RerunRunning, SessionNotFoundError
 
 logger = logging.getLogger(__name__)
 
@@ -277,3 +282,76 @@ async def cancel_rerun(session_id: str, request: Request) -> JSONResponse:
             message="The rerun could not be cancelled.",
         ) from None
     return await cancel_work_session(request, session)
+
+
+def _running() -> HTTPException:
+    return refused(
+        status.HTTP_409_CONFLICT, "rerun-running",
+        "A session of the rerun is in a turn, or one of its documents is open: cancel it, then purge it later.",
+    )
+
+
+@router.delete("/keel/reruns/{session_id}")
+async def purge_rerun(session_id: str, request: Request) -> JSONResponse:
+    """Delete a rerun or a trial whole: its memory, its sessions with every row that points at them, and its
+    boundary folder: ``200 {"sessions", "objects"}``.
+
+    In that order, the folder's record last: a purge that failed part-way is finished by a retry, which finds the
+    mark, and a purge of what is gone answers zeros.  An id that names a session that is no rerun's, or a folder
+    recorded as a case's, is 404 ``unknown-session`` and nothing is deleted.  A rerun in a turn, or with a document
+    open in the editor, is 409 ``rerun-running``: a save landing after the purge would write under the folder again.
+    """
+    require_link(request)
+    try:
+        rerun = UUID(session_id)
+    except ValueError:
+        raise unknown_session() from None
+    state = request.app.state
+    try:
+        try:
+            session = await state.session_store.get_session(rerun)
+        except SessionNotFoundError:
+            session = None
+        except DBAPIError as exc:
+            raise database_unavailable(
+                exc, logged=f"the rerun {session_id} could not be read", message="The rerun could not be read; try again.",
+            ) from None
+        if session is not None and not is_rerun(session):
+            raise unknown_session()
+        record = await read_case_record(state.storage, state.settings, rerun)
+        if record is not None and record.rerun is None:
+            # A case's folder: never a rerun's to delete.
+            raise unknown_session()
+        if session is None and record is None:
+            return JSONResponse({"sessions": 0, "objects": 0})
+        workspace = case_workspace(state.storage, state.settings, rerun).location("")
+        try:
+            if session is not None:
+                for member in await state.session_store.session_tree_ids(rerun):
+                    if await state.session_store.has_live_lease(member):
+                        raise _running()
+            if await open_under(state.session_factory, workspace):
+                raise _running()
+            sessions = 0
+            if session is not None:
+                memory_prefix = (session.config.get(CASE_RERUN_KEY) or {}).get("memory_prefix")
+                if memory_prefix is not None:
+                    bucket = state.settings.storage.memory_bucket or state.settings.storage.bucket
+                    for key in rerun_memory_keys(memory_prefix, rerun):
+                        await state.storage.delete(bucket, key)
+                try:
+                    sessions = await state.session_store.delete_rerun_tree(rerun)
+                except RerunRunning:
+                    raise _running() from None
+                except SessionNotFoundError:
+                    sessions = 0
+            await forget_closed_under(state.session_factory, workspace)
+        except DBAPIError as exc:
+            raise database_failed(
+                exc, logged=f"the rerun {session_id} could not be purged", message="The rerun could not be purged.",
+            ) from None
+        objects = await delete_boundary(state.storage, state.settings, rerun)
+    except (ClientError, BotoCoreError) as exc:
+        raise _unavailable(exc, rerun) from None
+    logger.info("keel-link: rerun %s purged (%d sessions, %d objects)", rerun, sessions, objects)
+    return JSONResponse({"sessions": sessions, "objects": objects})

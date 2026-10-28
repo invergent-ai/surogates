@@ -15,12 +15,16 @@ import uuid
 from uuid import UUID
 
 import pytest
+from botocore.exceptions import ClientError
+from sqlalchemy import text
 
 from surogates.channels.constants import API_CHANNEL
 from surogates.channels.memory_boundary import CASE_RERUN_KEY, rerun_kind_of, session_memory_boundary
 from surogates.config import INTERRUPT_CHANNEL_PREFIX
 from surogates.keel.case_files import case_boundary_folder, case_workspace, record_case_org, write_case_file
-from surogates.keel.reruns import CaseRecord, read_case_record
+from surogates.db.models import BoardNote, DeliveryOutbox, InboxItem, OfficeSession, Task
+from surogates.keel.files import case_file_value
+from surogates.keel.reruns import CaseRecord, read_case_record, rerun_memory_keys
 from surogates.keel.steps import step_contract_of
 from surogates.keel.versions import case_versions
 from surogates.runtime.memory_protocol import memory_object_key
@@ -513,3 +517,248 @@ async def test_cancelling_a_rerun_mid_run_pauses_it_and_takes_its_inputs(link, l
 
     assert (started.status_code, code_of(started)) == (409, "step-finished")
     assert len(await user_messages(session_store, rid)) == 1
+
+
+MEMORY_PREFIX = "test-project/intake-agent"
+
+
+async def purge(client, session_id, *, key: str | None = LINK_KEY):
+    return await client.delete(rerun_route(session_id), headers=link_headers(key))
+
+
+async def rows_naming(session_factory, *session_ids) -> dict[str, int]:
+    """How many rows of each table that points at a session point at one of *session_ids*."""
+    ids = [str(session_id) for session_id in session_ids]
+    queries = {
+        "sessions": "SELECT count(*) FROM sessions WHERE id = ANY(CAST(:ids AS uuid[]))",
+        "events": "SELECT count(*) FROM events WHERE session_id = ANY(CAST(:ids AS uuid[]))",
+        "inbox_items": "SELECT count(*) FROM inbox_items WHERE session_id = ANY(CAST(:ids AS uuid[]))",
+        "delivery_outbox": "SELECT count(*) FROM delivery_outbox WHERE session_id = ANY(CAST(:ids AS uuid[]))",
+        "session_cursors": "SELECT count(*) FROM session_cursors WHERE session_id = ANY(CAST(:ids AS uuid[]))",
+        "board_notes": "SELECT count(*) FROM board_notes WHERE writer_session_id = ANY(CAST(:ids AS uuid[]))",
+        "tasks": (
+            "SELECT count(*) FROM tasks WHERE parent_session_id = ANY(CAST(:ids AS uuid[])) "
+            "OR current_session_id = ANY(CAST(:ids AS uuid[]))"
+        ),
+    }
+    async with session_factory() as db:
+        return {
+            name: (await db.execute(text(query), {"ids": ids})).scalar_one() for name, query in queries.items()
+        }
+
+
+class _Memory:
+    """A rerun's memory objects, written as the worker keys them, in the bucket memory lives in."""
+
+    def __init__(self, link_app, case_id) -> None:
+        self.storage = link_app.state.storage
+        self.bucket = link_app.state.settings.storage.memory_bucket or link_app.state.settings.storage.bucket
+        self.keys = rerun_memory_keys(MEMORY_PREFIX, case_id)
+
+    async def write(self) -> None:
+        await self.storage.create_bucket(self.bucket)
+        for key in self.keys:
+            await self.storage.write(self.bucket, key, b'{"entries": ["written by the rerun"]}')
+
+    async def present(self) -> list[bool]:
+        return [await self.storage.exists(self.bucket, key) for key in self.keys]
+
+
+async def a_worked_rerun(link, link_app, org, session_store, session_factory, original, *, key: str):
+    """A rerun seeded with one file of *original*, that has worked: an output file, a helper, events, an inbox
+    item, an outbox row, a board note, a task, and memory.  Answers its session, the helper and its memory."""
+    state = link_app.state
+    request = rerun_body(org, key=key, files=[file_of("in/payslip.pdf", OLD)], of_case_id=original)
+    assert (await create_rerun(link, request)).status_code == 201
+    rid = UUID(request["session_id"])
+    rerun = await session_store.get_session(rid)
+    output = b"%PDF-1.7 what the rerun wrote"
+    await write_case_file(state.storage, state.settings, rid, "out/o.pdf", output)
+    await case_file_value(state.storage, rerun, rid, "out/o.pdf")
+    helper = await create_child_session(store=session_store, parent=rerun, channel="delegation")
+    event = await session_store.emit_event(rid, EventType.LLM_REQUEST, {"model": "m", "iteration": 1})
+    await session_store.emit_event(helper.id, EventType.LLM_REQUEST, {"model": "m", "iteration": 1})
+    async with session_factory() as db, db.begin():
+        task = Task(org_id=org, parent_session_id=rid, current_session_id=helper.id, goal="Check the payslip")
+        db.add_all([
+            InboxItem(
+                org_id=org, service_account_id=rerun.service_account_id, session_id=rid, source_event_id=event,
+                kind="task_complete", title="Done",
+            ),
+            DeliveryOutbox(session_id=rid, event_id=event, channel="slack"),
+            BoardNote(
+                org_id=org, group_id=rid, writer_session_id=helper.id, writer_label="helper", type="result",
+                content="The payslip is fine",
+            ),
+            task,
+        ])
+        await db.flush()
+        await db.execute(text("UPDATE sessions SET task_id = :task WHERE id = :id"), {"task": task.id, "id": helper.id})
+    memory = _Memory(link_app, rid)
+    await memory.write()
+    return rid, helper, memory
+
+
+async def test_a_purged_rerun_leaves_nothing(link, link_app, org, session_store, session_factory):
+    original = await kept_case(link_app, org, **{"in/payslip.pdf": OLD})
+    rid, helper, memory = await a_worked_rerun(
+        link, link_app, org, session_store, session_factory, original, key="keel:r:1:0",
+    )
+    other, other_helper, other_memory = await a_worked_rerun(
+        link, link_app, org, session_store, session_factory, original, key="keel:r:2:0",
+    )
+    original_before = await objects_under(link_app, original)
+    other_before = await objects_under(link_app, other)
+    other_rows = await rows_naming(session_factory, other, other_helper.id)
+    owned = await objects_under(link_app, rid)
+    # The seeded file, the rerun's output, the version of the output, and the folder's record.
+    assert len(owned) == 4
+    # The scenario reaches every table the purge must clear.
+    assert all(count > 0 for count in (await rows_naming(session_factory, rid, helper.id)).values())
+    assert all(await memory.present())
+
+    purged = await purge(link, rid)
+
+    assert purged.status_code == 200, purged.text
+    assert purged.json() == {"sessions": 2, "objects": len(owned)}
+    for gone in (rid, helper.id):
+        with pytest.raises(SessionNotFoundError):
+            await session_store.get_session(gone)
+    assert set((await rows_naming(session_factory, rid, helper.id)).values()) == {0}
+    assert await objects_under(link_app, rid) == {}
+    assert await memory.present() == [False, False]
+    # Another rerun and the case it was seeded from are as they were.
+    assert await objects_under(link_app, original) == original_before
+    assert await objects_under(link_app, other) == other_before
+    assert await other_memory.present() == [True, True]
+    assert await rows_naming(session_factory, other, other_helper.id) == other_rows
+
+    again = await purge(link, rid)
+
+    assert (again.status_code, again.json()) == (200, {"sessions": 0, "objects": 0})
+
+
+async def test_a_running_rerun_is_not_purged(link, link_app, org, session_store, session_factory):
+    original = await kept_case(link_app, org, **{"in/payslip.pdf": OLD})
+    rid, helper, memory = await a_worked_rerun(
+        link, link_app, org, session_store, session_factory, original, key="keel:r:1:0",
+    )
+    objects = await objects_under(link_app, rid)
+    rows = await rows_naming(session_factory, rid, helper.id)
+    assert await session_store.try_acquire_lease(helper.id, "worker-1", 60) is not None
+
+    refused = await purge(link, rid)
+
+    assert (refused.status_code, code_of(refused)) == (409, "rerun-running")
+    assert await rows_naming(session_factory, rid, helper.id) == rows
+    assert await objects_under(link_app, rid) == objects
+    assert await memory.present() == [True, True]
+
+
+async def test_purge_never_touches_a_case(link, link_app, org, session_store, session_factory):
+    step = await post(link, body(org))
+    assert step.status_code == 201, step.text
+    step_id = UUID(step.json()["session_id"])
+    case = UUID(contract_of()["case_id"])
+    assert (await upload(link, "in/offer.pdf", OLD)).status_code == 200
+    before = await objects_under(link_app, case)
+    rows = await rows_naming(session_factory, step_id)
+
+    by_session = await purge(link, step_id)
+    by_case = await purge(link, case)
+    unknown = await purge(link, uuid.uuid4())
+
+    assert (by_session.status_code, code_of(by_session)) == (404, "unknown-session")
+    assert (by_case.status_code, code_of(by_case)) == (404, "unknown-session")
+    assert (unknown.status_code, unknown.json()) == (200, {"sessions": 0, "objects": 0})
+    assert await objects_under(link_app, case) == before
+    assert await rows_naming(session_factory, step_id) == rows
+    with pytest.raises(SessionNotFoundError):
+        await session_store.delete_rerun_tree(step_id)
+    assert await rows_naming(session_factory, step_id) == rows
+
+
+async def test_a_trial_never_created_is_purged_with_its_files(link, link_app, org):
+    tid = uuid.uuid4()
+    assert (await trial_file(link, tid, org, "in/id.pdf", b"%PDF-1.7 the id")).status_code == 200
+
+    purged = await purge(link, tid)
+
+    # The file, its version and the folder's record.
+    assert (purged.status_code, purged.json()) == (200, {"sessions": 0, "objects": 3})
+    assert await objects_under(link_app, tid) == {}
+
+
+class _FailsOnce:
+    """A store whose delete of the versions prefix fails once: a later batch of a purge that began well."""
+
+    def __init__(self, inner) -> None:
+        self._inner = inner
+        self.failed = False
+
+    def __getattr__(self, name: str):
+        return getattr(self._inner, name)
+
+    async def delete_prefix(self, bucket: str, prefix: str) -> int:
+        if prefix.endswith("/versions/") and not self.failed:
+            self.failed = True
+            raise ClientError({"Error": {"Code": "SlowDown", "Message": "slow down"}}, "DeleteObjects")
+        return await self._inner.delete_prefix(bucket, prefix)
+
+
+async def test_a_purge_that_failed_part_way_finishes_on_retry(link, link_app, org, session_store, session_factory):
+    original = await kept_case(link_app, org, **{"in/payslip.pdf": OLD})
+    rid, helper, memory = await a_worked_rerun(
+        link, link_app, org, session_store, session_factory, original, key="keel:r:1:0",
+    )
+    working = link_app.state.storage
+    link_app.state.storage = _FailsOnce(working)
+
+    failed = await purge(link, rid)
+
+    assert (failed.status_code, code_of(failed)) == (503, "unavailable")
+    assert set((await rows_naming(session_factory, rid, helper.id)).values()) == {0}
+    assert await memory.present() == [False, False]
+    link_app.state.storage = working
+    left = await objects_under(link_app, rid)
+    # The workspace is gone; the version and, last, the folder's record are not.
+    assert sorted(key.rsplit("/", 1)[-1] for key in left if "/workspace/" in key) == []
+    assert len(left) == 2
+
+    retried = await purge(link, rid)
+
+    assert (retried.status_code, retried.json()) == (200, {"sessions": 0, "objects": 2})
+    assert await objects_under(link_app, rid) == {}
+    third = await purge(link, rid)
+    assert (third.status_code, third.json()) == (200, {"sessions": 0, "objects": 0})
+
+
+async def test_a_rerun_with_a_document_open_is_not_purged(link, link_app, org, session_store, session_factory):
+    request = rerun_body(org)
+    assert (await create_rerun(link, request)).status_code == 201
+    rid = UUID(request["session_id"])
+    state = link_app.state
+    await write_case_file(state.storage, state.settings, rid, "out/draft.docx", b"PK draft")
+    location = case_workspace(state.storage, state.settings, rid).location("out/draft.docx")
+    async with session_factory() as db, db.begin():
+        db.add(OfficeSession(path="out/draft.docx", location=location, case_id=rid, doc_key=f"k-{uuid.uuid4()}"))
+    objects = await objects_under(link_app, rid)
+
+    refused = await purge(link, rid)
+
+    assert (refused.status_code, code_of(refused)) == (409, "rerun-running")
+    assert await objects_under(link_app, rid) == objects
+    await session_store.get_session(rid)
+
+    async with session_factory() as db, db.begin():
+        await db.execute(text("UPDATE office_sessions SET status = 'closed' WHERE location = :location"), {"location": location})
+
+    purged = await purge(link, rid)
+
+    assert purged.status_code == 200, purged.text
+    async with session_factory() as db:
+        left = (await db.execute(
+            text("SELECT count(*) FROM office_sessions WHERE location LIKE :prefix"),
+            {"prefix": location.removesuffix("out/draft.docx") + "%"},
+        )).scalar_one()
+    assert left == 0

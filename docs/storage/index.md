@@ -96,6 +96,8 @@ boundaries/case:<case id>/
 
 Only `workspace/` is mounted or listed. `org.json` and `versions/` are for keel-link and the worker alone. A version is kept once per case, and its retention is the case engine's, which asks keel-link to remove it.
 
+A rerun's or a trial's folder, which holds the files Keel's reruns and trials work on, has the same layout, and its record says `"rerun": "<kind>"`. The case engine purges it whole through keel-link: the memory, the sessions and every row that points at them, `workspace/`, `versions/` and, last, `org.json`. A case's folder, recorded without that mark, is never deleted that way.
+
 ### Lifecycle
 
 1. **Session created** -- API server ensures the workspace bucket exists.
