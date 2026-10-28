@@ -2,7 +2,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -15,6 +15,8 @@ from surogates.tools.builtin.cron import (
     _cron_get_handler,
     _cron_list_handler,
     _cron_pause_handler,
+    _cron_resume_handler,
+    _cron_run_now_handler,
     _cron_update_handler,
 )
 from surogates.tools.loader import ResourceLoader
@@ -83,6 +85,10 @@ class FakeStore:
     async def pause(self, **kwargs):
         self.calls.append(("pause", kwargs))
         return False
+
+    async def mark_loop_completed(self, **kwargs):
+        self.calls.append(("complete", kwargs))
+        return True
 
 
 class FakeSessions:
@@ -296,3 +302,51 @@ def test_loop_list_shows_where_a_schedule_runs_and_when_it_ends():
         f"- `{short.id}` Every 5 minutes: check the deploy "
         "(paused; next: None; expires 2026-10-26T06:00:00+00:00)",
     ]
+
+
+def _in_its_run(store: FakeStore, **extra) -> dict:
+    return _kwargs(
+        FakeSessions(USER, []), store,
+        session_config={"scheduled_session_id": str(store.row.id)}, channel="scheduled", **extra,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_run_changes_and_ends_its_own_schedule_without_asking():
+    store = FakeStore()
+    kwargs = _in_its_run(store)
+    updated = json.loads(await _cron_update_handler({"id": str(store.row.id), "interval": "2h"}, **kwargs))
+    ended = json.loads(await _cron_delete_handler({"id": str(store.row.id), "reason": "the deploy is green"}, **kwargs))
+
+    assert updated["success"] is True and ended["success"] is True
+    complete = next(asked for name, asked in store.calls if name == "complete")
+    assert complete["session_id"] == UUID(kwargs["session_id"])
+    assert complete["reason"] == "the deploy is green"
+    # Done, not cancelled: a cancel would stop this very run.
+    assert not any(name == "cancel" for name, _ in store.calls)
+
+
+@pytest.mark.asyncio
+async def test_a_run_cannot_touch_another_schedule():
+    store = FakeStore()
+    other = str(uuid4())
+    kwargs = _in_its_run(store)
+    for handler, args in (
+        (_cron_update_handler, {"id": other, "prompt": "x"}),
+        (_cron_pause_handler, {"id": other}),
+        (_cron_delete_handler, {"id": other}),
+    ):
+        result = json.loads(await handler(args, **kwargs))
+        assert result["success"] is False and "only its own" in result["error"]
+    assert not [name for name, _ in store.calls if name != "get"]
+
+
+@pytest.mark.asyncio
+async def test_a_run_makes_no_schedule_and_starts_no_run():
+    store = FakeStore()
+    kwargs = _in_its_run(store)
+    made = json.loads(await _cron_create_handler(dict(DIGEST), **kwargs))
+    started = json.loads(await _cron_run_now_handler({"id": str(store.row.id)}, **kwargs))
+    resumed = json.loads(await _cron_resume_handler({"id": str(store.row.id)}, **kwargs))
+    assert all(r["success"] is False and "cannot make schedules" in r["error"] for r in (made, started, resumed))
+    assert store.created == [] and store.calls == []

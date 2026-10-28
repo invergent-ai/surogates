@@ -897,7 +897,7 @@ class PromptBuilder:
         # heading after the final ``"\n".join(parts)``.
         workspace = self._get_workspace_path()
         if workspace:
-            parts.append(f"- **Workspace**: `$HOME` (your working directory)")
+            parts.append("- **Workspace**: `$HOME` (your working directory)")
             parts.append("\n" + self._prompts.get("identity/workspace_rules"))
 
         # Platform hint based on session channel.
@@ -1257,5 +1257,9 @@ def scheduled_run_block(run: dict) -> str:
         lines.append(f"- The schedule ends at {run['expires_at']}")
     if run.get("last_error"):
         lines.append(f"- Last problem: {run['last_error']}")
-    lines.append("The schedule already exists: do not make another for the same work.")
+    lines.append(
+        "The schedule already exists: do not make another for the same work. "
+        "If its prompt says when to pause, change or stop it, use cron_pause, "
+        f"cron_update or cron_delete with id {run.get('id')}; no other schedule."
+    )
     return "\n".join(lines)

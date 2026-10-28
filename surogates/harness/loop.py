@@ -142,6 +142,7 @@ from surogates.keel.steps import (
     step_contract_of,
 )
 from surogates.harness.tool_schemas import (
+    CRON_OWN_SCHEDULE_TOOLS,
     CRON_WRITE_TOOLS,
     channel_tool_flags,
     describe_for_conversation,
@@ -3076,12 +3077,13 @@ class AgentHarness(
             has_kbs=getattr(self._prompt, "has_kbs", True),
             **channel_tool_flags(getattr(session, "channel", None)),
             # A chat with an owner of its own makes and changes its agent's
-            # schedules; anything someone owns, scheduled runs and helpers
-            # included, can read them.  Whether a tool is allowed at all is
-            # the policy's, by name, above.  No evaluation row: no one is
-            # behind it.
+            # schedules, and a scheduled run changes its own (the tools it
+            # may not call are taken off below); anything someone owns,
+            # helpers included, can read them.  Whether a tool is allowed at
+            # all is the policy's, by name, above.  No evaluation row: no
+            # one is behind it.
             makes_routines=(
-                session.parent_id is None
+                (session.parent_id is None or _is_scheduled_run(session))
                 and (session.user_id or session.service_account_id) is not None
                 and not is_eval_session(session)
             ),
@@ -5766,18 +5768,19 @@ class AgentHarness(
             tool_filter.discard("run_coding_agent")
 
         # Any session running as one iteration of a schedule (``/loop`` or
-        # cron_create-spawned) must not be able to make or change schedules.
+        # cron_create-spawned) must not make schedules or start runs.
         # Otherwise the LLM can spawn nested cron jobs from inside a wake —
         # observed in the wild on a ``/loop 1m`` run that called
         # ``cron_create`` to build a parallel cron for the same task.  It may
-        # read them: a run asked what it is on has to be able to look.
+        # read them, and pause, change or end its own schedule: the cron
+        # tools refuse any other.
         is_scheduled_child = bool(config.get("scheduled_session_id"))
         if is_scheduled_child:
             if tool_filter is None:
                 tool_filter = set(self._tools.tool_names)
             else:
                 tool_filter = set(tool_filter)
-            tool_filter.difference_update(CRON_WRITE_TOOLS)
+            tool_filter.difference_update(CRON_WRITE_TOOLS - CRON_OWN_SCHEDULE_TOOLS)
             if config.get("scheduled_dynamic_loop"):
                 if "loop_wait" in self._tools.tool_names:
                     tool_filter.add("loop_wait")

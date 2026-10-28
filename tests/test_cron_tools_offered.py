@@ -2,8 +2,8 @@
 
 A user's or a service account's own top-level chat makes and changes them,
 whatever ``/loop`` and ``ask_user_question`` are set to: only the policy,
-by tool name, takes one away.  Scheduled runs, threads and helpers of an
-owned session read them.  An anonymous visitor and an evaluation row get
+by tool name, takes one away.  Threads and helpers of an owned session
+read them; a scheduled run reads them and pauses, changes or ends its own.  An anonymous visitor and an evaluation row get
 none.
 """
 
@@ -88,16 +88,36 @@ async def test_a_session_no_one_owns_or_answers_gets_none(monkeypatch, session):
 
 
 @pytest.mark.parametrize("session", [
-    _session(parent=True, scheduled_session_id=str(uuid4())),
-    _session(scheduled_session_id=str(uuid4())),
     _session(parent=True, workstream_role="thread"),
     _session(parent=True),
-], ids=["a-scheduled-run", "a-detached-scheduled-run", "a-project-thread", "a-worker"])
+], ids=["a-project-thread", "a-worker"])
 @pytest.mark.asyncio
-async def test_runs_and_helpers_read_schedules_and_make_none(monkeypatch, session):
+async def test_helpers_read_schedules_and_make_none(monkeypatch, session):
     offered = await _offered(monkeypatch, session)
     assert READ_TOOLS <= offered
     assert not WRITE_TOOLS & offered
+
+
+OWN_SCHEDULE_TOOLS = {"cron_update", "cron_pause", "cron_delete"}
+
+
+@pytest.mark.parametrize("session", [
+    _session(parent=True, scheduled_session_id=str(uuid4())),
+    _session(scheduled_session_id=str(uuid4())),
+], ids=["a-scheduled-run", "a-detached-scheduled-run"])
+@pytest.mark.asyncio
+async def test_a_run_reads_schedules_and_may_change_only_its_own(monkeypatch, session):
+    offered = await _offered(monkeypatch, session)
+    assert READ_TOOLS | OWN_SCHEDULE_TOOLS <= offered
+    assert not {"cron_create", "cron_resume", "cron_run_now"} & offered
+
+
+@pytest.mark.asyncio
+async def test_the_policy_still_takes_a_runs_tools_away(monkeypatch):
+    run = _session(parent=True, scheduled_session_id=str(uuid4()))
+    offered = await _offered(monkeypatch, run, denied=frozenset({"cron_delete"}))
+    assert "cron_delete" not in offered
+    assert {"cron_pause", "cron_update"} <= offered
 
 
 @pytest.mark.asyncio

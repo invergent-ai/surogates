@@ -122,7 +122,8 @@ _CRON_UPDATE_SCHEMA = ToolSchema(
     description=(
         "Change a schedule's prompt, name, cadence or timezone. A new cadence "
         "is given as in cron_create (one of cron, interval, at, times). "
-        "Confirm with the user first, as for cron_create."
+        "Confirm with the user first, as for cron_create. A scheduled run may "
+        "change only its own schedule, without asking."
     ),
     parameters={
         "type": "object",
@@ -156,8 +157,15 @@ _CRON_RUN_NOW_SCHEMA = ToolSchema(
 
 _CRON_DELETE_SCHEMA = ToolSchema(
     name="cron_delete",
-    description="Cancel a schedule for good, when the user asks to stop it. A run still going is stopped.",
-    parameters={"type": "object", "properties": dict(_ID), "required": ["id"]},
+    description=(
+        "Cancel a schedule for good, when the user asks to stop it. A run still going is stopped. "
+        "A scheduled run ends its own schedule this way, with a reason, when its prompt says it is done."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {**_ID, "reason": {"type": "string", "description": "Why a run ends its own schedule."}},
+        "required": ["id"],
+    },
 )
 
 
@@ -179,6 +187,8 @@ async def _cron_create_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
     context = await _tool_context(kwargs)
     if isinstance(context, str):
         return context
+    if refusal := _not_in_a_run(context):
+        return refusal
 
     prompt = str(arguments.get("prompt") or "").strip()
     recurring = bool(arguments.get("recurring", True))
@@ -262,6 +272,8 @@ async def _cron_update_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
     schedule_id = _schedule_id(arguments)
     if isinstance(schedule_id, str):
         return schedule_id
+    if refusal := _not_its_own(context, schedule_id):
+        return refusal
     current = await context.store.get_for(
         schedule_id, org_id=context.org_id, agent_id=context.agent_id, **context.owner,
     )
@@ -276,7 +288,8 @@ async def _cron_update_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
     except (ScheduledPromptBlocked, ValueError) as exc:
         return _json({"success": False, "error": str(exc)})
 
-    refusal = await _confirmation_refusal(context, kwargs, would={
+    # A run has no one to ask: the schedule's own prompt said what it may do.
+    refusal = None if context.own_schedule else await _confirmation_refusal(context, kwargs, would={
         "id": str(schedule_id),
         **({"cadence": schedule.display, "timezone": schedule.timezone_name} if schedule else {}),
         **({"prompt": prompt} if prompt is not None else {}),
@@ -318,11 +331,25 @@ async def _transition(arguments: dict[str, Any], kwargs: dict[str, Any], action:
     schedule_id = _schedule_id(arguments)
     if isinstance(schedule_id, str):
         return schedule_id
-    extra = {"ended_by": f"session:{context.session_id}"} if action == "cancel" else {}
-    changed = await getattr(context.store, action)(
-        org_id=context.org_id, agent_id=context.agent_id, schedule_id=schedule_id,
-        **context.owner, **extra,
-    )
+    if context.own_schedule is not None:
+        if action in ("resume", "run_now"):
+            return _not_in_a_run(context)
+        if refusal := _not_its_own(context, schedule_id):
+            return refusal
+    if action == "cancel" and context.own_schedule is not None:
+        # Its run ending it is done, not cancelled: a cancel stops the
+        # schedule's runs still going, this one among them.
+        changed = await context.store.mark_loop_completed(
+            schedule_id=schedule_id, org_id=context.org_id, agent_id=context.agent_id,
+            session_id=context.session_id, reason=str(arguments.get("reason") or "Ended by its run."),
+            **context.owner,
+        )
+    else:
+        extra = {"ended_by": f"session:{context.session_id}"} if action == "cancel" else {}
+        changed = await getattr(context.store, action)(
+            org_id=context.org_id, agent_id=context.agent_id, schedule_id=schedule_id,
+            **context.owner, **extra,
+        )
     row = await context.store.get_for(
         schedule_id, org_id=context.org_id, agent_id=context.agent_id, **context.owner,
     )
@@ -340,8 +367,10 @@ async def _transition(arguments: dict[str, Any], kwargs: dict[str, Any], action:
 class _Context:
     def __init__(
         self, *, org_id: Any, principal: Any, agent_id: str, session_id: UUID,
-        session_store: Any, store: Any,
+        session_store: Any, store: Any, own_schedule: UUID | None = None,
     ) -> None:
+        #: Set in a scheduled run: the one schedule it may change.
+        self.own_schedule = own_schedule
         self.org_id = org_id
         self.principal = principal
         self.agent_id = agent_id
@@ -380,7 +409,32 @@ async def _tool_context(kwargs: dict[str, Any]) -> _Context | str:
     return _Context(
         org_id=tenant.org_id, principal=principal, agent_id=agent_id,
         session_id=session_id, session_store=session_store, store=store,
+        own_schedule=_uuid_or_none((kwargs.get("session_config") or {}).get("scheduled_session_id")),
     )
+
+
+def _not_in_a_run(context: _Context) -> str | None:
+    if context.own_schedule is None:
+        return None
+    return _json({
+        "success": False,
+        "error": (
+            "A scheduled run cannot make schedules or start runs. It can pause, "
+            f"change or end its own schedule ({context.own_schedule})."
+        ),
+    })
+
+
+def _not_its_own(context: _Context, schedule_id: UUID) -> str | None:
+    if context.own_schedule is None or schedule_id == context.own_schedule:
+        return None
+    return _json({
+        "success": False,
+        "error": (
+            f"A scheduled run can change only its own schedule ({context.own_schedule}), "
+            f"not {schedule_id}."
+        ),
+    })
 
 
 def _cadence(arguments: dict[str, Any], *, default_timezone: str = "UTC") -> ParsedSchedule | None:
