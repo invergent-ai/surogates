@@ -556,7 +556,7 @@ PHONE_HTML = r"""<!doctype html><meta charset=utf-8><meta name=viewport content=
 <title>Fake WhatsApp</title>
 <style>
 :root{--page:#05090b;--chat:#0b141a;--hd:#1f2c34;--hdt:#e9edef;--bin:#1f2c34;--mine:#005c4b;--tx:#e9edef;--mut:#8696a0;--acc:#00a884;--link:#53bdeb;--line:#2a3942;--field:#1f2c34;--sheet:#121b22;--sysb:#182229;--syst:#ffd279;--dateb:#182229;--datet:#8696a0;--quote:#0000002e;--shadow:0 1px .5px #0b141a40}
-:root[data-theme=light]{--page:#d1d7db;--chat:#efeae2;--hd:#fff;--hdt:#111b21;--bin:#fff;--mine:#d9fdd3;--tx:#111b21;--mut:#667781;--acc:#1daa61;--link:#027eb5;--line:#e9edef;--field:#fff;--sheet:#fff;--sysb:#ffeecd;--syst:#54656f;--dateb:#fff;--datet:#54656f;--quote:#0000000d;--shadow:0 1px .5px #0b141a21}
+:root[data-theme=light]{--page:#d1d7db;--chat:#f4f4f5;--hd:#fff;--hdt:#111b21;--bin:#fff;--mine:#d9fdd3;--tx:#111b21;--mut:#667781;--acc:#1daa61;--link:#027eb5;--line:#e9edef;--field:#fff;--sheet:#fff;--sysb:#e4e7eb;--syst:#54656f;--dateb:#fff;--datet:#54656f;--quote:#0000000d;--shadow:0 1px .5px #0b141a21}
 *{box-sizing:border-box}
 body{margin:0;background:var(--page);color:var(--tx);font:14.2px/19px -apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
 .ic{fill:currentColor;flex:none;display:block}
