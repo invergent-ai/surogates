@@ -19,6 +19,7 @@ from surogates.scheduled.schedule import (
     ParsedSchedule,
     schedule_from_cadence,
     schedule_from_fields,
+    row_kind,
     schedule_from_row,
     upcoming_runs,
 )
@@ -169,18 +170,20 @@ def _scheduled_store(request: Request) -> ScheduledSessionStore:
     return ScheduledSessionStore(session_factory)
 
 
-def _visible_to(tenant: TenantContext) -> dict[str, Any]:
+def _visible_to(request: Request, tenant: TenantContext) -> dict[str, Any]:
     """The caller, for a read: its principal, and a Keel case's schedules
-    hidden from all but that case session's own token."""
+    hidden from all but that case session's own token.  ``?owner=me`` on
+    any route narrows a project-wide account to the schedules it owns."""
     return {**_principal(tenant), "hide_cases": True,
-            "case_session_id": getattr(tenant, "session_scope_id", None)}
+            "case_session_id": getattr(tenant, "session_scope_id", None),
+            "own_only": request.query_params.get("owner") == "me"}
 
 
 async def _visible(
     request: Request, tenant: TenantContext, agent_id: str, schedule_id: UUID,
 ) -> ScheduledSession:
     row = await _scheduled_store(request).get_for(
-        schedule_id, org_id=tenant.org_id, agent_id=agent_id, **_visible_to(tenant),
+        schedule_id, org_id=tenant.org_id, agent_id=agent_id, **_visible_to(request, tenant),
     )
     if row is None:
         raise _not_found(schedule_id)
@@ -283,7 +286,7 @@ def _item(row: ScheduledSession, login: RunsLoggedInAs | None) -> ScheduledWorkI
         fires = []
     return ScheduledWorkItem(
         **row.model_dump(include=set(ScheduledWorkItem.model_fields) - {"kind"}),
-        kind=row.kind or schedule_from_row(row).kind,
+        kind=row_kind(row),
         display=row.schedule_display,
         next_fires=fires,
         owner_user_id=row.user_id,
@@ -348,10 +351,11 @@ async def list_scheduled_work(
     offset: int = Query(0, ge=0),
     # A project's routines: the schedules its master session made.
     created_from_session_id: UUID | None = Query(None),
+    owner: Literal["me"] | None = Query(None, description="me: only the caller's own."),
 ) -> ScheduledWorkListResponse:
     rows = await _scheduled_store(request).list_for_user(
         org_id=tenant.org_id,
-        **_visible_to(tenant),
+        **_visible_to(request, tenant),
         agent_id=agent_runtime.agent_id,
         status="active,paused" if status_filter == "live" else status_filter,
         limit=limit,
@@ -589,12 +593,17 @@ async def cancel_scheduled_work(
     principal = _principal(tenant)
     if ended_by is not None and not await _is_operator(request, tenant):
         ended_by = None
-    if await store.cancel(
+    if not await store.cancel(
         org_id=tenant.org_id, agent_id=agent_runtime.agent_id, schedule_id=schedule_id,
         ended_by=ended_by or _who(tenant), **principal,
     ):
-        await stop_runs_of_cancelled(
-            store, request.app.state.session_store, getattr(request.app.state, "redis", None),
-            schedule_id=schedule_id,
+        current = await _visible(request, tenant, agent_runtime.agent_id, schedule_id)
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Scheduled work {schedule_id} is {current.status}; it cannot cancel.",
         )
+    await stop_runs_of_cancelled(
+        store, request.app.state.session_store, getattr(request.app.state, "redis", None),
+        schedule_id=schedule_id,
+    )
     return Response(status_code=status.HTTP_204_NO_CONTENT)

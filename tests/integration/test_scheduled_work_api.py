@@ -187,6 +187,41 @@ async def test_run_now_and_cancel_scheduled_work_are_user_scoped(
     )
     assert cancelled.next_run_at is None
 
+    again = await client.delete(
+        f"/v1/scheduled-work/{schedule.id}", headers={"Authorization": f"Bearer {token}"},
+    )
+    assert again.status_code == 409
+    assert "cancelled" in again.json()["detail"]
+    assert (await client.delete(
+        f"/v1/scheduled-work/{uuid.uuid4()}", headers={"Authorization": f"Bearer {token}"},
+    )).status_code == 404
+
+
+async def test_owner_me_narrows_an_ops_chat_account_to_its_own(client: AsyncClient, session_factory):
+    org_id, user_id, _ = await _tenant(session_factory)
+    sa_id, auth = await _ops_chat(session_factory, org_id)
+    store = ScheduledSessionStore(session_factory)
+    mine = await store.create_loop(
+        org_id=org_id, service_account_id=sa_id, agent_id=_AGENT_ID, prompt="mine",
+        schedule=parse_schedule("10m"), created_from_session_id=None,
+    )
+    theirs = await store.create_loop(
+        org_id=org_id, user_id=user_id, agent_id=_AGENT_ID, prompt="theirs",
+        schedule=parse_schedule("10m"), created_from_session_id=None,
+    )
+
+    every = {i["id"] for i in (await client.get("/v1/scheduled-work", headers=auth)).json()["items"]}
+    assert {str(mine.id), str(theirs.id)} <= every
+    own = {i["id"] for i in (await client.get("/v1/scheduled-work?owner=me", headers=auth)).json()["items"]}
+    assert own == {str(mine.id)}
+
+    other = f"/v1/scheduled-work/{theirs.id}?owner=me"
+    assert (await client.get(other, headers=auth)).status_code == 404
+    assert (await client.post(f"/v1/scheduled-work/{theirs.id}/pause?owner=me", headers=auth)).status_code == 404
+    assert (await client.delete(other, headers=auth)).status_code == 404
+    assert (await store.get(theirs.id)).status == "active"
+    assert (await client.post(f"/v1/scheduled-work/{mine.id}/pause?owner=me", headers=auth)).status_code == 200
+
 
 async def test_scheduled_work_can_be_read_changed_paused_and_resumed(
     client: AsyncClient, session_factory

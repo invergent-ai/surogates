@@ -246,6 +246,33 @@ async def test_dynamic_loop_lifecycle_waits_for_loop_wait(session_factory):
     assert updated.schedule["last_delay_reason"] == "CI is still running"
 
 
+async def test_a_dynamic_loop_written_without_kind_is_still_a_dynamic_loop(session_factory):
+    """An older runtime writes no ``kind`` during a rolling deploy."""
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    store = ScheduledSessionStore(session_factory)
+    created = await store.create_loop(
+        org_id=org_id, user_id=user_id, agent_id="agent-legacy-kind", prompt="check CI",
+        schedule=parse_dynamic_loop_schedule(), created_from_session_id=None,
+    )
+    claimed = (await store.claim_due(agent_id="agent-legacy-kind", worker_id="w1", limit=1))[0]
+    await store.mark_run_created(claimed, session_id=created.id)
+    async with session_factory() as db:
+        await db.execute(
+            text("UPDATE scheduled_sessions SET kind = NULL WHERE id = :id"), {"id": created.id},
+        )
+        await db.commit()
+
+    await store.plan_unscheduled()
+    assert (await store.get(created.id)).next_run_at is None
+
+    assert await store.mark_dynamic_run_finished(
+        schedule_id=created.id, org_id=org_id, user_id=user_id, agent_id="agent-legacy-kind",
+        session_id=created.id, delay_seconds=120, reason="CI is still running",
+    )
+    assert (await store.get(created.id)).next_run_at is not None
+
+
 async def _create_due_loop(store, *, org_id, user_id, agent_id="agent-a"):
     """Build a fixed-cron ``/loop`` row with ``next_run_at`` in the past.
 
@@ -923,6 +950,27 @@ async def test_pause_update_resume_round_trip(session_factory):
     assert (resumed.status, resumed.paused_at) == ("active", None)
     assert resumed.next_run_at > datetime.now(timezone.utc) + timedelta(minutes=110)
     assert not await store.resume(**scope, schedule_id=created.id)
+
+
+async def test_an_interval_keeps_its_anchor_unless_its_length_changes(session_factory):
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    store = ScheduledSessionStore(session_factory)
+    scope = dict(org_id=org_id, user_id=user_id, agent_id=_agent())
+    created = await store.create(
+        **scope, name="Job", prompt="Do it", schedule=parse_schedule("10m"),
+        source="tool", created_from_session_id=None,
+    )
+    anchor = created.cadence["anchor"]
+
+    same = await store.update(
+        **scope, schedule_id=created.id, schedule=parse_schedule("10m", timezone_name="Europe/Bucharest"),
+    )
+    assert (same.cadence["anchor"], same.timezone, same.next_run_at) == (
+        anchor, "Europe/Bucharest", created.next_run_at,
+    )
+    longer = await store.update(**scope, schedule_id=created.id, schedule=parse_schedule("20m"))
+    assert longer.cadence["anchor"] != anchor
 
 
 async def test_update_cannot_turn_a_dynamic_loop_into_a_fixed_one(session_factory):
