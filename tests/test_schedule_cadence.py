@@ -172,3 +172,14 @@ def test_a_malformed_row_is_a_value_error(cadence):
         schedule_from_row(row)
     with pytest.raises(ValueError):
         schedule_from_row(SimpleNamespace(kind="once", cadence={}, timezone="UTC", schedule={}))
+
+
+@pytest.mark.parametrize("text, prompt, zone", [
+    ("Schedule: 0 8 * * *\nTimezone: Europe/Bucharest\nPrompt: Scan X mentions.", "Scan X mentions.", "Europe/Bucharest"),
+    ("Schedule: every weekday at 9:00\nTimezone: Europe/Bucharest\nPrompt: check the inbox", "check the inbox",
+     "Europe/Bucharest"),
+    ("Schedule 2: daily at 9\nName: Digest\nPrompt: send it", "send it", "UTC"),
+])
+def test_a_labelled_block_keeps_only_the_prompt(text, prompt, zone):
+    command = parse_loop_command(text)
+    assert (command.verb, command.prompt, command.schedule.timezone_name) == ("create", prompt, zone)

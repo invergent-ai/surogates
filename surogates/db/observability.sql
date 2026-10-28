@@ -660,6 +660,18 @@ CREATE INDEX IF NOT EXISTS idx_scheduled_sessions_unplanned
     ON scheduled_sessions (updated_at)
     WHERE status = 'active' AND next_run_at IS NULL;
 
+-- Ended schedules are kept, so the per-tick sweeps over recent endings and
+-- over open scheduled runs must not scan all of history.
+CREATE INDEX IF NOT EXISTS idx_scheduled_sessions_cancelled
+    ON scheduled_sessions (updated_at)
+    WHERE status = 'cancelled';
+CREATE INDEX IF NOT EXISTS idx_scheduled_sessions_unannounced
+    ON scheduled_sessions (updated_at)
+    WHERE ended_announced_at IS NULL AND status IN ('completed', 'failed');
+CREATE INDEX IF NOT EXISTS idx_sessions_open_scheduled
+    ON sessions (created_at)
+    WHERE channel = 'scheduled' AND status IN ('active', 'paused');
+
 
 -- ----------------------------------------------------------------------------
 -- v_session_tree -- recursive ancestry of sessions via parent_id.

@@ -24,6 +24,8 @@ import json
 import posixpath
 import re
 
+from surogates.harness.tool_schemas import CRON_WRITE_TOOLS
+
 #: Extensions worth holding the model to. These are deliverable formats --
 #: things a person asks to receive. Source-code extensions are excluded on
 #: purpose: "fix the bug in parser.py" names an input, not an output, and
@@ -195,6 +197,8 @@ _SCHEDULE_CLAIM_RE = re.compile(
 SCHEDULE_TOOLS = frozenset({
     "cron_create", "cron_update", "cron_resume", "cron_run_now", "cron_list", "cron_get",
 })
+#: Every tool that makes, changes or reads a schedule.
+CRON_TOOLS = SCHEDULE_TOOLS | CRON_WRITE_TOOLS
 
 
 def unbacked_schedule_claim(final_text: str, messages: list[dict]) -> bool:
@@ -206,10 +210,6 @@ def unbacked_schedule_claim(final_text: str, messages: list[dict]) -> bool:
         return False
     turn = _current_turn(messages)
     return not (_called_successfully(turn, SCHEDULE_TOOLS) or _refused(turn, CRON_TOOLS))
-
-
-#: Every tool that makes, changes or reads a schedule.
-CRON_TOOLS = SCHEDULE_TOOLS | {"cron_pause", "cron_delete"}
 
 
 def _refused(turn: list[dict], names: frozenset[str]) -> bool:

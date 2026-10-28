@@ -66,4 +66,9 @@ def inherit_context(
     if captured:
         return {field: captured[field] for field in SCHEDULE_FIELDS if field in captured}
     source = capture_schedule_context(parent_config, parent_channel)
-    return {field: source[field] for field in CONTEXT_FIELDS if field in source}
+    inherited = {field: source[field] for field in CONTEXT_FIELDS if field in source}
+    # Logins are granted per channel, and no grant names a helper's own.
+    login_channel = (parent_config or {}).get("login_channel") or parent_channel
+    if login_channel:
+        inherited["login_channel"] = login_channel
+    return inherited

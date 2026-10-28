@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
+from surogates.channels.constants import STUDIO_CHANNEL
 from surogates.scheduled.prompt_guard import (
     ScheduledPromptBlocked,
     validate_scheduled_prompt,
@@ -18,10 +19,10 @@ from surogates.scheduled.schedule import (
 from surogates.scheduled.store import ScheduledSessionStore
 from surogates.session.events import EventType
 from surogates.session.execution_context import capture_schedule_context
+from surogates.session.interactive_input import match_choice_label
 from surogates.tools.registry import ToolRegistry, ToolSchema
 
 #: The channel of an operator's own chat with their agent.
-_OPERATOR_CHANNEL = "studio"
 
 _CADENCE_PROPERTIES: dict[str, Any] = {
     "cron": {
@@ -480,7 +481,7 @@ async def _confirmation_refusal(
             ),
             "would": would,
         })
-    if kwargs.get("channel") == _OPERATOR_CHANNEL:
+    if kwargs.get("channel") == STUDIO_CHANNEL:
         return None
     return _json({
         "success": False,
@@ -510,23 +511,26 @@ async def _approved(session_store: Any, session_id: UUID, would: dict[str, Any])
     responses = (answer.data or {}).get("responses") or []
     if not responses or responses[0].get("is_other"):
         return False
-    calls = await session_store.get_events(session_id, types=[EventType.TOOL_CALL])
+    turn = await session_store.get_events(
+        session_id, after=turn_start, types=[EventType.TOOL_CALL, EventType.TOOL_RESULT],
+    )
     question = next((
-        call for call in reversed(calls)
-        if (call.data or {}).get("tool_call_id") == (answer.data or {}).get("tool_call_id")
+        call for call in reversed(turn)
+        if call.type == EventType.TOOL_CALL.value
+        and (call.data or {}).get("tool_call_id") == (answer.data or {}).get("tool_call_id")
     ), None)
     if question is None or not _picked_first(question.data or {}, responses[0]):
         return False
 
     preview: dict[str, Any] | None = None
-    for result in await session_store.get_events(session_id, types=[EventType.TOOL_RESULT]):
+    for result in turn:
         data = result.data or {}
-        if data.get("name") not in ("cron_create", "cron_update"):
+        if result.type != EventType.TOOL_RESULT.value or data.get("name") not in ("cron_create", "cron_update"):
             continue
         payload = _payload(data.get("content"))
         if payload.get("success") is True and result.id > answer.id:
             return False
-        if turn_start < result.id < question.id and isinstance(payload.get("would"), dict):
+        if result.id < question.id and isinstance(payload.get("would"), dict):
             preview = payload["would"]
     return preview is not None and _without_drift(preview) == _without_drift(_payload(_json(would)))
 
@@ -539,7 +543,8 @@ def _picked_first(question_call: dict[str, Any], response: dict[str, Any]) -> bo
     choices = (questions[0].get("choices") or []) if questions else []
     if not choices:
         return False
-    return str(response.get("answer") or "").strip() == str(choices[0].get("label") or "").strip()
+    picked = match_choice_label(str(response.get("answer") or ""), choices)
+    return picked is not None and picked == (choices[0].get("label") or "").strip()
 
 
 def _payload(content: Any) -> dict[str, Any]:

@@ -99,6 +99,19 @@ async def test_an_unbound_session_uses_the_agent_profile_granted_to_its_channel(
     )
 
 
+async def test_a_helper_browses_with_the_login_granted_to_its_parents_channel():
+    from surogates.session.execution_context import inherit_context
+
+    pid = uuid4()
+    store = _Store({(pid, AGENT_SA): STATE}, granted={(AGENT_SA, "slack"): pid})
+    helper = {**_config(), **inherit_context(_config(), "slack")}
+    its_helper = {**_config(), **inherit_context(helper, "delegation")}
+    for config in (helper, its_helper):
+        assert await _saved_login(
+            store, tenant=_tenant(AGENT_SA), session_config=config, channel="delegation",
+        ) == (str(pid), STATE, None)
+
+
 async def test_a_bound_profile_without_a_store_is_reported():
     pid = uuid4()
     _, state, problem = await _saved_login(None, tenant=_tenant(), session_config=_config(pid), channel="studio")

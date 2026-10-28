@@ -65,7 +65,11 @@ _CADENCE_PATTERNS = (
 )
 #: A leading 5-field cron (`*/30 * * * *`); validated with croniter.
 _LEADING_CRON_RE = re.compile(r"^(?P<cron>(?:[\d*/,\-A-Za-z?]+\s+){4}[\d*/,\-A-Za-z?]+)(?=\s|$)")
-_SCHEDULE_LABEL_RE = re.compile(r"^(?:schedule|cadence)\s*:\s*", re.I)
+_SCHEDULE_LABEL_RE = re.compile(r"^(?:schedule|cadence)(?:\s*\d+)?\s*:\s*", re.I)
+#: The other lines of a labelled block: a name is not the prompt, and a
+#: prompt's label is not part of it.
+_NAME_LINE_RE = re.compile(r"^\s*(?:name|title)\s*:.*$", re.I | re.M)
+_PROMPT_LABEL_RE = re.compile(r"^\s*(?:prompt|task|instructions?)\s*:\s*", re.I | re.M)
 _SEPARATOR_RE = re.compile(r"^\s*(?:[:,\-–]\s*)?")
 _TRAILING_ANCHOR_RE = re.compile(r"\s(?=(?:every|each|daily|hourly|at)\b)", re.I)
 #: Words that say the text asks for a cadence, read or not.
@@ -207,7 +211,10 @@ def parse_loop_command(raw: str, *, default_timezone: str = "UTC") -> LoopComman
     elif verb is not None and len(rest.split()) <= 1:
         return LoopCommand(verb=verb, target=rest or None)
 
+    labelled = _SCHEDULE_LABEL_RE.match(text) is not None
     schedule, prompt = _leading_cadence(_SCHEDULE_LABEL_RE.sub("", text, count=1), default_timezone)
+    if schedule is not None and labelled:
+        prompt = _PROMPT_LABEL_RE.sub("", _NAME_LINE_RE.sub("", prompt)).strip()
     if schedule is None:
         schedule, prompt = _trailing_cadence(text, default_timezone)
     if schedule is not None:
@@ -248,6 +255,9 @@ def parse_schedule(value: str, *, timezone_name: str = "UTC") -> ParsedSchedule:
     return ParsedSchedule(kind="cron", cron=text, display=humanize_cron(text), timezone_name=timezone_name)
 
 
+_WORD_SECONDS = {"hourly": 3600, "daily": 86400}
+
+
 def parse_interval(text: str) -> int | None:
     """Seconds in ``10m`` / ``25h`` / ``every 2 hours`` / ``hourly``; None when it is not one."""
     match = re.fullmatch(rf"(?:every\s+)?(?P<num>\d+)\s*{_UNIT}", text.strip(), re.I)
@@ -256,10 +266,7 @@ def parse_interval(text: str) -> int | None:
     match = re.fullmatch(rf"every\s+{_UNIT}", text.strip(), re.I)
     if match:
         return _seconds(1, match.group("unit"))
-    word = text.strip().lower()
-    if word in {"hourly", "daily"}:
-        return 3600 if word == "hourly" else 86400
-    return None
+    return _WORD_SECONDS.get(text.strip().lower())
 
 
 def interval_schedule(
@@ -350,8 +357,6 @@ def schedule_from_row(row) -> ParsedSchedule:
     """
     try:
         return _schedule_from_row(row)
-    except ValueError:
-        raise
     except (KeyError, TypeError, AttributeError) as exc:
         raise ValueError(f"Malformed schedule cadence: {exc}") from exc
 
@@ -473,7 +478,7 @@ def _from_match(kind: str, match: re.Match, default_tz: str) -> ParsedSchedule |
     if kind == "interval":
         word = (groups.get("word") or "").lower()
         if word:
-            seconds = 3600 if word == "hourly" else 86400
+            seconds = _WORD_SECONDS[word]
         else:
             seconds = _seconds(int(groups.get("num") or 1), groups["unit"])
         return interval_schedule(seconds, timezone_name=tz)

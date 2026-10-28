@@ -24,6 +24,7 @@ from typing import Any
 import httpx
 
 from surogates.harness.message_utils import message_to_dict
+from surogates.tools.builtin.vision import _download_image, _extract_response_content
 
 logger = logging.getLogger(__name__)
 
@@ -206,13 +207,8 @@ async def _via_chat(
     if not url:
         raise ImageRequestError("The image model returned no image")
     data = await _image_bytes(url)
-    message = _first_message(response)
-    text = ""
-    if message is not None:
-        content_text = getattr(message, "content", None)
-        text = content_text.strip() if isinstance(content_text, str) else ""
     return inspect(
-        data, text=text, model=str(getattr(response, "model", "") or model),
+        data, text=_extract_response_content(response), model=str(getattr(response, "model", "") or model),
         cost_cents=_reported_cents(response),
     )
 
@@ -344,16 +340,9 @@ async def _image_bytes(url: str) -> bytes:
     if not url.startswith("https://"):
         raise ImageRequestError("The image model returned an image link that cannot be fetched")
     try:
-        async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as http:
-            async with http.stream("GET", url) as response:
-                response.raise_for_status()
-                chunks, total = [], 0
-                async for chunk in response.aiter_bytes():
-                    total += len(chunk)
-                    if total > _MAX_DOWNLOAD_BYTES:
-                        raise ImageRequestError("The generated image is too large to download")
-                    chunks.append(chunk)
-                return b"".join(chunks)
+        return await _download_image(url, max_bytes=_MAX_DOWNLOAD_BYTES)
+    except ValueError as exc:
+        raise ImageRequestError(f"The generated image could not be downloaded: {exc}") from exc
     except httpx.HTTPError as exc:
         raise ImageRequestError("The generated image could not be downloaded; try again") from exc
 
