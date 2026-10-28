@@ -1129,6 +1129,51 @@ async def test_a_session_that_is_not_a_case_step_is_unknown(link, link_app, org,
     assert (await session_store.get_session(item.id)).status == item.status
 
 
+async def test_the_step_routes_never_serve_a_rerun(link, link_app, org, session_store):
+    rerun_case = uuid.uuid4()
+    rerun = await create_agent_session(
+        store=session_store,
+        storage=link_app.state.storage,
+        settings=link_app.state.settings,
+        org_id=org,
+        user_id=None,
+        agent_id=AGENT,
+        channel=API_CHANNEL,
+        config={"memory_boundary": f"case:{rerun_case}", "workspace_boundary": f"case:{rerun_case}"},
+        idempotency_key="keel:r:1:0",
+        case_step=contract_of(case_id=str(rerun_case)),
+        case_rerun={"kind": "rerun", "memory_prefix": "p"},
+    )
+    # The mention tests import this module too.
+    from .test_keel_mentions import mention
+
+    answers = [
+        await send(link, rerun.id),
+        await mention(link, rerun.id),
+        await cancel(link, rerun.id),
+        await status_of(link, rerun.id),
+        await page_of(link, rerun.id),
+        await stream_refused(link, rerun.id),
+        await progress_of(link, rerun.id),
+    ]
+
+    assert [(a.status_code, code_of(a)) for a in answers] == [(404, "unknown-session")] * 7
+    kept = await session_store.get_session(rerun.id)
+    assert kept.status == "active"
+    assert kept.config["case_step"]["inputs"] == contract_of()["inputs"]
+    assert await timeline(session_store, rerun.id) == []
+
+    # A step's create naming a rerun's key and id is another step's: even for the rerun's own case, node and
+    # agent, which would otherwise be the step it found.  So is one naming only its id.
+    by_key = await post(link, body(org, "keel:r:1:0", session_id=rerun.id, case_id=str(rerun_case)))
+    by_id = await post(link, body(org, "keel:c:9:0", session_id=rerun.id, case_id=str(rerun_case)))
+
+    for refused in (by_key, by_id):
+        assert refused.status_code == 409, refused.text
+        assert code_of(refused) == "key-in-use"
+    assert (await session_store.get_session(rerun.id)).config["case_rerun"] == {"kind": "rerun", "memory_prefix": "p"}
+
+
 async def test_every_step_session_route_needs_the_link_key(link, org, session_store, redis_client):
     step = await completed_step(link, org, session_store, redis_client)
     # The mention tests import this module too.

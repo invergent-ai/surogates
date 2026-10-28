@@ -36,6 +36,7 @@ from surogates.channels.memory_boundary import (
     CASE_BOUNDARY_PREFIX,
     is_case_config,
     is_case_session,
+    rerun_kind_of,
 )
 from surogates.runtime.governance import (
     BOARD_SELF_TOOLS,
@@ -71,6 +72,7 @@ __all__ = [
     "OutcomeContract",
     "PERSON_MARKER",
     "REPORTED_KEY",
+    "RERUN_REFUSED",
     "REVISION_MARKER",
     "STEP_ENDED",
     "STEP_STOPPED",
@@ -85,6 +87,7 @@ __all__ = [
     "is_case_work",
     "is_keel_message",
     "is_keels_word",
+    "is_rerun",
     "render_kickoff",
     "render_message",
     "rests_on_its_report",
@@ -185,6 +188,12 @@ CASE_AGENT_REFUSED: frozenset[str] = frozenset({
     "skills_list", "skill_view", "skill_step", "terminal", "process", "write_file", "patch",
     "office_read", "office_edit", "delegate_task", "spawn_worker", "send_worker_message", "stop_worker",
 })
+#: What a rerun and its helpers are never offered of the tools a case allows: a
+#: rerun runs on a copy of the case's past, so it may not run a command or
+#: drive a browser, which reach live systems and cannot be undone.
+RERUN_REFUSED: frozenset[str] = frozenset(
+    {"terminal", "process"} | {name for name in CASE_ALLOWED_TOOLS if name.startswith("browser_")},
+)
 #: What a case keeps when its scope names the work tools it may use: reading,
 #: memory, knowledge, skills and its todo list are how it works, not work it does.
 ALWAYS_KEPT: frozenset[str] = frozenset({
@@ -343,6 +352,12 @@ def is_case_step(session: object) -> bool:
     return getattr(session, "parent_id", None) is None and step_contract_of(session) is not None
 
 
+def is_rerun(session: object) -> bool:
+    """True for a rerun's own session: a step's (:func:`is_case_step`) that the Keel link marked as a rerun or a
+    trial.  A helper it started works for the rerun, but is not it."""
+    return is_case_step(session) and rerun_kind_of(session) is not None
+
+
 def is_case_work(session: object) -> bool:
     """True for a case's own work session: a step's (:func:`is_case_step`) or a
     work item's (:func:`~surogates.keel.items.is_case_item`)."""
@@ -367,8 +382,10 @@ def gate_case_tools(tools: set[str], session: object) -> set[str]:
     session of a case keeps them.  A person's case agent keeps the allowed
     tools less :data:`CASE_AGENT_REFUSED`, and gets
     :data:`KEEL_CASE_TOOLS`, which no other session gets, and no step or
-    item tool.  Nothing else is ever added, so a tool an earlier gate
-    dropped stays dropped.
+    item tool.  A rerun's session and its helpers' lose
+    :data:`RERUN_REFUSED`, the terminal and the browser, before the step and
+    office tools are added.  Nothing else is ever added, so a tool an
+    earlier gate dropped stays dropped.
     """
     # Here, not at the top: each imports this module, the office guard through its own imports.
     from surogates.keel.case_agents import is_case_agent
@@ -386,6 +403,8 @@ def gate_case_tools(tools: set[str], session: object) -> set[str]:
     if scope is not None and scope.tools is not None:
         named = set(scope.tools)
         kept = {name for name in kept if name in named or name in ALWAYS_KEPT or platform(name)}
+    if rerun_kind_of(session) is not None:
+        kept -= RERUN_REFUSED
     if is_case_agent(session):
         return (kept - CASE_AGENT_REFUSED) | KEEL_CASE_TOOLS
     if is_case_step(session):

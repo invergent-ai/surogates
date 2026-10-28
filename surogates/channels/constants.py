@@ -23,8 +23,10 @@ __all__ = [
     "INBOX_NOTIFY_CHANNELS",
     "INTERACTIVE_PROMPT_CHANNELS",
     "OUTBOUND_DM_CHANNELS",
+    "RERUN_PRIORITY",
     "SERVICE_ACCOUNT_CHANNELS",
     "STUDIO_CHANNEL",
+    "TRIAL_PRIORITY",
     "WEBSITE_CHANNEL",
     "multi_session_disabled",
     "outbound_dm",
@@ -85,18 +87,30 @@ def queue_priority(channel: str | None) -> float:
 #: child's: behind interactive work, which is queued at 0.  A case waits; a
 #: person does not.
 CASE_STEP_PRIORITY = 1.0
+#: A rerun's wakes and its helpers': behind every case's own work.  Nobody
+#: waits on a rerun.
+RERUN_PRIORITY = 2.0
+#: A trial's: ahead of case work, at interactive work's score, because a
+#: builder waits on it.
+TRIAL_PRIORITY = 0.0
 
 
 def session_queue_priority(session: object) -> float:
     """The work-queue score of one of *session*'s wakes.
 
-    A case's sessions wait behind interactive work, except a person's case
-    agent: a person waits on it, so the channel decides, as for any other
-    session (:func:`queue_priority`).  A row read without its channel or
-    config scores as ordinary work.
+    A rerun's sessions, its helpers' included, are scored by its kind first:
+    :data:`RERUN_PRIORITY` for a rerun, :data:`TRIAL_PRIORITY` for a trial.
+    Any other case session waits behind interactive work, except a person's
+    case agent: a person waits on it, so the channel decides, as for any
+    other session (:func:`queue_priority`).  A row read without its channel
+    or config scores as ordinary work.
     """
     # Imported here: memory_boundary imports this module's channel names.
-    from surogates.channels.memory_boundary import is_case_agent_session, is_case_session
+    from surogates.channels.memory_boundary import is_case_agent_session, is_case_session, rerun_kind_of
+
+    kind = rerun_kind_of(session)
+    if kind is not None:
+        return RERUN_PRIORITY if kind == "rerun" else TRIAL_PRIORITY
 
     if is_case_session(session) and not is_case_agent_session(session):
         return CASE_STEP_PRIORITY

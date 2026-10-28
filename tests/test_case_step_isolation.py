@@ -17,7 +17,14 @@ import pytest
 from fastapi import Response
 
 from surogates.api.routes import sessions as sessions_route
-from surogates.channels.memory_boundary import CASE_AGENT_KEY, is_case_agent_session, session_memory_boundary
+from surogates.channels.constants import session_queue_priority
+from surogates.channels.memory_boundary import (
+    CASE_AGENT_KEY,
+    CASE_RERUN_KEY,
+    is_case_agent_session,
+    rerun_kind_of,
+    session_memory_boundary,
+)
 from surogates.config import Settings
 from surogates.keel.items import is_case_item
 from surogates.keel.steps import (
@@ -28,6 +35,7 @@ from surogates.keel.steps import (
     case_scope_of,
     is_case_session,
     is_case_step,
+    is_rerun,
     step_contract_of,
 )
 from surogates.runtime.memory_protocol import memory_object_key
@@ -80,8 +88,8 @@ class _SessionStore(_RecordingStore):
         return Session(id=session_id, status="active", created_at=now, updated_at=now, **kwargs)
 
 
-async def _step_session(store, request, case: str):
-    """A step's root session, made as the Keel link makes one."""
+async def _step_session(store, request, case: str, *, case_rerun: dict | None = None):
+    """A step's root session, made as the Keel link makes one; a rerun's when *case_rerun* is given."""
     return await create_agent_session(
         store=store,
         storage=request.app.state.storage,
@@ -94,6 +102,7 @@ async def _step_session(store, request, case: str):
         service_account_id=uuid4(),
         case_step=CONTRACT,
         case_scope=SCOPE,
+        case_rerun=case_rerun,
     )
 
 
@@ -116,14 +125,17 @@ async def test_a_client_cannot_make_a_case_session(route):
         CASE_ITEM_KEY: ITEM_CONTRACT,
         CASE_AGENT_KEY: CASE_AGENT,
         CASE_SCOPE_KEY: {"tools": None, "knowledge": ["kb-of-another-project"]},
+        CASE_RERUN_KEY: {"kind": "rerun"},
         "memory_boundary": "case:x",
         "workspace_boundary": "case:x",
     })
 
     kept = {
-        CASE_STEP_KEY, CASE_ITEM_KEY, CASE_AGENT_KEY, CASE_SCOPE_KEY, "memory_boundary", "workspace_boundary",
+        CASE_STEP_KEY, CASE_ITEM_KEY, CASE_AGENT_KEY, CASE_SCOPE_KEY, CASE_RERUN_KEY,
+        "memory_boundary", "workspace_boundary",
     } & set(session.config)
     assert kept == set()
+    assert rerun_kind_of(session) is None
     assert not is_case_session(session)
     assert not is_case_step(session)
     assert not is_case_item(session)
@@ -169,6 +181,46 @@ async def test_a_child_inherits_the_case_and_its_scope_but_is_no_step():
     assert CASE_ITEM_KEY not in child.config
     assert CASE_AGENT_KEY not in child.config
     assert step_contract_of(child) is None
+
+
+async def test_a_reruns_helper_is_a_rerun_too():
+    store = _SessionStore()
+    _, request, _, _ = _route_fixtures("/v1/api/sessions", service_account=True)
+    root = await _step_session(store, request, case="C1", case_rerun={"kind": "rerun", "memory_prefix": "p/a"})
+    plain = await _step_session(store, request, case="C1")
+
+    # What the code making the child names is never its kind: the parent's is kept.
+    child = await create_child_session(
+        store=store, parent=root, channel="delegation", config={CASE_RERUN_KEY: {"kind": "trial"}},
+    )
+    plain_child = await create_child_session(
+        store=store, parent=plain, channel="delegation", config={CASE_RERUN_KEY: {"kind": "rerun"}},
+    )
+
+    assert rerun_kind_of(root) == rerun_kind_of(child) == "rerun"
+    assert child.config[CASE_RERUN_KEY] == {"kind": "rerun", "memory_prefix": "p/a"}
+    assert is_rerun(root)
+    assert not is_rerun(child)
+    assert rerun_kind_of(plain) is None
+    assert rerun_kind_of(plain_child) is None
+    assert CASE_RERUN_KEY not in plain_child.config
+
+
+async def test_reruns_wait_behind_case_work_and_trials_do_not():
+    store = _SessionStore()
+    _, request, _, _ = _route_fixtures("/v1/api/sessions", service_account=True)
+    rerun = await _step_session(store, request, case="C1", case_rerun={"kind": "rerun"})
+    trial = await _step_session(store, request, case="C1", case_rerun={"kind": "trial"})
+    plain = await _step_session(store, request, case="C1")
+
+    children = {
+        kind: await create_child_session(store=store, parent=parent, channel="delegation")
+        for kind, parent in (("rerun", rerun), ("trial", trial), ("plain", plain))
+    }
+
+    assert session_queue_priority(rerun) == session_queue_priority(children["rerun"]) == 2.0
+    assert session_queue_priority(trial) == session_queue_priority(children["trial"]) == 0.0
+    assert session_queue_priority(plain) == session_queue_priority(children["plain"]) == 1.0
 
 
 def test_the_keys_never_show_in_settings(monkeypatch):

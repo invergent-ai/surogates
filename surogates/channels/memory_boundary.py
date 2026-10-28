@@ -19,8 +19,10 @@ __all__ = [
     "BUYER_BOUNDARY_PREFIX",
     "CASE_AGENT_KEY",
     "CASE_BOUNDARY_PREFIX",
+    "CASE_RERUN_KEY",
     "EVAL_BOUNDARY_PREFIX",
     "PROJECT_BOUNDARY_PREFIX",
+    "RERUN_KINDS",
     "VISITOR_BOUNDARY_PREFIX",
     "boundary_token",
     "is_case_agent_config",
@@ -29,6 +31,8 @@ __all__ = [
     "is_case_session",
     "is_visitor_boundary",
     "is_eval_session",
+    "rerun_kind_in",
+    "rerun_kind_of",
     "session_memory_boundary",
     "visitor_boundary",
 ]
@@ -79,6 +83,15 @@ CASE_BOUNDARY_PREFIX = "case:"
 # holds which case and which person under this key.  Only the Keel link
 # stamps it; every other create path strips it, and a child never copies it.
 CASE_AGENT_KEY = "case_agent"
+
+# A step the Keel link starts for a builder, not for a live case, is a step
+# session like any other and holds, under this key, which kind it is: a
+# ``rerun`` of an agent over a case it already worked, or a ``trial`` of a
+# draft agent on a case's inputs.  The kind decides where its wakes queue
+# and what its tools may reach, so it is the Keel link's to stamp: every
+# other create path strips it, and a child copies its parent's.
+CASE_RERUN_KEY = "case_rerun"
+RERUN_KINDS: frozenset[str] = frozenset({"rerun", "trial"})
 
 
 def boundary_token(
@@ -193,6 +206,24 @@ def is_case_agent_config(config: Mapping | None) -> bool:
 def is_case_agent_session(session: object) -> bool:
     """True when this session is a person's case agent, by its config alone (:func:`is_case_agent_config`)."""
     return is_case_agent_config(getattr(session, "config", None))
+
+
+def rerun_kind_in(config: Mapping | None) -> str | None:
+    """The kind of rerun a session's config makes it, or ``None``: a case's config (:func:`is_case_config`)
+    holding a mapping under :data:`CASE_RERUN_KEY` whose ``kind`` is one of :data:`RERUN_KINDS`.
+
+    Tools hold only the session's config; anything that is not a mapping is no rerun.
+    """
+    if not is_case_config(config):
+        return None
+    marked = (config or {}).get(CASE_RERUN_KEY)
+    kind = marked.get("kind") if isinstance(marked, Mapping) else None
+    return kind if isinstance(kind, str) and kind in RERUN_KINDS else None
+
+
+def rerun_kind_of(session: object) -> str | None:
+    """The kind of rerun *session* is, or of the rerun it works for, by its config alone (:func:`rerun_kind_in`)."""
+    return rerun_kind_in(getattr(session, "config", None))
 
 
 def _legacy_boundary_fallback_id(session: object, cfg: dict) -> str:

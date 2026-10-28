@@ -166,7 +166,8 @@ async def _case_session(
     store, *, tools: list[str] | None = None, scoped: bool = True, file_pane: bool = False, **contract,
 ):
     """A case's own session, made as the Keel link makes one: a step's (*case_step*) or a work item's
-    (*case_item*), with a scope naming *tools* when *scoped*, and a file pane when *file_pane*."""
+    (*case_item*), a rerun's when it also names *case_rerun*, with a scope naming *tools* when *scoped*, and a file
+    pane when *file_pane*."""
     _, request, _, _ = _route_fixtures("/v1/api/sessions", service_account=True)
     config: dict = {"memory_boundary": "case:C1", "workspace_boundary": "case:C1"}
     if file_pane:
@@ -413,6 +414,35 @@ async def test_an_allow_list_naming_the_designer_tools_offers_them():
     for session in (await _step(store), await _item(store), await _case_agent(store)):
         for offered in _offered(session, registry, policy=policy):
             assert offered.isdisjoint(DESIGNER_TOOLS), session.config
+
+
+async def test_a_rerun_and_its_helpers_never_reach_the_terminal_or_the_browser():
+    registry = _registry()
+    store = _SessionStore()
+    refused = {"terminal", "process", "browser_navigate", "browser_click"}
+    rerun = await _case_session(
+        store, tools=None, case_step={**CONTRACT, "tools": None}, case_rerun={"kind": "rerun"},
+    )
+    helper = await create_child_session(store=store, parent=rerun, channel="delegation")
+    plain = await _step(store, tools=None)
+
+    for session in (rerun, helper):
+        for offered in (_prompt_tools(session, registry), _schema_tools(session, registry)):
+            assert offered.isdisjoint(refused), session.id
+            assert {"read_file", "kb_read_page", "web_search", MCP_TOOL} <= offered
+    for offered in (_prompt_tools(rerun, registry), _schema_tools(rerun, registry)):
+        assert STEP_TOOLS <= offered
+    # The same step, not a rerun, works in a terminal.
+    assert "terminal" in _prompt_tools(plain, registry)
+    assert "terminal" in _schema_tools(plain, registry)
+
+    # A draft rerun edits the case's documents beside the person, as a draft step does.
+    draft = await _case_session(
+        store, file_pane=True, case_step={**CONTRACT, "mode": "draft", "tools": None}, case_rerun={"kind": "rerun"},
+    )
+    for offered in (_prompt_tools(draft, registry), _schema_tools(draft, registry)):
+        assert OFFICE_TOOLS | STEP_TOOLS <= offered
+        assert offered.isdisjoint(refused)
 
 
 async def test_a_draft_step_gets_the_office_tools():

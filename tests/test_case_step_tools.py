@@ -35,6 +35,7 @@ import httpx
 import pytest
 
 import surogates.harness.loop as loop_module
+from surogates.channels.memory_boundary import CASE_RERUN_KEY
 from surogates.harness.budget import IterationBudget
 from surogates.keel.client import KeelClient, keel_client, use_keel_client
 from surogates.keel.steps import render_kickoff, step_contract_in, work_contract_key
@@ -747,6 +748,42 @@ async def test_raise_hand_parks_the_step(fake_keel, store):
     ):
         assert "error" in json.loads(await _call("raise_hand", bad, store)), bad
     assert len(fake_keel.requests) == 1
+
+
+async def test_a_rerun_reports_to_the_door_under_its_own_id(fake_keel, tmp_path):
+    rerun = {"kind": "rerun", "memory_prefix": "p/a"}
+
+    def a_rerun() -> _StepStore:
+        marked = _store_for(tmp_path)
+        marked.row.config[CASE_RERUN_KEY] = dict(rerun)
+        return marked
+
+    finished = a_rerun()
+    finished.write(EventType.KB_PAGE_READ, PAGE)
+    result = await _call("complete_step", COMPLETION, finished)
+
+    assert result == "Step ended: Keel completed the step."
+    [request] = fake_keel.requests
+    assert request.url.path == f"/api/harness/sessions/{finished.row.id}/complete"
+    assert json.loads(request.content) == {
+        "call_id": "c1", **COMPLETION, "pages_read": [reported(PAGE)], "usage": USAGE, "bundle_version": None,
+    }
+
+    fake_keel.answer(200, {"result": "hand-raised", "message": "A person will answer."})
+    stuck = a_rerun()
+    hand = {
+        "question": "Which income counts?",
+        "choices": ["Both", "The current employer only"],
+        "evidence": [{"label": "Employer", "value": "the first one", "source": {"file": "in/payslips/03.pdf"}}],
+    }
+    result = await _call("raise_hand", hand, stuck, tool_call_id="c7")
+
+    assert result == "Step ended: A person will answer."
+    request = fake_keel.requests[-1]
+    assert request.url.path == f"/api/harness/sessions/{stuck.row.id}/raise-hand"
+    assert json.loads(request.content) == {
+        "call_id": "c7", **hand, "pages_read": [], "usage": USAGE, "bundle_version": None,
+    }
 
 
 PAYSLIP = {"label": "Payslip · September", "value": "€6,180 net", "source": {"file": "/workspace/payslips/sep.pdf", "page": 1}}

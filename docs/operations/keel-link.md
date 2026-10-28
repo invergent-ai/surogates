@@ -49,7 +49,7 @@ Errors answer `{"detail": {"code", "message"}}`, and a message never repeats the
 |---|---|---|
 | 401 | `bad-link-key` | The bearer is not the link key, or no link key is set. |
 | 404 | `unknown-agent` | No such agent, or it belongs to another org. |
-| 404 | `unknown-session` | No such session, or it is not the own session of a step, for a step route, of a work item, for an item route, or of a person's case agent, for a case agent route. |
+| 404 | `unknown-session` | No such session, or it is not the own session of a step (never a rerun's), for a step route, of a work item, for an item route, or of a person's case agent, for a case agent route. |
 | 404 | `unknown-file` | No file at the path in the case's workspace, or the editor was asked for a case recorded under another org. |
 | 404 | `unknown-version` | The case holds no version with the hash. |
 | 404 | `unknown-user` | The editor was asked for a user who does not belong to the org. |
@@ -507,4 +507,4 @@ A start Keel would refuse whole is never sent: one over 256,000 bytes of JSON, o
 
 ## Step sessions wait behind people
 
-Every wake of a step session or an item session, and of each session either starts, is queued at priority 1. Interactive work is queued at 0 and phone calls at -1, and a lower score is taken first. A case's work therefore waits while people are waiting on the agent. A person's case agent does not wait: a person waits on it, so its wakes are queued at 0, as interactive work is.
+Every wake of a step session or an item session, and of each session either starts, is queued at priority 1. Interactive work is queued at 0 and phone calls at -1, and a lower score is taken first. A case's work therefore waits while people are waiting on the agent. A person's case agent does not wait: a person waits on it, so its wakes are queued at 0, as interactive work is. A rerun's wakes, and its helpers', are queued at 2, behind every case's work, because nobody waits on one; a trial's are queued at 0, as interactive work is, because a builder waits on it.

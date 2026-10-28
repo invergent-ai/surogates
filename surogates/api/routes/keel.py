@@ -54,7 +54,7 @@ from sse_starlette.sse import EventSourceResponse
 from surogates.api.routes.events import session_event_stream
 from surogates.api.routes.office import agent_display_name
 from surogates.channels.constants import API_CHANNEL, session_queue_priority
-from surogates.channels.memory_boundary import CASE_BOUNDARY_PREFIX
+from surogates.channels.memory_boundary import CASE_BOUNDARY_PREFIX, rerun_kind_of
 from surogates.config import INTERRUPT_CHANNEL_PREFIX, enqueue_session
 from surogates.db.models import User
 from surogates.harness.tool_schemas import FILE_PANE_KEY
@@ -79,6 +79,7 @@ from surogates.keel.steps import (
     REVISION_MARKER,
     StepContract,
     is_case_step,
+    is_rerun,
     render_kickoff,
     render_message,
     rests_on_its_report,
@@ -568,6 +569,7 @@ async def create_step_session(request: Request) -> JSONResponse:
         held = step_contract_of(existing)
         return (
             existing.agent_id == agent_id
+            and rerun_kind_of(existing) is None
             and held is not None
             and held.case_id == contract.case_id
             and held.token == contract.token
@@ -675,12 +677,18 @@ async def watched_session(request: Request, session_id: str, holds: Callable[[An
         ) from None
 
 
+def _is_a_step(session: Any) -> bool:
+    """Whether *session* is a step Keel started for a case, and no rerun's: a rerun is another route's."""
+    return is_case_step(session) and not is_rerun(session)
+
+
 async def _step_session(request: Request, session_id: str) -> Any:
     """The step session *session_id* names: 404 ``unknown-session`` for any other id.
 
     A child of the step works on the case, and a chat on none: neither is the step's.
+    A rerun's session is a step's too, but never this route's.
     """
-    return await session_where(request, session_id, is_case_step)
+    return await session_where(request, session_id, _is_a_step)
 
 
 @router.post("/keel/step-sessions/{session_id}/messages")
@@ -901,7 +909,7 @@ async def events_stream(request: Request, session: Any) -> EventSourceResponse:
 async def read_step_session_events(session_id: str, request: Request) -> JSONResponse:
     """A page of a step session's events after the cursor ``after``, without ``llm.delta`` (:func:`events_page`)."""
     require_link(request)
-    return await events_page(request, await watched_session(request, session_id, is_case_step))
+    return await events_page(request, await watched_session(request, session_id, _is_a_step))
 
 
 @router.get("/keel/step-sessions/{session_id}/events/stream")
@@ -911,7 +919,7 @@ async def stream_step_session_events(session_id: str, request: Request) -> Event
     A step at rest between its turns does not end the stream.
     """
     require_link(request)
-    return await events_stream(request, await watched_session(request, session_id, is_case_step))
+    return await events_stream(request, await watched_session(request, session_id, _is_a_step))
 
 
 #: The events whose ``data["name"]`` names the tool they call or answer.
@@ -1000,7 +1008,7 @@ async def read_step_session_progress(session_id: str, request: Request) -> JSONR
     Only the step's own session is read: a helper it started keeps its own list.
     """
     require_link(request)
-    return await progress_answer(request, await watched_session(request, session_id, is_case_step))
+    return await progress_answer(request, await watched_session(request, session_id, _is_a_step))
 
 
 # ---------------------------------------------------------------------------
