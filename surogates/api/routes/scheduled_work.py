@@ -425,7 +425,7 @@ async def run_scheduled_work_now(
     tenant: TenantContext = Depends(get_current_tenant),
     agent_runtime: AgentRuntimeContext = Depends(agent_runtime_context_dep),
 ) -> RunScheduledWorkNowResponse:
-    await _visible(request, tenant, agent_runtime.agent_id, schedule_id)
+    current = await _visible(request, tenant, agent_runtime.agent_id, schedule_id)
     queued = await _scheduled_store(request).run_now(
         org_id=tenant.org_id,
         **_principal(tenant),
@@ -433,7 +433,10 @@ async def run_scheduled_work_now(
         schedule_id=schedule_id,
     )
     if not queued:
-        raise _not_found(schedule_id)
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Scheduled work {schedule_id} is {current.status}; it cannot run now.",
+        )
     return RunScheduledWorkNowResponse(id=schedule_id, queued=True)
 
 

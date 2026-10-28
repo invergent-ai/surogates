@@ -260,6 +260,7 @@ async def test_scheduled_work_can_be_read_changed_paused_and_resumed(
 
     assert (await client.post(f"{base}/pause", headers=auth)).status_code == 200
     assert (await client.post(f"{base}/pause", headers=auth)).status_code == 409
+    assert (await client.post(f"{base}/run-now", headers=auth)).status_code == 409
     paused = await store.get(schedule.id)
     assert (paused.status, paused.next_run_at) == ("paused", None)
 
