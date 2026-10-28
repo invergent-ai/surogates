@@ -680,9 +680,11 @@ def _chain(top: Path, depth: int) -> None:
         os.close(fd)
 
 
-async def test_a_walk_goes_no_deeper_than_its_depth_and_says_so(wio, root):
+async def test_a_walk_goes_no_deeper_than_its_depth_and_says_so(wio, root, monkeypatch):
     import resource
 
+    # This is about depth: a busy machine must not run the walk's time out first and truncate it.
+    monkeypatch.setattr(fake_laptop, "WALK_BUDGET_S", 600)
     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
     # Two handles a level, as the app holds them: raised as Node raises its own.
     resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
