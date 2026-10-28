@@ -4,13 +4,17 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import func, select, text, true as sa_true, update
+from sqlalchemy import func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from surogates.db.models import InboxItem
 from surogates.db.models import ScheduledSession as ScheduledSessionRow
+from surogates.db.models import ServiceAccount as ServiceAccountRow
 from surogates.scheduled.models import ScheduledSession
+from surogates.tenant.auth.service_account import KIND_AGENT_PRINCIPAL
+from surogates.tools.owner_scope import OPS_CHAT_SA_PREFIX
 from surogates.scheduled.schedule import (
+    DEFAULT_LOOP_EXPIRY_DAYS,
     DYNAMIC_LOOP_EXPIRY_DAYS,
     DYNAMIC_LOOP_FALLBACK_DELAY_SECONDS,
     DYNAMIC_LOOP_STALE_RUN_SECONDS,
@@ -114,7 +118,10 @@ class ScheduledSessionStore:
         service_account_id: UUID | None = None,
         context: dict[str, Any] | None = None,
     ) -> ScheduledSession:
-        """A fixed-cadence ``/loop``: it runs until someone stops it."""
+        """A fixed-cadence ``/loop``.  It expires after
+        :data:`DEFAULT_LOOP_EXPIRY_DAYS`: a loop typed in passing should not
+        outlive the work it was for; a schedule meant to last is made with
+        ``cron_create`` or in Studio."""
         return await self.create(
             org_id=org_id,
             user_id=user_id,
@@ -125,6 +132,7 @@ class ScheduledSessionStore:
             schedule=schedule,
             source="loop",
             created_from_session_id=created_from_session_id,
+            expires_at=_utcnow() + timedelta(days=DEFAULT_LOOP_EXPIRY_DAYS),
             context=context or {},
         )
 
@@ -346,6 +354,9 @@ class ScheduledSessionStore:
                 schedule=_schedule_to_dict(schedule), schedule_display=schedule.display,
                 timezone=schedule.timezone_name, kind=schedule.kind, cadence=schedule.cadence(),
             )
+            if schedule.kind != _schedule_of(current).kind:
+                # A one-off runs once; the run limit of what it was is not the new one's.
+                values["repeat_limit"] = 1 if schedule.kind == "once" else None
             if current.status == "active" and not schedule.is_dynamic:
                 next_run_at = schedule.next_after(now)
                 if next_run_at is None:
@@ -1030,14 +1041,28 @@ def _planned_run(schedule: ScheduledSession, now: datetime) -> datetime:
 def _scope(user_id: UUID | None, service_account_id: UUID | None):
     """The schedules a principal sees and manages.
 
-    A person sees their own.  A service account (a Studio operator's chat
-    account, an integration) works for the project, and sees all of the
-    agent's: a co-owner manages a schedule another made, and a channel
-    user's schedule is visible to the people who run the agent.
+    A person sees their own.  A Studio operator's chat account and the
+    agent's own principal work for the project and see all of the agent's:
+    a co-owner manages a schedule another made, and a channel user's
+    schedule is visible to the people who run the agent.  Any other
+    service account (an API key, an integration) sees only its own.
     """
     if user_id is not None:
         return ScheduledSessionRow.user_id == user_id
-    return sa_true()
+    works_for_the_project = (
+        select(ServiceAccountRow.id)
+        .where(
+            ServiceAccountRow.id == service_account_id,
+            ServiceAccountRow.org_id == ScheduledSessionRow.org_id,
+            or_(
+                ServiceAccountRow.name.startswith(OPS_CHAT_SA_PREFIX),
+                (ServiceAccountRow.kind == KIND_AGENT_PRINCIPAL)
+                & (ServiceAccountRow.agent_id == ScheduledSessionRow.agent_id),
+            ),
+        )
+        .exists()
+    )
+    return or_(ScheduledSessionRow.service_account_id == service_account_id, works_for_the_project)
 
 
 def _default_name(prompt: str) -> str:

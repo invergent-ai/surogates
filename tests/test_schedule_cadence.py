@@ -1,6 +1,7 @@
 """Cadences: when a schedule's runs fall, and what ``/loop`` reads."""
 
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -11,6 +12,7 @@ from surogates.scheduled.schedule import (
     parse_loop_command,
     parse_schedule,
     schedule_from_fields,
+    schedule_from_row,
 )
 
 UTC = timezone.utc
@@ -40,6 +42,19 @@ def test_a_daily_cron_fires_once_when_the_clocks_go_forward():
     assert _fires(schedule, datetime(2026, 3, 28, 12, tzinfo=UTC), 2) == [
         datetime(2026, 3, 29, 1, 30, tzinfo=UTC),
         datetime(2026, 3, 30, 0, 30, tzinfo=UTC),
+    ]
+
+
+def test_a_frequent_cron_inside_the_repeated_hour_has_a_next_run():
+    # 03:15 the second time round (01:15 UTC): every 03:xx left that hour
+    # already ran the first time, so the next run is 04:00.
+    schedule = parse_schedule("*/5 * * * *", timezone_name="Europe/Bucharest")
+    assert schedule.next_after(datetime(2026, 10, 25, 1, 15, tzinfo=UTC)) == datetime(2026, 10, 25, 2, 0, tzinfo=UTC)
+    first_pass = _fires(schedule, datetime(2026, 10, 25, 0, 50, tzinfo=UTC), 3)
+    assert first_pass == [
+        datetime(2026, 10, 25, 0, 55, tzinfo=UTC),
+        datetime(2026, 10, 25, 2, 0, tzinfo=UTC),
+        datetime(2026, 10, 25, 2, 5, tzinfo=UTC),
     ]
 
 
@@ -108,6 +123,7 @@ def test_loop_reads_cadences_zones_and_crons(text, prompt, display, tz):
     ("cancel 4b1c", "cancel", "4b1c"),
     ("pause 4b1c", "pause", "4b1c"),
     ("resume", "resume", None),
+    ("list all", "list", "all"),
 ])
 def test_loop_commands_are_commands_never_prompts(text, verb, target):
     command = parse_loop_command(text)
@@ -125,3 +141,34 @@ def test_cron_reads_in_words_where_it_can():
     assert humanize_cron("30 3 * * *") == "Every day at 03:30"
     assert humanize_cron("0 9 * * 1,3") == "Mon, Wed at 09:00"
     assert humanize_cron("0 9 1 * *") == "0 9 1 * *"
+
+
+@pytest.mark.parametrize("text", [
+    "list new GitHub issues every hour",
+    "help me triage the inbox every day at 9",
+])
+def test_list_and_help_followed_by_more_are_requests(text):
+    command = parse_loop_command(text)
+    assert command.verb in {"create", "model"}
+    assert command.prompt
+
+
+def test_stored_days_are_names_or_numbers_from_monday():
+    names = calendar_schedule(["mon", "wed", "fri"], ["09:00"])
+    numbers = calendar_schedule([0, 2, 4], ["09:00"])
+    assert names.days == numbers.days == ("mon", "wed", "fri")
+    assert numbers.cadence()["days"] == ["mon", "wed", "fri"]
+
+
+@pytest.mark.parametrize("cadence", [
+    {"days": [9], "times": ["09:00"]},
+    {"days": [None], "times": ["09:00"]},
+    {"times": ["09:00"], "days": "mon"},
+    {},
+], ids=["day-out-of-range", "null-day", "days-not-a-list", "empty"])
+def test_a_malformed_row_is_a_value_error(cadence):
+    row = SimpleNamespace(kind="calendar", cadence=cadence, timezone="UTC", schedule={})
+    with pytest.raises(ValueError):
+        schedule_from_row(row)
+    with pytest.raises(ValueError):
+        schedule_from_row(SimpleNamespace(kind="once", cadence={}, timezone="UTC", schedule={}))
