@@ -92,6 +92,11 @@ TOOL_LOCATIONS: dict[str, ToolLocation] = {
     "cron_create": ToolLocation.HARNESS,
     "cron_delete": ToolLocation.HARNESS,
     "cron_list": ToolLocation.HARNESS,
+    "cron_get": ToolLocation.HARNESS,
+    "cron_update": ToolLocation.HARNESS,
+    "cron_pause": ToolLocation.HARNESS,
+    "cron_resume": ToolLocation.HARNESS,
+    "cron_run_now": ToolLocation.HARNESS,
     "loop_wait": ToolLocation.HARNESS,
     "loop_complete": ToolLocation.HARNESS,
     # Agent browser (separate resource from workspace sandbox)

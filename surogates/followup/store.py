@@ -403,6 +403,8 @@ TEAM_TEXTS = {
     "label_reported_by": "reported by {contact} ({relation})",
     "label_contact": "contact",
     "label_unnamed": "someone without a name on record",
+    "label_operator_chat": "from the operator chat",
+    "label_scheduled_run": "from a scheduled run",
     "label_footer": "About: {label}",
     "inbox_attention_title": "Needs your attention: {name}",
     "label_contact_for": "{contact} ({relation}), for {name}",

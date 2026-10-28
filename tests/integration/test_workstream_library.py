@@ -314,7 +314,7 @@ async def test_the_routines_are_the_schedules_the_master_made(api, monkeypatch, 
     assert response.status_code == 200, response.text
     [routine] = response.json()["items"]
     assert (routine["name"], routine["schedule_display"], routine["status"]) == (
-        "Check the cash report", "0 9 * * 1", "active",
+        "Check the cash report", "Mon at 09:00", "active",
     )
     everything = await api.client.get("/v1/scheduled-work", headers=api.auth())
     assert len(everything.json()["items"]) == 2

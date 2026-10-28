@@ -863,6 +863,56 @@ class SessionStore:
             await db.commit()
             return result.rowcount == 1
 
+    async def fail_overdue_scheduled_runs(
+        self, *, default_seconds: int, limit: int = 100,
+    ) -> list[tuple[UUID, int]]:
+        """Fail every scheduled run still open past its schedule's time limit.
+
+        A run nobody answers never ends by itself; left open it keeps its
+        browser and its claim on the agent.  The limit is the schedule's
+        ``max_run_seconds``, else *default_seconds*.  Each failed run gets a
+        ``session.fail`` and an interrupt, so a worker still on it stops.
+        """
+        async with self._sf() as db:
+            rows = (await db.execute(
+                text(
+                    """
+                    WITH overdue AS (
+                        SELECT s.id, COALESCE(sch.max_run_seconds, :default_seconds) AS limit_seconds
+                        FROM sessions s
+                        JOIN scheduled_sessions sch
+                          ON sch.last_session_id = s.id
+                        WHERE s.channel = 'scheduled'
+                          AND s.status IN ('active', 'paused')
+                          AND s.created_at < now() - make_interval(
+                              secs => COALESCE(sch.max_run_seconds, :default_seconds))
+                        LIMIT :limit
+                        FOR UPDATE OF s SKIP LOCKED
+                    )
+                    UPDATE sessions s SET status = 'failed', updated_at = now()
+                    FROM overdue
+                    WHERE s.id = overdue.id
+                    RETURNING s.id, overdue.limit_seconds
+                    """
+                ),
+                {"default_seconds": default_seconds, "limit": limit},
+            )).all()
+            await db.commit()
+        for session_id, limit_seconds in rows:
+            await self.emit_event(
+                session_id,
+                EventType.SESSION_FAIL,
+                {"reason": "run_time_limit", "limit_seconds": int(limit_seconds), "retryable": False},
+            )
+            if self._redis is not None:
+                from surogates.config import INTERRUPT_CHANNEL_PREFIX
+
+                await self._redis.publish(
+                    f"{INTERRUPT_CHANNEL_PREFIX}:{session_id}",
+                    json.dumps({"reason": "run_time_limit"}),
+                )
+        return [(session_id, int(limit_seconds)) for session_id, limit_seconds in rows]
+
     async def pause_if_active(self, session_id: UUID, data: dict) -> bool:
         """Pause *session_id* if it is still active, with a ``session.pause``
         whose data is *data*; whether it was.
@@ -913,11 +963,11 @@ class SessionStore:
         disappear with the parent; otherwise scheduled-loop runs and
         delegation children are left dangling in tree/list UIs.
 
-        Three categories of related rows are physically deleted in the same
-        transaction (they have no value once the owning session is gone):
+        Related rows go in the same transaction:
 
-        * **Schedules** (``scheduled_sessions``) — job definitions whose
-          ``created_from_session_id`` or ``last_session_id`` is in the tree.
+        * **Schedules** (``scheduled_sessions``) whose
+          ``created_from_session_id`` or ``last_session_id`` is in the tree
+          are cancelled, keeping their history.
         * **Missions** (``missions``) — orchestrated objectives whose
           ``session_id`` is in the tree.  Mission tasks (``tasks``) and the
           DAG edges (``task_links``) cascade with them; any
@@ -973,15 +1023,19 @@ class SessionStore:
                 select(SessionRow.id).where(SessionRow.id.in_(session_ids)).order_by(SessionRow.id).with_for_update()
             )
             await db.execute(
-                delete(ScheduledSessionRow).where(
+                update(ScheduledSessionRow).where(
                     ScheduledSessionRow.org_id == org_id,
                     ScheduledSessionRow.agent_id == agent_id,
+                    ScheduledSessionRow.status.in_(("active", "paused")),
                     or_(
                         ScheduledSessionRow.created_from_session_id.in_(
                             session_ids,
                         ),
                         ScheduledSessionRow.last_session_id.in_(session_ids),
                     ),
+                ).values(
+                    status="cancelled", ended_reason="cancelled", ended_by="session deleted",
+                    next_run_at=None, locked_by=None, locked_until=None, updated_at=func.now(),
                 )
             )
 

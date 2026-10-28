@@ -1,0 +1,83 @@
+"""A routine's run and a helper have nobody to answer a question.
+
+A scheduled run that called ``ask_user_question`` stayed active forever:
+nobody was present, and answering it from the inbox was refused because
+the run is read-only.  Both surfaces (prompt and schemas) must drop the
+tool, and the platform hint must say nobody is there.
+"""
+
+from __future__ import annotations
+
+import uuid
+from types import SimpleNamespace
+
+import pytest
+
+from surogates.harness.prompt_library import PromptLibrary
+from surogates.session.execution_context import channel_kind, platform_hint_channel
+from surogates.orchestrator.worker import _filter_effective_tools
+from surogates.tenant.context import TenantContext
+from surogates.tools.registry import ToolRegistry
+from surogates.tools.runtime import ToolRuntime
+from tests.test_steer_loop import _make_loop_harness, _make_session
+
+UNATTENDED = ["scheduled", "delegation", "worker", "task"]
+
+
+def _prompt_surface(channel: str, config: dict | None = None) -> set[str]:
+    tenant = TenantContext(
+        org_id=uuid.uuid4(), user_id=uuid.uuid4(), org_config={},
+        user_preferences={}, permissions=frozenset(), asset_root="/tmp",
+    )
+    return _filter_effective_tools(
+        tools={"ask_user_question", "web_search"},
+        tenant=tenant,
+        session=SimpleNamespace(config=config or {}, channel=channel),
+        use_api_for_harness_tools=False,
+    )
+
+
+def _schema_surface(channel: str, config: dict | None = None) -> set[str]:
+    registry = ToolRegistry()
+    ToolRuntime(registry).register_builtins()
+    harness = _make_loop_harness(session_store=None)
+    harness._tools = registry
+    session = _make_session()
+    session.channel = channel
+    session.config = {**session.config, **(config or {})}
+    offered = harness._tool_filter_for_session(session)
+    return set(registry.tool_names) if offered is None else offered
+
+
+@pytest.mark.parametrize("channel", UNATTENDED)
+def test_an_unattended_session_is_never_offered_a_question(channel):
+    assert "ask_user_question" not in _prompt_surface(channel)
+    assert "ask_user_question" not in _schema_surface(channel)
+    assert "web_search" in _prompt_surface(channel)
+
+
+@pytest.mark.parametrize("channel", ["studio", "web", "slack"])
+def test_a_conversation_keeps_its_questions(channel):
+    assert "ask_user_question" in _prompt_surface(channel)
+
+
+@pytest.mark.parametrize("channel", UNATTENDED)
+def test_an_unattended_session_is_told_nobody_is_there(channel):
+    hint = PromptLibrary().platform_hint(platform_hint_channel(channel, {}))
+    assert hint and "cannot ask questions" in hint
+
+
+def test_a_project_thread_on_the_worker_channel_still_asks_its_user():
+    thread = {"workstream_role": "thread", "workstream_id": str(uuid.uuid4())}
+    assert "ask_user_question" in _prompt_surface("worker", thread)
+    assert "ask_user_question" in _schema_surface("worker", thread)
+
+
+def test_who_is_behind_a_session():
+    thread = {"workstream_role": "thread", "workstream_id": str(uuid.uuid4())}
+    assert channel_kind("scheduled", {}) == "scheduled"
+    assert channel_kind("web", {"scheduled_session_id": "x"}) == "scheduled"
+    assert channel_kind("worker", {}) == "helper"
+    assert channel_kind("worker", thread) == "person"
+    assert channel_kind("slack", {}) == "person"
+    assert platform_hint_channel("worker", thread) is None

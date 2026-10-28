@@ -550,6 +550,30 @@ async def test_session_messages_includes_conversation_events(
     assert types == ["user.message", "skill.invoked", "llm.response"]
 
 
+async def test_session_messages_include_what_a_chat_shows_of_its_routines_and_helpers(
+    session_store, session_factory,
+):
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    session = await session_store.create_session(
+        user_id=user_id, org_id=org_id, agent_id="test-agent",
+    )
+    for event_type, data in (
+        (EventType.LOOP_RESULT, {"content": "Posted.", "outcome": "completed"}),
+        (EventType.BROWSER_PROFILE_UNAVAILABLE, {"profile_id": "p-1", "reason": "not granted"}),
+        (EventType.DELEGATION_PROGRESS, {"child_session_id": "c-1", "summary": "Read 3 of 5 pages"}),
+    ):
+        await session_store.emit_event(session.id, event_type, data)
+
+    async with session_factory() as db:
+        types = (await db.execute(
+            text("SELECT type FROM v_session_messages WHERE session_id = :sid ORDER BY event_id"),
+            {"sid": session.id},
+        )).scalars().all()
+
+    assert types == ["loop.result", "browser.profile_unavailable", "delegation.progress"]
+
+
 # ---------------------------------------------------------------------------
 # v_response_feedback
 # ---------------------------------------------------------------------------

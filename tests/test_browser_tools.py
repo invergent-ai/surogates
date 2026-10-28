@@ -27,6 +27,13 @@ class FakePool:
         )
         self.snapshot_cache: dict[str, dict[str, Any]] = {}
         self.typed_secrets = TypedSecrets()
+        self.profile_problems: list[tuple[str, str, str]] = []
+
+    async def report_profile_problem(self, session_id: str, profile_id: str, reason: str) -> None:
+        self.profile_problems.append((session_id, profile_id, reason))
+
+    def take_profile_note(self, session_id: str) -> str | None:
+        return None
 
     async def ensure(
         self,
@@ -34,7 +41,10 @@ class FakePool:
         org_id: str,
         user_id: str,
         spec: BrowserSpec,
+        login: Any = None,
     ) -> EnsureResult:
+        if login is not None and (state := await login()) is not None:
+            spec.storage_state = state
         self.ensures.append((session_id, org_id, user_id))
         self.specs.append(spec)
         return EnsureResult(

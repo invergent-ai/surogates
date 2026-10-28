@@ -28,7 +28,7 @@ from redis.exceptions import ConnectionError as RedisConnectionError
 from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.exc import DBAPIError, IntegrityError, InterfaceError, OperationalError, ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.sql.dml import Delete
+from sqlalchemy.sql.dml import Update
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed
 
@@ -3505,7 +3505,7 @@ async def test_a_recording_waits_for_a_delete_in_flight_and_is_refused(laptop_ri
 
     async def execute(self, statement, *args, **kwargs):
         # The statement that follows the archive's lock on the tree's sessions.
-        if isinstance(statement, Delete) and statement.table.name == "scheduled_sessions":
+        if isinstance(statement, Update) and statement.table.name == "scheduled_sessions":
             archiving.set()
             await release.wait()
         return await real_execute(self, statement, *args, **kwargs)

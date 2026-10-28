@@ -401,6 +401,19 @@ class TestS3fsModeProvision:
         assert "TOOL_EXECUTOR_REQUIRE_FUSE=0" not in joined
         await backend.aclose()
 
+    async def test_a_host_local_storage_endpoint_is_reachable_from_the_container(
+        self, healthz_transport,
+    ):
+        from types import SimpleNamespace
+        docker = FakeDocker()
+        storage = SimpleNamespace(endpoint="http://127.0.0.1:59000",
+                                  access_key="ak", secret_key="sk", region="")
+        backend = _backend(docker, healthz_transport, storage_settings=storage)
+        await backend.provision(self._spec())
+        run_call = next(c for c in docker.calls if c[:2] == ["run", "-d"])
+        assert "S3_ENDPOINT=http://host.docker.internal:59000" in " ".join(run_call)
+        await backend.aclose()
+
     async def test_bind_mode_still_sets_require_fuse_off_and_no_caps(
         self, healthz_transport, tmp_path
     ):

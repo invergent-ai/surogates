@@ -45,3 +45,11 @@ def test_skills_index_unchanged_with_skill_view():
     text = _builder({"skill_view"})._skills_section()
     assert "`skill_view(name)`" in text
     assert "Only proceed without loading a skill" in text
+
+
+def test_guidance_never_names_ask_user_question_without_it():
+    tools = {"read_file", "web_search", "terminal"}
+    assert "ask_user_question" not in _builder(tools)._tool_guidance_section()
+    assert "`ask_user_question` is never part of a batch" in _builder(
+        tools | {"ask_user_question"},
+    )._tool_guidance_section()

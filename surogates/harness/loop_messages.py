@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from surogates.session.events import MESSAGE_TYPES, EventType
+from surogates.session.execution_context import is_scheduled_run
 
 if TYPE_CHECKING:
     from surogates.browser.control import BrowserControlStore
@@ -603,19 +604,5 @@ def _as_aware_utc(value: datetime) -> datetime:
     return value.astimezone(timezone.utc)
 
 
-def _is_scheduled_run(session: Any) -> bool:
-    """True when *session* is a scheduled/loop run.
-
-    A run is identified by ``channel == "scheduled"`` or a
-    ``scheduled_session_id`` config marker (the latter guards the case where a
-    run's channel drifts from ``"scheduled"``). Both the loop-result surfacing
-    and the parent-notify suppression key off this single predicate so they can
-    never disagree.
-    """
-    if session.channel == "scheduled":
-        return True
-    return bool((getattr(session, "config", None) or {}).get("scheduled_session_id"))
-
-
 def _should_notify_parent_on_completion(session: Any) -> bool:
-    return session.parent_id is not None and not _is_scheduled_run(session)
+    return session.parent_id is not None and not is_scheduled_run(session)

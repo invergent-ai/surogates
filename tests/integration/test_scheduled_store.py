@@ -1,11 +1,14 @@
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
 from sqlalchemy import text
 
 from surogates.scheduled.schedule import (
+    DEFAULT_LOOP_EXPIRY_DAYS,
     DYNAMIC_LOOP_EXPIRY_DAYS,
     DYNAMIC_LOOP_FALLBACK_DELAY_SECONDS,
+    once_schedule,
     parse_dynamic_loop_schedule,
     parse_schedule,
 )
@@ -203,7 +206,7 @@ async def test_dynamic_loop_lifecycle_waits_for_loop_wait(session_factory):
     user_id = await create_user(session_factory, org_id)
     store = ScheduledSessionStore(session_factory)
 
-    created = await store.create_dynamic_loop(
+    created = await store.create_loop(
         org_id=org_id,
         user_id=user_id,
         agent_id="agent-a",
@@ -241,6 +244,33 @@ async def test_dynamic_loop_lifecycle_waits_for_loop_wait(session_factory):
     assert updated.next_run_at is not None
     assert updated.schedule["last_delay_seconds"] == 120
     assert updated.schedule["last_delay_reason"] == "CI is still running"
+
+
+async def test_a_dynamic_loop_written_without_kind_is_still_a_dynamic_loop(session_factory):
+    """An older runtime writes no ``kind`` during a rolling deploy."""
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    store = ScheduledSessionStore(session_factory)
+    created = await store.create_loop(
+        org_id=org_id, user_id=user_id, agent_id="agent-legacy-kind", prompt="check CI",
+        schedule=parse_dynamic_loop_schedule(), created_from_session_id=None,
+    )
+    claimed = (await store.claim_due(agent_id="agent-legacy-kind", worker_id="w1", limit=1))[0]
+    await store.mark_run_created(claimed, session_id=created.id)
+    async with session_factory() as db:
+        await db.execute(
+            text("UPDATE scheduled_sessions SET kind = NULL WHERE id = :id"), {"id": created.id},
+        )
+        await db.commit()
+
+    await store.plan_unscheduled()
+    assert (await store.get(created.id)).next_run_at is None
+
+    assert await store.mark_dynamic_run_finished(
+        schedule_id=created.id, org_id=org_id, user_id=user_id, agent_id="agent-legacy-kind",
+        session_id=created.id, delay_seconds=120, reason="CI is still running",
+    )
+    assert (await store.get(created.id)).next_run_at is not None
 
 
 async def _create_due_loop(store, *, org_id, user_id, agent_id="agent-a"):
@@ -322,7 +352,7 @@ async def test_dynamic_loop_marked_completed_when_caller_declares_done(session_f
     user_id = await create_user(session_factory, org_id)
     store = ScheduledSessionStore(session_factory)
 
-    created = await store.create_dynamic_loop(
+    created = await store.create_loop(
         org_id=org_id,
         user_id=user_id,
         agent_id="agent-a",
@@ -362,7 +392,7 @@ async def test_terminal_dynamic_loop_without_wait_gets_fallback(
     user_id = await create_user(session_factory, org_id)
     store = ScheduledSessionStore(session_factory)
 
-    loop = await store.create_dynamic_loop(
+    loop = await store.create_loop(
         org_id=org_id,
         user_id=user_id,
         agent_id="agent-a",
@@ -406,7 +436,7 @@ async def test_find_retryable_stalled_dynamic_loop_runs(
     store = ScheduledSessionStore(session_factory)
     agent_id = "agent-retryable-stalled"
 
-    loop = await store.create_dynamic_loop(
+    loop = await store.create_loop(
         org_id=org_id,
         user_id=user_id,
         agent_id=agent_id,
@@ -479,12 +509,15 @@ async def test_create_with_service_account_principal(session_factory):
 
 
 async def test_list_for_user_scopes_to_principal(session_factory):
-    """A user-principal listing must not surface SA-owned schedules and
-    vice versa — even in the same org. Locks the cross-principal isolation."""
+    """A person, and an API key, see only their own schedules; a Studio
+    operator's chat account and the agent's own principal see the agent's."""
+    from surogates.tenant.auth.service_account import KIND_AGENT_PRINCIPAL, ServiceAccountStore
+
     org_id = await create_org(session_factory)
     user_id = await create_user(session_factory, org_id)
-    issued = await issue_service_account_token(
-        session_factory, org_id, name="loop-listing-sa",
+    api_key = await issue_service_account_token(session_factory, org_id, name="loop-listing-sa")
+    operator = await issue_service_account_token(
+        session_factory, org_id, name=f"ops-chat-{org_id}-{user_id}",
     )
     store = ScheduledSessionStore(session_factory)
 
@@ -493,21 +526,37 @@ async def test_list_for_user_scopes_to_principal(session_factory):
         prompt="user prompt", schedule=parse_schedule("10m"),
         created_from_session_id=None,
     )
-    sa_schedule = await store.create_loop(
-        org_id=org_id, service_account_id=issued.id, agent_id="agent-x",
+    key_schedule = await store.create_loop(
+        org_id=org_id, service_account_id=api_key.id, agent_id="agent-x",
         prompt="sa prompt", schedule=parse_schedule("15m"),
         created_from_session_id=None,
     )
 
-    user_rows = await store.list_for_user(
-        org_id=org_id, user_id=user_id, agent_id="agent-x",
-    )
-    assert {row.id for row in user_rows} == {user_schedule.id}
+    def listed(**principal):
+        return store.list_for_user(org_id=org_id, agent_id="agent-x", **principal)
 
-    sa_rows = await store.list_for_user(
-        org_id=org_id, service_account_id=issued.id, agent_id="agent-x",
+    assert {row.id for row in await listed(user_id=user_id)} == {user_schedule.id}
+    assert {row.id for row in await listed(service_account_id=api_key.id)} == {key_schedule.id}
+    assert not await store.cancel(
+        org_id=org_id, agent_id="agent-x", schedule_id=user_schedule.id,
+        service_account_id=api_key.id, ended_by="key",
     )
-    assert {row.id for row in sa_rows} == {sa_schedule.id}
+    # An operator manages every schedule of the agent, a channel user's too.
+    assert {row.id for row in await listed(service_account_id=operator.id)} == {
+        user_schedule.id, key_schedule.id,
+    }
+
+    accounts = ServiceAccountStore(session_factory)
+    agent_itself = await accounts.create(
+        org_id=org_id, name="agent-x principal", agent_id="agent-x", kind=KIND_AGENT_PRINCIPAL,
+    )
+    another_agent = await accounts.create(
+        org_id=org_id, name="agent-y principal", agent_id="agent-y", kind=KIND_AGENT_PRINCIPAL,
+    )
+    assert {row.id for row in await listed(service_account_id=agent_itself.id)} == {
+        user_schedule.id, key_schedule.id,
+    }
+    assert await listed(service_account_id=another_agent.id) == []
 
 
 async def test_create_rejects_when_neither_principal(session_factory):
@@ -559,27 +608,28 @@ async def test_sa_principal_cancel_and_pause_resume_round_trip(session_factory):
         org_id=org_id, user_id=user_id, agent_id="agent-x",
         schedule_id=sa_schedule.id,
     )
-    assert rejected is False
+    assert rejected is None
 
     paused = await store.pause(
         org_id=org_id, service_account_id=issued.id, agent_id="agent-x",
         schedule_id=sa_schedule.id,
     )
-    assert paused is True
+    assert paused.status == "paused"
     assert (await store.get(sa_schedule.id)).status == "paused"
 
     resumed = await store.resume(
         org_id=org_id, service_account_id=issued.id, agent_id="agent-x",
         schedule_id=sa_schedule.id,
     )
-    assert resumed is True
+    assert resumed.status == "active"
     assert (await store.get(sa_schedule.id)).status == "active"
 
-    deleted = await store.delete(
+    cancelled = await store.cancel(
         org_id=org_id, service_account_id=issued.id, agent_id="agent-x",
-        schedule_id=sa_schedule.id,
+        schedule_id=sa_schedule.id, ended_by="test",
     )
-    assert deleted is True
+    assert cancelled.ended_by == "test"
+    assert (await store.get(sa_schedule.id)).status == "cancelled"
 
 
 async def test_expire_active_schedules_sweeps_expired_active_rows(session_factory):
@@ -669,3 +719,403 @@ async def test_expire_active_schedules_is_idempotent(session_factory):
     assert len(first) == 1
     second = await store.expire_active_schedules()
     assert second == []
+
+
+def _agent() -> str:
+    import uuid
+
+    return f"agent-{uuid.uuid4().hex[:8]}"
+
+
+async def _due(store, org_id, user_id, agent_id, schedule, **kw):
+    return await store.create(
+        org_id=org_id, user_id=user_id, agent_id=agent_id, name="Job", prompt="Do it",
+        schedule=schedule, source="tool", created_from_session_id=None,
+        next_run_at=datetime.now(timezone.utc) - timedelta(minutes=1), **kw,
+    )
+
+
+async def test_a_cancel_during_a_run_stays_cancelled(session_factory):
+    import uuid
+
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    store = ScheduledSessionStore(session_factory)
+    agent = _agent()
+    created = await _due(store, org_id, user_id, agent, parse_schedule("10m"))
+    claimed = (await store.claim_due(agent_id=agent, worker_id="w1", limit=1))[0]
+
+    assert await store.cancel(
+        org_id=org_id, user_id=user_id, agent_id=agent, schedule_id=created.id, ended_by="user:x",
+    )
+    await store.mark_run_created(claimed, session_id=uuid.uuid4())
+
+    row = await store.get(created.id)
+    assert (row.status, row.ended_reason, row.ended_by) == ("cancelled", "cancelled", "user:x")
+    assert row.next_run_at is None
+    assert row.run_count == 1
+
+
+async def test_a_dynamic_loop_cancelled_mid_run_is_not_revived_by_its_run(session_factory):
+    import uuid
+
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    store = ScheduledSessionStore(session_factory)
+    agent = _agent()
+    loop = await store.create_loop(
+        org_id=org_id, user_id=user_id, agent_id=agent, prompt="watch", created_from_session_id=None,
+    )
+    claimed = (await store.claim_due(agent_id=agent, worker_id="w1", limit=1))[0]
+    run_id = uuid.uuid4()
+    await store.mark_run_created(claimed, session_id=run_id)
+    await store.cancel(org_id=org_id, user_id=user_id, agent_id=agent, schedule_id=loop.id, ended_by="user:x")
+
+    assert not await store.mark_dynamic_run_finished(
+        schedule_id=loop.id, org_id=org_id, user_id=user_id, agent_id=agent,
+        session_id=run_id, delay_seconds=60, reason="again",
+    )
+    row = await store.get(loop.id)
+    assert (row.status, row.next_run_at) == ("cancelled", None)
+
+
+async def test_a_dynamic_loop_its_run_declares_done_ends_done(session_factory):
+    import uuid
+
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    store = ScheduledSessionStore(session_factory)
+    agent = _agent()
+    loop = await store.create_loop(
+        org_id=org_id, user_id=user_id, agent_id=agent, prompt="watch", created_from_session_id=None,
+    )
+    claimed = (await store.claim_due(agent_id=agent, worker_id="w1", limit=1))[0]
+    run_id = uuid.uuid4()
+    await store.mark_run_created(claimed, session_id=run_id)
+
+    assert await store.mark_dynamic_run_finished(
+        schedule_id=loop.id, org_id=org_id, user_id=user_id, agent_id=agent,
+        session_id=run_id, delay_seconds=0, reason="green", completed=True,
+    )
+    row = await store.get(loop.id)
+    assert (row.status, row.ended_reason, row.next_run_at) == ("completed", "done", None)
+
+
+async def test_a_one_off_runs_once_and_ends_done(session_factory):
+    import uuid
+
+    from surogates.scheduled.schedule import once_schedule
+
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    store = ScheduledSessionStore(session_factory)
+    agent = _agent()
+    at = datetime.now(timezone.utc) + timedelta(minutes=5)
+    created = await _due(store, org_id, user_id, agent, once_schedule(at.replace(tzinfo=None)))
+    assert created.kind == "once"
+    claimed = (await store.claim_due(agent_id=agent, worker_id="w1", limit=1))[0]
+    await store.mark_run_created(claimed, session_id=uuid.uuid4())
+
+    row = await store.get(created.id)
+    assert (row.status, row.ended_reason, row.next_run_at) == ("completed", "done", None)
+
+
+async def test_a_one_off_in_the_past_is_refused(session_factory):
+    from surogates.scheduled.schedule import once_schedule
+
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    store = ScheduledSessionStore(session_factory)
+    with pytest.raises(ValueError, match="already passed"):
+        await store.create(
+            org_id=org_id, user_id=user_id, agent_id=_agent(), name="Late", prompt="x",
+            schedule=once_schedule(datetime(2020, 1, 1)), source="tool", created_from_session_id=None,
+        )
+
+
+async def test_a_failing_one_off_retries_with_backoff_then_fails(session_factory):
+    from surogates.scheduled.schedule import once_schedule
+    from surogates.scheduled.store import MAX_ONCE_ATTEMPTS
+
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    store = ScheduledSessionStore(session_factory)
+    agent = _agent()
+    at = datetime.now(timezone.utc) + timedelta(minutes=5)
+    created = await _due(store, org_id, user_id, agent, once_schedule(at.replace(tzinfo=None)))
+
+    for attempt in range(1, MAX_ONCE_ATTEMPTS + 1):
+        async with session_factory() as db:
+            await db.execute(
+                text("UPDATE scheduled_sessions SET next_run_at = now() - interval '1 minute' WHERE id = :id"),
+                {"id": created.id},
+            )
+            await db.commit()
+        claimed = (await store.claim_due(agent_id=agent, worker_id="w1", limit=1))[0]
+        await store.mark_run_failed(claimed, error=f"boom {attempt}")
+        row = await store.get(created.id)
+        assert row.consecutive_failures == attempt
+        if attempt < MAX_ONCE_ATTEMPTS:
+            assert row.status == "active"
+            assert row.next_run_at > datetime.now(timezone.utc)
+
+    assert (row.status, row.ended_reason, row.next_run_at) == ("failed", "failed", None)
+    assert row.last_error == f"boom {MAX_ONCE_ATTEMPTS}"
+
+
+async def test_a_successful_run_resets_the_failure_count(session_factory):
+    import uuid
+
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    store = ScheduledSessionStore(session_factory)
+    agent = _agent()
+    created = await _due(store, org_id, user_id, agent, parse_schedule("10m"))
+    await store.mark_run_failed((await store.claim_due(agent_id=agent, worker_id="w1", limit=1))[0], error="x")
+    assert (await store.get(created.id)).consecutive_failures == 1
+
+    async with session_factory() as db:
+        await db.execute(
+            text("UPDATE scheduled_sessions SET next_run_at = now() - interval '1 minute' WHERE id = :id"),
+            {"id": created.id},
+        )
+        await db.commit()
+    await store.mark_run_created(
+        (await store.claim_due(agent_id=agent, worker_id="w1", limit=1))[0], session_id=uuid.uuid4(),
+    )
+    assert (await store.get(created.id)).consecutive_failures == 0
+
+
+async def test_runs_stopped_at_their_limit_count_until_one_ends_well(session_factory, session_store):
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    store = ScheduledSessionStore(session_factory)
+    agent = _agent()
+    created = await _due(store, org_id, user_id, agent, parse_schedule("10m"))
+
+    async def run(final_status: str) -> None:
+        async with session_factory() as db:
+            await db.execute(
+                text("UPDATE scheduled_sessions SET next_run_at = now() - interval '1 minute' WHERE id = :id"),
+                {"id": created.id},
+            )
+            await db.commit()
+        claimed = (await store.claim_due(agent_id=agent, worker_id="w1", limit=1))[0]
+        session = await session_store.create_session(
+            user_id=user_id, org_id=org_id, agent_id=agent, channel="scheduled",
+            config={"scheduled_session_id": str(created.id)},
+        )
+        await store.mark_run_created(claimed, session_id=session.id)
+        async with session_factory() as db:
+            await db.execute(text("UPDATE sessions SET status = :s WHERE id = :id"),
+                             {"s": final_status, "id": session.id})
+            await db.commit()
+        if final_status == "failed":
+            await store.mark_run_timed_out(session.id, limit_seconds=60)
+
+    await run("failed")
+    await run("failed")
+    assert (await store.get(created.id)).consecutive_failures == 2
+    await run("completed")
+    assert (await store.get(created.id)).consecutive_failures == 2
+    await run("completed")
+    assert (await store.get(created.id)).consecutive_failures == 0
+
+
+async def test_pause_update_resume_round_trip(session_factory):
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    store = ScheduledSessionStore(session_factory)
+    agent = _agent()
+    scope = dict(org_id=org_id, user_id=user_id, agent_id=agent)
+    created = await store.create(
+        **scope, name="Job", prompt="Do it", schedule=parse_schedule("10m"),
+        source="tool", created_from_session_id=None,
+    )
+
+    assert await store.pause(**scope, schedule_id=created.id)
+    paused = await store.get(created.id)
+    assert (paused.status, paused.next_run_at) == ("paused", None)
+    assert paused.paused_at is not None
+    assert not await store.pause(**scope, schedule_id=created.id)
+
+    updated = await store.update(
+        **scope, schedule_id=created.id, prompt="Do it better", schedule=parse_schedule("2h"),
+    )
+    assert (updated.prompt, updated.status, updated.next_run_at) == ("Do it better", "paused", None)
+    assert updated.schedule_display == "Every 2 hours"
+
+    assert await store.resume(**scope, schedule_id=created.id)
+    resumed = await store.get(created.id)
+    assert (resumed.status, resumed.paused_at) == ("active", None)
+    assert resumed.next_run_at > datetime.now(timezone.utc) + timedelta(minutes=110)
+    assert not await store.resume(**scope, schedule_id=created.id)
+
+
+async def test_an_interval_keeps_its_anchor_unless_its_length_changes(session_factory):
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    store = ScheduledSessionStore(session_factory)
+    scope = dict(org_id=org_id, user_id=user_id, agent_id=_agent())
+    created = await store.create(
+        **scope, name="Job", prompt="Do it", schedule=parse_schedule("10m"),
+        source="tool", created_from_session_id=None,
+    )
+    anchor = created.cadence["anchor"]
+
+    same = await store.update(
+        **scope, schedule_id=created.id, schedule=parse_schedule("10m", timezone_name="Europe/Bucharest"),
+    )
+    assert (same.cadence["anchor"], same.timezone, same.next_run_at) == (
+        anchor, "Europe/Bucharest", created.next_run_at,
+    )
+    longer = await store.update(**scope, schedule_id=created.id, schedule=parse_schedule("20m"))
+    assert longer.cadence["anchor"] != anchor
+
+
+async def test_update_cannot_turn_a_dynamic_loop_into_a_fixed_one(session_factory):
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    store = ScheduledSessionStore(session_factory)
+    agent = _agent()
+    loop = await store.create_loop(
+        org_id=org_id, user_id=user_id, agent_id=agent, prompt="watch", created_from_session_id=None,
+    )
+    with pytest.raises(ValueError):
+        await store.update(
+            org_id=org_id, user_id=user_id, agent_id=agent, schedule_id=loop.id,
+            schedule=parse_schedule("10m"),
+        )
+    # Due at once: left active, the cross-tenant claim tests would pick it up.
+    await store.cancel(org_id=org_id, user_id=user_id, agent_id=agent, schedule_id=loop.id)
+
+
+async def test_another_users_schedule_cannot_be_managed(session_factory):
+    org_id = await create_org(session_factory)
+    owner = await create_user(session_factory, org_id)
+    other = await create_user(session_factory, org_id)
+    store = ScheduledSessionStore(session_factory)
+    agent = _agent()
+    created = await store.create(
+        org_id=org_id, user_id=owner, agent_id=agent, name="Job", prompt="Do it",
+        schedule=parse_schedule("10m"), source="tool", created_from_session_id=None,
+    )
+    scope = dict(org_id=org_id, user_id=other, agent_id=agent, schedule_id=created.id)
+    assert not await store.pause(**scope)
+    assert not await store.cancel(**scope, ended_by="user:other")
+    assert await store.get_for(created.id, org_id=org_id, user_id=other, agent_id=agent) is None
+    assert (await store.get(created.id)).status == "active"
+
+
+async def test_plan_unscheduled_plans_rows_written_without_a_next_run(session_factory):
+    import uuid
+
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    store = ScheduledSessionStore(session_factory)
+    agent = _agent()
+    fixed = await store.create(
+        org_id=org_id, user_id=user_id, agent_id=agent, name="Job", prompt="Do it",
+        schedule=parse_schedule("10m"), source="tool", created_from_session_id=None,
+    )
+    loop = await store.create_loop(
+        org_id=org_id, user_id=user_id, agent_id=agent, prompt="watch", created_from_session_id=None,
+    )
+    async with session_factory() as db:
+        await db.execute(
+            text("UPDATE scheduled_sessions SET next_run_at = NULL WHERE id = :id"), {"id": fixed.id},
+        )
+        await db.execute(
+            text("UPDATE scheduled_sessions SET next_run_at = NULL, last_session_id = :run WHERE id = :id"),
+            {"id": loop.id, "run": uuid.uuid4()},
+        )
+        await db.commit()
+
+    planned = await store.plan_unscheduled(limit=1000)
+
+    assert fixed.id in {row.id for row in planned}
+    assert (await store.get(fixed.id)).next_run_at > datetime.now(timezone.utc)
+    assert (await store.get(loop.id)).next_run_at is None
+
+
+async def test_context_and_columns_are_stored(session_factory):
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    store = ScheduledSessionStore(session_factory)
+    created = await store.create(
+        org_id=org_id, user_id=user_id, agent_id=_agent(), name="Job", prompt="Do it",
+        schedule=parse_schedule("10m"), source="tool", created_from_session_id=None,
+        context={"browser": {"profile": "p1"}, "channel": "web"}, max_run_seconds=600,
+    )
+    row = await store.get(created.id)
+    assert row.context == {"browser": {"profile": "p1"}, "channel": "web"}
+    assert (row.kind, row.max_run_seconds, row.consecutive_failures) == ("interval", 600, 0)
+    assert row.cadence["seconds"] == 600
+
+
+async def test_changing_a_one_off_into_a_recurring_schedule_drops_its_single_run(session_factory):
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    store = ScheduledSessionStore(session_factory)
+    agent = _agent()
+    one_off = await store.create(
+        org_id=org_id, user_id=user_id, agent_id=agent, name="Once", prompt="Do it",
+        schedule=once_schedule(datetime.now(timezone.utc) + timedelta(days=1)), source="tool",
+        created_from_session_id=None, repeat_limit=1,
+    )
+    scope = dict(org_id=org_id, user_id=user_id, agent_id=agent, schedule_id=one_off.id)
+
+    recurring = await store.update(**scope, schedule=parse_schedule("2h"))
+    assert (recurring.kind, recurring.repeat_limit) == ("interval", None)
+    again = await store.update(**scope, schedule=once_schedule(datetime.now(timezone.utc) + timedelta(days=2)))
+    assert (again.kind, again.repeat_limit) == ("once", 1)
+
+
+async def test_a_loop_typed_in_a_chat_expires_and_a_made_schedule_does_not(session_factory):
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    store = ScheduledSessionStore(session_factory)
+    agent = _agent()
+    typed = await store.create_loop(
+        org_id=org_id, user_id=user_id, agent_id=agent, prompt="check the build",
+        schedule=parse_schedule("1m"), created_from_session_id=None,
+    )
+    made = await store.create(
+        org_id=org_id, user_id=user_id, agent_id=agent, name="Digest", prompt="digest",
+        schedule=parse_schedule("1h"), source="tool", created_from_session_id=None,
+    )
+    days = (typed.expires_at - typed.created_at).total_seconds() / 86400
+    assert DEFAULT_LOOP_EXPIRY_DAYS - 0.01 < days < DEFAULT_LOOP_EXPIRY_DAYS + 0.01
+    assert made.expires_at is None
+
+
+async def test_a_malformed_row_fails_alone_and_the_rest_are_planned(session_factory):
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    store = ScheduledSessionStore(session_factory)
+    agent = _agent()
+    good, bad = [
+        await store.create(
+            org_id=org_id, user_id=user_id, agent_id=agent, name=name, prompt=name,
+            schedule=parse_schedule("10m"), source="tool", created_from_session_id=None,
+        )
+        for name in ("good", "bad")
+    ]
+    async with session_factory() as db:
+        await db.execute(text(
+            "UPDATE scheduled_sessions SET next_run_at = NULL, kind = 'calendar', "
+            "cadence = CAST(:cadence AS jsonb) WHERE id = :id",
+        ), {"id": bad.id, "cadence": '{"days": [9], "times": ["09:00"]}'})
+        # A Studio row: days as numbers from Monday.
+        await db.execute(text(
+            "UPDATE scheduled_sessions SET next_run_at = NULL, kind = 'calendar', "
+            "cadence = CAST(:cadence AS jsonb) WHERE id = :id",
+        ), {"id": good.id, "cadence": '{"days": [0, 2, 4], "times": ["09:00"], "tz": "Europe/Bucharest"}'})
+        await db.commit()
+
+    await store.plan_unscheduled(limit=1000)
+
+    planned, failed = await store.get(good.id), await store.get(bad.id)
+    assert planned.status == "active" and planned.next_run_at is not None
+    assert planned.next_run_at.astimezone(ZoneInfo("Europe/Bucharest")).weekday() in {0, 2, 4}
+    assert failed.status == "failed" and "Cannot plan" in (failed.last_error or "")

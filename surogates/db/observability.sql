@@ -613,6 +613,12 @@ ALTER TABLE scheduled_sessions
     ADD COLUMN IF NOT EXISTS service_account_id uuid
         REFERENCES service_accounts(id);
 
+-- Who a run acts for and what it logs in as, captured when the schedule is
+-- made; a run's own time limit.
+ALTER TABLE scheduled_sessions
+    ADD COLUMN IF NOT EXISTS context jsonb NOT NULL DEFAULT '{}'::jsonb,
+    ADD COLUMN IF NOT EXISTS max_run_seconds integer;
+
 -- Replace the old (org, user, agent) index with one that covers both
 -- principal shapes.  Old index is dropped explicitly because the name
 -- is changing.
@@ -635,6 +641,49 @@ BEGIN
                  + (service_account_id IS NOT NULL)::int = 1);
     END IF;
 END $$;
+
+-- A schedule's cadence kind and parameters, and how it ended.
+ALTER TABLE scheduled_sessions
+    ADD COLUMN IF NOT EXISTS kind                 text,
+    ADD COLUMN IF NOT EXISTS cadence              jsonb,
+    ADD COLUMN IF NOT EXISTS paused_at            timestamptz,
+    ADD COLUMN IF NOT EXISTS ended_reason         text,
+    ADD COLUMN IF NOT EXISTS ended_by             text,
+    ADD COLUMN IF NOT EXISTS consecutive_failures integer NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS ended_announced_at   timestamptz;
+
+-- Rows made before ``kind`` keep their cadence in ``schedule``: a cron, or a
+-- dynamic loop.  Every reader goes by ``kind`` alone.
+UPDATE scheduled_sessions
+SET kind = CASE WHEN schedule->>'kind' = 'dynamic_loop' THEN 'dynamic' ELSE 'cron' END,
+    cadence = CASE WHEN schedule->>'kind' = 'dynamic_loop' THEN '{}'::jsonb
+                   ELSE jsonb_build_object('cron', schedule->>'cron') END,
+    timezone = COALESCE(schedule->>'timezone_name', timezone)
+WHERE kind IS NULL;
+
+-- A schedule's runs, looked up by the schedule they belong to.
+CREATE INDEX IF NOT EXISTS idx_sessions_scheduled_session
+    ON sessions ((config->>'scheduled_session_id'))
+    WHERE channel = 'scheduled';
+
+-- The ticker plans active rows with no next run (made or resumed by the
+-- control plane); dynamic loops waiting on their run look the same, and
+-- ``plan_unscheduled`` tells them apart.
+CREATE INDEX IF NOT EXISTS idx_scheduled_sessions_unplanned
+    ON scheduled_sessions (updated_at)
+    WHERE status = 'active' AND next_run_at IS NULL;
+
+-- Ended schedules are kept, so the per-tick sweeps over recent endings and
+-- over open scheduled runs must not scan all of history.
+CREATE INDEX IF NOT EXISTS idx_scheduled_sessions_cancelled
+    ON scheduled_sessions (updated_at)
+    WHERE status = 'cancelled';
+CREATE INDEX IF NOT EXISTS idx_scheduled_sessions_unannounced
+    ON scheduled_sessions (updated_at)
+    WHERE ended_announced_at IS NULL AND status IN ('completed', 'failed');
+CREATE INDEX IF NOT EXISTS idx_sessions_open_scheduled
+    ON sessions (created_at)
+    WHERE channel = 'scheduled' AND status IN ('active', 'paused');
 
 
 -- ----------------------------------------------------------------------------
@@ -832,8 +881,10 @@ WHERE d.type = 'expert.delegation';
 -- format training data exporters and chat-log renderers need.
 --
 -- Includes every event type that contributes to the conversation: user
--- messages, LLM responses, tool calls/results, expert delegation/outcome
--- and user feedback (both on expert output and on regular LLM turns).
+-- messages, LLM responses, tool calls/results, expert delegation/outcome,
+-- user feedback (both on expert output and on regular LLM turns), and what
+-- the chat shows of its routines and helpers (loop results, a browser login
+-- it could not use, a helper's progress).
 -- Context-engineering events (context.compact, harness.wake, etc.) and
 -- policy decision events are intentionally excluded; they have their own
 -- dedicated views.
@@ -864,7 +915,9 @@ WHERE e.type IN (
     'expert.endorse',
     'expert.override',
     'user.feedback',
-    'loop.result'
+    'loop.result',
+    'browser.profile_unavailable',
+    'delegation.progress'
 );
 
 
@@ -1374,3 +1427,7 @@ WHERE o.state IN ('queued', 'awaiting_reply')
           THEN split_part(o.dedupe_key, ':', 2)::uuid
   END
   AND x.org_id = o.org_id AND x.resolved_at IS NOT NULL;
+
+-- An agent-owned browser profile used, without being bound, on these channels.
+ALTER TABLE browser_profiles
+    ADD COLUMN IF NOT EXISTS use_in_channels text[] NOT NULL DEFAULT '{}'::text[];

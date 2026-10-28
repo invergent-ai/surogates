@@ -625,3 +625,97 @@ async def test_no_caller_says_a_new_chat_is_under_a_project_thread():
         org_id=uuid4(), user_id=uuid4(), agent_id="a-1", channel="web", config={"under_thread": "t-1"},
     )
     assert "under_thread" not in store.create_session.await_args.kwargs["config"]
+
+
+_STUDIO_CONTEXT = {
+    "ops": {"user_id": "ops-user-1", "username": "pieter"},
+    "operator": {"name": "Pieter Bakker", "email": "pieter@example.com"},
+    "browser": {"profile_id": "profile-1"},
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("channel", ["scheduled", "delegation", "worker", "task"])
+async def test_every_child_acts_for_its_parents_operator_with_its_login(channel):
+    parent = _make_session(channel="studio", config={**_workspace_config(), **_STUDIO_CONTEXT})
+    store = SimpleNamespace(create_session=AsyncMock(return_value=SimpleNamespace(id=uuid4())))
+
+    await create_child_session(store=store, parent=parent, channel=channel)
+
+    cfg = store.create_session.await_args.kwargs["config"]
+    for field, value in _STUDIO_CONTEXT.items():
+        assert cfg[field] == value
+    assert cfg["origin_channel"] == "studio"
+
+
+@pytest.mark.asyncio
+async def test_a_caller_cannot_name_the_login_or_operator_a_child_acts_as():
+    parent = _make_session(channel="studio")
+    store = SimpleNamespace(create_session=AsyncMock(return_value=SimpleNamespace(id=uuid4())))
+
+    await create_child_session(
+        store=store, parent=parent, channel="delegation", config=dict(_STUDIO_CONTEXT),
+    )
+
+    cfg = store.create_session.await_args.kwargs["config"]
+    assert not {"ops", "operator", "browser"} & cfg.keys()
+
+
+@pytest.mark.asyncio
+async def test_a_schedules_captured_context_wins_over_its_chats_current_one():
+    parent = _make_session(
+        channel="studio",
+        config={**_workspace_config(), **_STUDIO_CONTEXT, "browser": {"profile_id": "changed-later"}},
+    )
+    store = SimpleNamespace(create_session=AsyncMock(return_value=SimpleNamespace(id=uuid4())))
+
+    await create_child_session(
+        store=store, parent=parent, channel="scheduled",
+        context={**_STUDIO_CONTEXT, "origin_channel": "slack"},
+    )
+
+    cfg = store.create_session.await_args.kwargs["config"]
+    assert cfg["browser"] == {"profile_id": "profile-1"}
+    assert cfg["origin_channel"] == "slack"
+
+
+def test_a_schedule_captures_only_the_context_fields():
+    from surogates.session.execution_context import capture_schedule_context
+
+    captured = capture_schedule_context(
+        {**_workspace_config(), **_STUDIO_CONTEXT, "allowed_tools": ["x"]}, "studio",
+    )
+    assert captured == {**_STUDIO_CONTEXT, "origin_channel": "studio"}
+
+
+@pytest.mark.asyncio
+async def test_a_schedule_made_by_a_sub_agent_runs_as_that_sub_agent():
+    from surogates.session.execution_context import capture_schedule_context
+    from surogates.tools.owner_scope import owner_scope_config_ok
+
+    made_in = {**_workspace_config(), **_STUDIO_CONTEXT, "agent_type": "writer"}
+    captured = capture_schedule_context(made_in, "studio")
+    assert captured["agent_type"] == "writer"
+    parent = _make_session(channel="studio", config={**_workspace_config(), **_STUDIO_CONTEXT})
+    store = SimpleNamespace(create_session=AsyncMock(return_value=SimpleNamespace(id=uuid4())))
+
+    await create_child_session(store=store, parent=parent, channel="scheduled", context=captured)
+
+    cfg = store.create_session.await_args.kwargs["config"]
+    assert cfg["agent_type"] == "writer"
+    # A sub-agent's run gets no operator-only surfaces, as the sub-agent had none.
+    assert not owner_scope_config_ok(uuid4(), cfg)
+
+
+@pytest.mark.asyncio
+async def test_a_helper_names_its_own_sub_agent_and_never_inherits_its_parents():
+    parent = _make_session(
+        channel="studio", config={**_workspace_config(), **_STUDIO_CONTEXT, "agent_type": "writer"},
+    )
+    store = SimpleNamespace(create_session=AsyncMock(return_value=SimpleNamespace(id=uuid4())))
+
+    await create_child_session(store=store, parent=parent, channel="delegation", config={"agent_type": "reviewer"})
+    assert store.create_session.await_args.kwargs["config"]["agent_type"] == "reviewer"
+
+    await create_child_session(store=store, parent=parent, channel="delegation")
+    assert "agent_type" not in store.create_session.await_args.kwargs["config"]

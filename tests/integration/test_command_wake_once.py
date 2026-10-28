@@ -1010,7 +1010,7 @@ async def test_a_second_command_sent_before_the_first_ones_answer_is_written_is_
 
     await workers.wake(chat)
 
-    assert (workers.ran, (await workers.said(chat))[-1]) == (["_handle_goal_command", "_handle_loop_command"], "No active loops.")
+    assert (workers.ran, (await workers.said(chat))[-1]) == (["_handle_goal_command", "_handle_loop_command"], "No active or paused loops.")
     assert (workers.requests, await workers.status(chat)) == ([], "completed")
 
 
@@ -1046,7 +1046,7 @@ async def test_a_chat_the_old_harness_left_runs_each_new_command_once_and_no_old
     await workers.says(chat, "/goal status")
     await workers.says(chat, "/loop list")
     await emit(chat, EventType.HARNESS_WAKE, old)
-    await emit(chat, EventType.LLM_RESPONSE, {"message": {"role": "assistant", "content": "No active loops."}})
+    await emit(chat, EventType.LLM_RESPONSE, {"message": {"role": "assistant", "content": "No active or paused loops."}})
     # One typed during an old turn, which the model read as words.
     await workers.says(chat, "Go on.")
     await emit(chat, EventType.HARNESS_WAKE, old)

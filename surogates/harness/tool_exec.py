@@ -2094,6 +2094,7 @@ async def _run_single_tool(
                     expert_transcript=expert_transcript,
                     interrupt_check=interrupt_check,
                     task_id=sandbox_session_key(session),
+                    offered_tools=offered_tools,
                 )
     except KeyError:
         tool_failed = True

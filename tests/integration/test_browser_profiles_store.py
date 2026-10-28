@@ -107,3 +107,30 @@ async def test_storage_state_for_denies_foreign_principal(session_factory):
         )
         is None
     )
+
+
+async def test_an_agent_profile_is_used_only_on_the_channels_it_was_granted(session_factory):
+    store = _store(session_factory)
+    org = await create_org(session_factory)
+    agent_sa = (await issue_service_account_token(session_factory, org, name="agent")).id
+    other_sa = (await issue_service_account_token(session_factory, org, name="other")).id
+
+    empty = await store.create(org, user_id=None, service_account_id=agent_sa, name="Empty")
+    x = await store.create(org, user_id=None, service_account_id=agent_sa, name="X")
+    await store.save_capture(
+        x.id, org, user_id=None, service_account_id=agent_sa,
+        storage_state={"cookies": [{"name": "auth", "domain": ".x.com"}], "origins": []},
+    )
+    for profile in (empty, x):
+        assert await store.set_use_in_channels(
+            profile.id, org, service_account_id=agent_sa, channels=["slack", "scheduled", "slack"],
+        )
+    assert not await store.set_use_in_channels(
+        x.id, org, service_account_id=other_sa, channels=["web"],
+    )
+
+    assert await store.used_in_channel(org, service_account_id=agent_sa, channel="slack") == x.id
+    assert await store.used_in_channel(org, service_account_id=agent_sa, channel="web") is None
+    assert await store.used_in_channel(org, service_account_id=other_sa, channel="slack") is None
+    [row] = [r for r in await store.list(org, user_id=None, service_account_id=agent_sa) if r.id == x.id]
+    assert row.use_in_channels == ["scheduled", "slack"]

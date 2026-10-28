@@ -29,6 +29,7 @@ from surogates.harness.prompt_library import PromptLibrary, default_library
 from surogates.runtime.context import SlashCommandConfig
 from surogates.tools.loader import AGENT_SOURCE_PLATFORM
 from surogates.tools.skill_visibility import fallback_hidden
+from surogates.session.execution_context import platform_hint_channel
 from surogates.workstreams import is_project_master, is_project_thread
 
 if TYPE_CHECKING:
@@ -338,6 +339,10 @@ class PromptBuilder:
             # new tool registration would tell the LLM to call a tool
             # that doesn't exist.
             parts.append(self._prompts.get("guidance/cron_loop"))
+        if self._session is not None and self._session.config.get("scheduled_run"):
+            parts.append(scheduled_run_block(
+                self._session.config["scheduled_run"], offered=self._available_tools,
+            ))
 
         # Coordinator guidance — injected when the session is in coordinator
         # mode.  A project's master runs threads, not workers, so it gets its
@@ -385,7 +390,14 @@ class PromptBuilder:
 
         if not parts:
             return ""
-        return "\n\n".join(parts)
+        guidance = "\n\n".join(parts)
+        if "ask_user_question" not in self._available_tools:
+            # A shared fragment's line about asking makes the model look for a
+            # tool it was not given (denied by policy, or nobody to answer).
+            guidance = "\n".join(
+                line for line in guidance.split("\n") if "`ask_user_question`" not in line
+            )
+        return guidance
 
     def _working_principles_section(self) -> str:
         """Always-loaded working principles fragment.
@@ -895,11 +907,11 @@ class PromptBuilder:
         # heading after the final ``"\n".join(parts)``.
         workspace = self._get_workspace_path()
         if workspace:
-            parts.append(f"- **Workspace**: `$HOME` (your working directory)")
+            parts.append("- **Workspace**: `$HOME` (your working directory)")
             parts.append("\n" + self._prompts.get("identity/workspace_rules"))
 
         # Platform hint based on session channel.
-        channel = self._get_channel()
+        channel = platform_hint_channel(self._get_channel(), getattr(self._session, "config", None))
         if channel:
             hint = self._prompts.platform_hint(channel)
             if hint:
@@ -1236,3 +1248,30 @@ def _base64_looks_suspicious(candidate: str) -> bool:
         return False
     lowered = decoded.lower()
     return any(kw in lowered for kw in _B64_SUSPICIOUS_KEYWORDS)
+
+
+def scheduled_run_block(run: dict, *, offered: Any = None) -> str:
+    """What a scheduled run is told about the schedule it is a run of."""
+    previous = run.get("previous_run") or {}
+    lines = [
+        "## This is a scheduled run",
+        f"- Schedule: {run.get('name')} (id {run.get('id')})",
+        f"- Cadence: {run.get('cadence')}, timezone {run.get('timezone')}",
+        f"- Run number: {run.get('run_number')}"
+        + (f" of {run['repeat_limit']}" if run.get("repeat_limit") else ""),
+        f"- Previous run: {previous.get('status')} (started {previous.get('started_at')})"
+        if previous else "- Previous run: none, this is the first",
+        f"- Next run: {run.get('next_run_at') or 'none planned'}",
+    ]
+    if run.get("expires_at"):
+        lines.append(f"- The schedule ends at {run['expires_at']}")
+    if run.get("last_error"):
+        lines.append(f"- Last problem: {run['last_error']}")
+    lines.append("The schedule already exists: do not make another for the same work.")
+    own = [t for t in ("cron_pause", "cron_update", "cron_delete") if offered is None or t in offered]
+    if own:
+        lines.append(
+            "If its prompt says when to pause, change or stop it, use "
+            f"{', '.join(own)} with id {run.get('id')}; no other schedule."
+        )
+    return "\n".join(lines)

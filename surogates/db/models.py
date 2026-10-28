@@ -843,6 +843,20 @@ class ScheduledSession(Base):
     locked_until: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     created_from_session_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), nullable=True)
+    # How the next run is computed (``scheduled.schedule.CADENCE_KINDS``) and
+    # its parameters; NULL on rows made before them, read from ``schedule``.
+    kind: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    cadence: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONB, nullable=True)
+    # Who a run acts for and what it logs in as, captured at creation
+    # (surogates.session.execution_context).
+    context: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
+    paused_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    ended_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    ended_by: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    consecutive_failures: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    max_run_seconds: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # When its creating chat was told it ended on its own (expired, limit, failed).
+    ended_announced_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -1714,6 +1728,11 @@ class BrowserProfile(Base):
     )
     cookie_domains: Mapped[list[Any]] = mapped_column(
         JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
+    # An agent-owned profile is used, without being bound, by every session
+    # of the agent on these channels: the operator's grant of its login.
+    use_in_channels: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, server_default=text("'{}'::text[]")
     )
     created_at: Mapped[datetime] = mapped_column(
         nullable=False, server_default=func.now()

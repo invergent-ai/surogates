@@ -434,7 +434,7 @@ async def test_delete_parent_session_archives_descendants_and_cancels_schedules(
         )
 
     schedule_store = ScheduledSessionStore(session_factory)
-    root_schedule = await schedule_store.create_dynamic_loop(
+    root_schedule = await schedule_store.create_loop(
         org_id=org_id,
         user_id=user_id,
         agent_id=_AGENT_ID,
@@ -442,7 +442,7 @@ async def test_delete_parent_session_archives_descendants_and_cancels_schedules(
         schedule=parse_dynamic_loop_schedule(),
         created_from_session_id=root.id,
     )
-    child_schedule = await schedule_store.create_dynamic_loop(
+    child_schedule = await schedule_store.create_loop(
         org_id=org_id,
         user_id=user_id,
         agent_id=_AGENT_ID,
@@ -465,19 +465,20 @@ async def test_delete_parent_session_archives_descendants_and_cancels_schedules(
             .order_by(SessionRow.created_at)
         )
         schedule_rows = await db.execute(
-            select(ScheduledSessionRow.id)
+            select(ScheduledSessionRow.status, ScheduledSessionRow.ended_by)
             .where(ScheduledSessionRow.id.in_([root_schedule.id, child_schedule.id]))
         )
 
     sessions = session_rows.scalars().all()
-    schedules = schedule_rows.scalars().all()
+    schedules = schedule_rows.all()
 
     assert [row.status for row in sessions] == [
         "archived",
         "archived",
         "archived",
     ]
-    assert schedules == []
+    # Cancelled, with their history kept.
+    assert [tuple(row) for row in schedules] == [("cancelled", "session deleted")] * 2
     for session in (root, child, grandchild):
         assert not await app.state.storage.exists(
             bucket,

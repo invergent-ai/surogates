@@ -20,7 +20,7 @@ from surogates.session.acting_principal import ActingPrincipal
 from surogates.tenant.context import TenantContext
 from surogates.tools.builtin.cron import _cron_create_handler
 from surogates.tools.registry import ToolRegistry
-from tests.test_cron_tools import DIGEST, FakeSessions
+from tests.test_cron_tools import DIGEST, QUESTION, YES, FakeSessions, _preview
 from tests.test_wake_slash_command_gate import _llm_responses, _session, _stub_store
 
 from .conftest import create_org, create_user
@@ -32,14 +32,20 @@ async def test_loop_list_and_cancel_reach_a_schedule_the_model_made(session_fact
     org_id = await create_org(session_factory)
     user_id = await create_user(session_factory, org_id)
     session = _session()
-    made = json.loads(await _cron_create_handler(
-        DIGEST,
-        tenant=SimpleNamespace(org_id=org_id),
-        agent_id=session.agent_id,
-        session_id=str(session.id),
-        session_store=FakeSessions(ActingPrincipal(user_id=user_id, service_account_id=None)),
-        session_factory=session_factory,
-    ))
+    principal = ActingPrincipal(user_id=user_id, service_account_id=None)
+
+    async def create(events):
+        return json.loads(await _cron_create_handler(
+            DIGEST,
+            tenant=SimpleNamespace(org_id=org_id),
+            agent_id=session.agent_id,
+            session_id=str(session.id),
+            session_store=FakeSessions(principal, events),
+            session_factory=session_factory,
+        ))
+
+    shown = await create([])
+    made = await create([_preview("cron_create", shown["would"]), QUESTION, YES])
     schedule_id = made["schedule"]["id"]
 
     events = _stub_store(session, [])

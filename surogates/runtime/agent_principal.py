@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from surogates.db.models import ServiceAccount
 from surogates.tenant.auth.service_account import KIND_AGENT_PRINCIPAL
 
-__all__ = ["ServiceAccountPrincipal", "make_cached_agent_principal_resolver"]
+__all__ = ["ServiceAccountPrincipal", "find_agent_principal", "make_cached_agent_principal_resolver"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,6 +31,31 @@ class ServiceAccountPrincipal:
     id: UUID
     org_id: UUID
     name: str
+
+
+async def find_agent_principal(
+    session_factory: async_sessionmaker[AsyncSession], org_id: UUID, agent_id: str,
+) -> ServiceAccountPrincipal | None:
+    """The live service account *agent_id* acts as in *org_id*, uncached."""
+    async with session_factory() as db:
+        row = (
+            await db.execute(
+                select(ServiceAccount).where(
+                    ServiceAccount.org_id == org_id,
+                    ServiceAccount.agent_id == agent_id,
+                    # The agent's own machine identity, not one of the
+                    # operator's API keys — those share (org_id, agent_id)
+                    # with it and only the principal is unique on that
+                    # pair. Without this the query finds several rows and
+                    # every turn dies on MultipleResultsFound.
+                    ServiceAccount.kind == KIND_AGENT_PRINCIPAL,
+                    ServiceAccount.revoked_at.is_(None),
+                )
+            )
+        ).scalar_one_or_none()
+    if row is None:
+        return None
+    return ServiceAccountPrincipal(id=row.id, org_id=row.org_id, name=row.name)
 
 
 def make_cached_agent_principal_resolver(
@@ -56,25 +81,7 @@ def make_cached_agent_principal_resolver(
             org_id = UUID(org_id_raw)
         except ValueError:
             return None
-        async with session_factory() as db:
-            row = (
-                await db.execute(
-                    select(ServiceAccount).where(
-                        ServiceAccount.org_id == org_id,
-                        ServiceAccount.agent_id == agent_id,
-                        # The agent's own machine identity, not one of the
-                        # operator's API keys — those share (org_id, agent_id)
-                        # with it and only the principal is unique on that
-                        # pair. Without this the query finds several rows and
-                        # every turn dies on MultipleResultsFound.
-                        ServiceAccount.kind == KIND_AGENT_PRINCIPAL,
-                        ServiceAccount.revoked_at.is_(None),
-                    )
-                )
-            ).scalar_one_or_none()
-        if row is None:
-            return None
-        return ServiceAccountPrincipal(id=row.id, org_id=row.org_id, name=row.name)
+        return await find_agent_principal(session_factory, org_id, agent_id)
 
     cache = ChannelRoutingCache(
         loader=_loader, ttl_seconds=ttl_seconds, max_entries=max_entries,

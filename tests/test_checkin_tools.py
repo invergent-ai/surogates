@@ -227,6 +227,8 @@ async def test_a_failed_escalation_is_visible(sf, awaiting_invitation):
     assert row.escalation_state == "failed"
     assert row.reason
     assert "could not escalate" in result.lower()
+    # Inside a check-in the Program's team is a way to fix it too.
+    assert "agent's Inbox" in result and "Programs page" in result
     assert await _latest_inbox_item(sf) is None
 
 

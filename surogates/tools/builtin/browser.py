@@ -96,6 +96,70 @@ def _on_a_computer(session_config: dict[str, Any] | None) -> bool:
     return ((session_config or {}).get("execution") or {}).get("kind") == "device"
 
 
+def _as_uuid(raw: Any) -> UUID | None:
+    try:
+        return UUID(str(raw)) if raw else None
+    except ValueError:
+        return None
+
+
+async def _saved_login(
+    store: Any,
+    *,
+    tenant: Any,
+    session_config: dict[str, Any] | None,
+    channel: str | None,
+) -> tuple[str | None, dict | None, str | None]:
+    """The login a session's browser starts with: (profile id, its state, why it could not be loaded).
+
+    A profile bound to the session is its principal's own or, failing that,
+    the agent's.  With none bound, the agent's profile its operator granted
+    to this channel.  A personal profile never answers another principal, so
+    one person's routine cannot drive another's login.
+    """
+    config = session_config or {}
+    org_id = getattr(tenant, "org_id", None)
+    agent_sa = _as_uuid(config.get("agent_service_account_id"))
+    profile_id = (config.get("browser") or {}).get("profile_id")
+    if not profile_id:
+        if store is None or agent_sa is None or org_id is None or not channel:
+            return None, None, None
+        found = await store.used_in_channel(
+            org_id, service_account_id=agent_sa, channel=config.get("login_channel") or channel,
+        )
+        if found is None:
+            return None, None, None
+        profile_id, owners = str(found), [(None, agent_sa)]
+    else:
+        # The session's own principal: its service account (the ops-chat one in
+        # Studio, the agent's on a managed channel), else its user.
+        sa_id = getattr(tenant, "service_account_id", None) or _as_uuid(config.get("service_account_id"))
+        user_id = None if sa_id is not None else getattr(tenant, "user_id", None)
+        owners = [(user_id, sa_id)] if (user_id is None) != (sa_id is None) else []
+        if agent_sa is not None and agent_sa != sa_id:
+            owners.append((None, agent_sa))
+    if store is None:
+        logger.warning("Session is bound to browser profile %s but the worker has no profile store", profile_id)
+        return profile_id, None, "cannot be loaded here (saved logins are not configured on this worker)"
+    pid = _as_uuid(profile_id)
+    for user_id, sa_id in owners if pid is not None and org_id is not None else []:
+        try:
+            state = await store.storage_state_for(pid, org_id, user_id=user_id, service_account_id=sa_id)
+        except ValueError:
+            logger.warning("Could not decrypt browser profile %s", profile_id, exc_info=True)
+            return profile_id, None, "could not be decrypted; it has to be saved again"
+        except Exception:
+            logger.warning("Could not load browser profile %s", profile_id, exc_info=True)
+            return profile_id, None, "could not be loaded"
+        if state is not None:
+            await store.touch_last_used(pid, org_id, user_id=user_id, service_account_id=sa_id)
+            return profile_id, state, None
+    logger.warning(
+        "Browser profile %s is not one this session may use (org=%s owners=%s)", profile_id, org_id, owners,
+    )
+    return profile_id, None, "was not found, has no saved login, or belongs to someone else"
+
+
 async def _resolve_session_browser(
     *,
     tenant: Any,
@@ -107,6 +171,7 @@ async def _resolve_session_browser(
     session_config: dict[str, Any] | None = None,
     browser_profile_store: Any = None,
     workspace_io: Any = None,
+    channel: str | None = None,
 ) -> tuple[str, BrowserEndpoint | DeviceEndpoint, dict[str, dict[str, Any]]] | str:
     if isinstance(workspace_io, DeviceWorkspaceIO) and session_id is not None:
         # A session on the user's computer drives the browser there, through its
@@ -138,98 +203,23 @@ async def _resolve_session_browser(
             ),
         )
 
-        # Attach a saved browser profile's login state, if one is bound to the
-        # session. The pool injects it into the fresh context at provision. The
+        # The pool injects a saved login into a fresh browser at provision. The
         # store rides on the pool (set at worker construction); an explicit
         # ``browser_profile_store`` overrides it for tests.
         store = browser_profile_store or getattr(
             browser_pool, "browser_profile_store", None
         )
-        profile_id = (session_config or {}).get("browser", {}).get("profile_id")
-        if profile_id:
-            # Every miss below leaves the browser unauthenticated, which looks
-            # identical to "no profile bound" to the user. Log each branch so a
-            # logged-out session is diagnosable (store missing vs principal
-            # unresolved vs profile not found vs decrypt failure).
-            if store is None:
-                logger.warning(
-                    "Session %s is bound to browser profile %s but the worker "
-                    "has no profile store (encryption_key unset?); the browser "
-                    "will start unauthenticated",
-                    sid,
-                    profile_id,
-                )
-            else:
-                org_id = getattr(tenant, "org_id", None)
-                service_account_id = getattr(tenant, "service_account_id", None)
-                if service_account_id is None:
-                    sa_raw = (session_config or {}).get("service_account_id")
-                    if sa_raw:
-                        service_account_id = UUID(str(sa_raw))
-                # SA-owned profiles (the ops-chat path) take precedence; the
-                # store requires exactly one principal, so null the user when
-                # an SA is set.
-                user_id = (
-                    None
-                    if service_account_id is not None
-                    else getattr(tenant, "user_id", None)
-                )
-                if (user_id is not None) ^ (service_account_id is not None):
-                    try:
-                        state = await store.storage_state_for(
-                            UUID(str(profile_id)),
-                            org_id,
-                            user_id=user_id,
-                            service_account_id=service_account_id,
-                        )
-                        if state is not None:
-                            browser_spec.storage_state = state
-                            logger.info(
-                                "Loaded browser profile %s for session %s "
-                                "(%d cookies)",
-                                profile_id,
-                                sid,
-                                len(state.get("cookies", []) or []),
-                            )
-                            await store.touch_last_used(
-                                UUID(str(profile_id)),
-                                org_id,
-                                user_id=user_id,
-                                service_account_id=service_account_id,
-                            )
-                        else:
-                            logger.warning(
-                                "Browser profile %s not found for session %s "
-                                "(org=%s user_id=%s service_account_id=%s); the "
-                                "browser will start unauthenticated",
-                                profile_id,
-                                sid,
-                                org_id,
-                                user_id,
-                                service_account_id,
-                            )
-                    except Exception:
-                        # Fail open to a fresh browser rather than crashing the
-                        # tool — e.g. the encryption key was rotated and the
-                        # blob can no longer be decrypted.
-                        logger.warning(
-                            "Could not load browser profile %s for session %s; "
-                            "provisioning a fresh browser",
-                            profile_id,
-                            sid,
-                            exc_info=True,
-                        )
-                else:
-                    logger.warning(
-                        "Browser profile %s bound to session %s but its "
-                        "principal could not be resolved (user_id=%s "
-                        "service_account_id=%s); the browser will start "
-                        "unauthenticated",
-                        profile_id,
-                        sid,
-                        user_id,
-                        service_account_id,
-                    )
+        # Loaded only when the pool provisions a fresh browser: a reused one
+        # already holds its login, and every action of a session goes through here.
+        missing: list[tuple[str, str]] = []
+
+        async def login() -> dict | None:
+            profile_id, state, problem = await _saved_login(
+                store, tenant=tenant, session_config=session_config, channel=channel,
+            )
+            if problem:
+                missing.append((profile_id, problem))
+            return state
 
         tenant_user_id = getattr(tenant, "user_id", None) if tenant else None
         result = await browser_pool.ensure(
@@ -239,7 +229,10 @@ async def _resolve_session_browser(
             # (it used to leak into the pod's user-id label).
             user_id=str(tenant_user_id) if tenant_user_id is not None else "",
             spec=browser_spec,
+            login=login,
         )
+        for profile_id, problem in missing:
+            await browser_pool.report_profile_problem(sid, profile_id, problem)
     except BrowserBudgetExhaustedError as exc:
         # Subclasses of BrowserUnavailableError — caught first so the
         # user gets a buy prompt, not "infra is broken".
@@ -320,9 +313,11 @@ async def _browser_navigate_handler(
     session_config: dict[str, Any] | None = None,
     workspace_io: Any = None,
     session_store: Any = None,
+    channel: str | None = None,
     **_: Any,
 ) -> str:
     preflight = await _resolve_session_browser(
+        channel=channel,
         tenant=tenant,
         session_id=session_id,
         browser_pool=browser_pool,
@@ -439,9 +434,11 @@ async def _browser_get_state_handler(
     workspace_path: str | None = None,
     session_config: dict[str, Any] | None = None,
     workspace_io: Any = None,
+    channel: str | None = None,
     **_: Any,
 ) -> str:
     preflight = await _resolve_session_browser(
+        channel=channel,
         tenant=tenant,
         session_id=session_id,
         browser_pool=browser_pool,
@@ -528,6 +525,7 @@ async def _browser_evaluate_handler(
     workspace_path: str | None = None,
     session_config: dict[str, Any] | None = None,
     workspace_io: Any = None,
+    channel: str | None = None,
     **_: Any,
 ) -> str:
     code = arguments.get("code")
@@ -538,6 +536,7 @@ async def _browser_evaluate_handler(
         })
 
     preflight = await _resolve_session_browser(
+        channel=channel,
         tenant=tenant,
         session_id=session_id,
         browser_pool=browser_pool,
@@ -631,6 +630,7 @@ async def _browser_click_handler(
     workspace_path: str | None = None,
     session_config: dict[str, Any] | None = None,
     workspace_io: Any = None,
+    channel: str | None = None,
     **_: Any,
 ) -> str:
     has_ref = "ref" in arguments
@@ -639,6 +639,7 @@ async def _browser_click_handler(
         return _refused("invalid_arguments", "click requires ref or x/y")
 
     preflight = await _resolve_session_browser(
+        channel=channel,
         tenant=tenant,
         session_id=session_id,
         browser_pool=browser_pool,
@@ -705,9 +706,22 @@ def _scrubbing(handler: Callable[..., Any]) -> Callable[..., Any]:
         pool, session_id = kwargs.get("browser_pool"), kwargs.get("session_id")
         if pool is None or session_id is None or not isinstance(result, str):
             return result
+        note = pool.take_profile_note(str(session_id))
+        if note:
+            result = _with_profile_note(result, note)
         return mask_values(result, pool.typed_secrets.of(str(session_id)))
 
     return run
+
+
+def _with_profile_note(result: str, note: str) -> str:
+    try:
+        body = json.loads(result)
+    except ValueError:
+        body = None
+    if isinstance(body, dict):
+        return json.dumps({**body, "browser_profile": note})
+    return f"{result}\n\n[browser_profile] {note}"
 
 
 def _refused(error: str, detail: str) -> str:
@@ -748,6 +762,7 @@ async def _browser_type_handler(
         )
 
     preflight = await _resolve_session_browser(
+        channel=channel,
         tenant=tenant,
         session_id=session_id,
         browser_pool=browser_pool,
@@ -823,6 +838,7 @@ async def _fill_secret(
         session_id=session_id,
         session_config=session_config,
         workspace_io=workspace_io,
+        channel=channel,
         **browser,
     )
     if isinstance(preflight, str):
@@ -989,9 +1005,11 @@ async def _browser_press_key_handler(
     workspace_path: str | None = None,
     session_config: dict[str, Any] | None = None,
     workspace_io: Any = None,
+    channel: str | None = None,
     **_: Any,
 ) -> str:
     preflight = await _resolve_session_browser(
+        channel=channel,
         tenant=tenant,
         session_id=session_id,
         browser_pool=browser_pool,
@@ -1049,9 +1067,11 @@ async def _browser_scroll_handler(
     workspace_path: str | None = None,
     session_config: dict[str, Any] | None = None,
     workspace_io: Any = None,
+    channel: str | None = None,
     **_: Any,
 ) -> str:
     preflight = await _resolve_session_browser(
+        channel=channel,
         tenant=tenant,
         session_id=session_id,
         browser_pool=browser_pool,
@@ -1115,9 +1135,11 @@ async def _browser_drag_handler(
     workspace_path: str | None = None,
     session_config: dict[str, Any] | None = None,
     workspace_io: Any = None,
+    channel: str | None = None,
     **_: Any,
 ) -> str:
     preflight = await _resolve_session_browser(
+        channel=channel,
         tenant=tenant,
         session_id=session_id,
         browser_pool=browser_pool,
@@ -1157,9 +1179,11 @@ async def _browser_wait_handler(
     workspace_path: str | None = None,
     session_config: dict[str, Any] | None = None,
     workspace_io: Any = None,
+    channel: str | None = None,
     **_: Any,
 ) -> str:
     preflight = await _resolve_session_browser(
+        channel=channel,
         tenant=tenant,
         session_id=session_id,
         browser_pool=browser_pool,
@@ -1337,9 +1361,11 @@ async def _browser_screenshot_handler(
     sandbox_pool: Any | None = None,
     task_id: str | None = None,
     workspace_io: Any = None,
+    channel: str | None = None,
     **_: Any,
 ) -> str:
     preflight = await _resolve_session_browser(
+        channel=channel,
         tenant=tenant,
         session_id=session_id,
         browser_pool=browser_pool,

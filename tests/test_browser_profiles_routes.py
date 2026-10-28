@@ -233,8 +233,30 @@ def test_capture_rejects_non_setup_session():
 
 
 def test_capture_saves_storage_state(monkeypatch):
-    store = _FakeStore()
-    app = _app(store)
+    _capture(monkeypatch, _FakeStore(), owner=None)
+
+
+def test_a_login_captured_for_the_agent_is_saved_under_the_agent(monkeypatch):
+    saved_under = []
+
+    class _Store(_OwnerStore):
+        async def save_capture(self, profile_id, org_id, *, user_id, service_account_id, storage_state):
+            saved_under.append(service_account_id)
+            return await _FakeStore.save_capture(
+                self, profile_id, org_id, user_id=user_id,
+                service_account_id=service_account_id, storage_state=storage_state,
+            )
+
+    store = _Store()
+    agent_sa = _capture(monkeypatch, store, owner="agent")
+    assert saved_under == [agent_sa]
+
+
+def _capture(monkeypatch, store, *, owner):
+    if owner == "agent":
+        app, agent_sa = _agent_app(monkeypatch, store)
+    else:
+        app, agent_sa = _app(store), None
     row = _seed_profile(store)
     sid = uuid.uuid4()
     teardown = {"status": None, "waked": None}
@@ -287,9 +309,12 @@ def test_capture_saves_storage_state(monkeypatch):
     app.state.session_wake = _wake
 
     client = TestClient(app)
+    params = {"session_id": str(sid)}
+    if owner:
+        params.update(owner=owner, agent_id="agent-1")
     resp = client.post(
         f"/browser-profiles/{row.id}/capture",
-        params={"session_id": str(sid)},
+        params=params,
         json={"owner_user_id": "ops-user"},
     )
     assert resp.status_code == 200
@@ -300,6 +325,7 @@ def test_capture_saves_storage_state(monkeypatch):
     # (which owns the pool) releases the browser.
     assert teardown["status"] == "completed"
     assert teardown["waked"] == str(sid)
+    return agent_sa
 
 
 def test_a_setup_browser_is_captured_by_its_own_user_and_by_no_other_member(monkeypatch):
@@ -410,3 +436,90 @@ def test_a_key_of_another_organisation_bound_to_an_agent_of_that_name_captures_n
     )
     # Stopped at the session, as for no session: its browser is not even looked for.
     assert (refused.status_code, refused.json(), asked) == (404, {"detail": "Session not found"}, [])
+
+
+class _OwnerStore(_FakeStore):
+    """Rows per owning principal, as the real store keeps them."""
+
+    def __init__(self):
+        super().__init__()
+        self.by_owner = {}
+        self.channels = {}
+
+    async def list(self, org_id, *, user_id, service_account_id):
+        return list(self.by_owner.get(service_account_id or user_id, []))
+
+    async def create(self, org_id, *, user_id, service_account_id, name):
+        row = BrowserProfileRow(
+            uuid.uuid4(), name, "manual_vnc", [], datetime.now(timezone.utc), None, False,
+        )
+        self.by_owner.setdefault(service_account_id or user_id, []).append(row)
+        self.rows.append(row)
+        return row
+
+    async def set_use_in_channels(self, profile_id, org_id, *, service_account_id, channels):
+        if not any(r.id == profile_id for r in self.by_owner.get(service_account_id, [])):
+            return False
+        self.channels[profile_id] = sorted(set(channels))
+        return True
+
+
+def _agent_app(monkeypatch, store, *, operator=True, principal=True):
+    agent_sa = uuid.uuid4()
+    app = _app(store)
+    app.state.session_store = object()
+    app.state.session_factory = object()
+
+    async def is_operator(session_store, sa_id):
+        return operator
+
+    async def find(session_factory, org_id, agent_id):
+        assert agent_id == "agent-1"
+        return type("P", (), {"id": agent_sa})() if principal else None
+
+    monkeypatch.setattr(bp, "is_ops_chat_service_account", is_operator)
+    monkeypatch.setattr(bp, "find_agent_principal", find)
+    return app, agent_sa
+
+
+def test_an_operator_keeps_a_login_for_the_agent_apart_from_their_own(monkeypatch):
+    store = _OwnerStore()
+    app, agent_sa = _agent_app(monkeypatch, store)
+    client = TestClient(app)
+
+    made = client.post("/browser-profiles?owner=agent&agent_id=agent-1", json={"name": "X account"})
+    assert made.status_code == 201 and made.json()["owner"] == "agent"
+    assert [r.name for r in store.by_owner[agent_sa]] == ["X account"]
+    assert client.get("/browser-profiles").json() == []
+    listed = client.get("/browser-profiles?owner=agent&agent_id=agent-1").json()
+    assert [(p["name"], p["owner"]) for p in listed] == [("X account", "agent")]
+
+    pid = made.json()["id"]
+    granted = client.patch(
+        f"/browser-profiles/{pid}?owner=agent&agent_id=agent-1",
+        json={"use_in_channels": ["slack", "scheduled"]},
+    )
+    assert granted.status_code == 200
+    assert store.channels[uuid.UUID(pid)] == ["scheduled", "slack"]
+
+
+def test_only_an_operator_manages_the_agents_logins(monkeypatch):
+    app, _ = _agent_app(monkeypatch, _OwnerStore(), operator=False)
+    assert TestClient(app).get("/browser-profiles?owner=agent&agent_id=agent-1").status_code == 403
+
+
+def test_an_agent_without_an_identity_of_its_own_keeps_no_login(monkeypatch):
+    app, _ = _agent_app(monkeypatch, _OwnerStore(), principal=False)
+    assert TestClient(app).post(
+        "/browser-profiles?owner=agent&agent_id=agent-1", json={"name": "X"},
+    ).status_code == 404
+
+
+def test_a_personal_login_is_never_granted_to_channels(monkeypatch):
+    store = _OwnerStore()
+    app, _ = _agent_app(monkeypatch, store)
+    client = TestClient(app)
+    pid = client.post("/browser-profiles", json={"name": "Mine"}).json()["id"]
+    refused = client.patch(f"/browser-profiles/{pid}", json={"use_in_channels": ["slack"]})
+    assert refused.status_code == 422
+    assert store.channels == {}

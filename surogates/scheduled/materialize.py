@@ -25,15 +25,22 @@ loops whose run died without rescheduling itself.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID
 
 from sqlalchemy.exc import IntegrityError
 
 from surogates.channels.constants import session_queue_priority
-from surogates.config import enqueue_session
-from surogates.scheduled.schedule import DYNAMIC_LOOP_STALE_RUN_SECONDS
+from surogates.config import INTERRUPT_CHANNEL_PREFIX, enqueue_session
+from surogates.scheduled.schedule import (
+    DEFAULT_MAX_RUN_SECONDS,
+    DYNAMIC_LOOP_STALE_RUN_SECONDS,
+    local_iso,
+    schedule_from_row,
+)
 from surogates.session.events import EventType
+from surogates.session.execution_context import inherit_context
 from surogates.session.provisioning import (
     create_agent_session,
     create_child_session,
@@ -62,11 +69,21 @@ async def materialize_scheduled_run(
         schedule.next_run_at.isoformat() if schedule.next_run_at else "now"
     )
     idempotency_key = f"scheduled:{schedule.id}:{fire_key}"
-    is_dynamic_loop = schedule.schedule.get("kind") == "dynamic_loop"
+    is_dynamic_loop = schedule.kind == "dynamic"
+
+    previous = await _previous_run(session_store, schedule)
+    if previous is not None and _still_going(previous, schedule):
+        await scheduled_store.mark_run_skipped(
+            schedule,
+            reason=f"Skipped a run: the previous run ({previous.id}) is still going.",
+        )
+        return previous.id
+
     scheduled_config = {
         "scheduled_session_id": str(schedule.id),
         "scheduled_source": schedule.source,
         "scheduled_dynamic_loop": is_dynamic_loop,
+        "scheduled_run": run_identity(schedule, previous),
     }
 
     # When the schedule has a known creator session, every run shares its
@@ -83,6 +100,9 @@ async def materialize_scheduled_run(
         except SessionNotFoundError:
             parent = None
 
+    # What the schedule captured when it was made; rows from before it was
+    # captured take the creating chat's current context instead.
+    captured = getattr(schedule, "context", None) or None
     try:
         if parent is not None:
             session = await create_child_session(
@@ -91,6 +111,7 @@ async def materialize_scheduled_run(
                 channel="scheduled",
                 config=scheduled_config,
                 idempotency_key=idempotency_key,
+                context=captured,
             )
         else:
             session = await create_agent_session(
@@ -102,7 +123,7 @@ async def materialize_scheduled_run(
                 service_account_id=schedule.service_account_id,
                 agent_id=schedule.agent_id,
                 channel="scheduled",
-                config=scheduled_config,
+                config={**scheduled_config, **inherit_context(None, None, captured)},
                 parent_id=None,
                 idempotency_key=idempotency_key,
             )
@@ -135,10 +156,101 @@ async def materialize_scheduled_run(
     return session.id
 
 
+def run_identity(schedule: Any, previous: Any | None) -> dict[str, Any]:
+    """What a run is told about the schedule it belongs to."""
+    tz = schedule.timezone or "UTC"
+    try:
+        upcoming = schedule_from_row(schedule).next_after(datetime.now(timezone.utc))
+    except ValueError:
+        upcoming = None
+    return {
+        "id": str(schedule.id),
+        "name": schedule.name,
+        "cadence": schedule.schedule_display,
+        "timezone": tz,
+        "run_number": (schedule.run_count or 0) + 1,
+        "repeat_limit": schedule.repeat_limit,
+        "previous_run": None if previous is None else {
+            "session_id": str(previous.id),
+            "status": previous.status,
+            "started_at": local_iso(previous.created_at, tz),
+        },
+        "last_error": schedule.last_error,
+        "next_run_at": None if upcoming is None else local_iso(upcoming, tz),
+        "expires_at": local_iso(schedule.expires_at, tz),
+    }
+
+
+async def _previous_run(session_store: Any, schedule: Any) -> Any | None:
+    if schedule.last_session_id is None:
+        return None
+    try:
+        return await session_store.get_session(schedule.last_session_id)
+    except SessionNotFoundError:
+        return None
+
+
+def _still_going(run: Any, schedule: Any) -> bool:
+    """Whether *run* is still at work: active, and not past the schedule's
+    run limit, so a wedged run does not hold its schedule forever."""
+    if run.status != "active":
+        return False
+    limit = timedelta(seconds=schedule.max_run_seconds or DEFAULT_MAX_RUN_SECONDS)
+    started = run.created_at if run.created_at.tzinfo else run.created_at.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) - started < limit
+
+
+def ending_notice(schedule: Any) -> str:
+    """What the chat that made *schedule* is told when it ended on its own."""
+    name = schedule.name or "this schedule"
+    runs = schedule.run_count or 0
+    ran = f"It ran {runs} time{'' if runs == 1 else 's'}."
+    if schedule.ended_reason == "expired":
+        return (
+            f"The schedule \"{name}\" has ended: it reached its end date "
+            f"({local_iso(schedule.expires_at, schedule.timezone or 'UTC')}). {ran} "
+            "Make a new one to keep it going."
+        )
+    if schedule.ended_reason == "limit":
+        return (
+            f"The schedule \"{name}\" has ended: it ran all {schedule.repeat_limit} "
+            "times it was set to run."
+        )
+    reason = f" The last error: {schedule.last_error.rstrip('.')}." if schedule.last_error else ""
+    return (
+        f"The schedule \"{name}\" has stopped: its runs kept failing.{reason} {ran} "
+        "Fix the cause, then make it again."
+    )
+
+
+async def _announce_ending(session_store: Any, schedule: Any) -> None:
+    if schedule.created_from_session_id is None:
+        return
+    try:
+        await session_store.emit_event(
+            schedule.created_from_session_id,
+            EventType.LOOP_RESULT,
+            {
+                "run_session_id": str(schedule.last_session_id or ""),
+                "scheduled_session_id": str(schedule.id),
+                "content": ending_notice(schedule),
+                "outcome": "schedule_ended",
+                "ended_reason": schedule.ended_reason,
+                "run_completed_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+    except Exception:
+        logger.warning(
+            "Failed to tell session %s that schedule %s ended",
+            schedule.created_from_session_id, schedule.id, exc_info=True,
+        )
+
+
 async def recover_stalled_loops(
     *,
     scheduled_store: Any,
     redis: Any,
+    session_store: Any | None = None,
     stale_seconds: int = DYNAMIC_LOOP_STALE_RUN_SECONDS,
     limit: int = 100,
 ) -> None:
@@ -158,39 +270,89 @@ async def recover_stalled_loops(
     last run and its next due instant expires *unclaimed* (the claim query
     excludes expired rows), so it never reaches the completion code and stays
     ``active`` forever. :meth:`expire_active_schedules` transitions those.
+
+    And, given *session_store*, runs open past their time limit are failed
+    first, so a stalled loop's run is not requeued past it.
     """
-    expired = await scheduled_store.expire_active_schedules(limit=limit)
-    for schedule in expired:
-        logger.info(
-            "Expired schedule %s (past expires_at) → completed",
-            schedule.id,
-        )
+    async def plan() -> None:
+        for schedule in await scheduled_store.plan_unscheduled(limit=limit):
+            logger.info("Planned schedule %s: next run %s", schedule.id, schedule.next_run_at)
 
-    retryable = await scheduled_store.find_retryable_stalled_dynamic_loop_runs(
-        stale_seconds=stale_seconds,
-        limit=limit,
-    )
-    for schedule in retryable:
-        if schedule.last_session_id is None:
-            continue
-        await enqueue_session(
-            redis,
-            org_id=str(schedule.org_id),
-            agent_id=schedule.agent_id,
-            session_id=schedule.last_session_id,
-        )
-        logger.warning(
-            "Requeued stalled dynamic loop session %s for schedule %s",
-            schedule.last_session_id,
-            schedule.id,
-        )
+    # Every writer of a cancel (the runtime's own, the control plane writing
+    # the row) is covered here, a tick later, instead of at each of them.
+    async def stop_cancelled_runs() -> None:
+        await stop_runs_of_cancelled(scheduled_store, session_store, redis, limit=limit)
 
-    recovered = await scheduled_store.recover_stalled_dynamic_loops(
-        stale_seconds=stale_seconds,
-        limit=limit,
-    )
-    for schedule in recovered:
-        logger.warning(
-            "Recovered terminal dynamic loop %s with fallback delay",
-            schedule.id,
+    async def fail_overdue_runs() -> None:
+        for run_id, limit_seconds in await session_store.fail_overdue_scheduled_runs(
+            default_seconds=DEFAULT_MAX_RUN_SECONDS, limit=limit,
+        ):
+            logger.warning("Failed scheduled run %s: past its time limit", run_id)
+            await scheduled_store.mark_run_timed_out(run_id, limit_seconds=limit_seconds)
+
+    async def expire() -> None:
+        for schedule in await scheduled_store.expire_active_schedules(limit=limit):
+            logger.info("Expired schedule %s (past expires_at) → completed", schedule.id)
+
+    # Every way a schedule ends on its own is covered here, the control
+    # plane's writes included, a tick later.
+    async def announce_endings() -> None:
+        for schedule in await scheduled_store.claim_unannounced_endings(limit=limit):
+            await _announce_ending(session_store, schedule)
+
+    async def requeue_stalled() -> None:
+        retryable = await scheduled_store.find_retryable_stalled_dynamic_loop_runs(
+            stale_seconds=stale_seconds,
+            limit=limit,
         )
+        for schedule in retryable:
+            if schedule.last_session_id is None:
+                continue
+            await enqueue_session(
+                redis,
+                org_id=str(schedule.org_id),
+                agent_id=schedule.agent_id,
+                session_id=schedule.last_session_id,
+            )
+            logger.warning(
+                "Requeued stalled dynamic loop session %s for schedule %s",
+                schedule.last_session_id,
+                schedule.id,
+            )
+
+    async def recover_terminal() -> None:
+        recovered = await scheduled_store.recover_stalled_dynamic_loops(
+            stale_seconds=stale_seconds,
+            limit=limit,
+        )
+        for schedule in recovered:
+            logger.warning(
+                "Recovered terminal dynamic loop %s with fallback delay",
+                schedule.id,
+            )
+
+    steps = [plan]
+    if session_store is not None:
+        steps += [stop_cancelled_runs, fail_overdue_runs]
+    steps.append(expire)
+    if session_store is not None:
+        steps.append(announce_endings)
+    steps += [requeue_stalled, recover_terminal]
+    # One step failing (a bad row, a lost connection) must not skip the rest.
+    for step in steps:
+        try:
+            await step()
+        except Exception:
+            logger.exception("Scheduled sweep step %s failed", step.__name__)
+
+
+async def stop_runs_of_cancelled(
+    scheduled_store: Any, session_store: Any, redis: Any,
+    *, limit: int = 100, schedule_id: UUID | None = None,
+) -> None:
+    """Stop the runs still going of cancelled schedules (or of one)."""
+    for run_id in await scheduled_store.end_runs_of_cancelled(limit=limit, schedule_id=schedule_id):
+        if await session_store.pause_if_active(run_id, {"reason": "schedule_cancelled"}):
+            logger.info("Stopped run %s of a cancelled schedule", run_id)
+        if redis is not None:
+            await redis.publish(f"{INTERRUPT_CHANNEL_PREFIX}:{run_id}", "schedule_cancelled")

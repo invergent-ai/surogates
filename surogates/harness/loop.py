@@ -119,6 +119,7 @@ from surogates.workstreams import is_project_master, is_project_thread, master_r
 from surogates.workstreams.spend import admit_turn, admitted_at_wake
 from surogates.channels.capabilities import capabilities_for
 from surogates.channels.memory_boundary import is_eval_session
+from surogates.session.execution_context import is_scheduled_run, is_unattended
 from surogates.tools.builtin.case_item import item_awaiting_report
 from surogates.tools.builtin.case_step import step_awaiting_report, step_given_back
 from surogates.tools.builtin.send_form import SENT as FORM_SENT
@@ -141,6 +142,8 @@ from surogates.keel.steps import (
     step_contract_of,
 )
 from surogates.harness.tool_schemas import (
+    CRON_OWN_SCHEDULE_TOOLS,
+    CRON_WRITE_TOOLS,
     channel_tool_flags,
     describe_for_conversation,
     describe_for_device,
@@ -200,13 +203,15 @@ from surogates.harness.loop_deliverables import (
     SAVE_CLAIM_NUDGE,
     deliverable_nudge,
     missing_deliverables,
+    schedule_claim_nudge,
     unbacked_save_claim,
+    unbacked_schedule_claim,
 )
 from surogates.harness.loop_constants import (
-    _DYNAMIC_LOOP_EXCLUDED_TOOLS,
     _EMPTY_RESPONSE_NUDGE,
     _MAX_DELIVERABLE_RETRIES,
     _MAX_SAVE_CLAIM_RETRIES,
+    _MAX_SCHEDULE_CLAIM_RETRIES,
     _UNFINISHED_RESPONSE_NUDGE,
     _LEASE_RENEWAL_INTERVAL_SECONDS,
     _LEASE_TTL_SECONDS,
@@ -227,7 +232,6 @@ from surogates.harness.loop_deep_research import (
 )
 from surogates.harness.loop_messages import (
     _initial_system_message,
-    _is_scheduled_run,
     _last_assistant_message_excerpt,
     _latest_message_is_a_follow_up,
     _latest_user_event_data,
@@ -327,10 +331,35 @@ def _mcp_tool_component(name: str) -> str:
 
 
 
+def _loop_goes_to_the_model(text: str) -> bool:
+    """Whether ``/loop`` *text* asks for a cadence the harness cannot read:
+    the model makes that one with ``cron_create`` instead."""
+    from surogates.scheduled.schedule import parse_loop_command
+
+    try:
+        return parse_loop_command(_loop_argument(text)).verb == "model"
+    except ValueError:
+        return False
+
+
+_LOOP_USAGE = (
+    "Usage: `/loop [cadence] <prompt>`. Cadences: `30m`, `every 2 hours`, "
+    "`every day at 9`, `every weekday at 8:30, 17:00`, `every mon and wed at 9pm`, "
+    "a 5-field cron like `*/30 * * * *`, each optionally `in Europe/Bucharest` "
+    "(UTC otherwise). With no cadence each run picks its next one. "
+    "Also `/loop list`, `/loop pause|resume|cancel <id>`."
+)
+_LOOP_VERB_DONE = {"cancel": "cancelled", "pause": "paused", "resume": "resumed"}
+
+
+def _loop_argument(text: str) -> str:
+    return text.strip()[len("/loop"):].strip()
+
+
 def _format_loop_list(rows: list[Any]) -> str:
     if not rows:
-        return "No active loops."
-    lines = ["Active loops:"]
+        return "No active or paused loops."
+    lines = ["Loops:"]
     for row in rows:
         reason = row.schedule.get("last_delay_reason") if row.schedule else None
         suffix = f" (last wait: {reason})" if reason else ""
@@ -344,9 +373,10 @@ def _format_loop_list(rows: list[Any]) -> str:
             "until cancelled" if row.expires_at is None
             else f"expires {local_iso(row.expires_at, row.timezone)}"
         )
+        state = "" if row.status == "active" else f"{row.status}; "
         lines.append(
             f"- `{row.id}` {row.schedule_display}: {row.prompt} "
-            f"(next: {next_run}; {until}){suffix}"
+            f"({state}next: {next_run}; {until}){suffix}"
         )
     return "\n".join(lines)
 
@@ -993,10 +1023,12 @@ class AgentHarness(
         """Whether *text* is a command the harness answers itself, with no
         model turn: one gated off for this agent, which it refuses, or any
         built-in command but /deep-research."""
-        return (
-            self._slash_command_block_reason(text, session) is not None
-            or _slash_command_name(text) not in (None, _COMMAND_FOR_THE_MODEL)
-        )
+        if self._slash_command_block_reason(text, session) is not None:
+            return True
+        command = _slash_command_name(text)
+        if command == "loop":
+            return not _loop_goes_to_the_model(text)
+        return command not in (None, _COMMAND_FOR_THE_MODEL)
 
     def _is_plain_message(self, session: Session, event: Any) -> bool:
         """Whether *event* is a message the user wrote themselves that is no
@@ -2873,6 +2905,7 @@ class AgentHarness(
         unfinished_retries = 0    # nudges for a turn that trails off without acting
         deliverable_retries = 0   # nudges for a named file that was never written
         save_claim_retries = 0    # nudges for "noted it" with no memory call
+        schedule_claim_retries = 0  # nudges for "it's scheduled" with nothing made
         provider_error_retries = 0  # bounded retries for finish_reason='error'
         partial_tool_call_retries = 0  # retries for truncated tool-call arguments
         # One-shot safety net for the deep-research planner.  Fires when
@@ -3042,16 +3075,30 @@ class AgentHarness(
             # unknown resource must never cause a tool to vanish.
             has_kbs=getattr(self._prompt, "has_kbs", True),
             **channel_tool_flags(getattr(session, "channel", None)),
-            # Any chat's model makes its routines, where they have an owner
-            # and someone it can ask first: not an anonymous visitor's, nor
-            # a thread's, helper's or run's (each has a parent; a scheduled
-            # run's filter already took the cron tools away), nor where no
-            # one is asked anything.
+            # A chat with an owner of its own makes and changes its agent's
+            # schedules, and a scheduled run changes its own (the tools it
+            # may not call are taken off below); anything someone owns,
+            # helpers included, can read them.  Whether a tool is allowed at
+            # all is the policy's, by name, above; whether /loop is on, the
+            # agent's.  No evaluation row: no one is behind it.
             makes_routines=(
-                session.parent_id is None
+                (session.parent_id is None or is_scheduled_run(session))
                 and (session.user_id or session.service_account_id) is not None
+                and not is_eval_session(session)
+                # /loop switched off for the agent: its schedules stay
+                # readable, but none is made or changed.
                 and self._slash_command_enabled("loop", session)
-                and any(s["function"]["name"] == "ask_user_question" for s in tool_schemas)
+            ),
+            # A run changes only its own, unasked; elsewhere a yes comes from
+            # the question tool, or the operator's own word in Studio.
+            confirms_routines=(
+                is_scheduled_run(session)
+                or session.channel == "studio"
+                or any(s["function"]["name"] == "ask_user_question" for s in tool_schemas)
+            ),
+            reads_routines=(
+                (session.user_id or session.service_account_id) is not None
+                and not is_eval_session(session)
             ),
             # The same fact that decided the prompt's whiteboard
             # contract, so prose and schema cannot disagree.
@@ -3870,6 +3917,27 @@ class AgentHarness(
                     await _persist_response()
                     messages.append({"role": "assistant", "content": final_content})
                     messages.append({"role": "user", "content": SAVE_CLAIM_NUDGE})
+                    continue
+
+                # "Your loop is running" with nothing behind it: the person
+                # waits for runs that never come.  Not in a run, which is one.
+                if (
+                    schedule_claim_retries < _MAX_SCHEDULE_CLAIM_RETRIES
+                    and not (session.config or {}).get("scheduled_session_id")
+                    and unbacked_schedule_claim(visible_content, messages)
+                ):
+                    schedule_claim_retries += 1
+                    logger.info(
+                        "Session %s: reply claims a schedule no tool made or showed; "
+                        "nudging (%d/%d)",
+                        session.id, schedule_claim_retries, _MAX_SCHEDULE_CLAIM_RETRIES,
+                    )
+                    await _persist_response()
+                    messages.append({"role": "assistant", "content": final_content})
+                    messages.append({
+                        "role": "user",
+                        "content": schedule_claim_nudge("cron_create" in offered_tools),
+                    })
                     continue
 
                 # The nudge is spent and the model is still trailing off. Its
@@ -5469,7 +5537,7 @@ class AgentHarness(
         so a call to that tool parks the turn until the tool's own
         30-minute deadline and the caller reports a stalled agent.
         """
-        if not is_eval_session(session):
+        if not (is_eval_session(session) or is_unattended(session)):
             return tool_filter
         names = (
             set(self._tools.tool_names) if tool_filter is None
@@ -5709,17 +5777,19 @@ class AgentHarness(
             tool_filter.discard("run_coding_agent")
 
         # Any session running as one iteration of a schedule (``/loop`` or
-        # cron_create-spawned) must not be able to create new schedules.
+        # cron_create-spawned) must not make schedules or start runs.
         # Otherwise the LLM can spawn nested cron jobs from inside a wake —
         # observed in the wild on a ``/loop 1m`` run that called
-        # ``cron_create`` to build a parallel cron for the same task.
+        # ``cron_create`` to build a parallel cron for the same task.  It may
+        # read them, and pause, change or end its own schedule: the cron
+        # tools refuse any other.
         is_scheduled_child = bool(config.get("scheduled_session_id"))
         if is_scheduled_child:
             if tool_filter is None:
                 tool_filter = set(self._tools.tool_names)
             else:
                 tool_filter = set(tool_filter)
-            tool_filter.difference_update(_DYNAMIC_LOOP_EXCLUDED_TOOLS)
+            tool_filter.difference_update(CRON_WRITE_TOOLS - CRON_OWN_SCHEDULE_TOOLS)
             if config.get("scheduled_dynamic_loop"):
                 if "loop_wait" in self._tools.tool_names:
                     tool_filter.add("loop_wait")
@@ -6242,7 +6312,7 @@ class AgentHarness(
         and a command its user typed there is none.  Nor a chat's own inbox
         item: its user is reading the answer.
         """
-        if _is_scheduled_run(session):
+        if is_scheduled_run(session):
             said = extract_final_response(events, fallback="")
             try:
                 await announce_result(
@@ -6342,18 +6412,15 @@ class AgentHarness(
             ScheduledPromptBlocked,
             validate_scheduled_prompt,
         )
-        from surogates.scheduled.schedule import (
-            DYNAMIC_LOOP_EXPIRY_DAYS,
-            DEFAULT_LOOP_EXPIRY_DAYS,
-            parse_dynamic_loop_schedule,
-            parse_loop_command,
-            parse_schedule,
-        )
+        from surogates.scheduled.schedule import parse_loop_command
         from surogates.scheduled.store import ScheduledSessionStore
+        from surogates.session.execution_context import capture_schedule_context
 
-        principal_user_id = self._acting_principal.user_id
-        principal_sa_id = self._acting_principal.service_account_id
-        if principal_user_id is None and principal_sa_id is None:
+        owner = {
+            "user_id": self._acting_principal.user_id,
+            "service_account_id": self._acting_principal.service_account_id,
+        }
+        if owner["user_id"] is None and owner["service_account_id"] is None:
             # Anonymous-channel sessions have neither a user nor a
             # service-account principal — there is no durable owner that
             # outlives a recurring loop.  Reject explicitly with a
@@ -6367,103 +6434,79 @@ class AgentHarness(
             )
             return
 
-        raw = content[len("/loop"):].strip()
         store = ScheduledSessionStore(self._session_factory)
-        if not raw or raw == "help":
-            message = "Usage: /loop [interval] <prompt>. Example: /loop 5m /babysit-prs"
-        elif raw == "list":
-            rows = await store.list_for_user(
-                org_id=self._tenant.org_id,
-                user_id=principal_user_id,
-                service_account_id=principal_sa_id,
-                agent_id=session.agent_id,
-            )
-            message = _format_loop_list(rows)
-        elif raw.startswith("cancel "):
-            schedule_id_raw = raw.split(None, 1)[1].strip()
-            try:
-                schedule_id = UUID(schedule_id_raw)
-            except ValueError:
-                message = f"Loop {schedule_id_raw} was not found."
+        scope = {"org_id": self._tenant.org_id, "agent_id": session.agent_id, **owner}
+        try:
+            command = parse_loop_command(_loop_argument(content))
+            if command.verb == "help":
+                message = _LOOP_USAGE
+            elif command.verb == "list":
+                message = _format_loop_list(await store.list_for_user(**scope, status="active,paused"))
+            elif command.verb in ("cancel", "pause", "resume"):
+                message = await self._loop_verb(store, scope, command, session)
+            elif command.verb == "model":
+                # ``_answers_itself`` hands this text to the model; a wake
+                # that still reaches here says how to put it.
+                message = _LOOP_USAGE
             else:
-                deleted = await store.delete_for_user(
-                    schedule_id,
-                    org_id=self._tenant.org_id,
-                    user_id=principal_user_id,
-                    service_account_id=principal_sa_id,
-                    agent_id=session.agent_id,
-                )
-                message = (
-                    f"Loop {schedule_id} cancelled."
-                    if deleted
-                    else f"Loop {schedule_id} was not found."
-                )
-        else:
-            try:
-                parsed = parse_loop_command(raw)
-                validate_scheduled_prompt(parsed.prompt, source="loop")
+                validate_scheduled_prompt(command.prompt, source="loop")
                 made = None
                 if typed_on is not None:
                     made = next((
                         row for row in await store.list_for_user(
-                            org_id=self._tenant.org_id,
-                            user_id=principal_user_id,
-                            service_account_id=principal_sa_id,
-                            agent_id=session.agent_id,
-                            created_from_session_id=session.id,
+                            **scope, created_from_session_id=session.id,
                         )
-                        if row.prompt == parsed.prompt and _aware(row.created_at) >= _aware(typed_on)
+                        if row.prompt == command.prompt and _aware(row.created_at) >= _aware(typed_on)
                     ), None)
-                if parsed.interval is None:
-                    schedule = parse_dynamic_loop_schedule(timezone_name="UTC")
-                    created = made or await store.create_dynamic_loop(
-                        org_id=self._tenant.org_id,
-                        user_id=principal_user_id,
-                        service_account_id=principal_sa_id,
-                        agent_id=session.agent_id,
-                        prompt=parsed.prompt,
-                        schedule=schedule,
-                        created_from_session_id=session.id,
-                    )
+                context = capture_schedule_context(session.config, session.channel)
+                created = made or await store.create_loop(
+                    **scope, prompt=command.prompt, schedule=command.schedule,
+                    created_from_session_id=session.id, context=context,
+                )
+                if command.schedule is None:
                     message = (
                         f"Loop scheduled: `{created.id}`\n\n"
-                        f"- Prompt: {parsed.prompt}\n"
-                        f"- Cadence: dynamic, chosen after each run with `loop_wait`\n"
-                        f"- Next run: {created.next_run_at}\n"
-                        f"- Auto-expires: {DYNAMIC_LOOP_EXPIRY_DAYS} days\n"
+                        f"- Prompt: {command.prompt}\n"
+                        f"- Cadence: dynamic, each run picks the next with `loop_wait`\n"
+                        f"- Next run: now\n"
+                        f"- Ends: {local_iso(created.expires_at, created.timezone)} unless a run ends it first\n"
+                        f"- For a fixed time say e.g. `/loop every day at 9 in Europe/Bucharest {command.prompt}`\n"
                         f"- Cancel: `/loop cancel {created.id}`"
                     )
                 else:
-                    schedule = parse_schedule(parsed.interval, timezone_name="UTC")
-                    created = made or await store.create_loop(
-                        org_id=self._tenant.org_id,
-                        user_id=principal_user_id,
-                        service_account_id=principal_sa_id,
-                        agent_id=session.agent_id,
-                        prompt=parsed.prompt,
-                        schedule=schedule,
-                        created_from_session_id=session.id,
-                    )
-                    cadence_line = f"- Cadence: {created.schedule_display}\n"
-                    if schedule.adjusted_from:
-                        cadence_line += (
-                            f"- Requested cadence: {schedule.adjusted_from}; "
-                            f"using {created.schedule_display}\n"
-                        )
                     message = (
                         f"Loop scheduled: `{created.id}`\n\n"
-                        f"- Prompt: {parsed.prompt}\n"
-                        f"{cadence_line}"
-                        f"- Next run: {created.next_run_at}\n"
-                        f"- Auto-expires: {DEFAULT_LOOP_EXPIRY_DAYS} days\n"
-                        f"- Cancel: `/loop cancel {created.id}`"
+                        f"- Prompt: {command.prompt}\n"
+                        f"- Cadence: {created.schedule_display}\n"
+                        f"- Timezone: {created.timezone}\n"
+                        f"- Next run: {local_iso(created.next_run_at, created.timezone)}\n"
+                        f"- Ends: {local_iso(created.expires_at, created.timezone)}; "
+                        f"for one that runs until cancelled, ask me to schedule it\n"
+                        f"- Pause: `/loop pause {created.id}` · Cancel: `/loop cancel {created.id}`"
                     )
-            except (ValueError, ScheduledPromptBlocked) as exc:
-                message = str(exc)
+        except (ValueError, ScheduledPromptBlocked) as exc:
+            message = str(exc)
 
         await self._emit_loop_response(
             session, lease, message, user_content=content,
         )
+
+    async def _loop_verb(self, store: Any, scope: dict, command: Any, session: Session) -> str:
+        """``/loop cancel|pause|resume [id]``; without an id, which loops there are."""
+        verb = command.verb
+        if command.target is None:
+            listed = _format_loop_list(await store.list_for_user(**scope, status="active,paused"))
+            return f"Which loop? Use `/loop {verb} <id>`.\n\n{listed}"
+        try:
+            schedule_id = UUID(command.target)
+        except ValueError:
+            return f"Loop {command.target} was not found."
+        done, row = await store.apply(verb, schedule_id=schedule_id, ended_by=f"session:{session.id}", **scope)
+        if done:
+            return f"Loop {schedule_id} {_LOOP_VERB_DONE[verb]}."
+        if row is None:
+            return f"Loop {schedule_id} was not found."
+        return f"Loop {schedule_id} is {row.status}; it cannot be {_LOOP_VERB_DONE[verb]}."
 
     async def _emit_loop_response(
         self,
