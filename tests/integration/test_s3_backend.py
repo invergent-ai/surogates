@@ -20,7 +20,8 @@ from testcontainers.core.container import DockerContainer
 
 from surogates.storage.backend import Changed, S3Backend
 
-pytestmark = pytest.mark.asyncio(loop_scope="session")
+# Two real stores, each started in a container of its own: far over the 5 s a default test may take.
+pytestmark = [pytest.mark.asyncio(loop_scope="session"), pytest.mark.slow]
 
 GARAGE = "dxflrs/garage:v1.1.0"
 SEAWEEDFS = "chrislusf/seaweedfs:4.48"
