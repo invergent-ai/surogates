@@ -557,11 +557,12 @@ async def _transition(
     schedule_id: UUID, action: str,
 ) -> ScheduledWorkItem:
     await _visible(request, tenant, agent_runtime.agent_id, schedule_id)
-    changed = await getattr(_scheduled_store(request), action)(
-        org_id=tenant.org_id, agent_id=agent_runtime.agent_id, schedule_id=schedule_id,
+    changed, row = await _scheduled_store(request).apply(
+        action, org_id=tenant.org_id, agent_id=agent_runtime.agent_id, schedule_id=schedule_id,
         **_principal(tenant),
     )
-    row = await _visible(request, tenant, agent_runtime.agent_id, schedule_id)
+    if row is None:
+        raise _not_found(schedule_id)
     if not changed:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,

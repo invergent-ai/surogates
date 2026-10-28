@@ -102,6 +102,12 @@ class FakeStore:
         self.calls.append(("pause", kwargs))
         return False
 
+    async def apply(self, verb, *, ended_by=None, **kwargs):
+        extra = {"ended_by": ended_by} if verb == "cancel" else {}
+        changed = await getattr(self, verb)(**kwargs, **extra)
+        scope = {k: v for k, v in kwargs.items() if k != "schedule_id"}
+        return bool(changed), await self.get_for(kwargs["schedule_id"], **scope)
+
     async def mark_loop_completed(self, **kwargs):
         self.calls.append(("complete", kwargs))
         return True

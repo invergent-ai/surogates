@@ -260,6 +260,28 @@ class ScheduledSessionStore:
             rows = result.scalars().all()
         return [ScheduledSession.model_validate(row) for row in rows]
 
+    async def apply(
+        self,
+        verb: str,
+        *,
+        org_id: UUID,
+        agent_id: str,
+        schedule_id: UUID,
+        user_id: UUID | None = None,
+        service_account_id: UUID | None = None,
+        ended_by: str | None = None,
+    ) -> tuple[bool, ScheduledSession | None]:
+        """``pause``, ``resume``, ``cancel`` or ``run_now`` a schedule: whether
+        it changed, and the schedule as it now is (None when the principal
+        may not see it)."""
+        scope = {"org_id": org_id, "agent_id": agent_id,
+                 "user_id": user_id, "service_account_id": service_account_id}
+        extra = {"ended_by": ended_by} if verb == "cancel" else {}
+        changed = await getattr(self, verb)(schedule_id=schedule_id, **scope, **extra)
+        if changed is not None:
+            return True, changed
+        return False, await self.get_for(schedule_id, **scope)
+
     async def pause(
         self,
         *,
@@ -268,7 +290,7 @@ class ScheduledSessionStore:
         schedule_id: UUID,
         user_id: UUID | None = None,
         service_account_id: UUID | None = None,
-    ) -> bool:
+    ) -> ScheduledSession | None:
         """Stop an active schedule from starting runs until resumed."""
         return await self._transition(
             org_id=org_id, agent_id=agent_id, schedule_id=schedule_id,
@@ -285,7 +307,7 @@ class ScheduledSessionStore:
         schedule_id: UUID,
         user_id: UUID | None = None,
         service_account_id: UUID | None = None,
-    ) -> bool:
+    ) -> ScheduledSession | None:
         """Start a paused schedule again from its next run after now: a
         missed one-off runs now."""
         schedule = await self.get_for(
@@ -293,7 +315,7 @@ class ScheduledSessionStore:
             user_id=user_id, service_account_id=service_account_id,
         )
         if schedule is None or schedule.status != "paused":
-            return False
+            return None
         return await self._transition(
             org_id=org_id, agent_id=agent_id, schedule_id=schedule_id,
             user_id=user_id, service_account_id=service_account_id,
@@ -313,7 +335,7 @@ class ScheduledSessionStore:
         user_id: UUID | None = None,
         service_account_id: UUID | None = None,
         ended_by: str | None = None,
-    ) -> bool:
+    ) -> ScheduledSession | None:
         """End an active or paused schedule for good, keeping its row.
 
         Its run still going is ended by the ticker's sweep
@@ -380,12 +402,11 @@ class ScheduledSessionStore:
                 values["next_run_at"] = next_run_at
         if not values:
             return current
-        await self._transition(
+        return await self._transition(
             org_id=org_id, agent_id=agent_id, schedule_id=schedule_id,
             user_id=user_id, service_account_id=service_account_id,
             from_statuses=(current.status,), values=values,
         )
-        return await self.get(schedule_id)
 
     async def run_now(
         self,
@@ -395,7 +416,7 @@ class ScheduledSessionStore:
         schedule_id: UUID,
         user_id: UUID | None = None,
         service_account_id: UUID | None = None,
-    ) -> bool:
+    ) -> ScheduledSession | None:
         return await self._transition(
             org_id=org_id, agent_id=agent_id, schedule_id=schedule_id,
             user_id=user_id, service_account_id=service_account_id,
@@ -1084,9 +1105,9 @@ class ScheduledSessionStore:
         user_id: UUID | None = None,
         service_account_id: UUID | None = None,
         unlocked: bool = True,
-    ) -> bool:
+    ) -> ScheduledSession | None:
         """Write *values* to the schedule the principal may change, only from
-        *from_statuses*; whether it did.  *unlocked* releases a claim."""
+        *from_statuses*; the changed row, or None.  *unlocked* releases a claim."""
         _validate_principal(
             user_id, service_account_id,
             caller="ScheduledSessionStore._transition",
@@ -1095,7 +1116,7 @@ class ScheduledSessionStore:
         if unlocked:
             values.update(locked_by=None, locked_until=None)
         async with self._sf() as db:
-            result = await db.execute(
+            row = (await db.execute(
                 update(ScheduledSessionRow)
                 .where(
                     ScheduledSessionRow.id == schedule_id,
@@ -1105,9 +1126,11 @@ class ScheduledSessionStore:
                     ScheduledSessionRow.status.in_(from_statuses),
                 )
                 .values(**values)
-            )
+                .returning(ScheduledSessionRow)
+            )).scalar_one_or_none()
+            changed = None if row is None else ScheduledSession.model_validate(row)
             await db.commit()
-        return bool(result.rowcount)
+        return changed
 
 
 def _schedule_to_dict(schedule: ParsedSchedule) -> dict[str, str]:

@@ -345,15 +345,14 @@ async def _transition(arguments: dict[str, Any], kwargs: dict[str, Any], action:
             session_id=context.session_id, reason=str(arguments.get("reason") or "Ended by its run."),
             **context.owner,
         )
-    else:
-        extra = {"ended_by": f"session:{context.session_id}"} if action == "cancel" else {}
-        changed = await getattr(context.store, action)(
-            org_id=context.org_id, agent_id=context.agent_id, schedule_id=schedule_id,
-            **context.owner, **extra,
+        row = await context.store.get_for(
+            schedule_id, org_id=context.org_id, agent_id=context.agent_id, **context.owner,
         )
-    row = await context.store.get_for(
-        schedule_id, org_id=context.org_id, agent_id=context.agent_id, **context.owner,
-    )
+    else:
+        changed, row = await context.store.apply(
+            action, org_id=context.org_id, agent_id=context.agent_id, schedule_id=schedule_id,
+            ended_by=f"session:{context.session_id}", **context.owner,
+        )
     if row is None:
         return _not_found(schedule_id)
     if not changed:
