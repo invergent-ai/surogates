@@ -22,8 +22,9 @@ from jose import jwt
 from sqlalchemy import text
 
 from surogates.config import OfficeSettings
-from surogates.keel.case_files import CASE_ORG_OBJECT, case_workspace
+from surogates.keel.case_files import CASE_ORG_OBJECT, case_key, case_workspace
 from surogates.keel.files import case_file_value
+from surogates.keel.versions import case_versions
 from surogates.office import sessions as office_sessions
 from surogates.office.agent import location_of
 from surogates.office.sessions import open_or_reuse, record_editors
@@ -367,6 +368,99 @@ async def test_a_store_that_refuses_is_unavailable_and_logs_no_path(link, link_a
     logged = [record.getMessage() for record in caplog.records if record.name == "surogates.api.routes.keel"]
     assert len(logged) == 3 and all(CASE in line and "ClientError" in line for line in logged)
     assert not any("credit" in line for line in logged)
+
+
+def sha(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+async def kept_keys(link_app, versions) -> list[str]:
+    return sorted(await link_app.state.storage.list_keys(versions.bucket, versions.prefix))
+
+
+async def test_a_file_keel_writes_is_kept_by_its_hash(link, link_app):
+    versions = case_versions(link_app.state.settings, UUID(CASE))
+    storage = link_app.state.storage
+    first, second = b"first version", b"second version"
+
+    assert (await upload(link, "in/a.pdf", first)).status_code == 200
+    assert await storage.read(versions.bucket, versions.key(sha(first))) == first
+
+    # The same bytes at another path are the same version.
+    assert (await upload(link, "in/b.pdf", first)).status_code == 200
+    assert await kept_keys(link_app, versions) == [versions.key(sha(first))]
+
+    # A file written over is gone from the workspace, and kept.
+    assert (await upload(link, "in/a.pdf", second)).status_code == 200
+    assert await kept_keys(link_app, versions) == sorted([versions.key(sha(first)), versions.key(sha(second))])
+    assert await storage.read(versions.bucket, versions.key(sha(first))) == first
+
+    # Never listed as a case file, and never in the workspace the sandbox mounts.
+    assert sorted(listed_paths(await listing(link))) == ["in/a.pdf", "in/b.pdf"]
+    assert not any(key.startswith(case_key(link_app.state.settings, UUID(CASE), "")) for key in await kept_keys(link_app, versions))
+
+
+async def test_a_file_keel_reads_is_kept_by_its_hash(link, link_app, org, session_store):
+    session = await step_session(link, org, session_store)
+    versions = case_versions(link_app.state.settings, UUID(CASE))
+    data = b"written by the session"
+    await written_by_the_session(link_app, session, "memos/credit.docx", data)
+
+    read = await download(link, "memos/credit.docx")
+
+    assert read.status_code == 200, read.text
+    digest = read.headers["x-content-sha256"]
+    assert digest == sha(data)
+    assert await link_app.state.storage.read(versions.bucket, versions.key(digest)) == data
+
+    again = await download(link, "memos/credit.docx")
+
+    assert again.headers["x-content-sha256"] == digest
+    assert await kept_keys(link_app, versions) == [versions.key(digest)]
+
+
+class _RefusesVersions:
+    """A store that takes the workspace's files and refuses to keep a version of one."""
+
+    def __init__(self, inner) -> None:
+        self._inner = inner
+
+    def __getattr__(self, name: str):
+        return getattr(self._inner, name)
+
+    async def write(self, bucket: str, key: str, data: bytes) -> None:
+        self._refuse(key)
+        await self._inner.write(bucket, key, data)
+
+    async def upload(self, bucket: str, key: str, *args, **kwargs) -> None:
+        self._refuse(key)
+        await self._inner.upload(bucket, key, *args, **kwargs)
+
+    @staticmethod
+    def _refuse(key: str) -> None:
+        if "/versions/" in key:
+            raise ClientError({"Error": {"Code": "SlowDown", "Message": "slow down secret-key"}}, "PutObject")
+
+
+async def test_a_hash_is_never_handed_out_unkept(link, link_app, org, session_store, caplog):
+    session = await step_session(link, org, session_store)
+    working = link_app.state.storage
+    await written_by_the_session(link_app, session, "memos/d.pdf", b"written by the session")
+    link_app.state.storage = _RefusesVersions(working)
+
+    with caplog.at_level(logging.INFO, logger="surogates.api.routes.keel"):
+        written = await upload(link, "in/c.pdf", b"offered to Keel")
+        read = await download(link, "memos/d.pdf")
+
+    assert refusals(written, read) == [(503, "unavailable")] * 2
+    assert "x-content-sha256" not in read.headers
+    logged = [record.getMessage() for record in caplog.records if record.name == "surogates.api.routes.keel"]
+    assert logged and all(CASE in line and "ClientError" in line for line in logged)
+    assert not any("c.pdf" in line or "d.pdf" in line or "secret-key" in line for line in logged)
+
+    # The refused write left no file Keel could read as written.
+    link_app.state.storage = working
+    assert refusals(await download(link, "in/c.pdf")) == [(404, "unknown-file")]
 
 
 class _RefusingS3Client:

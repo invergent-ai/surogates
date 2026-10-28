@@ -6,7 +6,7 @@ from contextvars import ContextVar
 from typing import Any
 from uuid import UUID, uuid4
 
-from surogates.channels.memory_boundary import CASE_AGENT_KEY, MANAGED_CHANNELS
+from surogates.channels.memory_boundary import CASE_AGENT_KEY, CASE_RERUN_KEY, MANAGED_CHANNELS
 from surogates.keel.steps import CASE_ITEM_KEY, CASE_SCOPE_KEY, CASE_STEP_KEY
 from surogates.sandbox.pool import sandbox_session_key
 from surogates.session.models import Session
@@ -133,6 +133,7 @@ async def create_agent_session(
     case_item: dict | None = None,
     case_scope: dict | None = None,
     case_agent: dict | None = None,
+    case_rerun: dict | None = None,
 ) -> Session:
     sid = session_id or uuid4()
 
@@ -151,15 +152,17 @@ async def create_agent_session(
     # Server-owned too: where a session runs is decided from a device the API
     # checked, never by caller-supplied config.
     merged_config.pop("execution", None)
-    # A case's step or item contract, its scope and a person's case agent come
-    # from the Keel link alone, through *case_step*, *case_item*, *case_scope*
-    # and *case_agent*: a caller naming them in config would make its session
-    # a step, an item or a person's case agent, or widen what a case's session
-    # may reach.
+    # A case's step or item contract, its scope, a person's case agent and a
+    # step's rerun mark come from the Keel link alone, through *case_step*,
+    # *case_item*, *case_scope*, *case_agent* and *case_rerun*: a caller naming
+    # them in config would make its session a step, an item or a person's case
+    # agent, widen what a case's session may reach, or queue behind or ahead
+    # of the case's work.
     merged_config.pop(CASE_STEP_KEY, None)
     merged_config.pop(CASE_ITEM_KEY, None)
     merged_config.pop(CASE_SCOPE_KEY, None)
     merged_config.pop(CASE_AGENT_KEY, None)
+    merged_config.pop(CASE_RERUN_KEY, None)
     if case_step is not None:
         merged_config[CASE_STEP_KEY] = dict(case_step)
     if case_item is not None:
@@ -168,6 +171,8 @@ async def create_agent_session(
         merged_config[CASE_SCOPE_KEY] = dict(case_scope)
     if case_agent is not None:
         merged_config[CASE_AGENT_KEY] = dict(case_agent)
+    if case_rerun is not None:
+        merged_config[CASE_RERUN_KEY] = dict(case_rerun)
     # Tool paths that receive only ``session_config`` (media_gen, vision)
     # reconstruct a minimal session shape for boundary resolution; carry the
     # channel so a managed-channel session without a pinned workspace_boundary
@@ -266,8 +271,13 @@ async def create_child_session(
     merged_config.pop(CASE_STEP_KEY, None)
     merged_config.pop(CASE_ITEM_KEY, None)
     merged_config.pop(CASE_AGENT_KEY, None)
+    # A rerun's helper is a rerun's too: it queues and is fenced as its
+    # parent is, whatever the code making it names.
+    merged_config.pop(CASE_RERUN_KEY, None)
     if CASE_SCOPE_KEY in parent_config:
         merged_config[CASE_SCOPE_KEY] = parent_config[CASE_SCOPE_KEY]
+    if CASE_RERUN_KEY in parent_config:
+        merged_config[CASE_RERUN_KEY] = parent_config[CASE_RERUN_KEY]
     # The user's package, as the parent's last turn pinned it: a helper's
     # turn, often its only one, runs inside it as the parent's does.  Not a
     # routine run's: it is not held, so nothing would refresh the copy once

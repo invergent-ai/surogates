@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import func, or_, select, text, update
+from sqlalchemy import delete, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from surogates.db.models import OfficeSession
@@ -186,6 +186,21 @@ async def open_under(session_factory: Any, prefix: str) -> list[OpenDocument]:
             )
         )
         return [_snapshot(row) for row in rows.all()]
+
+
+async def forget_closed_under(session_factory: Any, prefix: str) -> int:
+    """Delete the closed rows whose location starts with *prefix*, as :func:`open_under` matches it: how many.
+
+    A row still open is never touched.  What a closed row holds, the editors that were in the document and who
+    they were, is the case's; this is for the folder it was in being deleted.
+    """
+    async with session_factory() as db, db.begin():
+        deleted = await db.execute(
+            delete(OfficeSession).where(
+                OfficeSession.status == CLOSED, OfficeSession.location.startswith(prefix, autoescape=True),
+            )
+        )
+        return deleted.rowcount
 
 
 async def open_documents(session_factory: Any) -> list[OpenDocument]:

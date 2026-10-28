@@ -35,6 +35,7 @@ import httpx
 import pytest
 
 import surogates.harness.loop as loop_module
+from surogates.channels.memory_boundary import CASE_RERUN_KEY
 from surogates.harness.budget import IterationBudget
 from surogates.keel.client import KeelClient, keel_client, use_keel_client
 from surogates.keel.steps import render_kickoff, step_contract_in, work_contract_key
@@ -514,6 +515,52 @@ async def test_an_empty_file_is_a_case_file(fake_keel, store):
     }
 
 
+OFFER = b"%PDF-1.7 offer"
+
+
+def _kept_for(tmp_path, data: bytes):
+    """Where the case's boundary keeps *data* by its hash: the file, and what it holds, or ``None``."""
+    kept = tmp_path / BUCKET / f"boundaries/case:{CASE}/versions/{hashlib.sha256(data).hexdigest()}"
+    return kept.read_bytes() if kept.exists() else None
+
+
+async def test_an_output_file_is_kept_before_keel_hears_of_it(fake_keel, tmp_path):
+    store = _store_for(tmp_path, files={"offer": "one"})
+    await store.put("out/offer.pdf", OFFER)
+    kept_when_keel_heard: list[bytes | None] = []
+    fake_keel.during = lambda: kept_when_keel_heard.append(_kept_for(tmp_path, OFFER))
+
+    result = await _call("complete_step", {**COMPLETION, "output": {**COMPLETION["output"], "offer": "out/offer.pdf"}}, store)
+
+    assert result.startswith("Step ended:")
+    assert kept_when_keel_heard == [OFFER]
+
+
+class _RefusesVersions(LocalBackend):
+    """A store that takes the workspace's files and refuses a version of one."""
+
+    async def write(self, bucket: str, key: str, data: bytes) -> None:
+        if "/versions/" in key:
+            raise OSError("refused secret-key")
+        await super().write(bucket, key, data)
+
+
+async def test_an_output_file_that_cannot_be_kept_never_reaches_keel(fake_keel, tmp_path, caplog):
+    store = _store_for(tmp_path, files={"offer": "one"})
+    await store.put("out/offer.pdf", OFFER)
+    store.storage = _RefusesVersions(str(tmp_path))
+
+    with caplog.at_level(logging.INFO):
+        result = await _call(
+            "complete_step", {**COMPLETION, "output": {**COMPLETION["output"], "offer": "out/offer.pdf"}}, store,
+        )
+
+    assert json.loads(result)["error"] == "offer: the file could not be kept for Keel just now; call again."
+    assert fake_keel.requests == []
+    assert "secret-key" not in caplog.text
+    assert "OSError" in caplog.text
+
+
 async def test_a_report_larger_than_keel_takes_is_never_sent(fake_keel, store):
     long_output = {**COMPLETION, "output": {**COMPLETION["output"], "notes": "x" * 300_000}}
 
@@ -701,6 +748,42 @@ async def test_raise_hand_parks_the_step(fake_keel, store):
     ):
         assert "error" in json.loads(await _call("raise_hand", bad, store)), bad
     assert len(fake_keel.requests) == 1
+
+
+async def test_a_rerun_reports_to_the_door_under_its_own_id(fake_keel, tmp_path):
+    rerun = {"kind": "rerun", "memory_prefix": "p/a"}
+
+    def a_rerun() -> _StepStore:
+        marked = _store_for(tmp_path)
+        marked.row.config[CASE_RERUN_KEY] = dict(rerun)
+        return marked
+
+    finished = a_rerun()
+    finished.write(EventType.KB_PAGE_READ, PAGE)
+    result = await _call("complete_step", COMPLETION, finished)
+
+    assert result == "Step ended: Keel completed the step."
+    [request] = fake_keel.requests
+    assert request.url.path == f"/api/harness/sessions/{finished.row.id}/complete"
+    assert json.loads(request.content) == {
+        "call_id": "c1", **COMPLETION, "pages_read": [reported(PAGE)], "usage": USAGE, "bundle_version": None,
+    }
+
+    fake_keel.answer(200, {"result": "hand-raised", "message": "A person will answer."})
+    stuck = a_rerun()
+    hand = {
+        "question": "Which income counts?",
+        "choices": ["Both", "The current employer only"],
+        "evidence": [{"label": "Employer", "value": "the first one", "source": {"file": "in/payslips/03.pdf"}}],
+    }
+    result = await _call("raise_hand", hand, stuck, tool_call_id="c7")
+
+    assert result == "Step ended: A person will answer."
+    request = fake_keel.requests[-1]
+    assert request.url.path == f"/api/harness/sessions/{stuck.row.id}/raise-hand"
+    assert json.loads(request.content) == {
+        "call_id": "c7", **hand, "pages_read": [], "usage": USAGE, "bundle_version": None,
+    }
 
 
 PAYSLIP = {"label": "Payslip · September", "value": "€6,180 net", "source": {"file": "/workspace/payslips/sep.pdf", "page": 1}}

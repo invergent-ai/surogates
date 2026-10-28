@@ -64,6 +64,7 @@ from uuid import UUID
 from surogates.keel.case_files import CaseFileError, case_path
 from surogates.keel.client import BodyNotJSON, BodyTooLarge, KeelAnswer, KeelClient, keel_client
 from surogates.keel.files import case_file_value, workspace_path
+from surogates.keel.versions import VersionNotKept
 from surogates.keel.items import ItemContract, is_case_item
 from surogates.keel.run_facts import compile_id_in, wake_bundle_version, work_usage, work_usage_or_none
 from surogates.keel.steps import (
@@ -635,6 +636,10 @@ async def _files(
             except CaseFileError:
                 at = f"{name}[{index}]" if kind == "list" else name
                 return f"{at} is not a file of the case: {_NAME_A_CASE_FILE}"
+            except VersionNotKept as exc:
+                # The store's own error can quote the file's key; its class says enough.
+                logger.warning("Session %s: a file's version was not kept (%s)", session.id, type(exc.__cause__).__name__)
+                return f"{name}: the file could not be kept for Keel just now; call again."
             except ValueError:
                 return f"{name}: {path} is not a path in /workspace."
             except FileNotFoundError:

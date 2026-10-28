@@ -41,11 +41,13 @@ __all__ = [
     "WORKSPACE_ROOTS",
     "CaseFile",
     "CaseFileError",
+    "case_boundary_folder",
     "case_key",
     "case_path",
     "case_workspace",
     "download_case_file",
     "list_case_files",
+    "no_such_bucket",
     "record_case_org",
     "write_case_file",
 ]
@@ -114,6 +116,16 @@ def _bucket_and_prefix(settings: Any, case_id: UUID) -> tuple[str, str]:
     return agent_session_bucket(settings.storage.bucket), prefix
 
 
+def case_boundary_folder(settings: Any, case_id: UUID) -> tuple[str, str]:
+    """The bucket, and the folder above *case_id*'s workspace: ``<installation prefix>boundaries/case:<id>/``.
+
+    The workspace is the folder a sandbox mounts; its siblings, the org
+    record and the file versions, are not.
+    """
+    bucket, workspace = _bucket_and_prefix(settings, case_id)
+    return bucket, workspace.rstrip("/").rpartition("/")[0] + "/"
+
+
 def case_key(settings: Any, case_id: UUID, path: str) -> str:
     """The object key of *path*, a :func:`case_path`, in *case_id*'s workspace.
 
@@ -133,7 +145,8 @@ def case_workspace(storage: Any, settings: Any, case_id: UUID) -> StorageWorkspa
     return StorageWorkspaceIO(storage, bucket=bucket, prefix=prefix)
 
 
-def _no_bucket(exc: ClientError) -> bool:
+def no_such_bucket(exc: ClientError) -> bool:
+    """Whether the store's *exc* says the bucket is not there: a case nothing was written to yet."""
     return exc.response.get("Error", {}).get("Code") == "NoSuchBucket"
 
 
@@ -163,7 +176,7 @@ async def list_case_files(storage: Any, settings: Any, case_id: UUID) -> list[Ca
     try:
         entries = await storage.list_entries(bucket, prefix=prefix)
     except ClientError as exc:
-        if _no_bucket(exc):
+        if no_such_bucket(exc):
             return []
         raise
     files = [
@@ -190,7 +203,7 @@ async def download_case_file(
     except KeyError:
         raise FileNotFoundError(path) from None
     except ClientError as exc:
-        if _no_bucket(exc):
+        if no_such_bucket(exc):
             raise FileNotFoundError(path) from None
         raise
 
@@ -208,9 +221,8 @@ async def write_case_file(storage: Any, settings: Any, case_id: UUID, path: str,
 
 def _org_record_key(settings: Any, case_id: UUID) -> tuple[str, str]:
     """Where *case_id*'s org record is: the bucket, and the key beside the workspace, which no sandbox mounts."""
-    bucket, workspace = _bucket_and_prefix(settings, case_id)
-    boundary = workspace.rstrip("/").rpartition("/")[0]
-    return bucket, f"{boundary}/{CASE_ORG_OBJECT}"
+    bucket, boundary = case_boundary_folder(settings, case_id)
+    return bucket, boundary + CASE_ORG_OBJECT
 
 
 def _recorded_org(data: bytes) -> UUID | None:
@@ -235,7 +247,7 @@ async def record_case_org(storage: Any, settings: Any, case_id: UUID, org_id: UU
     except KeyError:
         recorded = None
     except ClientError as exc:
-        if not _no_bucket(exc):
+        if not no_such_bucket(exc):
             raise
         recorded = None
     if recorded is not None:
