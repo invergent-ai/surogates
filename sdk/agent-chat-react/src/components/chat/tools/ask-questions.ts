@@ -69,6 +69,9 @@ export function askQuestionsOf(tc: ToolCallInfo): AskUserQuestionQuestion[] {
  * call ``error`` with ``[failed]``, and that question was asked.
  */
 export function askRejected(tc: ToolCallInfo): boolean {
+  // Recorded answers mean the question was shown; a later tool failure
+  // must not hide it or them.
+  if (tc.askUserQuestionAnswers !== undefined) return false;
   return tc.status === "complete" && effectiveStatus(tc) === "error";
 }
 

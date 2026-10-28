@@ -231,3 +231,20 @@ describe("malformed or rejected ask_user_question calls", () => {
     expect(dom.textContent).toContain("No answer recorded.");
   });
 });
+
+describe("an answered question whose tool then failed", () => {
+  it("keeps the question and the recorded answer", () => {
+    const dom = render(askTurn({
+      questions: [{ prompt: "Which GPU?" }, { prompt: "How many?" }],
+      status: "complete",
+      result: JSON.stringify({ error: "Tool execution failed: database is down" }),
+      answers: [
+        { question: "Which GPU?", answer: "RTX 5090", is_other: true },
+        { question: "How many?", answer: "1", is_other: true },
+      ],
+    }), "expert");
+    expect(dom.textContent).toContain("Which GPU?");
+    expect(dom.textContent).toContain("RTX 5090");
+    expect(dom.textContent).not.toContain("could not be shown");
+  });
+});
