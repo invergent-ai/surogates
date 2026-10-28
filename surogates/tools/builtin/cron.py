@@ -15,6 +15,7 @@ from surogates.scheduled.schedule import (
     ParsedSchedule,
     local_iso,
     once_schedule,
+    row_kind,
     schedule_from_fields,
 )
 from surogates.scheduled.store import ScheduledSessionStore
@@ -578,7 +579,7 @@ def _schedule_payload(row: Any, *, full: bool = False) -> dict[str, Any]:
         payload["ended"] = row.ended_reason
     if full:
         payload.update(
-            kind=row.kind,
+            kind=row_kind(row),
             cadence=getattr(row, "cadence", None),
             last_run_session_id=str(row.last_session_id) if row.last_session_id else None,
             paused_at=local_iso(getattr(row, "paused_at", None), timezone_name),

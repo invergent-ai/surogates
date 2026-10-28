@@ -397,6 +397,23 @@ def upcoming_runs(row, *, count: int = 3) -> list[datetime]:
     return fires
 
 
+def row_kind(row) -> str:
+    """A row's ``kind``. A runtime older than the column leaves it NULL
+    until ``surogates migrate`` backfills it, the same way as ``kind_sql``."""
+    kind = getattr(row, "kind", None)
+    if kind is not None:
+        return kind
+    legacy = getattr(row, "schedule", None) or {}
+    return "dynamic" if legacy.get("kind") == "dynamic_loop" else "cron"
+
+
+def kind_sql(table: str = "s") -> str:
+    return (
+        f"coalesce({table}.kind, CASE WHEN {table}.schedule->>'kind' = 'dynamic_loop' "
+        "THEN 'dynamic' ELSE 'cron' END)"
+    )
+
+
 def schedule_from_row(row) -> ParsedSchedule:
     """The cadence of a ``scheduled_sessions`` row, from its ``kind`` and
     ``cadence`` columns.

@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import exists, func, or_, select, text, update
+from sqlalchemy import exists, func, literal_column, or_, select, text, update
 from sqlalchemy.orm import aliased
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -27,9 +27,13 @@ from surogates.scheduled.schedule import (
     ParsedSchedule,
     clamp_dynamic_loop_delay,
     duration_words,
+    kind_sql,
     parse_dynamic_loop_schedule,
+    row_kind,
     schedule_from_row,
 )
+
+_KIND = kind_sql()
 
 #: Failed starts of a one-off before it ends ``failed``.
 MAX_ONCE_ATTEMPTS = 3
@@ -164,6 +168,7 @@ class ScheduledSessionStore:
         service_account_id: UUID | None = None,
         hide_cases: bool = False,
         case_session_id: UUID | None = None,
+        own_only: bool = False,
     ) -> ScheduledSession | None:
         """*schedule_id* when the principal may see it (:func:`_scope`), else
         None.  *hide_cases*: as :func:`_not_a_case_schedule`."""
@@ -172,7 +177,7 @@ class ScheduledSessionStore:
             ScheduledSessionRow.id == schedule_id,
             ScheduledSessionRow.org_id == org_id,
             ScheduledSessionRow.agent_id == agent_id,
-            _scope(user_id, service_account_id),
+            _scope(user_id, service_account_id, own_only=own_only),
         )
         if hide_cases:
             stmt = stmt.where(_not_a_case_schedule(case_session_id))
@@ -194,6 +199,7 @@ class ScheduledSessionStore:
         created_from_session_id: UUID | None = None,
         hide_cases: bool = False,
         case_session_id: UUID | None = None,
+        own_only: bool = False,
     ) -> list[ScheduledSession]:
         """The schedules the principal may see (:func:`_scope`), newest first.
         *hide_cases*: as :func:`_not_a_case_schedule`.
@@ -209,7 +215,7 @@ class ScheduledSessionStore:
             select(ScheduledSessionRow)
             .where(
                 ScheduledSessionRow.org_id == org_id,
-                _scope(user_id, service_account_id),
+                _scope(user_id, service_account_id, own_only=own_only),
                 ScheduledSessionRow.agent_id == agent_id,
             )
             .order_by(ScheduledSessionRow.created_at.desc())
@@ -357,15 +363,19 @@ class ScheduledSessionStore:
         if max_run_seconds is not None:
             values["max_run_seconds"] = max_run_seconds or None
         if schedule is not None:
-            if schedule.is_dynamic != (_schedule_of(current).is_dynamic):
+            was = _schedule_of(current)
+            if schedule.is_dynamic != was.is_dynamic:
                 raise ValueError("A dynamic loop cannot become a fixed schedule, or the reverse.")
             now = _utcnow()
-            schedule = schedule.anchored(now)
+            # The same interval keeps its rhythm when only the zone or the text changes.
+            schedule = schedule.anchored(
+                was.anchor if (was.kind, was.seconds) == (schedule.kind, schedule.seconds) and was.anchor else now
+            )
             values.update(
                 schedule=_schedule_to_dict(schedule), schedule_display=schedule.display,
                 timezone=schedule.timezone_name, kind=schedule.kind, cadence=schedule.cadence(),
             )
-            if schedule.kind != _schedule_of(current).kind:
+            if schedule.kind != was.kind:
                 # A one-off runs once; the run limit of what it was is not the new one's.
                 values["repeat_limit"] = 1 if schedule.kind == "once" else None
             if current.status == "active" and not schedule.is_dynamic:
@@ -729,7 +739,7 @@ class ScheduledSessionStore:
                 or row.agent_id != agent_id
                 or row.last_session_id != session_id
                 or row.status != "active"
-                or row.kind != "dynamic"
+                or row_kind(row) != "dynamic"
             ):
                 return False
 
@@ -812,7 +822,7 @@ class ScheduledSessionStore:
                     ScheduledSessionRow.status == "active",
                     ScheduledSessionRow.next_run_at.is_(None),
                     ~(
-                        (func.coalesce(ScheduledSessionRow.kind, "") == "dynamic")
+                        (literal_column(kind_sql("scheduled_sessions")) == "dynamic")
                         & ScheduledSessionRow.last_session_id.is_not(None)
                     ),
                 )
@@ -971,7 +981,7 @@ class ScheduledSessionStore:
                   {agent_filter}
                   AND s.next_run_at IS NULL
                   AND s.last_session_id IS NOT NULL
-                  AND s.kind = 'dynamic'
+                  AND {_KIND} = 'dynamic'
                   AND (s.expires_at IS NULL OR s.expires_at > now())
                   AND run_session.status IN ('completed', 'failed', 'idle', 'archived')
                 ORDER BY s.last_run_at ASC NULLS FIRST
@@ -1036,7 +1046,7 @@ class ScheduledSessionStore:
               {agent_filter}
               AND s.next_run_at IS NULL
               AND s.last_session_id IS NOT NULL
-              AND s.kind = 'dynamic'
+              AND {_KIND} = 'dynamic'
               AND (s.expires_at IS NULL OR s.expires_at > now())
               AND run_session.status = 'active'
               AND active_lease.session_id IS NULL
@@ -1136,17 +1146,20 @@ def _not_a_case_schedule(case_session_id: UUID | None):
     )
 
 
-def _scope(user_id: UUID | None, service_account_id: UUID | None):
+def _scope(user_id: UUID | None, service_account_id: UUID | None, *, own_only: bool = False):
     """The schedules a principal sees and manages.
 
     A person sees their own.  A Studio operator's chat account and the
     agent's own principal work for the project and see all of the agent's:
     a co-owner manages a schedule another made, and a channel user's
     schedule is visible to the people who run the agent.  Any other
-    service account (an API key, an integration) sees only its own.
+    service account (an API key, an integration) sees only its own, as
+    does any caller asking with *own_only*.
     """
     if user_id is not None:
         return ScheduledSessionRow.user_id == user_id
+    if own_only:
+        return ScheduledSessionRow.service_account_id == service_account_id
     works_for_the_project = (
         select(ServiceAccountRow.id)
         .where(
