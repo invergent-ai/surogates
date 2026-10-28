@@ -127,11 +127,16 @@ async def test_a_landing_waits_for_a_computer_that_goes_away_and_holds_nothing_o
 
     await eventually(waiting, timeout=10.0)
     assert not turn.done() and seen(here.folder) == before
-    # No lock of the server's is held while the computer is away, and no transaction is left open: its turn's lease alone.
+    # No lock of the project's is held while the computer is away, and no transaction is left open: its turn's lease
+    # alone.  The project's own lock, and this database's own transactions: other tests' leave theirs.
     async with api.app.state.session_factory() as db:
-        assert (await db.execute(text("SELECT count(*) FROM pg_locks WHERE locktype = 'advisory'"))).scalar() == 0
         assert (await db.execute(text(
-            "SELECT count(*) FROM pg_stat_activity WHERE state = 'idle in transaction' AND pid <> pg_backend_pid()"
+            "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' "
+            "AND objid::text::bigint = (hashtext(:key)::bigint & 4294967295)"
+        ), {"key": f"workstream:{thread.config['workstream_id']}"})).scalar() == 0
+        assert (await db.execute(text(
+            "SELECT count(*) FROM pg_stat_activity WHERE state = 'idle in transaction' AND pid <> pg_backend_pid() "
+            "AND datname = current_database()"
         ))).scalar() == 0
     await back(here)
     await asyncio.wait_for(turn, 30.0)
