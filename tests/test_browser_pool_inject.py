@@ -57,3 +57,38 @@ async def test_inject_applies_state_before_registry_publish(monkeypatch):
     assert order.index("apply") < order.index("registry")
     assert applied["state"]["cookies"][0]["name"] == "SID"
     assert applied["rest_url"] == "http://b:10001"
+
+
+async def test_the_saved_login_is_loaded_only_for_a_fresh_browser(monkeypatch):
+    class _Registry:
+        async def set(self, entry):
+            pass
+
+        async def get(self, session_id):
+            return None
+
+    applied = []
+
+    class _FakeClient:
+        def __init__(self, rest_url, **kw):
+            pass
+
+        async def apply_storage_state(self, state):
+            applied.append(state)
+
+        async def close(self):
+            pass
+
+    monkeypatch.setattr("surogates.browser.pool.KernelBrowserClient", _FakeClient)
+    loads = []
+
+    async def login():
+        loads.append(1)
+        return {"cookies": [{"name": "SID"}], "origins": []}
+
+    pool = BrowserPool(backend=_FakeBackend(), registry=_Registry(), event_emitter=_make_recording_emitter([]))
+    first = await pool.ensure(session_id="s1", org_id="o1", user_id="u1", spec=BrowserSpec(), login=login)
+    again = await pool.ensure(session_id="s1", org_id="o1", user_id="u1", spec=BrowserSpec(), login=login)
+
+    assert first.newly_provisioned and not again.newly_provisioned
+    assert len(loads) == 1 and applied[0]["cookies"][0]["name"] == "SID"

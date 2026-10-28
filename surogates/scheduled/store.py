@@ -363,7 +363,7 @@ class ScheduledSessionStore:
         if max_run_seconds is not None:
             values["max_run_seconds"] = max_run_seconds or None
         if schedule is not None:
-            was = _schedule_of(current)
+            was = schedule_from_row(current)
             if schedule.is_dynamic != was.is_dynamic:
                 raise ValueError("A dynamic loop cannot become a fixed schedule, or the reverse.")
             now = _utcnow()
@@ -597,7 +597,7 @@ class ScheduledSessionStore:
             row.updated_at = now
             if row.status == "active":
                 current = ScheduledSession.model_validate(row)
-                cadence = _schedule_of(current)
+                cadence = schedule_from_row(current)
                 ended = None
                 if row.repeat_limit is not None and row.run_count >= row.repeat_limit:
                     ended = "limit"
@@ -640,7 +640,7 @@ class ScheduledSessionStore:
             if row.status == "active":
                 failures = (row.consecutive_failures or 0) + 1
                 row.consecutive_failures = failures
-                cadence = _schedule_of(ScheduledSession.model_validate(row))
+                cadence = schedule_from_row(ScheduledSession.model_validate(row))
                 limit = MAX_ONCE_ATTEMPTS if cadence.kind == "once" else MAX_CONSECUTIVE_FAILURES
                 if failures >= limit:
                     _end(row, "failed")
@@ -695,7 +695,7 @@ class ScheduledSessionStore:
             row.last_error = reason[:2000]
             row.updated_at = now
             if row.status == "active":
-                cadence = _schedule_of(ScheduledSession.model_validate(row))
+                cadence = schedule_from_row(ScheduledSession.model_validate(row))
                 row.next_run_at = (
                     now + timedelta(seconds=DYNAMIC_LOOP_FALLBACK_DELAY_SECONDS)
                     if cadence.is_dynamic or cadence.kind == "once"
@@ -1118,14 +1118,10 @@ def _schedule_to_dict(schedule: ParsedSchedule) -> dict[str, str]:
     return data
 
 
-def _schedule_of(schedule: ScheduledSession) -> ParsedSchedule:
-    return schedule_from_row(schedule)
-
-
 def _planned_run(schedule: ScheduledSession, now: datetime) -> datetime:
     """When an active *schedule* with no next run runs: a dynamic loop or
     a one-off whose time has passed runs now."""
-    cadence = _schedule_of(schedule)
+    cadence = schedule_from_row(schedule)
     if cadence.is_dynamic:
         return now
     return cadence.next_after(now) or now
@@ -1188,8 +1184,7 @@ def _failure_words(data: dict) -> str | None:
     reason = data.get("error_title") or data.get("error") or data.get("reason")
     if reason == "run_time_limit":
         seconds = int(data.get("limit_seconds") or 0)
-        limit = (f" of {seconds // 3600} h" if seconds and seconds % 3600 == 0
-                 else f" of {seconds // 60} min" if seconds else "")
+        limit = f" of {duration_words(seconds)}" if seconds else ""
         return f"Stopped at its time limit{limit} before it finished"
     if reason == "schedule_cancelled":
         return "Stopped because the schedule was cancelled"

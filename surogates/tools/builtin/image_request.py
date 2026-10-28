@@ -77,7 +77,7 @@ class ImageRequestError(Exception):
         self.status = status
 
 
-_info_cache: dict[tuple[str, str], tuple[float, ImageModelInfo]] = {}
+_listing_cache: dict[str, tuple[float, dict[str, ImageModelInfo]]] = {}
 _shape_cache: dict[tuple[str, str], str] = {}
 
 
@@ -86,17 +86,21 @@ def _key(client: Any, model: str) -> tuple[str, str]:
 
 
 async def model_info(client: Any, model: str) -> ImageModelInfo:
-    key = _key(client, model)
+    """One ``/models`` listing per provider serves all its models; a model it
+    does not list is asked again sooner, in case it was added since."""
+    base_url = str(getattr(client, "base_url", ""))
     now = time.monotonic()
-    cached = _info_cache.get(key)
-    if cached is not None and cached[0] > now:
-        return cached[1]
-    info = await _fetch_model_info(client, model)
-    _info_cache[key] = (now + (_INFO_TTL if info.listed else _UNKNOWN_TTL), info)
-    return info
+    cached = _listing_cache.get(base_url)
+    if cached is not None:
+        info = cached[1].get(model)
+        if now - cached[0] < (_INFO_TTL if info is not None else _UNKNOWN_TTL):
+            return info or ImageModelInfo()
+    listing = await _fetch_listing(client)
+    _listing_cache[base_url] = (now, listing)
+    return listing.get(model) or ImageModelInfo()
 
 
-async def _fetch_model_info(client: Any, model: str) -> ImageModelInfo:
+async def _fetch_listing(client: Any) -> dict[str, ImageModelInfo]:
     try:
         raw = await client.get(
             "models", cast_to=object,
@@ -104,21 +108,22 @@ async def _fetch_model_info(client: Any, model: str) -> ImageModelInfo:
         )
     except Exception as exc:  # noqa: BLE001 — unknown capabilities fall back to the defaults
         logger.info("image model list unavailable at %s: %s", getattr(client, "base_url", ""), exc)
-        return ImageModelInfo()
+        return {}
     rows = raw.get("data") if isinstance(raw, dict) else raw
+    listing: dict[str, ImageModelInfo] = {}
     for row in rows if isinstance(rows, list) else []:
-        if not isinstance(row, dict) or row.get("id") != model:
+        if not isinstance(row, dict) or not isinstance(row.get("id"), str):
             continue
         arch = row.get("architecture") or {}
         outputs = arch.get("output_modalities") or row.get("output_modalities") or []
         inputs = arch.get("input_modalities") or row.get("input_modalities") or []
-        return ImageModelInfo(
+        listing.setdefault(row["id"], ImageModelInfo(
             listed=True,
             makes_images="image" in outputs,
             makes_text="text" in outputs,
             takes_images="image" in inputs,
-        )
-    return ImageModelInfo()
+        ))
+    return listing
 
 
 def shape_order(

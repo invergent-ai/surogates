@@ -18,9 +18,7 @@ from surogates.scheduled.prompt_guard import ScheduledPromptBlocked, validate_sc
 from surogates.scheduled.schedule import (
     ParsedSchedule,
     schedule_from_cadence,
-    schedule_from_fields,
     row_kind,
-    schedule_from_row,
     upcoming_runs,
 )
 from surogates.scheduled.store import ScheduledSessionStore
@@ -114,20 +112,13 @@ class ScheduledWorkCreate(BaseModel):
 
 class ScheduledWorkUpdate(BaseModel):
     """Fields left out stay as they are.  ``browser_profile_id: null`` runs
-    logged out; ``max_run_seconds: 0`` removes the limit.  The flat cadence
-    fields are read as in ``cron_create``."""
+    logged out; ``max_run_seconds: 0`` removes the limit."""
 
     name: str | None = Field(None, max_length=200)
     prompt: str | None = Field(None, min_length=1, max_length=20_000)
     cadence: Cadence | None = None
     browser_profile_id: UUID | None = None
     max_run_seconds: int | None = None
-    cron: str | None = None
-    interval: str | None = None
-    at: str | None = None
-    days: list[str] | None = None
-    times: list[str] | None = None
-    timezone: str | None = None
 
 
 class CadencePreviewRequest(BaseModel):
@@ -239,17 +230,15 @@ async def _items(
     """Items with their owners' names and whose login their runs use,
     looked up once for all rows."""
     user_names, account_names = await _scheduled_store(request).owner_names(rows)
-    bound = {
-        row.id: _bound_profile(row) for row in rows if _bound_profile(row) is not None
-    }
+    bound = {row.id: pid for row in rows if (pid := _bound_profile(row)) is not None}
     profiles = _profile_store(request)
-    owners = await profiles.owners(org_id, list(set(bound.values()))) if profiles and bound else {}
     agent_sa = await _agent_principal_id(request, org_id, agent_id) if profiles else None
-    agent_login = None
+    found = None
     if agent_sa is not None and any(row.id not in bound for row in rows):
         found = await profiles.used_in_channel(org_id, service_account_id=agent_sa, channel="scheduled")
-        if found is not None:
-            agent_login = (await profiles.owners(org_id, [found])).get(found)
+    wanted = set(bound.values()) | ({found} if found is not None else set())
+    owners = await profiles.owners(org_id, list(wanted)) if profiles and wanted else {}
+    agent_login = owners.get(found) if found is not None else None
     items = []
     for row in rows:
         login: RunsLoggedInAs | None = None
@@ -382,12 +371,9 @@ async def preview_scheduled_work(
             raise ValueError("That time has already passed.")
     except ValueError as exc:
         raise _unprocessable(exc) from exc
-    fires = [first]
-    while len(fires) < 3 and (following := cadence.next_after(fires[-1])) is not None:
-        fires.append(following)
     return CadencePreview(
         display=cadence.display, kind=cadence.kind, timezone=cadence.timezone_name,
-        cadence=cadence.cadence(), next_fires=fires,
+        cadence=cadence.cadence(), next_fires=cadence.fires(first, 3),
     )
 
 
@@ -507,7 +493,7 @@ async def update_scheduled_work(
     try:
         if body.prompt is not None:
             validate_scheduled_prompt(body.prompt, source="scheduled_work")
-        cadence = _new_cadence(body, current)
+        cadence = body.cadence.parsed() if body.cadence is not None else None
         updated = await store.update(
             org_id=tenant.org_id, agent_id=agent_runtime.agent_id, schedule_id=schedule_id,
             name=body.name, prompt=body.prompt, schedule=cadence, context=context,
@@ -518,22 +504,6 @@ async def update_scheduled_work(
     if updated is None:
         raise _not_found(schedule_id)
     return await _one(request, updated)
-
-
-def _new_cadence(body: ScheduledWorkUpdate, current: ScheduledSession) -> ParsedSchedule | None:
-    if body.cadence is not None:
-        return body.cadence.parsed()
-    if any(v for v in (body.cron, body.interval, body.at, body.days, body.times)):
-        return schedule_from_fields(
-            cron=body.cron, interval=body.interval, at=body.at, days=body.days, times=body.times,
-            timezone_name=body.timezone or current.timezone or "UTC",
-        )
-    if body.timezone is not None:
-        return schedule_from_row(current.model_copy(update={
-            "timezone": body.timezone,
-            "cadence": {**(current.cadence or {}), "tz": body.timezone},
-        }))
-    return None
 
 
 @router.post("/scheduled-work/{schedule_id}/pause", response_model=ScheduledWorkItem)

@@ -135,6 +135,7 @@ class BrowserPool:
         org_id: str,
         user_id: str,
         spec: BrowserSpec,
+        login: Callable[[], Awaitable[dict | None]] | None = None,
     ) -> EnsureResult:
         lock = await self._session_lock(session_id)
         async with lock:
@@ -218,6 +219,8 @@ class BrowserPool:
                 if billing:
                     spec.billing = billing
 
+            if login is not None and (state := await login()) is not None:
+                spec.storage_state = state
             browser_id, endpoint = await self._backend.provision(
                 spec,
                 session_id=session_id,

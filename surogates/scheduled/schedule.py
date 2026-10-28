@@ -138,6 +138,15 @@ class ParsedSchedule:
             return _next_cron(self.cron or "", self.timezone_name, after)
         return None
 
+    def fires(self, first: datetime | None, count: int, *, until: datetime | None = None) -> list[datetime]:
+        """Up to *count* runs from *first* on, each before *until* when given."""
+        fires: list[datetime] = []
+        moment = _aware(first) if first is not None else None
+        while moment is not None and len(fires) < count and (until is None or moment < _aware(until)):
+            fires.append(moment)
+            moment = self.next_after(moment)
+        return fires
+
     def cadence(self) -> dict:
         """The ``cadence`` column: what :func:`schedule_from_row` reads back."""
         if self.kind == "calendar":
@@ -386,15 +395,7 @@ def upcoming_runs(row, *, count: int = 3) -> list[datetime]:
     limit = getattr(row, "repeat_limit", None)
     if limit is not None:
         count = min(count, max(0, limit - (getattr(row, "run_count", 0) or 0)))
-    expires = getattr(row, "expires_at", None)
-    fires: list[datetime] = []
-    moment: datetime | None = _aware(row.next_run_at)
-    while moment is not None and len(fires) < count:
-        if expires is not None and moment >= _aware(expires):
-            break
-        fires.append(moment)
-        moment = cadence.next_after(moment)
-    return fires
+    return cadence.fires(row.next_run_at, count, until=getattr(row, "expires_at", None))
 
 
 def row_kind(row) -> str:

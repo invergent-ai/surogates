@@ -41,7 +41,10 @@ class FakePool:
         org_id: str,
         user_id: str,
         spec: BrowserSpec,
+        login: Any = None,
     ) -> EnsureResult:
+        if login is not None and (state := await login()) is not None:
+            spec.storage_state = state
         self.ensures.append((session_id, org_id, user_id))
         self.specs.append(spec)
         return EnsureResult(

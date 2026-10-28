@@ -90,12 +90,15 @@ async def tcp_probe(entry: BrowserEntry) -> bool:
     return True
 
 
+def _seconds_since(moment: datetime) -> float:
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - moment).total_seconds()
+
+
 def _age_seconds(entry: BrowserEntry) -> float:
     try:
-        provisioned = entry.provisioned_at
-        if provisioned.tzinfo is None:
-            provisioned = provisioned.replace(tzinfo=timezone.utc)
-        return (datetime.now(timezone.utc) - provisioned).total_seconds()
+        return _seconds_since(entry.provisioned_at)
     except Exception:  # noqa: BLE001 - a garbage timestamp is an old entry
         return PROVISION_GRACE_SECONDS + 1.0
 
@@ -106,11 +109,13 @@ async def sweep_browser_registry(
     redis: Any,
     emit: EmitEvent,
     probe: Probe = tcp_probe,
+    entries: dict[str, BrowserEntry] | None = None,
 ) -> int:
     """Probe every registry entry once; prune the repeatedly dead. Returns
-    how many entries were pruned."""
+    how many entries were pruned; a pruned one also leaves *entries*."""
 
-    entries: dict[str, BrowserEntry] = await registry.entries()
+    if entries is None:
+        entries = await registry.entries()
     if not entries:
         return 0
 
@@ -142,6 +147,7 @@ async def sweep_browser_registry(
         if failures < FAILURES_BEFORE_PRUNE:
             continue
         await registry.delete(session_id)
+        entries.pop(session_id, None)
         await redis.hdel(FAILURES_KEY, session_id)
         pruned += 1
         logger.info(
@@ -171,15 +177,15 @@ async def close_idle_browsers(
     registry: Any,
     close: CloseBrowser,
     idle_seconds: float = IDLE_CLOSE_SECONDS,
+    entries: dict[str, BrowserEntry] | None = None,
 ) -> int:
     """Close every registered browser idle for *idle_seconds*. Returns how many."""
-    now = datetime.now(timezone.utc)
+    if entries is None:
+        entries = await registry.entries()
     closed = 0
-    for session_id, entry in (await registry.entries()).items():
+    for session_id, entry in entries.items():
         used = entry.last_used_at or entry.provisioned_at
-        if used.tzinfo is None:
-            used = used.replace(tzinfo=timezone.utc)
-        if (now - used).total_seconds() < idle_seconds:
+        if _seconds_since(used) < idle_seconds:
             continue
         try:
             await close(session_id)
@@ -214,11 +220,12 @@ async def run_browser_reaper_loop(
                 ex=max(1, int(interval_seconds * 0.8)),
             )
             if acquired:
+                entries = await registry.entries()
                 await sweep_browser_registry(
-                    registry=registry, redis=redis, emit=emit, probe=probe,
+                    registry=registry, redis=redis, emit=emit, probe=probe, entries=entries,
                 )
                 if close is not None:
-                    await close_idle_browsers(registry=registry, close=close)
+                    await close_idle_browsers(registry=registry, close=close, entries=entries)
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 - a bad sweep must not end the loop

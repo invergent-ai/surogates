@@ -113,7 +113,7 @@ async def _run(provider, arguments, tmp_path, *, hooks=None, channel=None):
 
 @pytest.fixture(autouse=True)
 def _fresh_caches():
-    image_request._info_cache.clear()
+    image_request._listing_cache.clear()
     image_request._shape_cache.clear()
 
 
@@ -286,3 +286,24 @@ async def test_delivery_says_how_the_image_reaches_anyone(tmp_path, channel, say
 async def test_an_image_link_to_an_internal_address_is_not_fetched():
     with pytest.raises(image_request.ImageRequestError, match="unsafe"):
         await image_request._image_bytes("https://127.0.0.1/generated.png")
+
+
+@pytest.mark.asyncio
+async def test_one_model_listing_serves_every_model_of_a_provider():
+    provider = _Provider(models=[
+        {"id": "a", "architecture": {"output_modalities": ["image"], "input_modalities": ["text"]}},
+        {"id": "b", "architecture": {"output_modalities": ["image", "text"], "input_modalities": ["image"]}},
+    ])
+    asked = []
+    get = provider.get
+
+    async def counting_get(path, **kwargs):
+        asked.append(path)
+        return await get(path, **kwargs)
+
+    provider.get = counting_get
+    a = await image_request.model_info(provider, "a")
+    b = await image_request.model_info(provider, "b")
+    assert (a.listed, a.makes_text, a.takes_images) == (True, False, False)
+    assert (b.listed, b.makes_text, b.takes_images) == (True, True, True)
+    assert asked == ["models"]
