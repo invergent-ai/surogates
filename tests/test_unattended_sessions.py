@@ -23,7 +23,7 @@ from tests.test_steer_loop import _make_loop_harness, _make_session
 UNATTENDED = ["scheduled", "delegation", "worker", "task"]
 
 
-def _prompt_surface(channel: str) -> set[str]:
+def _prompt_surface(channel: str, config: dict | None = None) -> set[str]:
     tenant = TenantContext(
         org_id=uuid.uuid4(), user_id=uuid.uuid4(), org_config={},
         user_preferences={}, permissions=frozenset(), asset_root="/tmp",
@@ -31,18 +31,19 @@ def _prompt_surface(channel: str) -> set[str]:
     return _filter_effective_tools(
         tools={"ask_user_question", "web_search"},
         tenant=tenant,
-        session=SimpleNamespace(config={}, channel=channel),
+        session=SimpleNamespace(config=config or {}, channel=channel),
         use_api_for_harness_tools=False,
     )
 
 
-def _schema_surface(channel: str) -> set[str]:
+def _schema_surface(channel: str, config: dict | None = None) -> set[str]:
     registry = ToolRegistry()
     ToolRuntime(registry).register_builtins()
     harness = _make_loop_harness(session_store=None)
     harness._tools = registry
     session = _make_session()
     session.channel = channel
+    session.config = {**session.config, **(config or {})}
     offered = harness._tool_filter_for_session(session)
     return set(registry.tool_names) if offered is None else offered
 
@@ -63,3 +64,9 @@ def test_a_conversation_keeps_its_questions(channel):
 def test_an_unattended_session_is_told_nobody_is_there(channel):
     hint = PromptLibrary().platform_hint(channel)
     assert hint and "cannot ask questions" in hint
+
+
+def test_a_project_thread_on_the_worker_channel_still_asks_its_user():
+    thread = {"workstream_role": "thread", "workstream_id": str(uuid.uuid4())}
+    assert "ask_user_question" in _prompt_surface("worker", thread)
+    assert "ask_user_question" in _schema_surface("worker", thread)

@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from surogates.workstreams import is_project_thread
+
 #: Sessions with nobody behind them to answer a question.
 UNATTENDED_CHANNELS: frozenset[str] = frozenset({"scheduled", "delegation", "worker", "task"})
 
@@ -28,7 +30,10 @@ SCHEDULE_FIELDS: tuple[str, ...] = (*CONTEXT_FIELDS, "agent_type")
 
 
 def is_unattended(session: Any) -> bool:
-    return getattr(session, "channel", None) in UNATTENDED_CHANNELS
+    if getattr(session, "channel", None) not in UNATTENDED_CHANNELS:
+        return False
+    # A project thread is made on the worker channel, but the user chats in it.
+    return not is_project_thread(getattr(session, "config", None))
 
 
 def capture_schedule_context(session_config: dict | None, channel: str | None) -> dict[str, Any]:
