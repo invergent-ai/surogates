@@ -14,6 +14,7 @@ import type {
   AgentChatAskUserQuestionChoice,
   AgentChatInboxItem,
 } from "../../types";
+import { validateAskQuestions } from "../chat/tools/ask-questions";
 
 export interface InboxQuestion {
   prompt: string;
@@ -36,34 +37,14 @@ export function hasChoices(question: InboxQuestion): boolean {
   return (question.choices?.length ?? 0) > 0;
 }
 
+/** The item's questions, under the same all-or-nothing rule as the chat. */
 export function parseInboxQuestions(item: AgentChatInboxItem): InboxQuestion[] {
   const raw = (item.payload as { questions?: unknown }).questions;
-  if (!Array.isArray(raw)) return [];
-  return raw
-    .map((entry) => {
-      const question = entry as {
-        prompt?: unknown;
-        choices?: unknown;
-        allow_other?: unknown;
-      };
-      const choices = Array.isArray(question.choices)
-        ? (question.choices as Array<{ label?: unknown; description?: unknown }>)
-            .map((choice) => ({
-              label: typeof choice.label === "string" ? choice.label : "",
-              description:
-                typeof choice.description === "string"
-                  ? choice.description
-                  : undefined,
-            }))
-            .filter((choice) => choice.label)
-        : undefined;
-      return {
-        prompt: typeof question.prompt === "string" ? question.prompt : "",
-        choices,
-        allowOther: question.allow_other !== false,
-      };
-    })
-    .filter((question) => question.prompt);
+  return (validateAskQuestions(raw) ?? []).map((question) => ({
+    prompt: question.prompt,
+    choices: question.choices,
+    allowOther: question.allow_other !== false,
+  }));
 }
 
 /**
