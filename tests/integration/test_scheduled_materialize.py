@@ -748,6 +748,13 @@ async def test_a_run_open_past_its_time_limit_is_failed_and_one_within_it_is_not
         if e.type == EventType.SESSION_FAIL.value
     ]
     assert fails and fails[-1].data["reason"] == "run_time_limit"
+    by_name = {
+        row.name: row
+        for row in await scheduled_store.list_for_user(org_id=org_id, user_id=user_id, agent_id="agent-a")
+    }
+    assert by_name["default"].last_error.startswith("The last run was stopped after 2 hours")
+    assert by_name["default"].consecutive_failures == 1
+    assert by_name["long"].last_error is None and by_name["long"].consecutive_failures == 0
 
 
 async def test_a_schedule_that_ends_on_its_own_tells_its_chat_once(session_factory, redis_client):

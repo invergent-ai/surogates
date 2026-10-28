@@ -388,7 +388,14 @@ class PromptBuilder:
 
         if not parts:
             return ""
-        return "\n\n".join(parts)
+        guidance = "\n\n".join(parts)
+        if "ask_user_question" not in self._available_tools:
+            # A shared fragment's line about asking makes the model look for a
+            # tool it was not given (denied by policy, or nobody to answer).
+            guidance = "\n".join(
+                line for line in guidance.split("\n") if "`ask_user_question`" not in line
+            )
+        return guidance
 
     def _working_principles_section(self) -> str:
         """Always-loaded working principles fragment.

@@ -336,7 +336,7 @@ def _validate_data_url(data_url: str) -> str:
     return data_url
 
 
-async def _download_image(url: str) -> bytes:
+async def _download_image(url: str, *, max_bytes: int = _MAX_IMAGE_BYTES) -> bytes:
     current = url
     async with httpx.AsyncClient(timeout=30.0, follow_redirects=False) as client:
         for _ in range(_MAX_REDIRECTS + 1):
@@ -351,17 +351,17 @@ async def _download_image(url: str) -> bytes:
                     continue
                 response.raise_for_status()
                 length = response.headers.get("content-length")
-                if length and int(length) > _MAX_IMAGE_BYTES:
+                if length and int(length) > max_bytes:
                     raise ValueError(
-                        f"Image download is too large: {length} bytes exceeds {_MAX_IMAGE_BYTES}"
+                        f"Image download is too large: {length} bytes exceeds {max_bytes}"
                     )
                 chunks: list[bytes] = []
                 total = 0
                 async for chunk in response.aiter_bytes():
                     total += len(chunk)
-                    if total > _MAX_IMAGE_BYTES:
+                    if total > max_bytes:
                         raise ValueError(
-                            f"Image download is too large: exceeds {_MAX_IMAGE_BYTES} bytes"
+                            f"Image download is too large: exceeds {max_bytes} bytes"
                         )
                     chunks.append(chunk)
                 return b"".join(chunks)

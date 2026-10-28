@@ -124,7 +124,9 @@ async def _saved_login(
     if not profile_id:
         if store is None or agent_sa is None or org_id is None or not channel:
             return None, None, None
-        found = await store.used_in_channel(org_id, service_account_id=agent_sa, channel=channel)
+        found = await store.used_in_channel(
+            org_id, service_account_id=agent_sa, channel=config.get("login_channel") or channel,
+        )
         if found is None:
             return None, None, None
         profile_id, owners = str(found), [(None, agent_sa)]

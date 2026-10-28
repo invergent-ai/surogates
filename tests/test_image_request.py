@@ -281,3 +281,8 @@ async def test_delivery_says_how_the_image_reaches_anyone(tmp_path, channel, say
     result = await _run(provider, {}, tmp_path, channel=channel)
     assert says in result["delivery"]
     assert result["path"] in result["delivery"]
+
+
+async def test_an_image_link_to_an_internal_address_is_not_fetched():
+    with pytest.raises(image_request.ImageRequestError, match="unsafe"):
+        await image_request._image_bytes("https://127.0.0.1/generated.png")

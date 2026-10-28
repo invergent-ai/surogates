@@ -20,6 +20,7 @@ from surogates.scheduled.schedule import (
     DYNAMIC_LOOP_STALE_RUN_SECONDS,
     ParsedSchedule,
     clamp_dynamic_loop_delay,
+    duration_words,
     parse_dynamic_loop_schedule,
     schedule_from_row,
 )
@@ -634,6 +635,38 @@ class ScheduledSessionStore:
                         }
                 else:
                     row.next_run_at = cadence.next_after(now)
+            await db.commit()
+
+    async def mark_run_timed_out(self, run_id: UUID, *, limit_seconds: int) -> None:
+        """Count a run stopped at its time limit as a failure of its schedule:
+        said on ``last_error``, and after :data:`MAX_CONSECUTIVE_FAILURES` in
+        a row an active schedule ends ``failed``."""
+        now = _utcnow()
+        async with self._sf() as db:
+            row = (await db.execute(
+                select(ScheduledSessionRow)
+                .where(ScheduledSessionRow.last_session_id == run_id)
+                .with_for_update()
+            )).scalar_one_or_none()
+            if row is None:
+                return
+            row.last_error = (
+                f"The last run was stopped after {duration_words(limit_seconds)}, its time limit, "
+                "before it finished."
+            )
+            row.updated_at = now
+            # Each start resets the count, so the streak is read off the runs.
+            recent = (await db.execute(text(
+                "SELECT status FROM sessions WHERE agent_id = :agent AND channel = 'scheduled' "
+                "AND config->>'scheduled_session_id' = :sid ORDER BY created_at DESC LIMIT :n"
+            ), {"agent": row.agent_id, "sid": str(row.id), "n": MAX_CONSECUTIVE_FAILURES})).scalars().all()
+            streak = next((i for i, status in enumerate(recent) if status != "failed"), len(recent))
+            if row.status == "active":
+                row.consecutive_failures = max(streak, 1)
+                if row.consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                    row.status = "failed"
+                    row.ended_reason = "failed"
+                    row.next_run_at = None
             await db.commit()
 
     async def mark_run_skipped(self, schedule: ScheduledSession, *, reason: str) -> None:

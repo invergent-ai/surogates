@@ -288,10 +288,11 @@ async def recover_stalled_loops(
                 await redis.publish(f"{INTERRUPT_CHANNEL_PREFIX}:{run_id}", "schedule_cancelled")
 
     async def fail_overdue_runs() -> None:
-        for run_id in await session_store.fail_overdue_scheduled_runs(
+        for run_id, limit_seconds in await session_store.fail_overdue_scheduled_runs(
             default_seconds=DEFAULT_MAX_RUN_SECONDS, limit=limit,
         ):
             logger.warning("Failed scheduled run %s: past its time limit", run_id)
+            await scheduled_store.mark_run_timed_out(run_id, limit_seconds=limit_seconds)
 
     async def expire() -> None:
         for schedule in await scheduled_store.expire_active_schedules(limit=limit):

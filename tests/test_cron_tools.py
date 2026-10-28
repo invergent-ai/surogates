@@ -117,8 +117,11 @@ class FakeSessions:
     async def resolve_acting_principal(self, session_id):
         return self.principal
 
-    async def get_events(self, session_id, *, types=None, **_):
-        return [e for e in self.events if types is None or e.type in {t.value for t in types}]
+    async def get_events(self, session_id, *, types=None, after=None, **_):
+        return [
+            e for e in self.events
+            if (types is None or e.type in {t.value for t in types}) and (after is None or e.id > after)
+        ]
 
 
 USER = ActingPrincipal(user_id=uuid4(), service_account_id=None)
