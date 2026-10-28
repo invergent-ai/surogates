@@ -134,7 +134,7 @@ async def test_materialize_marks_dynamic_loop_session(
     user_id = await create_user(session_factory, org_id)
     scheduled_store = ScheduledSessionStore(session_factory)
     session_store = SessionStore(session_factory, redis=redis_client)
-    schedule = await scheduled_store.create_dynamic_loop(
+    schedule = await scheduled_store.create_loop(
         org_id=org_id,
         user_id=user_id,
         agent_id="agent-a",
@@ -469,7 +469,7 @@ async def test_recover_requeues_stalled_dynamic_loop_across_tenants(
     user_id = await create_user(session_factory, org_id)
     scheduled_store = ScheduledSessionStore(session_factory)
     session_store = SessionStore(session_factory, redis=redis_client)
-    schedule = await scheduled_store.create_dynamic_loop(
+    schedule = await scheduled_store.create_loop(
         org_id=org_id,
         user_id=user_id,
         agent_id="agent-a",

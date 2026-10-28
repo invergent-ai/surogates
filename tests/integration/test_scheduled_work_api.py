@@ -108,7 +108,7 @@ async def test_list_scheduled_work_returns_user_owned_agent_schedules(
         schedule=parse_schedule("5m"),
         created_from_session_id=origin.id,
     )
-    dynamic = await store.create_dynamic_loop(
+    dynamic = await store.create_loop(
         org_id=org_id,
         user_id=user_id,
         agent_id=_AGENT_ID,

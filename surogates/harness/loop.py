@@ -6459,11 +6459,11 @@ class AgentHarness(
                         if row.prompt == command.prompt and _aware(row.created_at) >= _aware(typed_on)
                     ), None)
                 context = capture_schedule_context(session.config, session.channel)
+                created = made or await store.create_loop(
+                    **scope, prompt=command.prompt, schedule=command.schedule,
+                    created_from_session_id=session.id, context=context,
+                )
                 if command.schedule is None:
-                    created = made or await store.create_dynamic_loop(
-                        **scope, prompt=command.prompt,
-                        created_from_session_id=session.id, context=context,
-                    )
                     message = (
                         f"Loop scheduled: `{created.id}`\n\n"
                         f"- Prompt: {command.prompt}\n"
@@ -6474,10 +6474,6 @@ class AgentHarness(
                         f"- Cancel: `/loop cancel {created.id}`"
                     )
                 else:
-                    created = made or await store.create_loop(
-                        **scope, prompt=command.prompt, schedule=command.schedule,
-                        created_from_session_id=session.id, context=context,
-                    )
                     message = (
                         f"Loop scheduled: `{created.id}`\n\n"
                         f"- Prompt: {command.prompt}\n"

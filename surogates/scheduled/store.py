@@ -119,16 +119,20 @@ class ScheduledSessionStore:
         org_id: UUID,
         agent_id: str,
         prompt: str,
-        schedule: ParsedSchedule,
         created_from_session_id: UUID | None,
+        schedule: ParsedSchedule | None = None,
         user_id: UUID | None = None,
         service_account_id: UUID | None = None,
         context: dict[str, Any] | None = None,
     ) -> ScheduledSession:
-        """A fixed-cadence ``/loop``.  It expires after
-        :data:`DEFAULT_LOOP_EXPIRY_DAYS`: a loop typed in passing should not
-        outlive the work it was for; a schedule meant to last is made with
-        ``cron_create`` or in Studio."""
+        """A ``/loop``: on *schedule*, or with none, one whose runs pick
+        their own next delay.  A loop typed in passing should not outlive
+        the work it was for: a fixed one expires after
+        :data:`DEFAULT_LOOP_EXPIRY_DAYS`, a dynamic one, bounded by nothing
+        but the model, after :data:`DYNAMIC_LOOP_EXPIRY_DAYS`.  A schedule
+        meant to last is made with ``cron_create`` or in Studio."""
+        schedule = schedule or parse_dynamic_loop_schedule()
+        days = DYNAMIC_LOOP_EXPIRY_DAYS if schedule.is_dynamic else DEFAULT_LOOP_EXPIRY_DAYS
         return await self.create(
             org_id=org_id,
             user_id=user_id,
@@ -139,38 +143,7 @@ class ScheduledSessionStore:
             schedule=schedule,
             source="loop",
             created_from_session_id=created_from_session_id,
-            expires_at=_utcnow() + timedelta(days=DEFAULT_LOOP_EXPIRY_DAYS),
-            context=context or {},
-        )
-
-    async def create_dynamic_loop(
-        self,
-        *,
-        org_id: UUID,
-        agent_id: str,
-        prompt: str,
-        created_from_session_id: UUID | None,
-        user_id: UUID | None = None,
-        service_account_id: UUID | None = None,
-        schedule: ParsedSchedule | None = None,
-        context: dict[str, Any] | None = None,
-    ) -> ScheduledSession:
-        """A ``/loop`` whose runs pick their own next delay.  It expires
-        after :data:`DYNAMIC_LOOP_EXPIRY_DAYS`: nothing but the model
-        bounds how often it runs."""
-        now = _utcnow()
-        return await self.create(
-            org_id=org_id,
-            user_id=user_id,
-            service_account_id=service_account_id,
-            agent_id=agent_id,
-            name=f"Loop: {prompt[:60]}",
-            prompt=prompt,
-            schedule=schedule or parse_dynamic_loop_schedule(),
-            source="loop",
-            created_from_session_id=created_from_session_id,
-            next_run_at=now,
-            expires_at=now + timedelta(days=DYNAMIC_LOOP_EXPIRY_DAYS),
+            expires_at=_utcnow() + timedelta(days=days),
             context=context or {},
         )
 
