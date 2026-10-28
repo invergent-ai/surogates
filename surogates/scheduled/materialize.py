@@ -69,7 +69,7 @@ async def materialize_scheduled_run(
         schedule.next_run_at.isoformat() if schedule.next_run_at else "now"
     )
     idempotency_key = f"scheduled:{schedule.id}:{fire_key}"
-    is_dynamic_loop = schedule.schedule.get("kind") == "dynamic_loop"
+    is_dynamic_loop = schedule.kind == "dynamic"
 
     previous = await _previous_run(session_store, schedule)
     if previous is not None and _still_going(previous, schedule):

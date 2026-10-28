@@ -12,6 +12,7 @@ import pytest
 from sqlalchemy import delete, select
 
 import surogates.harness.loop as loop_module
+import surogates.tools.builtin.cron as cron_module
 from surogates.db.agent_users import purge_user_account
 from surogates.db.models import ScheduledSession, Session, SessionCursor, Workstream
 from surogates.harness.prompt import PromptBuilder
@@ -458,8 +459,8 @@ async def test_a_master_does_a_simple_thing_itself_and_gives_out_the_rest(api, m
         "memory", "todo", "ask_user_question", "session_search", "skills_list", "skill_view",
         "start_thread", "propose_threads", "message_thread",
     } <= sent
-    # Its routines are the policy's to take away, not /loop's.
-    assert ROUTINE_TOOLS <= sent
+    # With /loop off its routines stay readable, and nothing makes or ends one.
+    assert ROUTINE_TOOLS & sent == (ROUTINE_TOOLS if loop else {"cron_list"})
     # Research, a site's study and every other piece of work are a thread's.
     assert not sent & {
         "web_search", "web_extract", "browser_navigate", "create_artifact", "vision_analyze",
@@ -550,23 +551,9 @@ async def turn_calling(
     monkeypatch.setattr(registry, "dispatch", ran)
     store = AsyncMock()
     store.emit_event = AsyncMock(side_effect=range(100, 300))
-    # The user has approved a routine in this turn: picked the first choice of the question asked.
-    asked = SimpleNamespace(id=1, type=EventType.TOOL_CALL.value, data={
-        "name": "ask_user_question", "tool_call_id": "call-q",
-        "arguments": {"questions": [{"prompt": "Schedule it?", "choices": [{"label": "Yes"}, {"label": "No"}]}]},
-    })
-    answered = SimpleNamespace(id=2, type=EventType.ASK_USER_QUESTION_RESPONSE.value, data={
-        "tool_call_id": "call-q", "responses": [{"question": "Schedule it?", "answer": "Yes", "is_other": False}],
-    })
-
-    def said(*_, types=None, **__):
-        types = types or ()
-        return (
-            [answered] if EventType.ASK_USER_QUESTION_RESPONSE in types
-            else [asked] if EventType.TOOL_CALL in types else []
-        )
-
-    store.get_events = AsyncMock(side_effect=said)
+    # The user has approved what the model schedules (how is test_cron_tools').
+    monkeypatch.setattr(cron_module, "_approved", AsyncMock(return_value=True))
+    store.get_events = AsyncMock(return_value=[])
     store.resolve_acting_principal = AsyncMock(
         return_value=ActingPrincipal(user_id=session.user_id, service_account_id=session.service_account_id),
     )

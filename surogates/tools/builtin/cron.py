@@ -580,7 +580,7 @@ def _schedule_payload(row: Any, *, full: bool = False) -> dict[str, Any]:
         payload["ended"] = row.ended_reason
     if full:
         payload.update(
-            kind=getattr(row, "kind", None) or ("dynamic" if row.schedule.get("kind") == "dynamic_loop" else "cron"),
+            kind=row.kind,
             cadence=getattr(row, "cadence", None),
             last_run_session_id=str(row.last_session_id) if row.last_session_id else None,
             paused_at=local_iso(getattr(row, "paused_at", None), timezone_name),

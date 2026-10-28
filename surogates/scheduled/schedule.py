@@ -399,7 +399,7 @@ def upcoming_runs(row, *, count: int = 3) -> list[datetime]:
 
 def schedule_from_row(row) -> ParsedSchedule:
     """The cadence of a ``scheduled_sessions`` row, from its ``kind`` and
-    ``cadence`` columns, or from ``schedule`` for a row made before them.
+    ``cadence`` columns.
 
     Rows are written by the control plane too, so any malformed one is a
     ValueError: its callers mark the schedule failed instead of crashing.
@@ -414,8 +414,10 @@ def _schedule_from_row(row) -> ParsedSchedule:
     tz = getattr(row, "timezone", None) or "UTC"
     kind = getattr(row, "kind", None)
     cadence = getattr(row, "cadence", None) or {}
-    legacy = getattr(row, "schedule", None) or {}
     if kind is None:
+        # Only a runtime older than ``kind`` still writes these, while a
+        # release rolls out; ``surogates migrate`` backfills the rest.
+        legacy = getattr(row, "schedule", None) or {}
         tz = str(legacy.get("timezone_name") or tz)
         if legacy.get("kind") == "dynamic_loop":
             return parse_dynamic_loop_schedule(timezone_name=tz)
@@ -432,7 +434,7 @@ def _schedule_from_row(row) -> ParsedSchedule:
     if kind == "once":
         return once_schedule(datetime.fromisoformat(cadence["at"]), timezone_name=tz)
     if kind == "cron":
-        return parse_schedule(str(cadence.get("cron") or legacy.get("cron")), timezone_name=tz)
+        return parse_schedule(str(cadence["cron"]), timezone_name=tz)
     if kind == "dynamic":
         return parse_dynamic_loop_schedule(timezone_name=tz)
     raise ValueError(f"Unknown schedule kind: {kind}")

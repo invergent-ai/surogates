@@ -730,7 +730,7 @@ class ScheduledSessionStore:
                 or row.agent_id != agent_id
                 or row.last_session_id != session_id
                 or row.status != "active"
-                or row.schedule.get("kind") != "dynamic_loop"
+                or row.kind != "dynamic"
             ):
                 return False
 
@@ -816,10 +816,7 @@ class ScheduledSessionStore:
                     ScheduledSessionRow.status == "active",
                     ScheduledSessionRow.next_run_at.is_(None),
                     ~(
-                        func.coalesce(
-                            ScheduledSessionRow.kind,
-                            ScheduledSessionRow.schedule["kind"].astext,
-                        ).in_(("dynamic", "dynamic_loop"))
+                        (func.coalesce(ScheduledSessionRow.kind, "") == "dynamic")
                         & ScheduledSessionRow.last_session_id.is_not(None)
                     ),
                 )
@@ -979,7 +976,7 @@ class ScheduledSessionStore:
                   {agent_filter}
                   AND s.next_run_at IS NULL
                   AND s.last_session_id IS NOT NULL
-                  AND s.schedule->>'kind' = 'dynamic_loop'
+                  AND s.kind = 'dynamic'
                   AND (s.expires_at IS NULL OR s.expires_at > now())
                   AND run_session.status IN ('completed', 'failed', 'idle', 'archived')
                 ORDER BY s.last_run_at ASC NULLS FIRST
@@ -1044,7 +1041,7 @@ class ScheduledSessionStore:
               {agent_filter}
               AND s.next_run_at IS NULL
               AND s.last_session_id IS NOT NULL
-              AND s.schedule->>'kind' = 'dynamic_loop'
+              AND s.kind = 'dynamic'
               AND (s.expires_at IS NULL OR s.expires_at > now())
               AND run_session.status = 'active'
               AND active_lease.session_id IS NULL
