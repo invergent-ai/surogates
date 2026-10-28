@@ -10,6 +10,7 @@ from fastapi import HTTPException, Request, status
 from surogates.channels.constants import BUY_PAGE_CHANNEL
 from surogates.channels.memory_boundary import is_case_session
 from surogates.devices.binding import binding_of, device_of
+from surogates.session.execution_context import is_scheduled_run
 from surogates.sandbox.pool import sandbox_session_key
 from surogates.session.files import DeviceAccess
 from surogates.session.models import Session
@@ -147,20 +148,13 @@ async def _resolve_multi_session(request: Request, agent_id: str) -> bool:
     return value
 
 
-def is_scheduled_run_session(session: Session) -> bool:
-    """Return true for scheduler-owned child sessions."""
-    return session.channel == "scheduled" or bool(
-        (session.config or {}).get("scheduled_session_id")
-    )
-
-
 def require_user_writable_session(session: Session, tenant: TenantContext) -> None:
     """Reject user-initiated mutations against scheduler-owned run records and buy-page conversations.
 
     The buy page meters every turn of its conversation; the buyer's own login
     reaching it here would run turns nothing charges.
     """
-    if is_scheduled_run_session(session):
+    if is_scheduled_run(session):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=SCHEDULED_RUN_READ_ONLY_DETAIL,

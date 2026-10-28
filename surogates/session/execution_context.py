@@ -14,8 +14,8 @@ from typing import Any
 
 from surogates.workstreams import is_project_thread
 
-#: Sessions with nobody behind them to answer a question.
-UNATTENDED_CHANNELS: frozenset[str] = frozenset({"scheduled", "delegation", "worker", "task"})
+#: The channels a session made to help another runs on.
+HELPER_CHANNELS: frozenset[str] = frozenset({"delegation", "worker", "task"})
 
 #: ``ops``: the Studio operator and project the work is for (MCP ``_meta``,
 #: owner-scoped reads).  ``operator``: the name the prompt gives the person.
@@ -29,11 +29,38 @@ CONTEXT_FIELDS: tuple[str, ...] = ("ops", "operator", "browser", "origin_channel
 SCHEDULE_FIELDS: tuple[str, ...] = (*CONTEXT_FIELDS, "agent_type")
 
 
-def is_unattended(session: Any) -> bool:
-    if getattr(session, "channel", None) not in UNATTENDED_CHANNELS:
-        return False
+def channel_kind(channel: str | None, config: dict | None) -> str:
+    """Who is behind a session: ``scheduled`` (a routine's run), ``helper``
+    (delegation, worker, task) or ``person``: someone who can answer."""
+    if channel == "scheduled" or (config or {}).get("scheduled_session_id"):
+        return "scheduled"
     # A project thread is made on the worker channel, but the user chats in it.
-    return not is_project_thread(getattr(session, "config", None))
+    if channel in HELPER_CHANNELS and not is_project_thread(config):
+        return "helper"
+    return "person"
+
+
+def session_kind(session: Any) -> str:
+    return channel_kind(getattr(session, "channel", None), getattr(session, "config", None))
+
+
+def is_unattended(session: Any) -> bool:
+    return session_kind(session) != "person"
+
+
+def is_scheduled_run(session: Any) -> bool:
+    return session_kind(session) == "scheduled"
+
+
+def platform_hint_channel(channel: str | None, config: dict | None) -> str | None:
+    """Whose platform hint a session gets: a helper the delegation one, a
+    project thread none (its worker channel's would say nobody is there)."""
+    kind = channel_kind(channel, config)
+    if kind == "helper":
+        return "delegation"
+    if kind == "person" and channel in HELPER_CHANNELS:
+        return None
+    return channel
 
 
 def capture_schedule_context(session_config: dict | None, channel: str | None) -> dict[str, Any]:

@@ -941,11 +941,12 @@ class Orchestrator:
         its turn's own failure does.
         """
         from surogates.harness.loop_artifact_completion import announce_failure
-        from surogates.harness.loop_messages import _is_scheduled_run, _should_notify_parent_on_completion
+        from surogates.harness.loop_messages import _should_notify_parent_on_completion
+        from surogates.session.execution_context import is_scheduled_run
         from surogates.harness.worker_notify import notify_parent_on_failure
 
         session_id = session.id
-        if _is_scheduled_run(session):
+        if is_scheduled_run(session):
             try:
                 await announce_failure(self.session_store, session, error=error)
             except Exception:

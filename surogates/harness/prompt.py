@@ -29,7 +29,7 @@ from surogates.harness.prompt_library import PromptLibrary, default_library
 from surogates.runtime.context import SlashCommandConfig
 from surogates.tools.loader import AGENT_SOURCE_PLATFORM
 from surogates.tools.skill_visibility import fallback_hidden
-from surogates.session.execution_context import UNATTENDED_CHANNELS, is_unattended
+from surogates.session.execution_context import platform_hint_channel
 from surogates.workstreams import is_project_master, is_project_thread
 
 if TYPE_CHECKING:
@@ -909,8 +909,8 @@ class PromptBuilder:
             parts.append("\n" + self._prompts.get("identity/workspace_rules"))
 
         # Platform hint based on session channel.
-        channel = self._get_channel()
-        if channel and (channel not in UNATTENDED_CHANNELS or is_unattended(self._session)):
+        channel = platform_hint_channel(self._get_channel(), getattr(self._session, "config", None))
+        if channel:
             hint = self._prompts.platform_hint(channel)
             if hint:
                 parts.append(f"\n## Platform\n{hint}")

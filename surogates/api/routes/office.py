@@ -25,7 +25,8 @@ from surogates.api.routes.workspace import (
     _validate_path,
     workspace_files,
 )
-from surogates.api.session_guards import is_scheduled_run_session, require_device_access
+from surogates.api.session_guards import require_device_access
+from surogates.session.execution_context import is_scheduled_run
 from surogates.channels.inbound import build_principal_stamp
 from surogates.db.models import User
 from surogates.devices.workspace import MAX_READ_BYTES, DeviceWorkspaceIO
@@ -99,7 +100,7 @@ async def get_workspace_editor(
             )
     location = location_of(target, path)
     document = await _open_document(request, location=location, path=path, session_id=session.id, user=(user_id, user_name))
-    edit = kind.editable and not view and not is_scheduled_run_session(session)
+    edit = kind.editable and not view and not is_scheduled_run(session)
     config = build_editor_config(
         settings=office, row_id=document.id, doc_key=document.doc_key, path=path, kind=kind,
         user_id=user_id, user_name=user_name, theme=theme, access="edit" if edit else "read",
