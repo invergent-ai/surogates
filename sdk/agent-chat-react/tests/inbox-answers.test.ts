@@ -41,17 +41,11 @@ describe("parseInboxQuestions", () => {
     expect(question?.allowOther).toBe(false);
   });
 
-  it("drops entries with no prompt and choices with no label", () => {
-    const questions = parseInboxQuestions(
-      item([
-        { prompt: "" },
-        { prompt: "Pick", choices: [{ label: "a" }, { description: "x" }] },
-      ]),
-    );
-    expect(questions).toHaveLength(1);
-    expect(questions[0]?.choices).toEqual([
-      { label: "a", description: undefined },
-    ]);
+  it("returns nothing when any question is malformed, as the server refuses the call", () => {
+    expect(parseInboxQuestions(item([{ prompt: "" }, { prompt: "Pick" }]))).toEqual([]);
+    expect(
+      parseInboxQuestions(item([{ prompt: "Pick", choices: [{ label: "a" }, { description: "x" }] }])),
+    ).toEqual([]);
   });
 
   it("returns nothing when the payload carries no question array", () => {

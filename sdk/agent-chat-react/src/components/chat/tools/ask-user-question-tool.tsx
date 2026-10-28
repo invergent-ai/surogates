@@ -30,11 +30,10 @@ import { Input } from "@invergent/ui-sdk/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@invergent/ui-sdk/tabs";
 import { MessageResponse } from "../../ai-elements/message";
 import { useAgentChatAdapterContext } from "../../../adapter-context";
-import { parseArgs } from "./shared";
+import { askQuestionsOf, askRejected } from "./ask-questions";
 import type { ToolCallInfo } from "../../../types";
 import type {
   AskUserQuestionAnswer,
-  AskUserQuestionArgs,
   AskUserQuestionChoice,
   AskUserQuestionQuestion,
 } from "../../../types";
@@ -75,30 +74,6 @@ function buildAnswer(q: AskUserQuestionQuestion, sel: Selection): AskUserQuestio
 }
 
 // ── Shape helpers (shared with chat-thread) ──────────────────────────
-
-/**
- * The questions an ask_user_question call is presenting, if parseable.
- *
- * A question without a text ``prompt`` is dropped: the tool rejects such
- * a call and the agent retries, and every view below reads ``prompt``.
- */
-export function askQuestionsOf(tc: ToolCallInfo): AskUserQuestionQuestion[] {
-  const questions = parseArgs<AskUserQuestionArgs>(tc.args)?.questions;
-  return Array.isArray(questions)
-    ? questions.filter((q) => typeof q?.prompt === "string")
-    : [];
-}
-
-/** Whether the tool refused this call (its result is an ``error``). */
-export function askRejected(tc: ToolCallInfo): boolean {
-  if (!tc.result) return false;
-  try {
-    const parsed: unknown = JSON.parse(tc.result);
-    return typeof parsed === "object" && parsed !== null && "error" in parsed;
-  } catch {
-    return false;
-  }
-}
 
 /**
  * A one-question ask is conversational: the agent is talking, not
@@ -173,16 +148,16 @@ export function AskUserQuestionToolBlock({
   viewMode?: "simple" | "expert";
 }) {
   const questions = useMemo(() => askQuestionsOf(tc), [tc.args]);
+  const rejected = useMemo(() => askRejected(tc), [tc.status, tc.result]);
 
-  // The agent already asked again with a call the tool accepted; this
-  // one can't be answered, so it shows nothing.
-  if (askRejected(tc)) return null;
-
-  if (questions.length === 0) {
+  // A call the tool refuses asks nothing: the agent asks again with a
+  // call it accepts.  Shown as a note once refused, not before.
+  if (rejected || questions.length === 0) {
+    if (tc.status === "running") return null;
     return (
-      <div className="rounded-md border border-destructive/50 bg-destructive/5 px-3 py-2 text-xs text-destructive">
-        ask_user_question: no questions provided
-      </div>
+      <p className="text-xs italic text-muted-foreground/70">
+        The agent's question could not be shown.
+      </p>
     );
   }
 

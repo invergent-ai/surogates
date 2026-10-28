@@ -1,9 +1,10 @@
 // Copyright (c) 2026, Invergent SA, developed by Flavius Burca
 // SPDX-License-Identifier: AGPL-3.0-only
 //
-// A malformed ask_user_question call (a question without a text
-// ``prompt``) or one the tool rejected must not break the thread: the
-// agent retries with a valid call, and the old one is not answerable.
+// A malformed ask_user_question call (one the server's
+// ``_validate_questions`` would refuse) or one the tool rejected asks
+// nothing: no card, no composer lock, no listening orb.  The agent
+// retries with a valid call, and the old one is not answerable.
 
 import { act, type ReactElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -11,6 +12,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { AgentChatAdapterProvider, NO_BROWSER_ADAPTER } from "../src/adapter-context";
 import { ChatThread } from "../src/components/chat/chat-thread";
+import { messageOrbState } from "../src/runtime/orb-state";
 import { TooltipProvider } from "@invergent/ui-sdk/tooltip";
 import type { AgentChatAdapter, ChatMessage } from "../src/types";
 
@@ -110,6 +112,23 @@ function render(message: ChatMessage, viewMode: "simple" | "expert" = "simple") 
   );
 }
 
+function composer(dom: HTMLDivElement): HTMLTextAreaElement {
+  const textarea = dom.querySelector<HTMLTextAreaElement>("textarea");
+  if (!textarea) throw new Error("composer textarea not rendered");
+  return textarea;
+}
+
+/** The composer reads as it does with no question pending. */
+function expectNoAskComposer(dom: HTMLDivElement) {
+  const textarea = composer(dom);
+  expect(textarea.disabled).toBe(false);
+  expect(textarea.placeholder).toMatch(/^Send a message/);
+}
+
+function buttonLabels(dom: HTMLDivElement): (string | null)[] {
+  return [...dom.querySelectorAll("button")].map((b) => b.textContent);
+}
+
 describe("malformed or rejected ask_user_question calls", () => {
   const rejected = JSON.stringify({ error: "questions[0].prompt is required." });
   const malformed = [{
@@ -121,7 +140,72 @@ describe("malformed or rejected ask_user_question calls", () => {
     expect(() => render(askTurn({ questions: malformed }))).not.toThrow();
   });
 
-  it("does not crash and offers no buttons for a call the tool rejected", () => {
+  it("shows nothing and leaves the composer alone for a malformed call that runs", () => {
+    for (const viewMode of ["simple", "expert"] as const) {
+      const dom = render(askTurn({ questions: malformed }), viewMode);
+      expect(dom.textContent).not.toContain("no questions provided");
+      expect(dom.textContent).not.toContain("Yes, deploy it");
+      expectNoAskComposer(dom);
+      act(() => root?.unmount());
+      root = null;
+      container?.remove();
+    }
+  });
+
+  it("offers nothing to answer for a batch with one malformed question", () => {
+    const dom = render(askTurn({ questions: [{ prompt: "Which GPU?" }, { question: "broken" }] }));
+    expect(dom.textContent).not.toContain("Which GPU?");
+    const labels = buttonLabels(dom);
+    expect(labels).not.toContain("Submit");
+    expect(labels).not.toContain("Next question →");
+    expectNoAskComposer(dom);
+  });
+
+  it("treats a whitespace prompt as no question", () => {
+    const dom = render(askTurn({
+      questions: [{ prompt: "   ", choices: [{ label: "Yes" }, { label: "No" }] }],
+    }));
+    expect(buttonLabels(dom)).not.toContain("Yes");
+    expectNoAskComposer(dom);
+  });
+
+  it("treats choices given as a string as no question", () => {
+    const dom = render(askTurn({ questions: [{ prompt: "Deploy it?", choices: "Yes, No" }] }));
+    expect(dom.textContent).not.toContain("Deploy it?");
+    expectNoAskComposer(dom);
+  });
+
+  it("treats a null choice as no question", () => {
+    let dom!: HTMLDivElement;
+    expect(() => {
+      dom = render(askTurn({ questions: [{ prompt: "Deploy it?", choices: [null] }] }));
+    }).not.toThrow();
+    expect(dom.textContent).not.toContain("Deploy it?");
+    expectNoAskComposer(dom);
+  });
+
+  it("does not show a malformed running call as listening", () => {
+    const message = askTurn({ questions: [{ prompt: "Deploy it?", choices: [null] }] });
+    expect(messageOrbState(message)).toBe("working");
+  });
+
+  it("says a rejected call could not be shown, with nothing to answer", () => {
+    const dom = render(
+      askTurn({
+        questions: [{ prompt: "Deploy it?", choices: [{ label: "Yes" }, { label: "No" }] }],
+        status: "complete",
+        result: rejected,
+      }),
+      "expert",
+    );
+    expect(dom.textContent).toContain("The agent's question could not be shown.");
+    expect(dom.textContent).not.toContain("Deploy it?");
+    const labels = buttonLabels(dom);
+    expect(labels).not.toContain("Yes");
+    expect(labels).not.toContain("No");
+  });
+
+  it("offers no buttons for a malformed call the tool rejected", () => {
     let dom!: HTMLDivElement;
     expect(() => {
       dom = render(askTurn({ questions: malformed, status: "complete", result: rejected }));
@@ -129,28 +213,21 @@ describe("malformed or rejected ask_user_question calls", () => {
     expect(dom.textContent).not.toContain("Yes, deploy it");
   });
 
-  it("shows nothing to answer for a well-formed call the tool rejected", () => {
-    const dom = render(askTurn({
-      questions: [{ prompt: "Deploy it?", choices: [{ label: "Yes" }, { label: "No" }] }],
-      status: "complete",
-      result: rejected,
-    }));
-    const labels = [...dom.querySelectorAll("button")].map((b) => b.textContent);
-    expect(labels).not.toContain("Yes");
-    expect(labels).not.toContain("No");
-    expect(dom.textContent).not.toContain("Deploy it?");
-  });
-
-  it("keeps the valid questions of a batch with one malformed question", () => {
-    let dom!: HTMLDivElement;
-    expect(() => {
-      dom = render(askTurn({ questions: [{ prompt: "Which GPU?" }, { question: "broken" }] }));
-    }).not.toThrow();
-    expect(dom.textContent).toContain("Which GPU?");
-  });
-
-  it("still shows a normal question", () => {
+  it("still shows a normal question and opens the composer for it", () => {
     const dom = render(askTurn({ questions: [{ prompt: "How's school going?" }] }));
     expect(dom.textContent).toContain("How's school going?");
+    expect(composer(dom).placeholder).toContain("Type your answer…");
+    expect(messageOrbState(askTurn({ questions: [{ prompt: "How's school going?" }] })))
+      .toBe("listening");
+  });
+
+  it("still shows a paused question as unanswered", () => {
+    const dom = render(askTurn({
+      questions: [{ prompt: "How's school going?" }],
+      status: "complete",
+      result: "[interrupted]",
+    }));
+    expect(dom.textContent).toContain("How's school going?");
+    expect(dom.textContent).toContain("No answer recorded.");
   });
 });

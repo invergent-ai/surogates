@@ -14,6 +14,8 @@ import type {
   AgentChatToolCallInfo,
 } from "../src/types";
 
+const VALID_ASK = JSON.stringify({ questions: [{ prompt: "Which one?" }] });
+
 function toolCall(
   overrides: Partial<AgentChatToolCallInfo> = {},
 ): AgentChatToolCallInfo {
@@ -115,7 +117,7 @@ describe("messageOrbState", () => {
   it("prefers a pending ask_user_question over other running tools", () => {
     const msg = assistant({
       toolCalls: [
-        toolCall({ id: "a", toolName: "ask_user_question" }),
+        toolCall({ id: "a", toolName: "ask_user_question", args: VALID_ASK }),
         toolCall({ id: "b", toolName: "web_search" }),
       ],
     });
@@ -175,7 +177,7 @@ describe("messageOrbState", () => {
 
   it("keeps listening even when a toolFilter excludes ask_user_question", () => {
     const msg = assistant({
-      toolCalls: [toolCall({ toolName: "ask_user_question" })],
+      toolCalls: [toolCall({ toolName: "ask_user_question", args: VALID_ASK })],
     });
     expect(messageOrbState(msg, { toolFilter: () => false })).toBe("listening");
   });

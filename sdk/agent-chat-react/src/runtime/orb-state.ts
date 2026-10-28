@@ -8,6 +8,7 @@
 // back other render layers (e.g. the Preact website widget).
 
 import type { OrbState } from "thinking-orbs";
+import { isLiveAsk } from "../components/chat/tools/ask-questions";
 import type { AgentChatMessage, AgentChatToolCallInfo } from "../types";
 
 export type { OrbState };
@@ -113,6 +114,9 @@ function lastRunningToolCall(
   const calls = message.toolCalls ?? [];
   for (let i = calls.length - 1; i >= 0; i--) {
     const tc = calls[i];
+    // A pending ask already returned "listening"; one still here is
+    // malformed and about to be refused, so it is not listening.
+    if (tc?.toolName === "ask_user_question") continue;
     if (tc && tc.status === "running" && (!toolFilter || toolFilter(tc))) {
       return tc;
     }
@@ -132,13 +136,7 @@ export function messageOrbState(
   message: AgentChatMessage,
   options: OrbDerivationOptions = {},
 ): OrbState {
-  if (
-    message.toolCalls?.some(
-      (tc) => tc.toolName === "ask_user_question" && tc.status === "running",
-    )
-  ) {
-    return "listening";
-  }
+  if (message.toolCalls?.some(isLiveAsk)) return "listening";
   const running = lastRunningToolCall(message, options.toolFilter);
   if (running) return toolOrbState(running.toolName);
   if (message.toolCalls?.some((tc) => tc.status === "running")) {

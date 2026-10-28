@@ -46,11 +46,11 @@ import { WebSearchGroupBlock } from "./tools/web-search-tool";
 import { TodoToolBlock } from "./tools/todo-tool";
 import {
   AskUserQuestionToolBlock,
-  askQuestionsOf,
   conversationalAskAcceptsFreeText,
   hasChoices,
   isConversationalAsk,
 } from "./tools/ask-user-question-tool";
+import { askQuestionsOf, isAsk, isLiveAsk } from "./tools/ask-questions";
 import { parseTerminalResult } from "./tools/terminal-tool";
 import {
   statusColorClass,
@@ -267,10 +267,11 @@ const TRANSCRIPT_WIDTH = "[--container-4xl:64rem]";
  * design the user must approve) rather than the throwaway preamble
  * other tool calls emit.  Such turns must render their body in full —
  * collapsing it to a one-line narration drops the very content the user
- * is being asked to act on.
+ * is being asked to act on.  A call the tool refuses (or would) asks
+ * nothing, so its body is an ordinary preamble.
  */
 function hasUserFacingAskContent(msg: ChatMessageType): boolean {
-  return !!msg.toolCalls?.some((tc) => tc.toolName === "ask_user_question");
+  return !!msg.toolCalls?.some(isAsk);
 }
 
 /**
@@ -286,18 +287,15 @@ function hasUserFacingAskContent(msg: ChatMessageType): boolean {
  * ``ask_user_question`` lands its artifact marker as the literal tail,
  * so a tail-only check would miss the still-pending ask. The first
  * assistant turn we reach decides it; a ``user`` message after the ask
- * means the user moved on, so it's no longer awaiting.
+ * means the user moved on, so it's no longer awaiting.  A malformed
+ * call is not awaiting anything: the tool is about to refuse it.
  */
 function pendingAskCall(messages: ChatMessageType[]): ToolCallInfo | null {
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i];
     if (m.role === "user") return null;
     if (m.role !== "assistant") continue; // skip trailing system markers
-    return (
-      m.toolCalls?.find(
-        (tc) => tc.toolName === "ask_user_question" && tc.status === "running",
-      ) ?? null
-    );
+    return m.toolCalls?.find(isLiveAsk) ?? null;
   }
   return null;
 }
@@ -320,11 +318,8 @@ function askComposerPolicy(
   pending: ToolCallInfo | null,
 ): { locked: boolean; reason?: string; placeholder?: string } | null {
   if (!pending) return null;
+  // ``pending`` is a live ask, so it has at least one valid question.
   const questions = askQuestionsOf(pending);
-  // Zero questions means the args have not finished streaming; it is
-  // indistinguishable from a batch until they do, and locking is the
-  // safe reading either way — a stray message answering an unseen
-  // batch is worse than a composer that unlocks a moment later.
   if (!isConversationalAsk(questions)) {
     return { locked: true, reason: "Answer the questions above to continue." };
   }
@@ -1158,7 +1153,7 @@ function hasInlineRunningIndicator(
     if (viewMode === "simple") {
       // The question widget owns ask iterations. Text-only tails with
       // content render as the final answer instead of an iteration row.
-      if (message.toolCalls?.some((tc) => tc.toolName === "ask_user_question")) {
+      if (message.toolCalls?.some(isAsk)) {
         return false;
       }
       return isIterationLive(message)
@@ -1325,7 +1320,9 @@ function iterationKind(message: ChatMessageType, isActive: boolean): IterationKi
   // label alone gives the user nothing to act on and the session stalls —
   // and the question again once answered, so the exchange stays in the
   // thread instead of collapsing to a generic tool row that drops it.
-  if ((message.toolCalls ?? []).some((tc) => tc.toolName === "ask_user_question")) {
+  // A call the tool refuses (or would) is not a question, so it does
+  // not take the iteration over.
+  if ((message.toolCalls ?? []).some(isAsk)) {
     return "ask";
   }
   // "Live" means a tool is actively running, OR a text-only iteration is
@@ -1479,9 +1476,7 @@ export function IterationGroup({
   isActive = true,
 }: IterationGroupProps) {
   const kind = iterationKind(message, isActive);
-  const askCall = (message.toolCalls ?? []).find(
-    (tc) => tc.toolName === "ask_user_question",
-  );
+  const askCall = (message.toolCalls ?? []).find(isAsk);
   if (kind === "ask" && askCall) {
     return (
       <div className="px-1 py-0.5">
