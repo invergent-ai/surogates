@@ -83,6 +83,19 @@ Two cases do not get a path of their own. A managed-channel thread
 child works in its root ancestor's path rather than an empty one of its
 own.
 
+### A case's boundary
+
+The work of a Keel case sits in the `case:<case id>` boundary, at `{storage.key_prefix}boundaries/case:<case id>/`:
+
+```
+boundaries/case:<case id>/
+  workspace/         the case's files, mounted in a step's sandbox
+  org.json           the organisation the case is under
+  versions/<sha256>  a file as it was when its digest was handed to Keel
+```
+
+Only `workspace/` is mounted or listed. `org.json` and `versions/` are for keel-link and the worker alone. A version is kept once per case, and its retention is the case engine's, which asks keel-link to remove it.
+
 ### Lifecycle
 
 1. **Session created** -- API server ensures the workspace bucket exists.

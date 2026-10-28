@@ -514,6 +514,52 @@ async def test_an_empty_file_is_a_case_file(fake_keel, store):
     }
 
 
+OFFER = b"%PDF-1.7 offer"
+
+
+def _kept_for(tmp_path, data: bytes):
+    """Where the case's boundary keeps *data* by its hash: the file, and what it holds, or ``None``."""
+    kept = tmp_path / BUCKET / f"boundaries/case:{CASE}/versions/{hashlib.sha256(data).hexdigest()}"
+    return kept.read_bytes() if kept.exists() else None
+
+
+async def test_an_output_file_is_kept_before_keel_hears_of_it(fake_keel, tmp_path):
+    store = _store_for(tmp_path, files={"offer": "one"})
+    await store.put("out/offer.pdf", OFFER)
+    kept_when_keel_heard: list[bytes | None] = []
+    fake_keel.during = lambda: kept_when_keel_heard.append(_kept_for(tmp_path, OFFER))
+
+    result = await _call("complete_step", {**COMPLETION, "output": {**COMPLETION["output"], "offer": "out/offer.pdf"}}, store)
+
+    assert result.startswith("Step ended:")
+    assert kept_when_keel_heard == [OFFER]
+
+
+class _RefusesVersions(LocalBackend):
+    """A store that takes the workspace's files and refuses a version of one."""
+
+    async def write(self, bucket: str, key: str, data: bytes) -> None:
+        if "/versions/" in key:
+            raise OSError("refused secret-key")
+        await super().write(bucket, key, data)
+
+
+async def test_an_output_file_that_cannot_be_kept_never_reaches_keel(fake_keel, tmp_path, caplog):
+    store = _store_for(tmp_path, files={"offer": "one"})
+    await store.put("out/offer.pdf", OFFER)
+    store.storage = _RefusesVersions(str(tmp_path))
+
+    with caplog.at_level(logging.INFO):
+        result = await _call(
+            "complete_step", {**COMPLETION, "output": {**COMPLETION["output"], "offer": "out/offer.pdf"}}, store,
+        )
+
+    assert json.loads(result)["error"] == "offer: the file could not be kept for Keel just now; call again."
+    assert fake_keel.requests == []
+    assert "secret-key" not in caplog.text
+    assert "OSError" in caplog.text
+
+
 async def test_a_report_larger_than_keel_takes_is_never_sent(fake_keel, store):
     long_output = {**COMPLETION, "output": {**COMPLETION["output"], "notes": "x" * 300_000}}
 

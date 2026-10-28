@@ -363,6 +363,8 @@ The listing names only files these routes can read by the path it gives.
 
 A write takes up to `SUROGATES_KEEL_MAX_FILE_BYTES`, and makes the bucket when it is not there yet. It is refused while the file is open in the document editor: the editor's next save would land over a file it never saw. A read is copied to a scratch file first, so its digest is sent before its bytes. A read of a file over `SUROGATES_KEEL_MAX_FILE_BYTES` is `413 too-large`, copied no further. None of these routes logs a path or a file's bytes.
 
+Every digest keel-link or a step session hands Keel (a write's answer, a read's `X-Content-SHA256` header, an output's file value) names bytes the runtime keeps. They are written under the case's `versions/<sha256>`, beside the workspace in the case's boundary, before the digest leaves; once per case, however many paths hold the bytes. A version is never mounted in a sandbox and never listed as a case file. A write or a read whose version cannot be kept is `503 unavailable`, a write leaves no file, and a read sends no digest. An output file whose version cannot be kept fails the `complete_step` or `complete_item` call with an error the model reads, and nothing is sent to Keel; the model calls again.
+
 ## A case's document in the editor
 
 `POST /v1/keel/cases/{case_id}/editor` gives Keel the editor config of one person for one document of the case's files, to open in the document server at `document_server_url`. The body is `{"org_id", "path", "user_id", "access", "theme", "mentionable"}`: `access` is `edit`, `comment` or `view`, `theme` is `light` (the default) or `dark`, and `mentionable` is optional. The path is checked as the file routes check it.

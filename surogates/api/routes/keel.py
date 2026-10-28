@@ -69,6 +69,7 @@ from surogates.keel.case_files import (
     write_case_file,
 )
 from surogates.keel.files import file_value
+from surogates.keel.versions import VersionNotKept, case_versions
 from surogates.keel.run_facts import bundle_version_in
 from surogates.keel.steps import (
     ANSWER_MARKER,
@@ -1091,19 +1092,24 @@ def _scratch_file() -> Path:
     return Path(name)
 
 
-def _opened_digest(path: Path) -> tuple[BinaryIO, str]:
-    """*path* opened, and removed, so nothing is left behind however its reader ends; and its digest."""
+def _file_digest(path: Path) -> str:
+    """The SHA-256 of the file at *path*, read a piece at a time."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as source:
+        while chunk := source.read(_CHUNK):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _opened_and_removed(path: Path) -> BinaryIO:
+    """*path* opened, and removed, so nothing is left behind however its reader ends."""
     source = open(path, "rb")
     try:
         path.unlink()
-        digest = hashlib.sha256()
-        while chunk := source.read(_CHUNK):
-            digest.update(chunk)
-        source.seek(0)
     except BaseException:
         source.close()
         raise
-    return source, digest.hexdigest()
+    return source
 
 
 async def _streamed(source: BinaryIO) -> AsyncIterator[bytes]:
@@ -1121,6 +1127,8 @@ async def read_file_of_case(case_id: str, request: Request) -> StreamingResponse
     The file is copied to a scratch file first, a piece at a time: its digest
     is known before its first byte is sent, and none of it is held whole.
     One over the size Keel may write is 413 ``too-large``, copied no further.
+    The bytes are kept under that digest before it is sent: with no version
+    kept the answer is 503, and no digest has left.
     """
     require_link(request)
     case = _case_id(case_id)
@@ -1130,11 +1138,15 @@ async def read_file_of_case(case_id: str, request: Request) -> StreamingResponse
     target = await asyncio.to_thread(_scratch_file)
     try:
         size = await download_case_file(state.storage, state.settings, case, relative, target, limit=limit)
-        source, digest = await asyncio.to_thread(_opened_digest, target)
+        digest = await asyncio.to_thread(_file_digest, target)
+        await case_versions(state.settings, case).keep_file(state.storage, digest, target)
+        source = await asyncio.to_thread(_opened_and_removed, target)
     except FileNotFoundError:
         raise _unknown_file() from None
     except TooLarge:
         raise _too_large(limit) from None
+    except VersionNotKept as exc:
+        raise _storage_failed(exc.__cause__ or exc, case) from None
     except (ClientError, BotoCoreError) as exc:
         raise _storage_failed(exc, case) from None
     finally:
@@ -1170,8 +1182,19 @@ async def write_file_of_case(case_id: str, request: Request) -> JSONResponse:
     require_link(request)
     case = _case_id(case_id)
     relative = _case_path(request, case)
+    data = await _body_within(request, request.app.state.settings.keel.max_file_bytes)
+    return await write_case_file_answer(request, case, relative, data)
+
+
+async def write_case_file_answer(request: Request, case: UUID, relative: str, data: bytes) -> JSONResponse:
+    """Write *data* at *relative* in *case*'s workspace, and answer with the file's Keel value and size.
+
+    A file open in the editor is refused, 409 ``file-open``.  The bytes are
+    kept under their digest before the file is written, so the digest in the
+    answer names bytes the runtime holds: with no version kept, or a store
+    that would not answer, the answer is 503 and the file is not written.
+    """
     state = request.app.state
-    data = await _body_within(request, state.settings.keel.max_file_bytes)
     location = case_workspace(state.storage, state.settings, case).location(relative)
     try:
         open_now = await open_at(state.session_factory, location)
@@ -1183,11 +1206,17 @@ async def write_file_of_case(case_id: str, request: Request) -> JSONResponse:
         ) from None
     if open_now is not None:
         raise refused(status.HTTP_409_CONFLICT, "file-open", "The file is open in the editor.")
+    value = await asyncio.to_thread(file_value, case, relative, data)
+    versions = case_versions(state.settings, case)
     try:
+        # Keel may write a case's files before its first step session makes the bucket.
+        await state.storage.create_bucket(versions.bucket)
+        await versions.keep(state.storage, value["sha256"], data)
         await write_case_file(state.storage, state.settings, case, relative, data)
+    except VersionNotKept as exc:
+        raise _storage_failed(exc.__cause__ or exc, case) from None
     except (ClientError, BotoCoreError) as exc:
         raise _storage_failed(exc, case) from None
-    value = await asyncio.to_thread(file_value, case, relative, data)
     return JSONResponse({**value, "size": len(data)})
 
 
