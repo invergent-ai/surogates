@@ -7,10 +7,13 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
-from livekit.api import ServerError, SipCallError
 
-from surogates.voice import outbound as vo
-from surogates.voice.outbound import Outbound, acknowledges, call_failure, deliver_voice
+pytest.importorskip("livekit.agents", reason="the voice extra is not installed")
+
+from livekit.api import ServerError, SipCallError  # noqa: E402
+
+from surogates.voice import outbound as vo  # noqa: E402
+from surogates.voice.outbound import Outbound, acknowledges, call_failure, deliver_voice  # noqa: E402
 
 
 class Redis:

@@ -1,9 +1,12 @@
 """The call's background sound: a faint room, rare distant events, and sounds caused by what the agent does."""
-import numpy as np
 import pytest
 
-from surogates.voice.soundscape import Pack, SoundSettings, Soundscape, render_offline
-from surogates.voice.text import asks_for_details
+pytest.importorskip("livekit.agents", reason="the voice extra is not installed")
+
+import numpy as np  # noqa: E402
+
+from surogates.voice.soundscape import Pack, SoundSettings, Soundscape, render_offline  # noqa: E402
+from surogates.voice.text import asks_for_details  # noqa: E402
 
 RATE = 8000
 FRAME = RATE // 50  # 20 ms
