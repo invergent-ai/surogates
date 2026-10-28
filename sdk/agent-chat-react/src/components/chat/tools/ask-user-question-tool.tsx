@@ -76,9 +76,28 @@ function buildAnswer(q: AskUserQuestionQuestion, sel: Selection): AskUserQuestio
 
 // ── Shape helpers (shared with chat-thread) ──────────────────────────
 
-/** The questions an ask_user_question call is presenting, if parseable. */
+/**
+ * The questions an ask_user_question call is presenting, if parseable.
+ *
+ * A question without a text ``prompt`` is dropped: the tool rejects such
+ * a call and the agent retries, and every view below reads ``prompt``.
+ */
 export function askQuestionsOf(tc: ToolCallInfo): AskUserQuestionQuestion[] {
-  return parseArgs<AskUserQuestionArgs>(tc.args)?.questions ?? [];
+  const questions = parseArgs<AskUserQuestionArgs>(tc.args)?.questions;
+  return Array.isArray(questions)
+    ? questions.filter((q) => typeof q?.prompt === "string")
+    : [];
+}
+
+/** Whether the tool refused this call (its result is an ``error``). */
+export function askRejected(tc: ToolCallInfo): boolean {
+  if (!tc.result) return false;
+  try {
+    const parsed: unknown = JSON.parse(tc.result);
+    return typeof parsed === "object" && parsed !== null && "error" in parsed;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -154,6 +173,10 @@ export function AskUserQuestionToolBlock({
   viewMode?: "simple" | "expert";
 }) {
   const questions = useMemo(() => askQuestionsOf(tc), [tc.args]);
+
+  // The agent already asked again with a call the tool accepted; this
+  // one can't be answered, so it shows nothing.
+  if (askRejected(tc)) return null;
 
   if (questions.length === 0) {
     return (
