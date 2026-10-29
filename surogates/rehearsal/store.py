@@ -22,6 +22,8 @@ from surogates.rehearsal.ids import is_rehearsal_id, new_phone_number_id, new_wa
 VAULT_CREDENTIALS = ("access_token", "app_secret", "verify_token", "phone_number_id", "api_version")
 
 _WINDOW = timedelta(hours=24)
+#: WhatsApp drops a typing indicator after 25 seconds, or when a message is sent.
+_TYPING = timedelta(seconds=25)
 
 Provision = Callable[..., Awaitable[ResolvedIdentity]]
 
@@ -142,6 +144,22 @@ async def mark_read_up_to(sf, run_id: uuid.UUID, wamid: str) -> None:
             RehearsalMessage.id <= target.id,
         ).values(status="read"))
         await db.commit()
+
+
+async def set_typing(sf, run_id: uuid.UUID, wamid: str, typing: bool) -> None:
+    """Show or clear "typing…" for the person the message *wamid* belongs to."""
+    async with sf() as db:
+        person_id = (await db.execute(sa.select(RehearsalMessage.person_id).where(
+            RehearsalMessage.run_id == run_id, RehearsalMessage.wamid == wamid,
+        ))).scalar_one_or_none()
+        if person_id is not None:
+            await db.execute(sa.update(RehearsalPerson).where(RehearsalPerson.id == person_id)
+                             .values(agent_typing_at=datetime.now(timezone.utc) if typing else None))
+            await db.commit()
+
+
+def is_typing(person: RehearsalPerson, now: datetime) -> bool:
+    return person.agent_typing_at is not None and now - person.agent_typing_at < _TYPING
 
 
 async def thread(sf, person_id: uuid.UUID) -> Sequence[RehearsalMessage]:

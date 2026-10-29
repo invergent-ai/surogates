@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import httpx
 import pytest
 import respx
@@ -59,6 +61,8 @@ async def test_send_inside_window_is_logged_and_reported(rsf):  # noqa: F811
     wamid = r.json()["messages"][0]["id"]
     [_, out] = await store.thread(rsf, person.id)
     assert out.wamid == wamid and out.direction == "out" and out.status == "delivered"
+    [sent_to] = await store.people(rsf, run.id)
+    assert sent_to.agent_typing_at is None
     assert hook.call_count == 2
 
 
@@ -79,9 +83,12 @@ async def test_read_receipt_and_media_round_trip(rsf):  # noqa: F811
                             body={}, wamid="wamid.IN1", status="delivered")
     r = await client.post(f"{base}/messages", headers=auth, json={
         "messaging_product": "whatsapp", "status": "read", "message_id": "wamid.IN1",
+        "typing_indicator": {"type": "text"},
     })
     assert r.json() == {"success": True}
     assert (await store.thread(rsf, person.id))[0].status == "read"
+    [typing] = await store.people(rsf, run.id)
+    assert store.is_typing(typing, datetime.now(timezone.utc))
 
     r = await client.post(f"{base}/media", headers=auth,
                           files={"file": ("a.png", b"png", "image/png")})

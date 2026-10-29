@@ -94,7 +94,10 @@ async def send(phone_number_id: str, version: str, pnid: str, request: Request,
     sf = request.app.state.session_factory
     body = await request.json()
     if body.get("status") == "read":
-        await store.mark_read_up_to(sf, run.id, str(body.get("message_id") or ""))
+        message_id = str(body.get("message_id") or "")
+        await store.mark_read_up_to(sf, run.id, message_id)
+        if body.get("typing_indicator"):
+            await store.set_typing(sf, run.id, message_id, True)
         return {"success": True}
     to = str(body.get("to") or "").lstrip("+")
     person = await store.person_by_address(sf, run.id, to)
@@ -109,6 +112,7 @@ async def send(phone_number_id: str, version: str, pnid: str, request: Request,
     wamid = f"wamid.R{secrets.token_hex(10)}"
     await store.log_message(sf, run_id=run.id, person_id=person.id, direction="out", kind=kind,
                             body=body, wamid=wamid, status="accepted")
+    await store.set_typing(sf, run.id, wamid, False)
     background.add_task(_report_statuses, request.app, run, wamid, to)
     return {"messaging_product": "whatsapp", "contacts": [{"input": to, "wa_id": to}],
             "messages": [{"id": wamid}]}

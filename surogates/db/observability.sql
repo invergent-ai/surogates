@@ -1436,3 +1436,7 @@ ALTER TABLE browser_profiles
 ALTER TABLE users
     ADD COLUMN IF NOT EXISTS rehearsal_run_id uuid;
 CREATE INDEX IF NOT EXISTS ix_users_rehearsal_run_id ON users (rehearsal_run_id);
+
+-- When the agent last showed a rehearsal person "typing…".
+ALTER TABLE IF EXISTS rehearsal_people
+    ADD COLUMN IF NOT EXISTS agent_typing_at timestamptz;

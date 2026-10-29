@@ -2946,6 +2946,8 @@ class RehearsalPerson(Base):
     #: The person's address on their channel, e.g. a WhatsApp wa_id.
     address: Mapped[str] = mapped_column(Text, nullable=False)
     user_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), nullable=True)
+    #: When the agent last showed "typing…" to this person; a send clears it.
+    agent_typing_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False, default=_utcnow)
 
 

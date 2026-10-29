@@ -54,6 +54,7 @@ async def _detail(sf, run) -> dict[str, Any]:
         messages = await store.thread(sf, person.id)
         people.append({"id": str(person.id), "name": person.name, "channel": person.channel,
                        "address": person.address, "window_open": store.window_open(messages, now),
+                       "agent_typing": store.is_typing(person, now),
                        "messages": [_message(m) for m in messages]})
     return {"id": str(run.id), "agent_id": run.agent_id, "status": run.status,
             "phone_number_id": run.phone_number_id, "created_by": run.created_by,
