@@ -19,7 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from surogates.rehearsal import store
-from surogates.rehearsal import slack, teams
+from surogates.rehearsal import discord, slack, teams
 from surogates.rehearsal.webhook import (
     post_slack,
     post_teams_activity,
@@ -46,7 +46,7 @@ class StartRun(BaseModel):
     routing_config: dict[str, Any] = Field(default_factory=dict)
     templates: list[dict[str, Any]] = Field(default_factory=list)
     flows: list[dict[str, Any]] = Field(default_factory=list)
-    channel: Literal["whatsapp", "telegram", "slack", "teams"] = "whatsapp"
+    channel: Literal["whatsapp", "telegram", "slack", "teams", "discord"] = "whatsapp"
 
 
 class PersonMessage(BaseModel):
@@ -139,6 +139,8 @@ async def write_as_person(run_id: uuid.UUID, person_id: uuid.UUID, org_id: uuid.
         return await _write_on_slack(state, run, person, body)
     if run.channel == "teams":
         return await _write_on_teams(state, run, person, body)
+    if run.channel == "discord":
+        return await _write_on_discord(state, run, person, body)
     wamid = f"wamid.R{secrets.token_hex(10)}"
     message: dict[str, Any] = {"from": person.address, "id": wamid,
                                "timestamp": str(int(datetime.now(timezone.utc).timestamp()))}
@@ -227,6 +229,26 @@ def _modal_state(view: dict[str, Any], answers: dict[str, Any]) -> dict[str, Any
                 "type": element.get("type") or "plain_text_input",
                 "value": None if answer in (None, "") else str(answer)}}
     return values
+
+
+async def _write_on_discord(state, run, person, body: PersonMessage) -> dict[str, Any]:
+    """The member's DM, as the Gateway dispatches it to the bot."""
+    if not (body.text and body.text.strip()):
+        raise HTTPException(status_code=422, detail="Write something")
+    message_id = discord.new_snowflake()
+    message = {
+        "id": message_id, "type": 0, "channel_id": discord.dm_of(person.address),
+        "author": discord.author(person), "content": body.text, "mentions": [],
+        "attachments": [], "embeds": [], "timestamp": datetime.now(timezone.utc).isoformat(),
+        "edited_timestamp": None,
+    }
+    await store.log_message(state.session_factory, run_id=run.id, person_id=person.id,
+                            direction="in", kind="message", body=message, wamid=message_id,
+                            status="pending")
+    delivered = await discord.GATEWAYS.dispatch(run.id, message)
+    if delivered:
+        await store.set_status(state.session_factory, run.id, message_id, "sent")
+    return {"delivered": delivered}
 
 
 async def _write_on_teams(state, run, person, body: PersonMessage) -> dict[str, Any]:
@@ -338,4 +360,6 @@ async def end_run(run_id: uuid.UUID, org_id: uuid.UUID, request: Request):
     await _run_in_org(request, run_id, org_id)
     state = request.app.state
     run = await store.end_run(state.session_factory, state.vault, run_id)
+    if run.channel == "discord":
+        await discord.GATEWAYS.close(run.id)
     return await _detail(state.session_factory, run)

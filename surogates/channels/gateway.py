@@ -174,7 +174,7 @@ class DiscordGatewayClient:
         http = self._http or httpx.AsyncClient(timeout=15.0)
         try:
             resp = await http.get(
-                f"{discord_platform.DISCORD_API_BASE}/gateway/bot",
+                f"{discord_platform._api_base(self._token)}/gateway/bot",
                 headers={"Authorization": f"Bot {self._token}"},
             )
         finally:
@@ -329,6 +329,7 @@ class DiscordGatewaySupervisor:
         ingest: Callable[[Any, str, Any], Awaitable[Any]],
         client_factory: Callable[..., Any] = DiscordGatewayClient,
         holder_id: str | None = None,
+        rehearsals: Callable[[], Awaitable[list[dict]]] | None = None,
     ) -> None:
         self._platform = platform
         self._platform_client = platform_client
@@ -336,6 +337,8 @@ class DiscordGatewaySupervisor:
         self._redis = redis
         self._ingest = ingest
         self._client_factory = client_factory
+        #: Running rehearsal bots, which route from the runtime DB, not ops.
+        self._rehearsals = rehearsals
         self._holder = holder_id or f"{socket.gethostname()}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
         self._held: dict[str, _Held] = {}
         #: Bots stopped on a fatal close or a missing token; left alone until
@@ -363,6 +366,11 @@ class DiscordGatewaySupervisor:
                 # dropping every connection.
                 logger.warning("[discord] listing routings failed; keeping connections", exc_info=True)
                 return
+            if self._rehearsals is not None:
+                try:
+                    routings = [*routings, *await self._rehearsals()]
+                except Exception:
+                    logger.warning("[discord] listing rehearsal bots failed", exc_info=True)
             wanted = {r["channel_identifier"]: r for r in routings if r.get("channel_identifier")}
             if changed is not None:
                 self._halted.discard(changed)

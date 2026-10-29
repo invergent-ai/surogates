@@ -22,6 +22,8 @@ from surogates.rehearsal.ids import (
     is_rehearsal_id,
     new_bot_token,
     new_bot_username,
+    new_discord_bot_token,
+    new_discord_id,
     new_phone_number_id,
     new_slack_app_id,
     new_slack_bot_token,
@@ -37,6 +39,7 @@ VAULT_CREDENTIALS = {
     "telegram": ("bot_token", "webhook_secret"),
     "slack": ("bot_token", "signing_secret"),
     "teams": ("app_password", "tenant_id"),
+    "discord": ("bot_token",),
 }
 CHANNELS = tuple(VAULT_CREDENTIALS)
 
@@ -45,7 +48,7 @@ _WINDOW = timedelta(hours=24)
 #: a message: WhatsApp 25 s, Telegram 5 s, Teams about 3 s (given 5 here, as
 #: the adapter refreshes every 3 s and Studio polls in between).
 _TYPING = {"whatsapp": timedelta(seconds=25), "telegram": timedelta(seconds=5),
-           "teams": timedelta(seconds=5)}
+           "teams": timedelta(seconds=5), "discord": timedelta(seconds=10)}
 
 Provision = Callable[..., Awaitable[ResolvedIdentity]]
 
@@ -64,6 +67,9 @@ async def create_run(
         account, token = new_slack_app_id(), new_slack_bot_token()
     elif channel == "teams":
         account, token = new_teams_app_id(), "eyJ" + secrets.token_urlsafe(48)
+    elif channel == "discord":
+        account = new_discord_id()
+        token = new_discord_bot_token(account)
     else:
         account, token = new_phone_number_id(), "EAA" + secrets.token_urlsafe(96)
     run = RehearsalRun(
@@ -82,6 +88,8 @@ async def create_run(
     elif channel == "teams":
         # The world's tenant is the App ID: one bot, one tenant.
         creds = {"app_password": run.app_secret, "tenant_id": run.phone_number_id}
+    elif channel == "discord":
+        creds = {"bot_token": run.access_token}
     else:
         creds = {
             "access_token": run.access_token, "app_secret": run.app_secret,
@@ -96,7 +104,7 @@ async def create_run(
 
 async def add_person(sf, run: RehearsalRun, *, name: str, provision: Provision) -> RehearsalPerson:
     address = {"telegram": new_telegram_user_id, "slack": new_slack_user_id,
-               "teams": new_teams_user_id}.get(
+               "teams": new_teams_user_id, "discord": new_discord_id}.get(
         run.channel, new_wa_id)()
     # The same call the inbound pipeline makes for an unknown sender: the
     # pipeline then finds this identity, already marked as the run's.
@@ -305,6 +313,16 @@ async def routing_for(sf, kind: str, identifier: str) -> dict[str, Any] | None:
         "org_id": str(run.org_id), "agent_id": run.agent_id,
         "config": {**(run.routing_config or {}), "rehearsal_run_id": str(run.id)},
     }
+
+
+async def running_routings(sf, kind: str) -> list[dict[str, Any]]:
+    """Every running rehearsal on *kind*, shaped as ops lists a channel's routings."""
+    async with sf() as db:
+        runs = (await db.execute(sa.select(RehearsalRun).where(
+            RehearsalRun.channel == kind, RehearsalRun.status == "running",
+        ))).scalars().all()
+    return [{"channel_identifier": r.phone_number_id, "org_id": str(r.org_id),
+             "config": dict(r.routing_config or {})} for r in runs]
 
 
 async def end_run(sf, vault, run_id: uuid.UUID) -> RehearsalRun | None:
