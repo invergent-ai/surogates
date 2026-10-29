@@ -20,6 +20,8 @@ from typing import Any
 
 import httpx
 
+from surogates.rehearsal.ids import is_rehearsal_id
+
 __all__ = [
     "DEFAULT_API_VERSION",
     "GRAPH_API_BASE",
@@ -28,6 +30,7 @@ __all__ = [
     "download_media",
     "ext_for_mime",
     "format_graph_error",
+    "graph_base",
     "graph_url",
     "media_kind_for_mime",
     "send_message",
@@ -41,6 +44,19 @@ logger = logging.getLogger(__name__)
 GRAPH_API_BASE = (
     os.environ.get("SUROGATES_WHATSAPP_GRAPH_BASE") or "https://graph.facebook.com"
 ).rstrip("/")
+
+
+def graph_base(phone_number_id: str = "") -> str:
+    """Meta's Graph, or the rehearsal world that owns *phone_number_id*.
+
+    A world is reached only for a rehearsal id and only on a deployment that
+    runs Rehearsal, so a real number always gets Meta.  Read per call: the
+    YAML config reaches the environment after this module is imported.
+    """
+    rehearsal_url = os.environ.get("SUROGATES_REHEARSAL_URL", "").rstrip("/")
+    if rehearsal_url and is_rehearsal_id(phone_number_id):
+        return f"{rehearsal_url}/w/{phone_number_id}/whatsapp"
+    return GRAPH_API_BASE
 
 #: Meta removes v20.0 on 2026-09-24; never pin below v23.0.
 DEFAULT_API_VERSION = "v23.0"
@@ -75,7 +91,7 @@ def graph_url(
     phone_number_id: str, path: str, *, api_version: str = DEFAULT_API_VERSION,
 ) -> str:
     """Return the phone-number-scoped Graph URL for *path*."""
-    return f"{GRAPH_API_BASE}/{api_version}/{phone_number_id}/{path.lstrip('/')}"
+    return f"{graph_base(phone_number_id)}/{api_version}/{phone_number_id}/{path.lstrip('/')}"
 
 
 def format_graph_error(status_code: int, body: dict) -> str:
@@ -202,6 +218,7 @@ async def download_media(
     media_id: str,
     max_bytes: int,
     api_version: str = DEFAULT_API_VERSION,
+    phone_number_id: str = "",
 ) -> tuple[bytes | None, str | None]:
     """Fetch inbound media by id.  Returns ``(data, mime_type)``.
 
@@ -222,7 +239,7 @@ async def download_media(
         return None, None
 
     headers = {"Authorization": f"Bearer {token}"}
-    meta_url = f"{GRAPH_API_BASE}/{api_version}/{media_id}"
+    meta_url = f"{graph_base(phone_number_id)}/{api_version}/{media_id}"
 
     for attempt in (1, 2):
         try:
