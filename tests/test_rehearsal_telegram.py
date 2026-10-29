@@ -24,6 +24,7 @@ def test_only_a_rehearsal_bot_reaches_the_world(monkeypatch):
     assert _bot_api_url("9991234567890:abc", "sendMessage") == (
         "http://rehearsal:8004/t/bot9991234567890:abc/sendMessage")
     assert _bot_api_url("7123456789:abc", "sendMessage").startswith("https://api.telegram.org/")
+    assert _bot_api_url("999123456:abc", "sendMessage").startswith("https://api.telegram.org/")
     monkeypatch.delenv("SUROGATES_REHEARSAL_URL")
     assert _bot_api_url("9991234567890:abc", "sendMessage").startswith("https://api.telegram.org/")
 

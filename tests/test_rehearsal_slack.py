@@ -18,6 +18,7 @@ from httpx import ASGITransport
 
 from surogates.channels.platforms.slack import _api_base
 from surogates.rehearsal import api, slack, store
+from surogates.rehearsal.ids import new_slack_bot_token
 from tests.test_rehearsal_api import TOKEN, Settings
 from tests.test_rehearsal_models import rsf  # noqa: F401
 from tests.test_rehearsal_store import FakeVault, make_org, provision_into
@@ -25,8 +26,9 @@ from tests.test_rehearsal_store import FakeVault, make_org, provision_into
 
 def test_only_a_rehearsal_token_reaches_the_world(monkeypatch):
     monkeypatch.setenv("SUROGATES_REHEARSAL_URL", "http://rehearsal:8004")
-    assert _api_base("xoxb-9991234567890123-abc") == "http://rehearsal:8004/s/api/"
+    assert _api_base(new_slack_bot_token()) == "http://rehearsal:8004/s/api/"
     assert _api_base("xoxb-1234567890-abc").startswith("https://slack.com/")
+    assert _api_base("xoxb-9991234567-2222222222-abc").startswith("https://slack.com/")
 
 
 def _signed_by(request: httpx.Request, secret: str) -> bool:

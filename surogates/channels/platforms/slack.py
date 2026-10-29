@@ -61,7 +61,7 @@ except ImportError:
     SlackApiError = Exception  # type: ignore[misc,assignment]
 
 from surogates.channels.errors import ChannelApiError
-from surogates.rehearsal.ids import is_rehearsal_id
+from surogates.rehearsal.ids import is_rehearsal_slack_token
 
 from fastapi.responses import Response
 
@@ -133,7 +133,7 @@ SLACK_API_BASE = os.environ.get("SUROGATES_SLACK_API_BASE") or "https://slack.co
 def _api_base(bot_token: str) -> str:
     """Slack, or the rehearsal world that owns a rehearsal bot token."""
     rehearsal_url = os.environ.get("SUROGATES_REHEARSAL_URL", "").rstrip("/")
-    if rehearsal_url and is_rehearsal_id(bot_token.removeprefix("xoxb-")):
+    if rehearsal_url and is_rehearsal_slack_token(bot_token):
         return f"{rehearsal_url}/s/api/"
     return SLACK_API_BASE
 
