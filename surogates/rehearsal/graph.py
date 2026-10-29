@@ -109,6 +109,8 @@ async def send(phone_number_id: str, version: str, pnid: str, request: Request,
     ):
         return _graph_error(400, 131047, "Re-engagement message: more than 24 hours have passed "
                                          "since the recipient last replied")
+    if kind == "template":
+        body = store.with_template_definition(run, body)
     wamid = f"wamid.R{secrets.token_hex(10)}"
     await store.log_message(sf, run_id=run.id, person_id=person.id, direction="out", kind=kind,
                             body=body, wamid=wamid, status="accepted")

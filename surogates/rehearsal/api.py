@@ -34,6 +34,7 @@ class StartRun(BaseModel):
     created_by: str
     person_name: str = Field(min_length=1, max_length=80)
     routing_config: dict[str, Any] = Field(default_factory=dict)
+    templates: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class PersonMessage(BaseModel):
@@ -76,6 +77,7 @@ async def start_run(body: StartRun, request: Request):
         state.session_factory, state.vault, org_id=body.org_id, agent_id=body.agent_id,
         created_by=body.created_by, routing_config=body.routing_config,
         person_name=body.person_name.strip(), provision=state.provision,
+        templates=body.templates,
     )
     return await _detail(state.session_factory, run)
 

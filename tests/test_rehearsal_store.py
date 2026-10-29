@@ -99,3 +99,18 @@ async def test_messages_and_window(rsf):  # noqa: F811
     assert [(m.wamid, m.status) for m in thread] == [("wamid.1", "read"), ("wamid.2", "read")]
     assert store.window_open(thread, now)
     assert not store.window_open(thread, now + timedelta(hours=25))
+
+
+@pytest.mark.asyncio
+async def test_a_template_send_carries_its_definition(rsf):  # noqa: F811
+    org_id = await make_org(rsf)
+    components = [{"type": "BODY", "text": "Bună {{1}}, ne vedem mâine."}]
+    run = await store.create_run(
+        rsf, FakeVault(), org_id=org_id, agent_id="a1", created_by="u1", routing_config={},
+        person_name="Ana", provision=provision_into(rsf),
+        templates=[{"name": "reminder", "language": "ro", "components": components}],
+    )
+    sent = {"type": "template", "template": {"name": "reminder", "language": {"code": "ro"}}}
+    assert store.with_template_definition(run, sent)["template"]["definition"] == components
+    other = {"type": "template", "template": {"name": "other", "language": {"code": "ro"}}}
+    assert store.with_template_definition(run, other) == other

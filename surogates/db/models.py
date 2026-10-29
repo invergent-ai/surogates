@@ -2928,6 +2928,9 @@ class RehearsalRun(Base):
     #: The agent's own WhatsApp behaviour config, copied so the run behaves
     #: like the real channel (identity policy, multi-session, ...).
     routing_config: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    #: The agent's WhatsApp message templates as Meta lists them, so a
+    #: template the agent sends shows with its real header, body and buttons.
+    templates: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, default=list)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False, default=_utcnow)
     ended_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
 

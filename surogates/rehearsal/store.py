@@ -32,12 +32,13 @@ async def create_run(
     sf, vault, *, org_id: uuid.UUID, agent_id: str, created_by: str,
     routing_config: dict[str, Any], person_name: str,
     provision: Provision = get_or_create_channel_identity,
+    templates: list[dict[str, Any]] | None = None,
 ) -> RehearsalRun:
     run = RehearsalRun(
         org_id=org_id, agent_id=agent_id, created_by=created_by,
         phone_number_id=new_phone_number_id(),
         access_token="EAA" + secrets.token_urlsafe(96), app_secret=secrets.token_hex(16),
-        routing_config=dict(routing_config or {}),
+        routing_config=dict(routing_config or {}), templates=list(templates or []),
     )
     async with sf() as db:
         db.add(run)
@@ -168,6 +169,16 @@ async def thread(sf, person_id: uuid.UUID) -> Sequence[RehearsalMessage]:
             sa.select(RehearsalMessage).where(RehearsalMessage.person_id == person_id)
             .order_by(RehearsalMessage.id)
         )).scalars().all()
+
+
+def with_template_definition(run: RehearsalRun, body: dict[str, Any]) -> dict[str, Any]:
+    """A template send, with the template's components as the account defines them."""
+    sent = body.get("template") or {}
+    language = (sent.get("language") or {}).get("code")
+    for template in run.templates or []:
+        if template.get("name") == sent.get("name") and template.get("language") in (language, None):
+            return {**body, "template": {**sent, "definition": template.get("components") or []}}
+    return body
 
 
 def window_open(messages: Sequence[RehearsalMessage], now: datetime) -> bool:
