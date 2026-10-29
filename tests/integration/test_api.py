@@ -10,7 +10,10 @@ import pytest
 import pytest_asyncio
 from cryptography.fernet import Fernet
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select, update
 
+from surogates.db.models import Event, InboxItem
+from surogates.session.events import EventType
 from surogates.session.store import SessionStore
 from surogates.storage.tenant import session_workspace_key
 from surogates.tenant.auth.jwt import create_access_token
@@ -2184,3 +2187,223 @@ async def test_scheduled_run_session_rejects_ask_user_question_response(
 
     assert resp.status_code == 409
     assert "read-only" in resp.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# A chat proxy's typed reply answering the open question (answers_open_question)
+# ---------------------------------------------------------------------------
+
+_TINY_PNG = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA"
+    "60e6kgAAAABJRU5ErkJggg=="
+)
+
+
+async def _proxy_session_with_open_question(client, session_factory):
+    org_id = await create_org(session_factory)
+    issued = await issue_service_account_token(session_factory, org_id, name="ops-chat")
+    headers = {"Authorization": f"Bearer {issued.token}"}
+    created = await client.post(
+        "/v1/api/sessions", json={"config": {"source": "ops"}}, headers=headers,
+    )
+    assert created.status_code == 201, created.text
+    session_id = UUID(created.json()["id"])
+    await SessionStore(session_factory).emit_event(
+        session_id,
+        EventType.INBOX_INPUT_REQUIRED,
+        {
+            "tool_call_id": "tc-proxy",
+            "questions": [{"prompt": "Which region?"}],
+            "context": "",
+        },
+    )
+    return session_id, headers
+
+
+async def _question_state(session_factory, session_id):
+    """(inbox status, response events, user.message events)."""
+    async with session_factory() as db:
+        inbox = (await db.execute(
+            select(InboxItem.status).where(InboxItem.session_id == session_id)
+        )).scalar_one()
+        types = (await db.execute(
+            select(Event.type).where(Event.session_id == session_id)
+        )).scalars().all()
+    return (
+        inbox,
+        types.count(EventType.ASK_USER_QUESTION_RESPONSE.value),
+        types.count(EventType.USER_MESSAGE.value),
+    )
+
+
+async def test_api_message_with_flag_answers_the_open_question(
+    client: AsyncClient, session_factory
+):
+    sid, headers = await _proxy_session_with_open_question(client, session_factory)
+    resp = await client.post(
+        f"/v1/api/sessions/{sid}/messages",
+        json={"content": "eu-west", "answers_open_question": True},
+        headers=headers,
+    )
+    assert resp.status_code == 202, resp.text
+    assert await _question_state(session_factory, sid) == ("responded", 1, 0)
+
+
+async def test_api_message_without_flag_is_a_normal_message(
+    client: AsyncClient, session_factory
+):
+    sid, headers = await _proxy_session_with_open_question(client, session_factory)
+    resp = await client.post(
+        f"/v1/api/sessions/{sid}/messages",
+        json={"content": "eu-west"},
+        headers=headers,
+    )
+    assert resp.status_code == 202, resp.text
+    assert await _question_state(session_factory, sid) == ("pending", 0, 1)
+
+
+async def test_api_message_with_flag_and_image_is_a_normal_message(
+    client: AsyncClient, session_factory
+):
+    sid, headers = await _proxy_session_with_open_question(client, session_factory)
+    resp = await client.post(
+        f"/v1/api/sessions/{sid}/messages",
+        json={
+            "content": "eu-west",
+            "answers_open_question": True,
+            "images": [{"data": _TINY_PNG, "mime_type": "image/png"}],
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 202, resp.text
+    assert await _question_state(session_factory, sid) == ("pending", 0, 1)
+
+
+async def test_api_message_with_flag_and_attachment_is_not_an_answer(
+    client: AsyncClient, session_factory
+):
+    sid, headers = await _proxy_session_with_open_question(client, session_factory)
+    resp = await client.post(
+        f"/v1/api/sessions/{sid}/messages",
+        json={
+            "content": "eu-west",
+            "answers_open_question": True,
+            "attachments": [
+                {"path": "missing.txt", "filename": "missing.txt",
+                 "mime_type": "text/plain", "size": 1},
+            ],
+        },
+        headers=headers,
+    )
+    # Reaches attachment resolution (and fails there) instead of answering.
+    assert resp.status_code == 422, resp.text
+    assert await _question_state(session_factory, sid) == ("pending", 0, 0)
+
+
+async def test_api_message_with_flag_and_builtin_command_is_a_normal_message(
+    client: AsyncClient, session_factory
+):
+    sid, headers = await _proxy_session_with_open_question(client, session_factory)
+    resp = await client.post(
+        f"/v1/api/sessions/{sid}/messages",
+        json={"content": "/compress", "answers_open_question": True},
+        headers=headers,
+    )
+    assert resp.status_code == 202, resp.text
+    assert await _question_state(session_factory, sid) == ("pending", 0, 1)
+
+
+async def test_api_message_with_flag_and_no_pending_question_is_normal(
+    client: AsyncClient, session_factory
+):
+    org_id = await create_org(session_factory)
+    issued = await issue_service_account_token(session_factory, org_id, name="ops-chat")
+    headers = {"Authorization": f"Bearer {issued.token}"}
+    created = await client.post(
+        "/v1/api/sessions", json={"config": {"source": "ops"}}, headers=headers,
+    )
+    sid = UUID(created.json()["id"])
+    resp = await client.post(
+        f"/v1/api/sessions/{sid}/messages",
+        json={"content": "hi", "answers_open_question": True},
+        headers=headers,
+    )
+    assert resp.status_code == 202, resp.text
+    async with session_factory() as db:
+        types = (await db.execute(
+            select(Event.type).where(Event.session_id == sid)
+        )).scalars().all()
+    assert EventType.USER_MESSAGE.value in types
+    assert EventType.ASK_USER_QUESTION_RESPONSE.value not in types
+
+
+async def test_api_message_with_flag_and_stale_question_is_normal(
+    client: AsyncClient, session_factory
+):
+    from datetime import datetime, timedelta, timezone
+
+    sid, headers = await _proxy_session_with_open_question(client, session_factory)
+    async with session_factory() as db:
+        await db.execute(
+            update(InboxItem)
+            .where(InboxItem.session_id == sid)
+            .values(created_at=datetime.now(timezone.utc) - timedelta(hours=2))
+        )
+        await db.commit()
+    resp = await client.post(
+        f"/v1/api/sessions/{sid}/messages",
+        json={"content": "eu-west", "answers_open_question": True},
+        headers=headers,
+    )
+    assert resp.status_code == 202, resp.text
+    assert await _question_state(session_factory, sid) == ("pending", 0, 1)
+
+
+async def test_web_message_still_answers_the_open_question(
+    client: AsyncClient, session_factory
+):
+    _, _, token, _ = await _create_test_tenant(session_factory)
+    headers = {"Authorization": f"Bearer {token}"}
+    created = await client.post(
+        "/v1/sessions", json={"model": "gpt-4o"}, headers=headers,
+    )
+    sid = UUID(created.json()["id"])
+    await SessionStore(session_factory).emit_event(
+        sid,
+        EventType.INBOX_INPUT_REQUIRED,
+        {"tool_call_id": "tc-web", "questions": [{"prompt": "Which?"}], "context": ""},
+    )
+    resp = await client.post(
+        f"/v1/sessions/{sid}/messages", json={"content": "this one"}, headers=headers,
+    )
+    assert resp.status_code == 202, resp.text
+    assert await _question_state(session_factory, sid) == ("responded", 1, 0)
+
+
+async def test_api_message_with_flag_on_a_paused_session_is_a_normal_message(
+    client: AsyncClient, session_factory
+):
+    sid, headers = await _proxy_session_with_open_question(client, session_factory)
+    await SessionStore(session_factory).update_session_status(sid, "paused")
+    resp = await client.post(
+        f"/v1/api/sessions/{sid}/messages",
+        json={"content": "eu-west", "answers_open_question": True},
+        headers=headers,
+    )
+    assert resp.status_code == 202, resp.text
+    assert await _question_state(session_factory, sid) == ("pending", 0, 1)
+
+
+async def test_api_message_with_flag_and_blank_content_is_not_an_answer(
+    client: AsyncClient, session_factory
+):
+    sid, headers = await _proxy_session_with_open_question(client, session_factory)
+    await client.post(
+        f"/v1/api/sessions/{sid}/messages",
+        json={
+            "content": "   ",
+            "answers_open_question": True,
+        },
+        headers=headers,
+    )
+    assert (await _question_state(session_factory, sid))[1] == 0
