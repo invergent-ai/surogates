@@ -53,6 +53,11 @@ async def authorize_commerce_turn(
     (``{"code", "buy_url"}``) so the widget can render a paywall
     instead of a generic error.
     """
+    if (session.config or {}).get("rehearsal_run_id"):
+        # The agent's builder writing as a visitor: no buyer to charge, as on
+        # every other channel a rehearsal runs on.  Only a running run's own
+        # key stamps this, at bootstrap.
+        return None
     payload = await runtime_commerce_payload(request, str(session.agent_id))
     mode = str(payload.get("commerce_mode") or "free")
     if mode == "free":

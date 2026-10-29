@@ -81,3 +81,14 @@ async def test_website_run(rsf):  # noqa: F811
         r = await w.post("/v1/website/sessions",
                          headers={"Authorization": f"Bearer {key}", "Origin": _ORIGIN})
         assert r.status_code == 404 and ops.asked == [key]
+
+
+@pytest.mark.asyncio
+async def test_a_rehearsal_visitor_never_meets_the_paywall():
+    from types import SimpleNamespace
+
+    from surogates.api.routes._commerce_turn import authorize_commerce_turn
+
+    session = SimpleNamespace(agent_id="a1", id="s1", config={"rehearsal_run_id": "r1"})
+    # No app state at all: the gate must not even ask ops for the agent's mode.
+    assert await authorize_commerce_turn(SimpleNamespace(app=None), session, "Salut") is None
