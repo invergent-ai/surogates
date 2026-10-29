@@ -40,3 +40,19 @@ async def post_webhook(
         logger.warning("[rehearsal] webhook to channels failed (%s)", exc)
         return 0
     return response.status_code
+
+
+async def post_telegram_update(
+    client: httpx.AsyncClient, *, channels_url: str, bot_username: str,
+    webhook_secret: str, update: dict[str, Any],
+) -> int:
+    """POST one Update to ``/telegram/{username}`` as Telegram does; returns the HTTP status (0 on failure)."""
+    try:
+        response = await client.post(
+            f"{channels_url.rstrip('/')}/telegram/{bot_username}", json=update,
+            headers={"X-Telegram-Bot-Api-Secret-Token": webhook_secret},
+        )
+    except httpx.HTTPError as exc:
+        logger.warning("[rehearsal] telegram update to channels failed (%s)", exc)
+        return 0
+    return response.status_code

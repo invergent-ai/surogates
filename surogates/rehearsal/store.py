@@ -1,8 +1,9 @@
 """Runs and their worlds, in the runtime database.
 
-A run's WhatsApp credentials live in the vault under the names the runtime's
-WhatsApp adapter already reads (``whatsapp_<cred>_<phone_number_id>``), so the
-real adapter serves a rehearsal number exactly as it serves a real one.
+A run's credentials live in the vault under the names the runtime's adapter
+already reads (``whatsapp_<cred>_<phone_number_id>``,
+``telegram_<cred>_<bot username>``), so the real adapter serves a rehearsal
+account exactly as it serves a real one.
 """
 
 from __future__ import annotations
@@ -17,9 +18,20 @@ import sqlalchemy as sa
 from surogates.channels.identity import ResolvedIdentity, get_or_create_channel_identity
 from surogates.channels.platforms.whatsapp_api import DEFAULT_API_VERSION
 from surogates.db.models import RehearsalMedia, RehearsalMessage, RehearsalPerson, RehearsalRun, User
-from surogates.rehearsal.ids import is_rehearsal_id, new_phone_number_id, new_wa_id
+from surogates.rehearsal.ids import (
+    is_rehearsal_id,
+    new_bot_token,
+    new_bot_username,
+    new_phone_number_id,
+    new_telegram_user_id,
+    new_wa_id,
+)
 
-VAULT_CREDENTIALS = ("access_token", "app_secret", "verify_token", "phone_number_id", "api_version")
+VAULT_CREDENTIALS = {
+    "whatsapp": ("access_token", "app_secret", "verify_token", "phone_number_id", "api_version"),
+    "telegram": ("bot_token", "webhook_secret"),
+}
+CHANNELS = tuple(VAULT_CREDENTIALS)
 
 _WINDOW = timedelta(hours=24)
 #: WhatsApp drops a typing indicator after 25 seconds, or when a message is sent.
@@ -34,36 +46,43 @@ async def create_run(
     provision: Provision = get_or_create_channel_identity,
     templates: list[dict[str, Any]] | None = None,
     flows: list[dict[str, Any]] | None = None,
+    channel: str = "whatsapp",
 ) -> RehearsalRun:
+    if channel == "telegram":
+        account, token = new_bot_username(), new_bot_token()
+    else:
+        account, token = new_phone_number_id(), "EAA" + secrets.token_urlsafe(96)
     run = RehearsalRun(
-        org_id=org_id, agent_id=agent_id, created_by=created_by,
-        phone_number_id=new_phone_number_id(),
-        access_token="EAA" + secrets.token_urlsafe(96), app_secret=secrets.token_hex(16),
+        org_id=org_id, agent_id=agent_id, created_by=created_by, channel=channel,
+        phone_number_id=account, access_token=token, app_secret=secrets.token_hex(16),
         routing_config=dict(routing_config or {}), templates=list(templates or []),
         flows=list(flows or []),
     )
     async with sf() as db:
         db.add(run)
         await db.commit()
-    creds = {
-        "access_token": run.access_token, "app_secret": run.app_secret,
-        "verify_token": secrets.token_hex(8), "phone_number_id": run.phone_number_id,
-        "api_version": DEFAULT_API_VERSION,
-    }
+    if channel == "telegram":
+        creds = {"bot_token": run.access_token, "webhook_secret": run.app_secret}
+    else:
+        creds = {
+            "access_token": run.access_token, "app_secret": run.app_secret,
+            "verify_token": secrets.token_hex(8), "phone_number_id": run.phone_number_id,
+            "api_version": DEFAULT_API_VERSION,
+        }
     for name, value in creds.items():
-        await vault.store(org_id, f"whatsapp_{name}_{run.phone_number_id}", value)
+        await vault.store(org_id, f"{channel}_{name}_{run.phone_number_id}", value)
     await add_person(sf, run, name=person_name, provision=provision)
     return run
 
 
 async def add_person(sf, run: RehearsalRun, *, name: str, provision: Provision) -> RehearsalPerson:
-    wa_id = new_wa_id()
+    address = new_telegram_user_id() if run.channel == "telegram" else new_wa_id()
     # The same call the inbound pipeline makes for an unknown sender: the
     # pipeline then finds this identity, already marked as the run's.
     identity = await provision(
-        sf, platform="whatsapp", platform_user_id=wa_id, org_id=run.org_id, display_name=name,
+        sf, platform=run.channel, platform_user_id=address, org_id=run.org_id, display_name=name,
     )
-    person = RehearsalPerson(run_id=run.id, name=name, channel="whatsapp", address=wa_id,
+    person = RehearsalPerson(run_id=run.id, name=name, channel=run.channel, address=address,
                              user_id=identity.user_id)
     async with sf() as db:
         await db.execute(sa.update(User).where(User.id == identity.user_id)
@@ -82,6 +101,13 @@ async def run_by_number(sf, phone_number_id: str) -> RehearsalRun | None:
     async with sf() as db:
         return (await db.execute(
             sa.select(RehearsalRun).where(RehearsalRun.phone_number_id == phone_number_id)
+        )).scalar_one_or_none()
+
+
+async def run_by_token(sf, token: str) -> RehearsalRun | None:
+    async with sf() as db:
+        return (await db.execute(
+            sa.select(RehearsalRun).where(RehearsalRun.access_token == token)
         )).scalar_one_or_none()
 
 
@@ -124,6 +150,32 @@ async def log_message(
     return message
 
 
+async def replace_body(sf, run_id: uuid.UUID, wamid: str, body: dict[str, Any]) -> bool:
+    """An edit: the message keeps its place in the thread with its new body."""
+    async with sf() as db:
+        result = await db.execute(sa.update(RehearsalMessage)
+                                  .where(RehearsalMessage.run_id == run_id,
+                                         RehearsalMessage.wamid == wamid)
+                                  .values(body=body))
+        await db.commit()
+    return result.rowcount > 0
+
+
+async def message(sf, run_id: uuid.UUID, wamid: str) -> RehearsalMessage | None:
+    async with sf() as db:
+        return (await db.execute(sa.select(RehearsalMessage).where(
+            RehearsalMessage.run_id == run_id, RehearsalMessage.wamid == wamid,
+        ))).scalar_one_or_none()
+
+
+async def next_message_id(sf, run_id: uuid.UUID) -> int:
+    """Telegram numbers a chat's messages 1, 2, 3…; a run has one chat per person."""
+    async with sf() as db:
+        count = (await db.execute(sa.select(sa.func.count()).select_from(RehearsalMessage)
+                                  .where(RehearsalMessage.run_id == run_id))).scalar_one()
+    return int(count) + 1
+
+
 async def set_status(sf, run_id: uuid.UUID, wamid: str, status: str) -> None:
     async with sf() as db:
         await db.execute(sa.update(RehearsalMessage)
@@ -159,6 +211,13 @@ async def set_typing(sf, run_id: uuid.UUID, wamid: str, typing: bool) -> None:
             await db.execute(sa.update(RehearsalPerson).where(RehearsalPerson.id == person_id)
                              .values(agent_typing_at=datetime.now(timezone.utc) if typing else None))
             await db.commit()
+
+
+async def set_person_typing(sf, person_id: uuid.UUID, typing: bool) -> None:
+    async with sf() as db:
+        await db.execute(sa.update(RehearsalPerson).where(RehearsalPerson.id == person_id)
+                         .values(agent_typing_at=datetime.now(timezone.utc) if typing else None))
+        await db.commit()
 
 
 def is_typing(person: RehearsalPerson, now: datetime) -> bool:
@@ -205,10 +264,10 @@ async def get_media(sf, run_id: uuid.UUID, media_id: str) -> RehearsalMedia | No
 
 async def routing_for(sf, kind: str, identifier: str) -> dict[str, Any] | None:
     """The routing record a running rehearsal number resolves to, else ``None``."""
-    if kind != "whatsapp" or not is_rehearsal_id(identifier):
+    if kind not in CHANNELS or not is_rehearsal_id(identifier):
         return None
     run = await run_by_number(sf, identifier)
-    if run is None or run.status != "running":
+    if run is None or run.status != "running" or run.channel != kind:
         return None
     return {
         "org_id": str(run.org_id), "agent_id": run.agent_id,
@@ -223,6 +282,6 @@ async def end_run(sf, vault, run_id: uuid.UUID) -> RehearsalRun | None:
             return None
         run.status, run.ended_at = "ended", datetime.now(timezone.utc)
         await db.commit()
-    for name in VAULT_CREDENTIALS:
-        await vault.delete(run.org_id, f"whatsapp_{name}_{run.phone_number_id}")
+    for name in VAULT_CREDENTIALS[run.channel]:
+        await vault.delete(run.org_id, f"{run.channel}_{name}_{run.phone_number_id}")
     return run

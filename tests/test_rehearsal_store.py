@@ -60,7 +60,7 @@ async def test_create_run_provisions_world(rsf):  # noqa: F811
     run = await make_run(rsf, vault, {"identity_policy": "shadow"})
     assert is_rehearsal_id(run.phone_number_id)
     names = {name for (_, name) in vault.items}
-    assert names == {f"whatsapp_{c}_{run.phone_number_id}" for c in store.VAULT_CREDENTIALS}
+    assert names == {f"whatsapp_{c}_{run.phone_number_id}" for c in store.VAULT_CREDENTIALS["whatsapp"]}
     [person] = await store.people(rsf, run.id)
     assert person.name == "Ana" and is_rehearsal_id(person.address)
     async with rsf() as db:

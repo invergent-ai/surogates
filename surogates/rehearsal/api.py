@@ -11,13 +11,13 @@ import json
 import secrets
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from surogates.rehearsal import store
-from surogates.rehearsal.webhook import post_webhook
+from surogates.rehearsal.webhook import post_telegram_update, post_webhook
 
 
 def _require_internal_token(request: Request) -> None:
@@ -38,6 +38,7 @@ class StartRun(BaseModel):
     routing_config: dict[str, Any] = Field(default_factory=dict)
     templates: list[dict[str, Any]] = Field(default_factory=list)
     flows: list[dict[str, Any]] = Field(default_factory=list)
+    channel: Literal["whatsapp", "telegram"] = "whatsapp"
 
 
 class PersonMessage(BaseModel):
@@ -48,6 +49,8 @@ class PersonMessage(BaseModel):
     quick_reply: Optional[dict[str, str]] = None
     #: A completed WhatsApp Flow: the ``complete`` payload, ``flow_token`` included.
     form_reply: Optional[dict[str, Any]] = None
+    #: A Telegram inline-keyboard tap: ``{"message_id", "data"}``.
+    callback: Optional[dict[str, str]] = None
 
 
 def _message(m) -> dict[str, Any]:
@@ -65,6 +68,7 @@ async def _detail(sf, run) -> dict[str, Any]:
                        "agent_typing": store.is_typing(person, now),
                        "messages": [_message(m) for m in messages]})
     return {"id": str(run.id), "agent_id": run.agent_id, "status": run.status,
+            "channel": run.channel,
             "phone_number_id": run.phone_number_id, "created_by": run.created_by,
             "created_at": run.created_at.isoformat(),
             "ended_at": run.ended_at.isoformat() if run.ended_at else None, "people": people,
@@ -85,7 +89,7 @@ async def start_run(body: StartRun, request: Request):
         state.session_factory, state.vault, org_id=body.org_id, agent_id=body.agent_id,
         created_by=body.created_by, routing_config=body.routing_config,
         person_name=body.person_name.strip(), provision=state.provision,
-        templates=body.templates, flows=body.flows,
+        templates=body.templates, flows=body.flows, channel=body.channel,
     )
     return await _detail(state.session_factory, run)
 
@@ -93,7 +97,8 @@ async def start_run(body: StartRun, request: Request):
 @router.get("/runs")
 async def list_runs(org_id: uuid.UUID, agent_id: str, request: Request):
     sf = request.app.state.session_factory
-    return [{"id": str(r.id), "status": r.status, "created_by": r.created_by,
+    return [{"id": str(r.id), "status": r.status, "channel": r.channel,
+             "created_by": r.created_by,
              "created_at": r.created_at.isoformat(),
              "people": [p.name for p in await store.people(sf, r.id)]}
             for r in await store.list_runs(sf, org_id=org_id, agent_id=agent_id)]
@@ -115,6 +120,8 @@ async def write_as_person(run_id: uuid.UUID, person_id: uuid.UUID, org_id: uuid.
     person = next((p for p in await store.people(state.session_factory, run.id) if p.id == person_id), None)
     if person is None:
         raise HTTPException(status_code=404, detail="No such person in this rehearsal")
+    if run.channel == "telegram":
+        return await _write_on_telegram(state, run, person, body)
     wamid = f"wamid.R{secrets.token_hex(10)}"
     message: dict[str, Any] = {"from": person.address, "id": wamid,
                                "timestamp": str(int(datetime.now(timezone.utc).timestamp()))}
@@ -145,6 +152,44 @@ async def write_as_person(run_id: uuid.UUID, person_id: uuid.UUID, org_id: uuid.
     )
     delivered = 200 <= status < 300
     await store.set_status(state.session_factory, run.id, wamid, "delivered" if delivered else "failed")
+    return {"delivered": delivered, "channels_status": status}
+
+
+async def _write_on_telegram(state, run, person, body: PersonMessage) -> dict[str, Any]:
+    """The person's message or button tap, as the Update Telegram would POST."""
+    sf = state.session_factory
+    sender = {"id": int(person.address), "is_bot": False, "first_name": person.name}
+    chat = {"id": int(person.address), "type": "private", "first_name": person.name}
+    now = int(datetime.now(timezone.utc).timestamp())
+    update_id = await store.next_message_id(sf, run.id)
+    if body.callback:
+        tapped = await store.message(sf, run.id, str(body.callback.get("message_id") or ""))
+        if tapped is None or tapped.direction != "out":
+            raise HTTPException(status_code=404, detail="No such message to tap")
+        update = {"update_id": update_id, "callback_query": {
+            "id": secrets.token_hex(8), "from": sender, "chat_instance": person.address,
+            "message": tapped.body, "data": str(body.callback.get("data") or ""),
+        }}
+        status = await post_telegram_update(
+            state.http, channels_url=state.settings.rehearsal.channels_url,
+            bot_username=run.phone_number_id, webhook_secret=run.app_secret, update=update,
+        )
+        return {"delivered": 200 <= status < 300, "channels_status": status}
+    if not (body.text and body.text.strip()):
+        raise HTTPException(status_code=422, detail="Write something, or tap a button")
+    message = {"message_id": update_id, "from": sender, "chat": chat, "date": now,
+               "text": body.text}
+    wamid = str(update_id)
+    await store.log_message(sf, run_id=run.id, person_id=person.id, direction="in", kind="text",
+                            body=message, wamid=wamid)
+    status = await post_telegram_update(
+        state.http, channels_url=state.settings.rehearsal.channels_url,
+        bot_username=run.phone_number_id, webhook_secret=run.app_secret,
+        update={"update_id": update_id, "message": message},
+    )
+    delivered = 200 <= status < 300
+    # A bot takes a message the moment Telegram hands it over: two ticks.
+    await store.set_status(sf, run.id, wamid, "read" if delivered else "failed")
     return {"delivered": delivered, "channels_status": status}
 
 

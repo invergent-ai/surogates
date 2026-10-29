@@ -2913,7 +2913,11 @@ def _utcnow() -> datetime:
 
 
 class RehearsalRun(Base):
-    """One rehearsal: its world's WhatsApp number, credentials and status."""
+    """One rehearsal: its world, the agent's account in it, and its status.
+
+    The account columns keep their WhatsApp names; on Telegram they hold the
+    bot's username, its token and its webhook secret.
+    """
 
     __tablename__ = "rehearsal_runs"
 
@@ -2922,6 +2926,7 @@ class RehearsalRun(Base):
     agent_id: Mapped[str] = mapped_column(Text, nullable=False, index=True)
     created_by: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(Text, nullable=False, default="running")
+    channel: Mapped[str] = mapped_column(Text, nullable=False, default="whatsapp")
     phone_number_id: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
     access_token: Mapped[str] = mapped_column(Text, nullable=False)
     app_secret: Mapped[str] = mapped_column(Text, nullable=False)

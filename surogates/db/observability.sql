@@ -1444,3 +1444,5 @@ ALTER TABLE IF EXISTS rehearsal_runs
     ADD COLUMN IF NOT EXISTS templates jsonb NOT NULL DEFAULT '[]'::jsonb;
 ALTER TABLE IF EXISTS rehearsal_runs
     ADD COLUMN IF NOT EXISTS flows jsonb NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE IF EXISTS rehearsal_runs
+    ADD COLUMN IF NOT EXISTS channel text NOT NULL DEFAULT 'whatsapp';

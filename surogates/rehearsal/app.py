@@ -9,7 +9,7 @@ import uvicorn
 from fastapi import FastAPI
 
 from surogates.channels.identity import get_or_create_channel_identity
-from surogates.rehearsal import api, graph
+from surogates.rehearsal import api, graph, telegram
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +20,7 @@ def create_app(*, settings, session_factory, vault, http, provision=get_or_creat
     app.state.vault, app.state.http, app.state.provision = vault, http, provision
     app.include_router(api.router)
     app.include_router(graph.router)
+    app.include_router(telegram.router)
 
     @app.get("/health")
     async def health() -> dict:

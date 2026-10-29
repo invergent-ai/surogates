@@ -46,6 +46,7 @@ from surogates.channels.platforms.telegram_interactive import (
     tool_call_digest,
 )
 from surogates.channels.text_split import split_text
+from surogates.rehearsal.ids import is_rehearsal_id
 
 __all__ = [
     "TelegramPlatform",
@@ -333,9 +334,21 @@ def _parse(body: dict, *, bot_username: str) -> InboundMessage | None:
 # ---------------------------------------------------------------------------
 
 
+def _api_base(bot_token: str) -> str:
+    """Telegram, or the rehearsal world that owns a rehearsal bot.
+
+    A world is reached only for a rehearsal token and only on a deployment
+    that runs the rehearsal process.
+    """
+    rehearsal_url = os.environ.get("SUROGATES_REHEARSAL_URL", "").rstrip("/")
+    if rehearsal_url and is_rehearsal_id(bot_token):
+        return f"{rehearsal_url}/t"
+    return TELEGRAM_API_BASE
+
+
 def _bot_api_url(bot_token: str, method: str) -> str:
     """Return the full Telegram Bot API URL for *method*."""
-    return f"{TELEGRAM_API_BASE}/bot{bot_token}/{method}"
+    return f"{_api_base(bot_token)}/bot{bot_token}/{method}"
 
 
 def _extract_files(message: dict) -> list[InboundFileRef]:
@@ -819,7 +832,7 @@ class TelegramPlatform:
                 )
                 return None
             download_url = (
-                f"{TELEGRAM_API_BASE}/file/bot{bot_token}/{file_path}"
+                f"{_api_base(bot_token)}/file/bot{bot_token}/{file_path}"
             )
             resp = await self._http.get(download_url)
             if resp.status_code < 200 or resp.status_code >= 300:
