@@ -151,13 +151,36 @@ async def test_an_image_only_model_falls_back_to_the_images_api(tmp_path):
     def chat(kwargs):
         raise _Refused(400, "The parameter 'modalities' is not supported by this gateway profile")
 
-    provider = _Provider(
-        models=_listed(["image"]), chat=chat, images=lambda _: _images_answer(_png(1536, 1024)),
-    )
+    def images(kwargs):
+        if "aspect_ratio" in kwargs["extra_body"]:
+            raise _Refused(400, "Unknown parameter: 'aspect_ratio'")
+        return _images_answer(_png(1536, 1024))
+
+    provider = _Provider(models=_listed(["image"]), chat=chat, images=images)
     result = await _run(provider, {"aspect_ratio": "16:9"}, tmp_path)
     assert "error" not in result
     assert len(provider.chat_calls) == 1
-    assert provider.images_calls[0]["size"] == "1536x1024"
+    assert provider.images_calls[-1]["size"] == "1536x1024"
+
+
+@pytest.mark.asyncio
+async def test_a_gateway_that_serves_its_own_sizes_gets_the_ratio_not_an_openai_size(tmp_path):
+    # llm.buzz admits an Images request by the model's declared sizes: Gemini
+    # serves 1344x768 for 16:9 and refuses 1536x1024.
+    def chat(kwargs):
+        raise _Refused(400, "The parameter 'modalities' is not supported by this gateway profile")
+
+    def images(kwargs):
+        if "size" in kwargs:
+            raise _Refused(400, f"{MODEL} serves size 1024x1024, 1344x768; resend with one of them.")
+        assert kwargs["extra_body"]["aspect_ratio"] == "16:9"
+        return _images_answer(_png(1344, 768))
+
+    provider = _Provider(models=_listed(["image"]), chat=chat, images=images)
+    result = await _run(provider, {"aspect_ratio": "16:9"}, tmp_path)
+    assert "error" not in result
+    assert len(provider.images_calls) == 1
+    assert "not_as_asked" not in result
 
 
 @pytest.mark.asyncio
