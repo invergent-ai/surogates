@@ -18,7 +18,7 @@ from __future__ import annotations
 import uuid
 from uuid import UUID
 
-from sqlalchemy import delete, exists, or_, select, update
+from sqlalchemy import and_, delete, exists, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import func
@@ -100,14 +100,18 @@ def visible_users_filter(org_id: UUID, agent_id: str):
     somewhere or they become unmanageable orphans. A tombstoned
     (removed) binding is deliberately neither: the user neither shows
     on this agent nor resurfaces everywhere as an orphan — re-adding
-    them is the explicit attach path.
+    them is the explicit attach path. A rehearsal run's stand-in users
+    are never listed.
     """
     any_binding_row = select(AgentUser.user_id).where(
         AgentUser.org_id == org_id,
     )
-    return or_(
-        User.id.in_(active_bound_user_ids(org_id, [agent_id])),
-        User.id.not_in(any_binding_row),
+    return and_(
+        User.rehearsal_run_id.is_(None),
+        or_(
+            User.id.in_(active_bound_user_ids(org_id, [agent_id])),
+            User.id.not_in(any_binding_row),
+        ),
     )
 
 

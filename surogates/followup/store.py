@@ -187,6 +187,10 @@ async def enrollments(
             AgentUser.user_id == FollowupEnrollmentRow.user_id,
             AgentUser.removed_at.isnot(None),
         ))
+        .where(~sa.exists().where(
+            User.id == FollowupEnrollmentRow.user_id,
+            User.rehearsal_run_id.isnot(None),
+        ))
         .order_by(FollowupEnrollmentRow.created_at)
     )
     for column, value in (
