@@ -340,8 +340,10 @@ class SendMessageRequest(BaseModel):
     answers_open_question: bool = Field(
         default=False,
         description=(
-            "True when the content is a person's typed reply relayed by a "
-            "proxy; it then answers the session's open question, if any."
+            "Set only when the content is text a person typed in a chat that "
+            "shows the agent's question, relayed by a proxy; it then answers "
+            "the session's open question, if any. Leave it unset for text a "
+            "program sends."
         ),
     )
     # Free-form per-message metadata.  Used by the platform copilot to

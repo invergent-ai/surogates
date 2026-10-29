@@ -2230,11 +2230,11 @@ async def _proxy_session_with_open_question(client, session_factory):
 
 
 async def _question_state(session_factory, session_id):
-    """(inbox status, response events, user.message events)."""
+    """(inbox status or None, response events, user.message events)."""
     async with session_factory() as db:
         inbox = (await db.execute(
             select(InboxItem.status).where(InboxItem.session_id == session_id)
-        )).scalar_one()
+        )).scalar_one_or_none()
         types = (await db.execute(
             select(Event.type).where(Event.session_id == session_id)
         )).scalars().all()
@@ -2313,12 +2313,7 @@ async def test_api_message_with_flag_and_no_pending_question_is_normal(
         headers=headers,
     )
     assert resp.status_code == 202, resp.text
-    async with session_factory() as db:
-        types = (await db.execute(
-            select(Event.type).where(Event.session_id == sid)
-        )).scalars().all()
-    assert EventType.USER_MESSAGE.value in types
-    assert EventType.ASK_USER_QUESTION_RESPONSE.value not in types
+    assert await _question_state(session_factory, sid) == (None, 0, 1)
 
 
 async def test_api_message_with_flag_and_stale_question_is_normal(
@@ -2382,4 +2377,4 @@ async def test_api_message_with_flag_and_blank_content_is_not_an_answer(
         headers=headers,
     )
     assert resp.status_code == 202, resp.text
-    assert (await _question_state(session_factory, sid))[1] == 0
+    assert await _question_state(session_factory, sid) == ("pending", 0, 1)
