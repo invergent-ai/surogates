@@ -41,6 +41,8 @@ class PersonMessage(BaseModel):
     text: Optional[str] = None
     button_reply: Optional[dict[str, str]] = None
     list_reply: Optional[dict[str, str]] = None
+    #: A template's quick-reply button: ``{"text", "payload"}``.
+    quick_reply: Optional[dict[str, str]] = None
 
 
 def _message(m) -> dict[str, Any]:
@@ -113,6 +115,8 @@ async def write_as_person(run_id: uuid.UUID, person_id: uuid.UUID, org_id: uuid.
     if body.button_reply:
         message |= {"type": "interactive",
                     "interactive": {"type": "button_reply", "button_reply": body.button_reply}}
+    elif body.quick_reply:
+        message |= {"type": "button", "button": body.quick_reply}
     elif body.list_reply:
         message |= {"type": "interactive",
                     "interactive": {"type": "list_reply", "list_reply": body.list_reply}}

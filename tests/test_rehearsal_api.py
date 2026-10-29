@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 
 import httpx
@@ -63,8 +64,17 @@ async def test_run_lifecycle(rsf):  # noqa: F811
     sent = hook.calls[0].request.content.decode()
     assert "programare" in sent and person["address"] in sent
 
+    with respx.mock(assert_all_called=True) as mock:
+        hook = mock.post(f"http://channels:8003/whatsapp/{run['phone_number_id']}").mock(
+            return_value=httpx.Response(200),
+        )
+        await client.post(f"/internal/runs/{run['id']}/people/{person['id']}/messages",
+                          params=org, json={"quick_reply": {"text": "Confirm", "payload": "yes"}})
+    tapped = json.loads(hook.calls[0].request.content)["entry"][0]["changes"][0]["value"]["messages"][0]
+    assert tapped["type"] == "button" and tapped["button"] == {"text": "Confirm", "payload": "yes"}
+
     detail = (await client.get(f"/internal/runs/{run['id']}", params=org)).json()
-    [message] = detail["people"][0]["messages"]
+    message = detail["people"][0]["messages"][0]
     assert message["direction"] == "in" and message["status"] == "delivered"
     assert detail["people"][0]["window_open"] is True
 
