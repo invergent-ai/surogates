@@ -41,8 +41,11 @@ VAULT_CREDENTIALS = {
 CHANNELS = tuple(VAULT_CREDENTIALS)
 
 _WINDOW = timedelta(hours=24)
-#: WhatsApp drops a typing indicator after 25 seconds, or when a message is sent.
-_TYPING = timedelta(seconds=25)
+#: How long each platform shows "typing…" unless the bot refreshes it or sends
+#: a message: WhatsApp 25 s, Telegram 5 s, Teams about 3 s (given 5 here, as
+#: the adapter refreshes every 3 s and Studio polls in between).
+_TYPING = {"whatsapp": timedelta(seconds=25), "telegram": timedelta(seconds=5),
+           "teams": timedelta(seconds=5)}
 
 Provision = Callable[..., Awaitable[ResolvedIdentity]]
 
@@ -249,7 +252,8 @@ async def set_person_typing(sf, person_id: uuid.UUID, typing: bool) -> None:
 
 
 def is_typing(person: RehearsalPerson, now: datetime) -> bool:
-    return person.agent_typing_at is not None and now - person.agent_typing_at < _TYPING
+    shown = _TYPING.get(person.channel, timedelta(seconds=5))
+    return person.agent_typing_at is not None and now - person.agent_typing_at < shown
 
 
 async def thread(sf, person_id: uuid.UUID) -> Sequence[RehearsalMessage]:
