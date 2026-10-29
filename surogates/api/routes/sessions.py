@@ -336,10 +336,7 @@ class AttachmentRef(BaseModel):
 class SendMessageRequest(BaseModel):
     content: str
     images: list[ImageBlock] | None = None
-    # Set by a chat proxy (a service-account caller relaying what a person
-    # typed in its own chat) to say this text is that person's reply, so it
-    # may answer the question the agent is waiting on.  Without it the
-    # ``/v1/api/`` path never reinterprets a message.
+    # Set by a chat proxy relaying a person's typed reply (see description).
     answers_open_question: bool = Field(
         default=False,
         description=(
@@ -1290,9 +1287,8 @@ async def deliver_message(
     # until its timeout).  Guards, in order: only a message its person
     # typed (a route's own message, a mention's, is no reply); only
     # genuinely-active sessions (a terminal session's tool already
-    # cancelled itself); only real web users, or an API caller that
-    # opts in with ``answers_open_question`` (a service-account client
-    # cannot otherwise detect the reinterpretation); only pure text
+    # cancelled itself); only real web users, or a chat proxy that sets
+    # answers_open_question for a person's typed text; only pure text
     # (images/attachments are new material for the next turn).  The
     # claim is atomic among claim-first callers; the form's respond
     # route emits first and claims best-effort, so the helper also

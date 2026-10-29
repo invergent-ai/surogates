@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import uuid
+from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 import pytest
@@ -2199,7 +2200,7 @@ _TINY_PNG = (
 )
 
 
-async def _proxy_session_with_open_question(client, session_factory):
+async def _proxy_session(client, session_factory):
     org_id = await create_org(session_factory)
     issued = await issue_service_account_token(session_factory, org_id, name="ops-chat")
     headers = {"Authorization": f"Bearer {issued.token}"}
@@ -2207,17 +2208,25 @@ async def _proxy_session_with_open_question(client, session_factory):
         "/v1/api/sessions", json={"config": {"source": "ops"}}, headers=headers,
     )
     assert created.status_code == 201, created.text
-    session_id = UUID(created.json()["id"])
+    return UUID(created.json()["id"]), headers
+
+
+async def _open_question(session_factory, session_id, tool_call_id="tc-proxy"):
     await SessionStore(session_factory).emit_event(
         session_id,
         EventType.INBOX_INPUT_REQUIRED,
         {
-            "tool_call_id": "tc-proxy",
+            "tool_call_id": tool_call_id,
             "questions": [{"prompt": "Which region?"}],
             "context": "",
         },
     )
-    return session_id, headers
+
+
+async def _proxy_session_with_open_question(client, session_factory):
+    sid, headers = await _proxy_session(client, session_factory)
+    await _open_question(session_factory, sid)
+    return sid, headers
 
 
 async def _question_state(session_factory, session_id):
@@ -2249,31 +2258,25 @@ async def test_api_message_with_flag_answers_the_open_question(
     assert await _question_state(session_factory, sid) == ("responded", 1, 0)
 
 
-async def test_api_message_without_flag_is_a_normal_message(
-    client: AsyncClient, session_factory
-):
-    sid, headers = await _proxy_session_with_open_question(client, session_factory)
-    resp = await client.post(
-        f"/v1/api/sessions/{sid}/messages",
-        json={"content": "eu-west"},
-        headers=headers,
-    )
-    assert resp.status_code == 202, resp.text
-    assert await _question_state(session_factory, sid) == ("pending", 0, 1)
-
-
-async def test_api_message_with_flag_and_image_is_a_normal_message(
-    client: AsyncClient, session_factory
-):
-    sid, headers = await _proxy_session_with_open_question(client, session_factory)
-    resp = await client.post(
-        f"/v1/api/sessions/{sid}/messages",
-        json={
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"content": "eu-west"},
+        {
             "content": "eu-west",
             "answers_open_question": True,
             "images": [{"data": _TINY_PNG, "mime_type": "image/png"}],
         },
-        headers=headers,
+        {"content": "/compress", "answers_open_question": True},
+    ],
+    ids=["no-flag", "image", "builtin-command"],
+)
+async def test_api_message_that_is_not_a_plain_reply_is_a_normal_message(
+    client: AsyncClient, session_factory, payload
+):
+    sid, headers = await _proxy_session_with_open_question(client, session_factory)
+    resp = await client.post(
+        f"/v1/api/sessions/{sid}/messages", json=payload, headers=headers,
     )
     assert resp.status_code == 202, resp.text
     assert await _question_state(session_factory, sid) == ("pending", 0, 1)
@@ -2300,29 +2303,10 @@ async def test_api_message_with_flag_and_attachment_is_not_an_answer(
     assert await _question_state(session_factory, sid) == ("pending", 0, 0)
 
 
-async def test_api_message_with_flag_and_builtin_command_is_a_normal_message(
-    client: AsyncClient, session_factory
-):
-    sid, headers = await _proxy_session_with_open_question(client, session_factory)
-    resp = await client.post(
-        f"/v1/api/sessions/{sid}/messages",
-        json={"content": "/compress", "answers_open_question": True},
-        headers=headers,
-    )
-    assert resp.status_code == 202, resp.text
-    assert await _question_state(session_factory, sid) == ("pending", 0, 1)
-
-
 async def test_api_message_with_flag_and_no_pending_question_is_normal(
     client: AsyncClient, session_factory
 ):
-    org_id = await create_org(session_factory)
-    issued = await issue_service_account_token(session_factory, org_id, name="ops-chat")
-    headers = {"Authorization": f"Bearer {issued.token}"}
-    created = await client.post(
-        "/v1/api/sessions", json={"config": {"source": "ops"}}, headers=headers,
-    )
-    sid = UUID(created.json()["id"])
+    sid, headers = await _proxy_session(client, session_factory)
     resp = await client.post(
         f"/v1/api/sessions/{sid}/messages",
         json={"content": "hi", "answers_open_question": True},
@@ -2340,8 +2324,6 @@ async def test_api_message_with_flag_and_no_pending_question_is_normal(
 async def test_api_message_with_flag_and_stale_question_is_normal(
     client: AsyncClient, session_factory
 ):
-    from datetime import datetime, timedelta, timezone
-
     sid, headers = await _proxy_session_with_open_question(client, session_factory)
     async with session_factory() as db:
         await db.execute(
@@ -2368,11 +2350,7 @@ async def test_web_message_still_answers_the_open_question(
         "/v1/sessions", json={"model": "gpt-4o"}, headers=headers,
     )
     sid = UUID(created.json()["id"])
-    await SessionStore(session_factory).emit_event(
-        sid,
-        EventType.INBOX_INPUT_REQUIRED,
-        {"tool_call_id": "tc-web", "questions": [{"prompt": "Which?"}], "context": ""},
-    )
+    await _open_question(session_factory, sid, "tc-web")
     resp = await client.post(
         f"/v1/sessions/{sid}/messages", json={"content": "this one"}, headers=headers,
     )
@@ -2398,12 +2376,10 @@ async def test_api_message_with_flag_and_blank_content_is_not_an_answer(
     client: AsyncClient, session_factory
 ):
     sid, headers = await _proxy_session_with_open_question(client, session_factory)
-    await client.post(
+    resp = await client.post(
         f"/v1/api/sessions/{sid}/messages",
-        json={
-            "content": "   ",
-            "answers_open_question": True,
-        },
+        json={"content": "   ", "answers_open_question": True},
         headers=headers,
     )
+    assert resp.status_code == 202, resp.text
     assert (await _question_state(session_factory, sid))[1] == 0
