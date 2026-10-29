@@ -570,7 +570,7 @@ async def run_channels(settings: Any, kind: str | None = None) -> None:
         base_url=settings.platform_api_url,
         token=settings.platform_api_token,
     )
-    cache = build_channel_routing_cache(settings=settings, platform_client=client)
+    cache = build_channel_routing_cache(settings=settings, platform_client=client, session_factory=sf)
     mate_cache = build_mate_settings_cache(settings=settings, platform_client=client)
 
     delivery_service = DeliveryService(session_factory=sf, redis_client=redis)

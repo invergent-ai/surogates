@@ -383,16 +383,25 @@ def build_memory_cache(*, settings, storage_backend):
     return MemoryCache(loader=_loader, ttl_seconds=5.0)
 
 
-def build_channel_routing_cache(*, settings, platform_client):
+def build_channel_routing_cache(*, settings, platform_client, session_factory=None):
     """Construct a :class:`ChannelRoutingCache`.
 
     Loader splits the cache key ``"<kind>:<identifier>"`` back into
-    the two :meth:`PlatformClient.get_channel_routing` args.
+    the two :meth:`PlatformClient.get_channel_routing` args.  A rehearsal
+    number routes from the runtime DB and never reaches ops' table, so no ops
+    reader of channel routing (senders, the Channels screen) can meet one.
     """
+    from surogates.rehearsal.ids import is_rehearsal_id
     from surogates.runtime import ChannelRoutingCache
 
     async def _loader(key: str) -> dict | None:
         kind, _, identifier = key.partition(":")
+        if session_factory is not None and is_rehearsal_id(identifier):
+            from surogates.rehearsal.store import routing_for
+
+            routing = await routing_for(session_factory, kind, identifier)
+            if routing is not None:
+                return routing
         return await platform_client.get_channel_routing(kind, identifier)
 
     return ChannelRoutingCache(loader=_loader, ttl_seconds=30.0)
