@@ -61,6 +61,7 @@ except ImportError:
     SlackApiError = Exception  # type: ignore[misc,assignment]
 
 from surogates.channels.errors import ChannelApiError
+from surogates.rehearsal.ids import is_rehearsal_id
 
 from fastapi.responses import Response
 
@@ -129,8 +130,16 @@ def _slack_error_code(exc: SlackApiError) -> str:
 SLACK_API_BASE = os.environ.get("SUROGATES_SLACK_API_BASE") or "https://slack.com/api/"
 
 
+def _api_base(bot_token: str) -> str:
+    """Slack, or the rehearsal world that owns a rehearsal bot token."""
+    rehearsal_url = os.environ.get("SUROGATES_REHEARSAL_URL", "").rstrip("/")
+    if rehearsal_url and is_rehearsal_id(bot_token.removeprefix("xoxb-")):
+        return f"{rehearsal_url}/s/api/"
+    return SLACK_API_BASE
+
+
 def web_client(bot_token: str) -> AsyncWebClient:
-    return AsyncWebClient(token=bot_token, base_url=SLACK_API_BASE)
+    return AsyncWebClient(token=bot_token, base_url=_api_base(bot_token))
 
 
 # Replay-guard window in seconds (±5 minutes matches Slack's recommendation).

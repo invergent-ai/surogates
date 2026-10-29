@@ -23,6 +23,9 @@ from surogates.rehearsal.ids import (
     new_bot_token,
     new_bot_username,
     new_phone_number_id,
+    new_slack_app_id,
+    new_slack_bot_token,
+    new_slack_user_id,
     new_telegram_user_id,
     new_wa_id,
 )
@@ -30,6 +33,7 @@ from surogates.rehearsal.ids import (
 VAULT_CREDENTIALS = {
     "whatsapp": ("access_token", "app_secret", "verify_token", "phone_number_id", "api_version"),
     "telegram": ("bot_token", "webhook_secret"),
+    "slack": ("bot_token", "signing_secret"),
 }
 CHANNELS = tuple(VAULT_CREDENTIALS)
 
@@ -50,6 +54,8 @@ async def create_run(
 ) -> RehearsalRun:
     if channel == "telegram":
         account, token = new_bot_username(), new_bot_token()
+    elif channel == "slack":
+        account, token = new_slack_app_id(), new_slack_bot_token()
     else:
         account, token = new_phone_number_id(), "EAA" + secrets.token_urlsafe(96)
     run = RehearsalRun(
@@ -63,6 +69,8 @@ async def create_run(
         await db.commit()
     if channel == "telegram":
         creds = {"bot_token": run.access_token, "webhook_secret": run.app_secret}
+    elif channel == "slack":
+        creds = {"bot_token": run.access_token, "signing_secret": run.app_secret}
     else:
         creds = {
             "access_token": run.access_token, "app_secret": run.app_secret,
@@ -76,7 +84,8 @@ async def create_run(
 
 
 async def add_person(sf, run: RehearsalRun, *, name: str, provision: Provision) -> RehearsalPerson:
-    address = new_telegram_user_id() if run.channel == "telegram" else new_wa_id()
+    address = {"telegram": new_telegram_user_id, "slack": new_slack_user_id}.get(
+        run.channel, new_wa_id)()
     # The same call the inbound pipeline makes for an unknown sender: the
     # pipeline then finds this identity, already marked as the run's.
     identity = await provision(
@@ -157,6 +166,16 @@ async def replace_body(sf, run_id: uuid.UUID, wamid: str, body: dict[str, Any]) 
                                   .where(RehearsalMessage.run_id == run_id,
                                          RehearsalMessage.wamid == wamid)
                                   .values(body=body))
+        await db.commit()
+    return result.rowcount > 0
+
+
+async def delete_message(sf, run_id: uuid.UUID, wamid: str) -> bool:
+    async with sf() as db:
+        result = await db.execute(sa.delete(RehearsalMessage).where(
+            RehearsalMessage.run_id == run_id, RehearsalMessage.wamid == wamid,
+            RehearsalMessage.direction == "out",
+        ))
         await db.commit()
     return result.rowcount > 0
 

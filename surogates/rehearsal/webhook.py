@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import time
 import logging
 from typing import Any
 
@@ -54,5 +55,25 @@ async def post_telegram_update(
         )
     except httpx.HTTPError as exc:
         logger.warning("[rehearsal] telegram update to channels failed (%s)", exc)
+        return 0
+    return response.status_code
+
+
+async def post_slack(
+    client: httpx.AsyncClient, *, channels_url: str, app_id: str, signing_secret: str,
+    path: str, raw: bytes, content_type: str,
+) -> int:
+    """POST to ``/slack/{app_id}{path}`` signed as Slack signs; returns the HTTP status (0 on failure)."""
+    ts = str(int(time.time()))
+    signature = "v0=" + hmac.new(signing_secret.encode(), b"v0:" + ts.encode() + b":" + raw,
+                                 hashlib.sha256).hexdigest()
+    try:
+        response = await client.post(
+            f"{channels_url.rstrip('/')}/slack/{app_id}{path}", content=raw,
+            headers={"Content-Type": content_type, "X-Slack-Request-Timestamp": ts,
+                     "X-Slack-Signature": signature},
+        )
+    except httpx.HTTPError as exc:
+        logger.warning("[rehearsal] slack delivery to channels failed (%s)", exc)
         return 0
     return response.status_code

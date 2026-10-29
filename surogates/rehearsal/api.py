@@ -6,18 +6,21 @@ user's rights on the agent first and passes the org every call is scoped to.
 
 from __future__ import annotations
 
+import functools
 import json
 
 import secrets
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Literal, Optional
+from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from surogates.rehearsal import store
-from surogates.rehearsal.webhook import post_telegram_update, post_webhook
+from surogates.rehearsal import slack
+from surogates.rehearsal.webhook import post_slack, post_telegram_update, post_webhook
 
 
 def _require_internal_token(request: Request) -> None:
@@ -38,7 +41,7 @@ class StartRun(BaseModel):
     routing_config: dict[str, Any] = Field(default_factory=dict)
     templates: list[dict[str, Any]] = Field(default_factory=list)
     flows: list[dict[str, Any]] = Field(default_factory=list)
-    channel: Literal["whatsapp", "telegram"] = "whatsapp"
+    channel: Literal["whatsapp", "telegram", "slack"] = "whatsapp"
 
 
 class PersonMessage(BaseModel):
@@ -51,6 +54,11 @@ class PersonMessage(BaseModel):
     form_reply: Optional[dict[str, Any]] = None
     #: A Telegram inline-keyboard tap: ``{"message_id", "data"}``.
     callback: Optional[dict[str, str]] = None
+    #: A Slack Block Kit button click: ``{"ts", "action_id"}``.
+    action: Optional[dict[str, str]] = None
+    #: A Slack modal: ``{"id", "values": {block_id: answer}}`` submits it,
+    #: ``{"id", "cancel": true}`` closes it.
+    view: Optional[dict[str, Any]] = None
 
 
 def _message(m) -> dict[str, Any]:
@@ -122,6 +130,8 @@ async def write_as_person(run_id: uuid.UUID, person_id: uuid.UUID, org_id: uuid.
         raise HTTPException(status_code=404, detail="No such person in this rehearsal")
     if run.channel == "telegram":
         return await _write_on_telegram(state, run, person, body)
+    if run.channel == "slack":
+        return await _write_on_slack(state, run, person, body)
     wamid = f"wamid.R{secrets.token_hex(10)}"
     message: dict[str, Any] = {"from": person.address, "id": wamid,
                                "timestamp": str(int(datetime.now(timezone.utc).timestamp()))}
@@ -190,6 +200,99 @@ async def _write_on_telegram(state, run, person, body: PersonMessage) -> dict[st
     delivered = 200 <= status < 300
     # A bot takes a message the moment Telegram hands it over: two ticks.
     await store.set_status(sf, run.id, wamid, "read" if delivered else "failed")
+    return {"delivered": delivered, "channels_status": status}
+
+
+def _modal_state(view: dict[str, Any], answers: dict[str, Any]) -> dict[str, Any]:
+    """Slack's ``view.state.values`` for *answers* keyed by block_id: an option value or text."""
+    values: dict[str, Any] = {}
+    for block in view.get("blocks") or []:
+        element = block.get("element") or {}
+        if block.get("type") != "input" or not element.get("action_id"):
+            continue
+        answer = answers.get(block.get("block_id"))
+        if element.get("type") == "static_select":
+            option = next((o for o in element.get("options") or [] if o.get("value") == answer), None)
+            values[block["block_id"]] = {element["action_id"]: {
+                "type": "static_select", "selected_option": option}}
+        else:
+            values[block["block_id"]] = {element["action_id"]: {
+                "type": element.get("type") or "plain_text_input",
+                "value": None if answer in (None, "") else str(answer)}}
+    return values
+
+
+async def _write_on_slack(state, run, person, body: PersonMessage) -> dict[str, Any]:
+    """The member's message, button click or modal, as Slack would deliver it."""
+    sf = state.session_factory
+    team = {"id": slack.team_id(run), "domain": "rehearsal"}
+    user = {"id": person.address, "username": person.name.lower(), "name": person.name.lower(),
+            "team_id": team["id"]}
+    deliver = functools.partial(
+        post_slack, state.http, channels_url=state.settings.rehearsal.channels_url,
+        app_id=run.phone_number_id, signing_secret=run.app_secret,
+    )
+    trigger = f"{person.address}.{secrets.token_hex(6)}"
+
+    def interaction(payload: dict[str, Any]):
+        raw = urlencode({"payload": json.dumps(payload)}).encode()
+        return deliver(path="/interact", raw=raw, content_type="application/x-www-form-urlencoded")
+
+    if body.view:
+        opened = await store.message(sf, run.id, str(body.view.get("id") or ""))
+        if opened is None or opened.kind != "view" or opened.status != "open":
+            raise HTTPException(status_code=404, detail="No open modal")
+        if body.view.get("cancel"):
+            await store.set_status(sf, run.id, opened.wamid, "closed")
+            return {"delivered": True, "channels_status": 200}
+        view = opened.body["view"]
+        submitted = {**view, "state": {"values": _modal_state(view, body.view.get("values") or {})}}
+        status = await interaction({"type": "view_submission", "user": user, "team": team,
+                                    "api_app_id": run.phone_number_id, "trigger_id": trigger,
+                                    "view": submitted})
+        if 200 <= status < 300:
+            await store.set_status(sf, run.id, opened.wamid, "closed")
+        return {"delivered": 200 <= status < 300, "channels_status": status}
+
+    if body.action:
+        tapped = await store.message(sf, run.id, str(body.action.get("ts") or ""))
+        if tapped is None or tapped.direction != "out":
+            raise HTTPException(status_code=404, detail="No such message to click")
+        for block in tapped.body.get("blocks") or []:
+            for element in block.get("elements") or [] if block.get("type") == "actions" else []:
+                if element.get("action_id") != body.action.get("action_id"):
+                    continue
+                status = await interaction({
+                    "type": "block_actions", "user": user, "team": team,
+                    "api_app_id": run.phone_number_id, "trigger_id": trigger,
+                    "container": {"type": "message", "message_ts": tapped.wamid,
+                                  "channel_id": slack.dm_of(person.address), "is_ephemeral": False},
+                    "channel": {"id": slack.dm_of(person.address), "name": "directmessage"},
+                    "message": tapped.body,
+                    "actions": [{"type": "button", "action_id": element.get("action_id"),
+                                 "block_id": block.get("block_id", ""),
+                                 "value": element.get("value", ""), "text": element.get("text"),
+                                 "action_ts": slack.new_ts()}],
+                })
+                return {"delivered": 200 <= status < 300, "channels_status": status}
+        raise HTTPException(status_code=404, detail="No such button")
+
+    if not (body.text and body.text.strip()):
+        raise HTTPException(status_code=422, detail="Write something, or click a button")
+    ts = slack.new_ts()
+    event = {"type": "message", "channel": slack.dm_of(person.address), "channel_type": "im",
+             "user": person.address, "text": body.text, "ts": ts, "event_ts": ts, "team": team["id"]}
+    await store.log_message(sf, run_id=run.id, person_id=person.id, direction="in", kind="message",
+                            body=event, wamid=ts)
+    raw = json.dumps({
+        "token": "rehearsal", "team_id": team["id"], "api_app_id": run.phone_number_id,
+        "event": event, "type": "event_callback", "event_id": f"Ev{secrets.token_hex(6)}",
+        "event_time": int(datetime.now(timezone.utc).timestamp()),
+        "authorizations": [{"team_id": team["id"], "user_id": slack.bot_user_id(run), "is_bot": True}],
+    }).encode()
+    status = await deliver(path="", raw=raw, content_type="application/json")
+    delivered = 200 <= status < 300
+    await store.set_status(sf, run.id, ts, "sent" if delivered else "failed")
     return {"delivered": delivered, "channels_status": status}
 
 
