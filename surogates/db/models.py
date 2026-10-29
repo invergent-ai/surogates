@@ -207,6 +207,11 @@ class User(Base):
     preferences: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, server_default="{}"
     )
+    # Set on the stand-in users a rehearsal run creates, so no reader of real
+    # people ever lists them.
+    rehearsal_run_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), nullable=True, index=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         nullable=False, server_default=func.now()
     )
@@ -2896,3 +2901,83 @@ class WebPushSubscription(Base):
     p256dh: Mapped[str] = mapped_column(Text, nullable=False)
     auth: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False, server_default=func.now())
+
+
+# ---------------------------------------------------------------------------
+# Rehearsal
+# ---------------------------------------------------------------------------
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+class RehearsalRun(Base):
+    """One rehearsal: its world's WhatsApp number, credentials and status."""
+
+    __tablename__ = "rehearsal_runs"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    org_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("orgs.id"), nullable=False)
+    agent_id: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    created_by: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="running")
+    phone_number_id: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    access_token: Mapped[str] = mapped_column(Text, nullable=False)
+    app_secret: Mapped[str] = mapped_column(Text, nullable=False)
+    #: The agent's own WhatsApp behaviour config, copied so the run behaves
+    #: like the real channel (identity policy, multi-session, ...).
+    routing_config: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False, default=_utcnow)
+    ended_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+
+
+class RehearsalPerson(Base):
+    """Someone a run's user writes as."""
+
+    __tablename__ = "rehearsal_people"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("rehearsal_runs.id", ondelete="CASCADE"), nullable=False, index=True,
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    channel: Mapped[str] = mapped_column(Text, nullable=False)
+    #: The person's address on their channel, e.g. a WhatsApp wa_id.
+    address: Mapped[str] = mapped_column(Text, nullable=False)
+    user_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False, default=_utcnow)
+
+
+class RehearsalMessage(Base):
+    """One message in a world, in Meta's own shape."""
+
+    __tablename__ = "rehearsal_messages"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("rehearsal_runs.id", ondelete="CASCADE"), nullable=False, index=True,
+    )
+    person_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("rehearsal_people.id", ondelete="CASCADE"), nullable=False,
+    )
+    #: ``in``: the person wrote it; ``out``: the agent sent it.
+    direction: Mapped[str] = mapped_column(Text, nullable=False)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    body: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    wamid: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False, default=_utcnow)
+
+
+class RehearsalMedia(Base):
+    """A file uploaded into a world, by the agent or by the person."""
+
+    __tablename__ = "rehearsal_media"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("rehearsal_runs.id", ondelete="CASCADE"), nullable=False,
+    )
+    mime_type: Mapped[str] = mapped_column(Text, nullable=False)
+    data: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)

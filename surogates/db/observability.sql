@@ -1431,3 +1431,8 @@ WHERE o.state IN ('queued', 'awaiting_reply')
 -- An agent-owned browser profile used, without being bound, on these channels.
 ALTER TABLE browser_profiles
     ADD COLUMN IF NOT EXISTS use_in_channels text[] NOT NULL DEFAULT '{}'::text[];
+
+-- The stand-in users a rehearsal run creates; readers of real people skip them.
+ALTER TABLE users
+    ADD COLUMN IF NOT EXISTS rehearsal_run_id uuid;
+CREATE INDEX IF NOT EXISTS ix_users_rehearsal_run_id ON users (rehearsal_run_id);
