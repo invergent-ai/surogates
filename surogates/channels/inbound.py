@@ -769,7 +769,7 @@ class ChannelInboundPipeline:
         single_session = multi_session_disabled(config)
         session_key = build_session_key_for_config(source, config)
 
-        from surogates.channels.memory_boundary import boundary_token
+        from surogates.channels.memory_boundary import boundary_token, rehearsal_boundary
 
         memory_boundary = boundary_token(
             platform=routing.platform,
@@ -788,6 +788,10 @@ class ChannelInboundPipeline:
                 ) or memory_boundary
             except Exception:  # noqa: BLE001 — the conversation's own partition
                 logger.warning("[inbound] shared memory partition lookup failed", exc_info=True)
+        # A rehearsal run's conversation: memory stays inside the run, and the
+        # boundary is what ops hides from every reader of real data.
+        if config.get("rehearsal_run_id"):
+            memory_boundary = rehearsal_boundary(config["rehearsal_run_id"], memory_boundary)
 
         session_id = await deps.get_or_create_session(
             deps.session_store,

@@ -1576,3 +1576,16 @@ async def test_a_disclosure_the_channel_could_not_post_is_not_recorded_as_shown(
 
     [said] = [d for _, t, d in deps.session_store.events if t == EventType.USER_MESSAGE]
     assert disclosure_note("I am an AI.") not in build_user_message_dict(said)["content"]
+
+
+@pytest.mark.asyncio
+async def test_rehearsal_routing_nests_the_memory_boundary():
+    """A rehearsal run's conversation keeps memory inside the run and is hidden by ops."""
+    deps = _make_deps()
+    msg = _make_msg(is_dm=True, ts="95.0")
+    config = {**_make_config(require_mention=False), "rehearsal_run_id": "run-1"}
+
+    await ChannelInboundPipeline().handle(msg, routing=_make_routing(), config=config, deps=deps)
+
+    boundary = deps._sessions_created[-1]["config"]["memory_boundary"]
+    assert boundary.startswith("rehearsal:run-1:")
