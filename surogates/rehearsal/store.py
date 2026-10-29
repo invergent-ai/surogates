@@ -33,12 +33,14 @@ async def create_run(
     routing_config: dict[str, Any], person_name: str,
     provision: Provision = get_or_create_channel_identity,
     templates: list[dict[str, Any]] | None = None,
+    flows: list[dict[str, Any]] | None = None,
 ) -> RehearsalRun:
     run = RehearsalRun(
         org_id=org_id, agent_id=agent_id, created_by=created_by,
         phone_number_id=new_phone_number_id(),
         access_token="EAA" + secrets.token_urlsafe(96), app_secret=secrets.token_hex(16),
         routing_config=dict(routing_config or {}), templates=list(templates or []),
+        flows=list(flows or []),
     )
     async with sf() as db:
         db.add(run)

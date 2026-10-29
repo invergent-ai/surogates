@@ -40,7 +40,7 @@ async def _client(sf):
 async def _start(client, org_id):
     r = await client.post("/internal/runs", json={
         "org_id": str(org_id), "agent_id": "a1", "created_by": "u1", "person_name": "Ana",
-        "routing_config": {},
+        "routing_config": {}, "flows": [{"id": "f1", "name": "intake", "json": {"screens": []}}],
     })
     assert r.status_code == 201
     return r.json()
@@ -73,10 +73,22 @@ async def test_run_lifecycle(rsf):  # noqa: F811
     tapped = json.loads(hook.calls[0].request.content)["entry"][0]["changes"][0]["value"]["messages"][0]
     assert tapped["type"] == "button" and tapped["button"] == {"text": "Confirm", "payload": "yes"}
 
+    with respx.mock(assert_all_called=True) as mock:
+        hook = mock.post(f"http://channels:8003/whatsapp/{run['phone_number_id']}").mock(
+            return_value=httpx.Response(200),
+        )
+        await client.post(f"/internal/runs/{run['id']}/people/{person['id']}/messages", params=org,
+                          json={"form_reply": {"flow_token": "intake:abc", "varsta": "54"}})
+    filled = json.loads(hook.calls[0].request.content)["entry"][0]["changes"][0]["value"]["messages"][0]
+    reply = filled["interactive"]["nfm_reply"]
+    assert filled["interactive"]["type"] == "nfm_reply"
+    assert json.loads(reply["response_json"]) == {"flow_token": "intake:abc", "varsta": "54"}
+
     detail = (await client.get(f"/internal/runs/{run['id']}", params=org)).json()
     message = detail["people"][0]["messages"][0]
     assert message["direction"] == "in" and message["status"] == "delivered"
     assert detail["people"][0]["window_open"] is True
+    assert detail["flows"][0]["name"] == "intake"
 
     listed = (await client.get("/internal/runs", params={**org, "agent_id": "a1"})).json()
     assert [r["id"] for r in listed] == [run["id"]]

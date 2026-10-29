@@ -2931,6 +2931,9 @@ class RehearsalRun(Base):
     #: The agent's WhatsApp message templates as Meta lists them, so a
     #: template the agent sends shows with its real header, body and buttons.
     templates: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, default=list)
+    #: The agent's WhatsApp Flows as ``{id, name, json}``, so a form the
+    #: agent sends opens with its real screens.
+    flows: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, default=list)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False, default=_utcnow)
     ended_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
 

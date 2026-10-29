@@ -1442,3 +1442,5 @@ ALTER TABLE IF EXISTS rehearsal_people
     ADD COLUMN IF NOT EXISTS agent_typing_at timestamptz;
 ALTER TABLE IF EXISTS rehearsal_runs
     ADD COLUMN IF NOT EXISTS templates jsonb NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE IF EXISTS rehearsal_runs
+    ADD COLUMN IF NOT EXISTS flows jsonb NOT NULL DEFAULT '[]'::jsonb;

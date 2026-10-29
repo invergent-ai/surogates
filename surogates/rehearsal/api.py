@@ -6,6 +6,8 @@ user's rights on the agent first and passes the org every call is scoped to.
 
 from __future__ import annotations
 
+import json
+
 import secrets
 import uuid
 from datetime import datetime, timezone
@@ -35,6 +37,7 @@ class StartRun(BaseModel):
     person_name: str = Field(min_length=1, max_length=80)
     routing_config: dict[str, Any] = Field(default_factory=dict)
     templates: list[dict[str, Any]] = Field(default_factory=list)
+    flows: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class PersonMessage(BaseModel):
@@ -43,6 +46,8 @@ class PersonMessage(BaseModel):
     list_reply: Optional[dict[str, str]] = None
     #: A template's quick-reply button: ``{"text", "payload"}``.
     quick_reply: Optional[dict[str, str]] = None
+    #: A completed WhatsApp Flow: the ``complete`` payload, ``flow_token`` included.
+    form_reply: Optional[dict[str, Any]] = None
 
 
 def _message(m) -> dict[str, Any]:
@@ -62,7 +67,8 @@ async def _detail(sf, run) -> dict[str, Any]:
     return {"id": str(run.id), "agent_id": run.agent_id, "status": run.status,
             "phone_number_id": run.phone_number_id, "created_by": run.created_by,
             "created_at": run.created_at.isoformat(),
-            "ended_at": run.ended_at.isoformat() if run.ended_at else None, "people": people}
+            "ended_at": run.ended_at.isoformat() if run.ended_at else None, "people": people,
+            "flows": run.flows or []}
 
 
 async def _run_in_org(request: Request, run_id: uuid.UUID, org_id: uuid.UUID):
@@ -79,7 +85,7 @@ async def start_run(body: StartRun, request: Request):
         state.session_factory, state.vault, org_id=body.org_id, agent_id=body.agent_id,
         created_by=body.created_by, routing_config=body.routing_config,
         person_name=body.person_name.strip(), provision=state.provision,
-        templates=body.templates,
+        templates=body.templates, flows=body.flows,
     )
     return await _detail(state.session_factory, run)
 
@@ -115,6 +121,11 @@ async def write_as_person(run_id: uuid.UUID, person_id: uuid.UUID, org_id: uuid.
     if body.button_reply:
         message |= {"type": "interactive",
                     "interactive": {"type": "button_reply", "button_reply": body.button_reply}}
+    elif body.form_reply:
+        message |= {"type": "interactive", "interactive": {
+            "type": "nfm_reply",
+            "nfm_reply": {"name": "flow", "body": "Sent",
+                          "response_json": json.dumps(body.form_reply, ensure_ascii=False)}}}
     elif body.quick_reply:
         message |= {"type": "button", "button": body.quick_reply}
     elif body.list_reply:
