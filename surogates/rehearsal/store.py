@@ -26,6 +26,8 @@ from surogates.rehearsal.ids import (
     new_slack_app_id,
     new_slack_bot_token,
     new_slack_user_id,
+    new_teams_app_id,
+    new_teams_user_id,
     new_telegram_user_id,
     new_wa_id,
 )
@@ -34,6 +36,7 @@ VAULT_CREDENTIALS = {
     "whatsapp": ("access_token", "app_secret", "verify_token", "phone_number_id", "api_version"),
     "telegram": ("bot_token", "webhook_secret"),
     "slack": ("bot_token", "signing_secret"),
+    "teams": ("app_password", "tenant_id"),
 }
 CHANNELS = tuple(VAULT_CREDENTIALS)
 
@@ -56,6 +59,8 @@ async def create_run(
         account, token = new_bot_username(), new_bot_token()
     elif channel == "slack":
         account, token = new_slack_app_id(), new_slack_bot_token()
+    elif channel == "teams":
+        account, token = new_teams_app_id(), "eyJ" + secrets.token_urlsafe(48)
     else:
         account, token = new_phone_number_id(), "EAA" + secrets.token_urlsafe(96)
     run = RehearsalRun(
@@ -71,6 +76,9 @@ async def create_run(
         creds = {"bot_token": run.access_token, "webhook_secret": run.app_secret}
     elif channel == "slack":
         creds = {"bot_token": run.access_token, "signing_secret": run.app_secret}
+    elif channel == "teams":
+        # The world's tenant is the App ID: one bot, one tenant.
+        creds = {"app_password": run.app_secret, "tenant_id": run.phone_number_id}
     else:
         creds = {
             "access_token": run.access_token, "app_secret": run.app_secret,
@@ -84,7 +92,8 @@ async def create_run(
 
 
 async def add_person(sf, run: RehearsalRun, *, name: str, provision: Provision) -> RehearsalPerson:
-    address = {"telegram": new_telegram_user_id, "slack": new_slack_user_id}.get(
+    address = {"telegram": new_telegram_user_id, "slack": new_slack_user_id,
+               "teams": new_teams_user_id}.get(
         run.channel, new_wa_id)()
     # The same call the inbound pipeline makes for an unknown sender: the
     # pipeline then finds this identity, already marked as the run's.

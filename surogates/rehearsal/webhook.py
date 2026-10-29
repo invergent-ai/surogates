@@ -77,3 +77,19 @@ async def post_slack(
         logger.warning("[rehearsal] slack delivery to channels failed (%s)", exc)
         return 0
     return response.status_code
+
+
+async def post_teams_activity(
+    client: httpx.AsyncClient, *, channels_url: str, app_id: str, token: str,
+    activity: dict[str, Any],
+) -> int:
+    """POST one activity to ``/teams/{app_id}`` with a Bot Framework token; returns the HTTP status (0 on failure)."""
+    try:
+        response = await client.post(
+            f"{channels_url.rstrip('/')}/teams/{app_id}", json=activity,
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    except httpx.HTTPError as exc:
+        logger.warning("[rehearsal] teams activity to channels failed (%s)", exc)
+        return 0
+    return response.status_code

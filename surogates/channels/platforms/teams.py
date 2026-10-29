@@ -61,6 +61,7 @@ from surogates.channels.capabilities import ChannelCapabilities
 from surogates.channels.inbound import InboundFileRef, InboundMessage
 from surogates.channels.registry import ChannelDescriptor
 from surogates.channels.text_split import split_text
+from surogates.rehearsal.ids import is_rehearsal_teams_app
 
 __all__ = [
     "BOT_FRAMEWORK_ISSUER",
@@ -109,6 +110,12 @@ _INLINE_IMAGE_MAX = 1024 * 1024
 
 _AT_TAG = re.compile(r"<at>(.*?)</at>", re.IGNORECASE | re.DOTALL)
 _THREAD_MARK = ";messageid="
+
+
+def _rehearsal_base(app_id: str) -> str:
+    """The rehearsal world that stands in for Microsoft for a rehearsal App ID, else ``""``."""
+    rehearsal_url = os.environ.get("SUROGATES_REHEARSAL_URL", "").rstrip("/")
+    return f"{rehearsal_url}/m" if rehearsal_url and is_rehearsal_teams_app(app_id) else ""
 
 
 # ---------------------------------------------------------------------------
@@ -382,6 +389,11 @@ class TeamsPlatform:
                 self._jwks_at = time.monotonic()
             return self._jwks.get(kid)
 
+    async def _rehearsal_key(self, base: str, kid: str) -> dict | None:
+        """A rehearsal world's signing key; never cached, the world is local."""
+        keys = (await self._http.get(f"{base}/keys")).raise_for_status().json()
+        return next((k for k in keys.get("keys") or [] if k.get("kid") == kid), None)
+
     async def verify(self, request: Any, raw_body: bytes, *, creds: dict) -> bool:
         """Accept only a Bot Framework token minted for this routing's App ID."""
         auth = str(request.headers.get("Authorization") or request.headers.get("authorization") or "")
@@ -393,7 +405,9 @@ class TeamsPlatform:
             header = jwt.get_unverified_header(token)
             if header.get("alg") != "RS256":
                 return False
-            key = await self._signing_key(str(header.get("kid") or ""))
+            rehearsal = _rehearsal_base(app_id)
+            key = (await self._rehearsal_key(rehearsal, str(header.get("kid") or "")) if rehearsal
+                   else await self._signing_key(str(header.get("kid") or "")))
             if key is None:
                 logger.info("[teams] token signed by unknown kid %r", header.get("kid"))
                 return False
@@ -476,12 +490,14 @@ class TeamsPlatform:
         secret = str((creds or {}).get("app_password") or "")
         if not app_id or not tenant or not secret:
             return None, "teams credentials missing (app id, tenant or secret)"
+        rehearsal = _rehearsal_base(app_id)
+        login = f"{rehearsal}/login" if rehearsal else TEAMS_LOGIN_BASE
         cached = self._tokens.get((app_id, tenant))
         if cached and cached[1] > time.monotonic():
             return cached[0], ""
         try:
             resp = await self._http.post(
-                f"{TEAMS_LOGIN_BASE}/{tenant}/oauth2/v2.0/token",
+                f"{login}/{tenant}/oauth2/v2.0/token",
                 data={
                     "grant_type": "client_credentials", "client_id": app_id,
                     "client_secret": secret, "scope": _SCOPE,

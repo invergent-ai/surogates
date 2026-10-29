@@ -19,8 +19,13 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from surogates.rehearsal import store
-from surogates.rehearsal import slack
-from surogates.rehearsal.webhook import post_slack, post_telegram_update, post_webhook
+from surogates.rehearsal import slack, teams
+from surogates.rehearsal.webhook import (
+    post_slack,
+    post_teams_activity,
+    post_telegram_update,
+    post_webhook,
+)
 
 
 def _require_internal_token(request: Request) -> None:
@@ -41,7 +46,7 @@ class StartRun(BaseModel):
     routing_config: dict[str, Any] = Field(default_factory=dict)
     templates: list[dict[str, Any]] = Field(default_factory=list)
     flows: list[dict[str, Any]] = Field(default_factory=list)
-    channel: Literal["whatsapp", "telegram", "slack"] = "whatsapp"
+    channel: Literal["whatsapp", "telegram", "slack", "teams"] = "whatsapp"
 
 
 class PersonMessage(BaseModel):
@@ -132,6 +137,8 @@ async def write_as_person(run_id: uuid.UUID, person_id: uuid.UUID, org_id: uuid.
         return await _write_on_telegram(state, run, person, body)
     if run.channel == "slack":
         return await _write_on_slack(state, run, person, body)
+    if run.channel == "teams":
+        return await _write_on_teams(state, run, person, body)
     wamid = f"wamid.R{secrets.token_hex(10)}"
     message: dict[str, Any] = {"from": person.address, "id": wamid,
                                "timestamp": str(int(datetime.now(timezone.utc).timestamp()))}
@@ -220,6 +227,36 @@ def _modal_state(view: dict[str, Any], answers: dict[str, Any]) -> dict[str, Any
                 "type": element.get("type") or "plain_text_input",
                 "value": None if answer in (None, "") else str(answer)}}
     return values
+
+
+async def _write_on_teams(state, run, person, body: PersonMessage) -> dict[str, Any]:
+    """The member's message in their personal chat with the bot, as Bot Framework delivers it."""
+    if not (body.text and body.text.strip()):
+        raise HTTPException(status_code=422, detail="Write something")
+    sf = state.session_factory
+    service = teams.service_url(state.settings)
+    activity_id = f"1{int(datetime.now(timezone.utc).timestamp() * 1000)}"
+    tenant = teams.tenant_of(run)
+    activity = {
+        "type": "message", "id": activity_id, "channelId": "msteams", "serviceUrl": service,
+        "timestamp": datetime.now(timezone.utc).isoformat(), "textFormat": "plain",
+        "from": {"id": person.address, "name": person.name},
+        "recipient": {"id": f"28:{run.phone_number_id}", "name": "agent"},
+        "conversation": {"id": teams.conversation_of(person.address),
+                         "conversationType": "personal", "tenantId": tenant},
+        "channelData": {"tenant": {"id": tenant}},
+        "text": body.text,
+    }
+    await store.log_message(sf, run_id=run.id, person_id=person.id, direction="in",
+                            kind="message", body=activity, wamid=activity_id)
+    status = await post_teams_activity(
+        state.http, channels_url=state.settings.rehearsal.channels_url,
+        app_id=run.phone_number_id, token=teams.sign(run.phone_number_id, service),
+        activity=activity,
+    )
+    delivered = 200 <= status < 300
+    await store.set_status(sf, run.id, activity_id, "sent" if delivered else "failed")
+    return {"delivered": delivered, "channels_status": status}
 
 
 async def _write_on_slack(state, run, person, body: PersonMessage) -> dict[str, Any]:
