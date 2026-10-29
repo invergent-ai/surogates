@@ -114,6 +114,21 @@ class OpsDatabaseSettings(BaseSettings):
     pool_overflow: int = 2
 
 
+class RehearsalSettings(BaseSettings):
+    """The ``surogates rehearsal`` process.
+
+    ``url`` is where the runtime's adapters reach the worlds; the WhatsApp
+    adapter reads it as ``SUROGATES_REHEARSAL_URL``, and an empty one keeps
+    every number on Meta.  ``channels_url`` is where worlds post webhooks.
+    """
+    model_config = {"env_prefix": "SUROGATES_REHEARSAL_"}
+
+    url: str = ""
+    port: int = 8004
+    channels_url: str = ""
+    internal_token: str = ""
+
+
 class KBHubSettings(BaseSettings):
     """Connection to surogate-hub for fetching wiki page content.
 
@@ -945,6 +960,7 @@ class Settings(BaseSettings):
     vapid: VapidSettings = Field(default_factory=VapidSettings)
     office: OfficeSettings = Field(default_factory=OfficeSettings)
     keel: KeelSettings = Field(default_factory=KeelSettings)
+    rehearsal: RehearsalSettings = Field(default_factory=RehearsalSettings)
 
     # Tenant asset root.  Used by the per-session sandbox pods to mount
     # workspace volumes; the platform itself no longer reads filesystem
