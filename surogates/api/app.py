@@ -301,6 +301,7 @@ def _install_shared_runtime_plumbing(app: FastAPI, settings: Any) -> None:
     # pod picks up the same code path.
     channel_routing_cache = build_channel_routing_cache(
         settings=settings, platform_client=client,
+        session_factory=app.state.session_factory,
     )
     mate_settings_cache = build_mate_settings_cache(
         settings=settings, platform_client=client,

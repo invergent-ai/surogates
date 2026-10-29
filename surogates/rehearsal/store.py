@@ -32,6 +32,7 @@ from surogates.rehearsal.ids import (
     new_teams_user_id,
     new_telegram_user_id,
     new_wa_id,
+    new_website_key,
 )
 
 VAULT_CREDENTIALS = {
@@ -40,6 +41,8 @@ VAULT_CREDENTIALS = {
     "slack": ("bot_token", "signing_secret"),
     "teams": ("app_password", "tenant_id"),
     "discord": ("bot_token",),
+    # The widget talks to the runtime API itself: nothing to keep in the vault.
+    "website": (),
 }
 CHANNELS = tuple(VAULT_CREDENTIALS)
 
@@ -67,6 +70,8 @@ async def create_run(
         account, token = new_slack_app_id(), new_slack_bot_token()
     elif channel == "teams":
         account, token = new_teams_app_id(), "eyJ" + secrets.token_urlsafe(48)
+    elif channel == "website":
+        account, token = new_website_key(), secrets.token_hex(16)
     elif channel == "discord":
         account = new_discord_id()
         token = new_discord_bot_token(account)
@@ -90,6 +95,8 @@ async def create_run(
         creds = {"app_password": run.app_secret, "tenant_id": run.phone_number_id}
     elif channel == "discord":
         creds = {"bot_token": run.access_token}
+    elif channel == "website":
+        creds = {}
     else:
         creds = {
             "access_token": run.access_token, "app_secret": run.app_secret,
@@ -103,6 +110,13 @@ async def create_run(
 
 
 async def add_person(sf, run: RehearsalRun, *, name: str, provision: Provision) -> RehearsalPerson:
+    if run.channel == "website":
+        # A visitor is anonymous: the widget's own cookie names them, no user row.
+        person = RehearsalPerson(run_id=run.id, name=name, channel=run.channel, address="visitor")
+        async with sf() as db:
+            db.add(person)
+            await db.commit()
+        return person
     address = {"telegram": new_telegram_user_id, "slack": new_slack_user_id,
                "teams": new_teams_user_id, "discord": new_discord_id}.get(
         run.channel, new_wa_id)()

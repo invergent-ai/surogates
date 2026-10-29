@@ -46,7 +46,7 @@ class StartRun(BaseModel):
     routing_config: dict[str, Any] = Field(default_factory=dict)
     templates: list[dict[str, Any]] = Field(default_factory=list)
     flows: list[dict[str, Any]] = Field(default_factory=list)
-    channel: Literal["whatsapp", "telegram", "slack", "teams", "discord"] = "whatsapp"
+    channel: Literal["whatsapp", "telegram", "slack", "teams", "discord", "website"] = "whatsapp"
 
 
 class PersonMessage(BaseModel):
@@ -133,6 +133,8 @@ async def write_as_person(run_id: uuid.UUID, person_id: uuid.UUID, org_id: uuid.
     person = next((p for p in await store.people(state.session_factory, run.id) if p.id == person_id), None)
     if person is None:
         raise HTTPException(status_code=404, detail="No such person in this rehearsal")
+    if run.channel == "website":
+        raise HTTPException(status_code=422, detail="On a website the visitor writes in the widget")
     if run.channel == "telegram":
         return await _write_on_telegram(state, run, person, body)
     if run.channel == "slack":
