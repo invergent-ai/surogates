@@ -3,8 +3,9 @@ answers it, asks it for a revision or sends it a message, gives it a comment
 that mentions its agent, cancels it, and reads its status, its events, by
 page and live, and its progress.  It also
 lists, reads and writes a case's files: the workspace its step sessions
-share; it gives a person the editor config of one of them; and it invites
-staff into an organisation.
+share; it gives a person the editor config of one of them; it invites
+staff into an organisation, and it gives Keel the mail addresses of an
+organisation's users.
 
 Mounted only on the keel-link app (:mod:`surogates.api.keel_link`), never
 on the public API.  Every route checks the link key with
@@ -98,10 +99,11 @@ from surogates.session.models import Event
 from surogates.session.provisioning import create_agent_session
 from surogates.session.store import SessionNotFoundError, StepFinishedError
 from surogates.storage.backend import TooLarge
+from surogates.tenant.addresses import org_addresses
 from surogates.tenant.auth.jwt import signing_secret
 from surogates.tenant.auth.service_account import ServiceAccountStore
 from surogates.tenant.invitations import InvitationError, invite_member
-from surogates.tenant.memberships import belongs_to
+from surogates.tenant.memberships import MembershipError, belongs_to
 
 logger = logging.getLogger(__name__)
 
@@ -298,6 +300,17 @@ class MemberInvitationRequest(BaseModel):
     @classmethod
     def _a_name(cls, value: str) -> str:
         return _printable(value)
+
+
+_MAX_ADDRESSES = 100
+
+
+class AddressesRequest(BaseModel):
+    """Keel's question: the mail addresses of these users of the org.  Keys this runtime does not know are ignored."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    user_ids: list[UUID] = Field(min_length=1, max_length=_MAX_ADDRESSES)
 
 
 def refused(status_code: int, code: str, message: str) -> HTTPException:
@@ -1503,5 +1516,32 @@ async def invite_org_member(org_id: str, request: Request) -> JSONResponse:
             "set_password_token": invitation.set_password_token,
             "expires_at": expires_at.isoformat() if expires_at is not None else None,
         },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@router.post("/keel/orgs/{org_id}/emails")
+async def read_org_emails(org_id: str, request: Request) -> JSONResponse:
+    """The mail addresses of the org's users Keel names by id, who have one that mail can reach.
+
+    An id is answered when its user belongs to the org, as a home user or a member, and has such an address.  Every
+    other id is left out.  The answer carries ``Cache-Control: no-store``, and no address is logged.
+    """
+    require_link(request)
+    org = _org_id(org_id)
+    body = await read_body(request, AddressesRequest)
+    try:
+        async with request.app.state.session_factory() as db:
+            found = await org_addresses(db, org, body.user_ids)
+    except MembershipError:
+        raise refused(status.HTTP_404_NOT_FOUND, "unknown-org", "No such org.") from None
+    except DBAPIError as exc:
+        raise database_unavailable(
+            exc,
+            logged=f"the addresses of org {org} could not be read",
+            message="The addresses could not be read; try again.",
+        ) from None
+    return JSONResponse(
+        {"emails": {str(user_id): email for user_id, email in found.items()}},
         headers={"Cache-Control": "no-store"},
     )
