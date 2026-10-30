@@ -129,6 +129,10 @@ class RehearsalSettings(BaseSettings):
     internal_token: str = ""
     #: Where Studio's browser reaches LiveKit for a voice rehearsal; empty is ``voice.livekit_url``.
     livekit_public_url: str = ""
+    #: The model that plays people; empty ones fall back to ``llm.summary_*``.
+    model: str = ""
+    base_url: str = ""
+    api_key: str = ""
 
 
 class KBHubSettings(BaseSettings):

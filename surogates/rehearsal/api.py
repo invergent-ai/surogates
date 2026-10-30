@@ -50,6 +50,8 @@ class StartRun(BaseModel):
     templates: list[dict[str, Any]] = Field(default_factory=list)
     flows: list[dict[str, Any]] = Field(default_factory=list)
     channel: Literal["whatsapp", "telegram", "slack", "teams", "discord", "website", "voice"] = "whatsapp"
+    #: Who the AI plays; none and the user types as the person.
+    persona: Optional[str] = Field(default=None, max_length=4000)
 
 
 class PersonMessage(BaseModel):
@@ -80,7 +82,10 @@ async def _detail(sf, run) -> dict[str, Any]:
     for person in await store.people(sf, run.id):
         messages = await store.thread(sf, person.id)
         people.append({"id": str(person.id), "name": person.name, "channel": person.channel,
-                       "address": person.address, "window_open": store.window_open(messages, now),
+                       "address": person.address, "persona": person.persona,
+                       "driver": person.driver, "ai_state": person.ai_state,
+                       "ai_note": person.ai_note,
+                       "window_open": store.window_open(messages, now),
                        "agent_typing": store.is_typing(person, now),
                        "messages": [_message(m) for m in messages]})
     return {"id": str(run.id), "agent_id": run.agent_id, "status": run.status,
@@ -101,11 +106,14 @@ async def _run_in_org(request: Request, run_id: uuid.UUID, org_id: uuid.UUID):
 @router.post("/runs", status_code=201)
 async def start_run(body: StartRun, request: Request):
     state = request.app.state
+    persona = (body.persona or "").strip() or None
+    if persona and body.channel not in AI_CHANNELS:
+        raise HTTPException(status_code=422, detail="The AI writes on chat channels only")
     run = await store.create_run(
         state.session_factory, state.vault, org_id=body.org_id, agent_id=body.agent_id,
         created_by=body.created_by, routing_config=body.routing_config,
         person_name=body.person_name.strip(), provision=state.provision,
-        templates=body.templates, flows=body.flows, channel=body.channel,
+        templates=body.templates, flows=body.flows, channel=body.channel, persona=persona,
     )
     return await _detail(state.session_factory, run)
 
@@ -131,11 +139,46 @@ async def write_as_person(run_id: uuid.UUID, person_id: uuid.UUID, org_id: uuid.
                           body: PersonMessage, request: Request):
     state = request.app.state
     run = await _run_in_org(request, run_id, org_id)
+    person = await _running_person(state, run, person_id)
+    return await write(state, run, person, body)
+
+
+async def _running_person(state, run, person_id: uuid.UUID):
     if run.status != "running":
         raise HTTPException(status_code=409, detail="This rehearsal has ended")
     person = next((p for p in await store.people(state.session_factory, run.id) if p.id == person_id), None)
     if person is None:
         raise HTTPException(status_code=404, detail="No such person in this rehearsal")
+    return person
+
+
+class Driver(BaseModel):
+    driver: Literal["ai", "human"]
+
+
+@router.put("/runs/{run_id}/people/{person_id}/driver")
+async def set_driver(run_id: uuid.UUID, person_id: uuid.UUID, org_id: uuid.UUID, body: Driver,
+                     request: Request):
+    """Take over from the AI, or hand back to it: it carries on from where the chat is."""
+    state = request.app.state
+    run = await _run_in_org(request, run_id, org_id)
+    person = await _running_person(state, run, person_id)
+    if not person.persona:
+        raise HTTPException(status_code=422, detail="Nobody told the AI who this person is")
+    values: dict[str, Any] = {"driver": body.driver}
+    if body.driver == "ai":
+        # Handing back restarts the AI, whatever stopped it.
+        values |= {"ai_state": "talking", "ai_note": None, "ai_acted_at": None}
+    await store.update_person(state.session_factory, person.id, **values)
+    return await _detail(state.session_factory, run)
+
+
+#: The channels the AI can write on: a widget and a phone call need a browser and a voice.
+AI_CHANNELS = ("whatsapp", "telegram", "slack", "teams", "discord")
+
+
+async def write(state, run, person, body: PersonMessage) -> dict[str, Any]:
+    """The person's message or tap, delivered as their platform would."""
     if run.channel == "website":
         raise HTTPException(status_code=422, detail="On a website the visitor writes in the widget")
     if run.channel == "voice":

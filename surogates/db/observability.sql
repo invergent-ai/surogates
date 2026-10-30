@@ -1446,3 +1446,11 @@ ALTER TABLE IF EXISTS rehearsal_runs
     ADD COLUMN IF NOT EXISTS flows jsonb NOT NULL DEFAULT '[]'::jsonb;
 ALTER TABLE IF EXISTS rehearsal_runs
     ADD COLUMN IF NOT EXISTS channel text NOT NULL DEFAULT 'whatsapp';
+
+-- A person the AI plays, and where it is in the conversation.
+ALTER TABLE IF EXISTS rehearsal_people
+    ADD COLUMN IF NOT EXISTS persona text,
+    ADD COLUMN IF NOT EXISTS driver text NOT NULL DEFAULT 'human',
+    ADD COLUMN IF NOT EXISTS ai_state text,
+    ADD COLUMN IF NOT EXISTS ai_note text,
+    ADD COLUMN IF NOT EXISTS ai_acted_at timestamptz;

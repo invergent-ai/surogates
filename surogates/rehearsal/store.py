@@ -66,6 +66,7 @@ async def create_run(
     templates: list[dict[str, Any]] | None = None,
     flows: list[dict[str, Any]] | None = None,
     channel: str = "whatsapp",
+    persona: str | None = None,
 ) -> RehearsalRun:
     if channel == "telegram":
         account, token = new_bot_username(), new_bot_token()
@@ -110,11 +111,12 @@ async def create_run(
         }
     for name, value in creds.items():
         await vault.store(org_id, f"{channel}_{name}_{run.phone_number_id}", value)
-    await add_person(sf, run, name=person_name, provision=provision)
+    await add_person(sf, run, name=person_name, provision=provision, persona=persona)
     return run
 
 
-async def add_person(sf, run: RehearsalRun, *, name: str, provision: Provision) -> RehearsalPerson:
+async def add_person(sf, run: RehearsalRun, *, name: str, provision: Provision,
+                     persona: str | None = None) -> RehearsalPerson:
     if run.channel == "website":
         # A visitor is anonymous: the widget's own cookie names them, no user row.
         person = RehearsalPerson(run_id=run.id, name=name, channel=run.channel, address="visitor")
@@ -132,13 +134,33 @@ async def add_person(sf, run: RehearsalRun, *, name: str, provision: Provision) 
         sf, platform=run.channel, platform_user_id=address, org_id=run.org_id, display_name=name,
     )
     person = RehearsalPerson(run_id=run.id, name=name, channel=run.channel, address=address,
-                             user_id=identity.user_id)
+                             user_id=identity.user_id, persona=persona,
+                             driver="ai" if persona else "human",
+                             ai_state="talking" if persona else None)
     async with sf() as db:
         await db.execute(sa.update(User).where(User.id == identity.user_id)
                          .values(rehearsal_run_id=run.id))
         db.add(person)
         await db.commit()
     return person
+
+
+async def ai_people(sf) -> Sequence[tuple[RehearsalRun, RehearsalPerson]]:
+    """The people the AI is writing as right now, with their runs."""
+    async with sf() as db:
+        rows = await db.execute(
+            sa.select(RehearsalRun, RehearsalPerson)
+            .join(RehearsalPerson, RehearsalPerson.run_id == RehearsalRun.id)
+            .where(RehearsalRun.status == "running", RehearsalPerson.driver == "ai",
+                   RehearsalPerson.ai_state == "talking")
+        )
+        return [tuple(r) for r in rows.all()]
+
+
+async def update_person(sf, person_id: uuid.UUID, **values: Any) -> None:
+    async with sf() as db:
+        await db.execute(sa.update(RehearsalPerson).where(RehearsalPerson.id == person_id).values(**values))
+        await db.commit()
 
 
 async def get_run(sf, run_id: uuid.UUID) -> RehearsalRun | None:

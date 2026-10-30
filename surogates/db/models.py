@@ -2959,6 +2959,15 @@ class RehearsalPerson(Base):
     user_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), nullable=True)
     #: When the agent last showed "typing…" to this person; a send clears it.
     agent_typing_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    #: Who the AI plays when it plays this person; none for a hand-typed one.
+    persona: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    #: ``ai`` while the AI writes as them, ``human`` while the user does.
+    driver: Mapped[str] = mapped_column(Text, nullable=False, default="human", server_default="human")
+    #: ``talking`` until the AI stops: ``done``, ``gave_up``, ``no_reply`` or ``failed``.
+    ai_state: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    ai_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    #: When the AI last wrote or tapped: it waits for the agent after that.
+    ai_acted_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False, default=_utcnow)
 
 

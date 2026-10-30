@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 import httpx
@@ -10,6 +11,7 @@ from fastapi import FastAPI
 
 from surogates.channels.identity import get_or_create_channel_identity
 from surogates.rehearsal import api, discord, graph, slack, teams, telegram
+from surogates.rehearsal.actor import Actor
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +45,9 @@ async def run_rehearsal(settings) -> None:
     vault = CredentialVault(sf, encryption_key=settings.encryption_key.encode("utf-8"))
     async with httpx.AsyncClient(timeout=10) as http:
         app = create_app(settings=settings, session_factory=sf, vault=vault, http=http)
+        actor = asyncio.create_task(Actor(app.state).run())
         config = uvicorn.Config(app, host="0.0.0.0", port=settings.rehearsal.port, log_config=None)
         logger.info("[rehearsal] serving on :%s", settings.rehearsal.port)
         await uvicorn.Server(config).serve()
+        actor.cancel()
     await engine.dispose()
