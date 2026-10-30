@@ -12,6 +12,7 @@ the base64 of its id, never with a digit.  A Teams App ID is a GUID
 Entra issues as version 4; a rehearsal one is version 0, which Entra never
 issues.  A website key is ``surg_wk_`` and 44 random characters; a
 rehearsal one is ``surg_wk_999r`` and 48 hex digits, a length no real key has.
+A phone number in country code +999 is reserved by the ITU and never assigned.
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ __all__ = [
     "new_teams_app_id", "new_teams_user_id", "new_telegram_user_id", "new_wa_id",
     "is_rehearsal_bot_token", "is_rehearsal_discord_token", "new_discord_bot_token",
     "new_discord_id", "is_rehearsal_slack_token", "is_rehearsal_teams_app",
-    "new_website_key", "is_rehearsal_website_key",
+    "new_website_key", "is_rehearsal_website_key", "new_voice_number", "is_rehearsal_voice_number",
 ]
 
 REHEARSAL_ID_PREFIX = "999"
@@ -75,6 +76,10 @@ def new_discord_bot_token(app_id: str) -> str:
     return f"{app_id}.{secrets.token_urlsafe(27)}"
 
 
+def new_voice_number() -> str:
+    return f"+{REHEARSAL_ID_PREFIX}{_digits(10)}"
+
+
 def new_website_key() -> str:
     return f"surg_wk_999r{secrets.token_hex(24)}"
 
@@ -90,6 +95,7 @@ def new_teams_user_id() -> str:
 
 _BOT_TOKEN = re.compile(r"999\d{10}:.+")
 _DISCORD_TOKEN = re.compile(r"999\d{17}\.[A-Za-z0-9_-]+")
+_VOICE_NUMBER = re.compile(r"\+999\d{10}")
 _WEBSITE_KEY = re.compile(r"surg_wk_999r[0-9a-f]{48}")
 _SLACK_TOKEN = re.compile(r"xoxb-999\d{13}-[0-9a-f]{24}")
 _TEAMS_APP = re.compile(r"999[0-9a-f]{5}-[0-9a-f]{4}-0[0-9a-f]{3}-8[0-9a-f]{3}-[0-9a-f]{12}")
@@ -101,6 +107,10 @@ def is_rehearsal_bot_token(token: str) -> bool:
 
 def is_rehearsal_discord_token(token: str) -> bool:
     return _DISCORD_TOKEN.fullmatch(str(token or "")) is not None
+
+
+def is_rehearsal_voice_number(number: str) -> bool:
+    return _VOICE_NUMBER.fullmatch(str(number or "")) is not None
 
 
 def is_rehearsal_website_key(key: str) -> bool:
@@ -118,4 +128,5 @@ def is_rehearsal_teams_app(app_id: str) -> bool:
 def is_rehearsal_id(value: str) -> bool:
     """Whether *value* may name a rehearsal account, so routing asks the runtime DB first."""
     value = str(value or "")
-    return value.startswith(REHEARSAL_ID_PREFIX) or is_rehearsal_website_key(value)
+    return (value.startswith(REHEARSAL_ID_PREFIX) or is_rehearsal_website_key(value)
+            or is_rehearsal_voice_number(value))

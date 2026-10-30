@@ -64,6 +64,11 @@ def call_info(room_name: str, attributes: Mapping[str, str]) -> CallInfo | None:
                     caller=(attributes.get("sip.phoneNumber") or "").strip() or None)
 
 
+def rehearsal_of(tenant: Mapping[str, Any] | None) -> str | None:
+    """The rehearsal run a call belongs to, from its routing; ``None`` for a real call."""
+    return ((tenant or {}).get("config") or {}).get("rehearsal_run_id") or None
+
+
 class ProviderUnavailable(Exception):
     """A line's speech provider cannot be used for this call (its key is missing or unreadable)."""
 
@@ -95,7 +100,8 @@ class Runtime:
         sf = async_session_factory(engine)
         redis = Redis.from_url(settings.redis.url)
         client = PlatformClient(base_url=settings.platform_api_url, token=settings.platform_api_token)
-        routing = build_channel_routing_cache(settings=settings, platform_client=client)
+        routing = build_channel_routing_cache(settings=settings, platform_client=client,
+                                              session_factory=sf)
         sessions = VoiceSessions(store=SessionStore(sf, redis=redis), redis=redis, session_factory=sf,
                                  storage=create_backend(settings), settings=settings)
         return cls(engine=engine, redis=redis, client=client, routing=routing, sessions=sessions,
@@ -262,6 +268,8 @@ async def entrypoint(ctx: JobContext) -> None:
 
     async def report(outcome: str) -> None:
         """Tell ops about this call (recorded now, charged later). Never raises."""
+        if rehearsal_of(tenant):  # a Studio user's own test call is never recorded nor charged
+            return
         ended = datetime.now(timezone.utc)
         await rt.client.report_voice_call(
             call_id=info.call_id, agent_id=tenant["agent_id"], number=info.called,
@@ -336,7 +344,7 @@ async def entrypoint(ctx: JobContext) -> None:
         else:
             call = await rt.sessions.open_call(
                 CallTarget(org_id=org_id, agent_id=tenant["agent_id"],
-                           remember_callers=config.remember_callers),
+                           remember_callers=config.remember_callers, rehearsal_run_id=rehearsal_of(tenant)),
                 call_id=info.call_id, called=info.called, caller=info.caller, greeting=greeting,
                 language=config.language, lines=config.lines)
     except Exception:

@@ -127,6 +127,8 @@ class RehearsalSettings(BaseSettings):
     port: int = 8004
     channels_url: str = ""
     internal_token: str = ""
+    #: Where Studio's browser reaches LiveKit for a voice rehearsal; empty is ``voice.livekit_url``.
+    livekit_public_url: str = ""
 
 
 class KBHubSettings(BaseSettings):

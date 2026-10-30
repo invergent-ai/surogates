@@ -18,6 +18,7 @@ from uuid import UUID
 
 from surogates.channels.identity import get_or_create_channel_identity, get_or_create_channel_session
 from surogates.channels.inbound import build_principal_stamp
+from surogates.channels.memory_boundary import rehearsal_boundary
 from surogates.channels.constants import queue_priority
 from surogates.config import INTERRUPT_CHANNEL_PREFIX, enqueue_session
 from surogates.session.events import EventType
@@ -107,6 +108,8 @@ class CallTarget:
     org_id: UUID
     agent_id: str
     remember_callers: bool = False
+    #: A Studio user calling as one of the agent's customers: the call is kept inside their run.
+    rehearsal_run_id: str | None = None
 
 
 @dataclass
@@ -305,6 +308,9 @@ class VoiceSessions:
         boundary = f"phone:{caller_id}" if remember else f"voice:call:{call_id}"
         if remember:
             boundary = await _shared_boundary(self._sf, target.org_id, target.agent_id, user_id) or boundary
+        if target.rehearsal_run_id:
+            boundary = rehearsal_boundary(target.rehearsal_run_id, boundary)
+            await _mark_rehearsal(self._sf, user_id, target.rehearsal_run_id)
         session_id = await get_or_create_channel_session(
             self._store, self._redis, session_key=f"agent:voice:call:{call_id}", user_id=user_id,
             org_id=target.org_id, agent_id=target.agent_id, channel="voice",
@@ -372,6 +378,17 @@ async def same_person(session_factory: Any, org_id: UUID, number: str) -> UUID |
         await db.commit()
     log.info("caller %s… is the WhatsApp person %s", number[:4], whatsapp[0])
     return whatsapp[0]
+
+
+async def _mark_rehearsal(session_factory: Any, user_id: UUID, run_id: str) -> None:
+    """Keep the run's stand-in caller off every reader of real people, as on the other channels."""
+    import sqlalchemy as sa
+
+    from surogates.db.models import User
+
+    async with session_factory() as db:
+        await db.execute(sa.update(User).where(User.id == user_id).values(rehearsal_run_id=UUID(run_id)))
+        await db.commit()
 
 
 async def _shared_boundary(session_factory: Any, org_id: UUID, agent_id: str, user_id: UUID) -> str | None:

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import functools
 import json
+import logging
 
 import secrets
 import uuid
@@ -19,7 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from surogates.rehearsal import store
-from surogates.rehearsal import discord, slack, teams
+from surogates.rehearsal import discord, slack, teams, voice
 from surogates.rehearsal.webhook import (
     post_slack,
     post_teams_activity,
@@ -35,6 +36,8 @@ def _require_internal_token(request: Request) -> None:
         raise HTTPException(status_code=401, detail="Rehearsal internal token required")
 
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/internal", dependencies=[Depends(_require_internal_token)])
 
 
@@ -46,7 +49,7 @@ class StartRun(BaseModel):
     routing_config: dict[str, Any] = Field(default_factory=dict)
     templates: list[dict[str, Any]] = Field(default_factory=list)
     flows: list[dict[str, Any]] = Field(default_factory=list)
-    channel: Literal["whatsapp", "telegram", "slack", "teams", "discord", "website"] = "whatsapp"
+    channel: Literal["whatsapp", "telegram", "slack", "teams", "discord", "website", "voice"] = "whatsapp"
 
 
 class PersonMessage(BaseModel):
@@ -135,6 +138,8 @@ async def write_as_person(run_id: uuid.UUID, person_id: uuid.UUID, org_id: uuid.
         raise HTTPException(status_code=404, detail="No such person in this rehearsal")
     if run.channel == "website":
         raise HTTPException(status_code=422, detail="On a website the visitor writes in the widget")
+    if run.channel == "voice":
+        raise HTTPException(status_code=422, detail="On a phone line the caller speaks: place a call")
     if run.channel == "telegram":
         return await _write_on_telegram(state, run, person, body)
     if run.channel == "slack":
@@ -357,6 +362,23 @@ async def _write_on_slack(state, run, person, body: PersonMessage) -> dict[str, 
     return {"delivered": delivered, "channels_status": status}
 
 
+@router.post("/runs/{run_id}/people/{person_id}/call")
+async def call_as_person(run_id: uuid.UUID, person_id: uuid.UUID, org_id: uuid.UUID, request: Request):
+    """A LiveKit token that phones the run's number as its person."""
+    state = request.app.state
+    run = await _run_in_org(request, run_id, org_id)
+    if run.channel != "voice":
+        raise HTTPException(status_code=422, detail="Only a voice rehearsal places calls")
+    if run.status != "running":
+        raise HTTPException(status_code=409, detail="This rehearsal has ended")
+    person = next((p for p in await store.people(state.session_factory, run.id) if p.id == person_id), None)
+    if person is None:
+        raise HTTPException(status_code=404, detail="No such person in this rehearsal")
+    if not state.settings.voice.livekit_api_key:
+        raise HTTPException(status_code=503, detail="Phone calls are not set up on this deployment")
+    return voice.call_token(state.settings, run, person)
+
+
 @router.post("/runs/{run_id}/end")
 async def end_run(run_id: uuid.UUID, org_id: uuid.UUID, request: Request):
     await _run_in_org(request, run_id, org_id)
@@ -364,4 +386,9 @@ async def end_run(run_id: uuid.UUID, org_id: uuid.UUID, request: Request):
     run = await store.end_run(state.session_factory, state.vault, run_id)
     if run.channel == "discord":
         await discord.GATEWAYS.close(run.id)
+    if run.channel == "voice" and state.settings.voice.livekit_api_key:
+        try:
+            await voice.hang_up_all(state.settings, run)
+        except Exception:  # noqa: BLE001 - the run is ended; a call left ringing ends at its own limit
+            logger.warning("could not hang up the calls of rehearsal %s", run.id, exc_info=True)
     return await _detail(state.session_factory, run)

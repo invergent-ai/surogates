@@ -31,6 +31,7 @@ from surogates.rehearsal.ids import (
     new_teams_app_id,
     new_teams_user_id,
     new_telegram_user_id,
+    new_voice_number,
     new_wa_id,
     new_website_key,
 )
@@ -43,6 +44,8 @@ VAULT_CREDENTIALS = {
     "discord": ("bot_token",),
     # The widget talks to the runtime API itself: nothing to keep in the vault.
     "website": (),
+    # A call reaches the voice worker through LiveKit, which the runtime holds the keys to.
+    "voice": (),
 }
 CHANNELS = tuple(VAULT_CREDENTIALS)
 
@@ -72,6 +75,8 @@ async def create_run(
         account, token = new_teams_app_id(), "eyJ" + secrets.token_urlsafe(48)
     elif channel == "website":
         account, token = new_website_key(), secrets.token_hex(16)
+    elif channel == "voice":
+        account, token = new_voice_number(), secrets.token_hex(16)
     elif channel == "discord":
         account = new_discord_id()
         token = new_discord_bot_token(account)
@@ -95,7 +100,7 @@ async def create_run(
         creds = {"app_password": run.app_secret, "tenant_id": run.phone_number_id}
     elif channel == "discord":
         creds = {"bot_token": run.access_token}
-    elif channel == "website":
+    elif channel in ("website", "voice"):
         creds = {}
     else:
         creds = {
@@ -118,7 +123,8 @@ async def add_person(sf, run: RehearsalRun, *, name: str, provision: Provision) 
             await db.commit()
         return person
     address = {"telegram": new_telegram_user_id, "slack": new_slack_user_id,
-               "teams": new_teams_user_id, "discord": new_discord_id}.get(
+               "teams": new_teams_user_id, "discord": new_discord_id,
+               "voice": new_voice_number}.get(
         run.channel, new_wa_id)()
     # The same call the inbound pipeline makes for an unknown sender: the
     # pipeline then finds this identity, already marked as the run's.
