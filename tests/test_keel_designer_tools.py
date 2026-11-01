@@ -10,6 +10,7 @@ Keel through these tools.
 from __future__ import annotations
 
 import json
+import re
 from copy import deepcopy
 from datetime import UTC, datetime
 from uuid import uuid4
@@ -17,6 +18,7 @@ from uuid import uuid4
 import pytest
 
 from surogates.keel.client import use_keel_client
+from surogates.tools.router import ToolLocation, ToolRouter
 from surogates.session.models import Session
 from tests.test_case_step_isolation import CONTRACT
 from tests.test_case_step_tools import (  # noqa: F401 - fake_keel is a fixture
@@ -47,6 +49,26 @@ CALLS = {
         {"path": "tests/loan/approved.json"}, SCENARIO,
     ),
     "draft_dry_run": ({}, "POST", "draft/dry-run", {}, None),
+}
+
+
+PROCESS = "processes/review.bpmn"
+XML = "<bpmn:definitions/>"
+CHECK = {"path": PROCESS, "head": "c2", "changed": True, "problems": [], "ops_checked": False}
+REFERENCE = {"rules": [], "elements": [], "refused": [], "keel": [], "problems": [], "layout": [], "examples": []}
+NO_PROCESS_ROUTES = (
+    "This Keel cannot work on process files yet: tell the builder you can work on its case types, and on its "
+    "processes once Keel is upgraded."
+)
+PROCESS_TOOLS = (
+    "draft_process_read", "draft_process_save", "draft_process_edit", "draft_process_check",
+    "draft_process_reference",
+)
+# The three tools that only read, as CALLS gives each: the arguments, the method, the route, the query, the body.
+PROCESS_READS = {
+    "draft_process_read": ({"path": PROCESS}, "GET", "draft/process", {"path": PROCESS}, None),
+    "draft_process_check": ({"path": PROCESS}, "POST", "draft/process/check", {"path": PROCESS}, None),
+    "draft_process_reference": ({}, "GET", "draft/process/reference", {}, None),
 }
 
 
@@ -178,3 +200,134 @@ async def test_without_a_link_to_keel_a_designer_tool_says_so(fake_keel: _FakeKe
     use_keel_client(None)
 
     assert json.loads(await _call("draft_files", {}, _designer())) == {"error": "This runtime has no link to Keel."}
+
+
+@pytest.mark.parametrize(("tool", "arguments", "method", "route", "params", "body", "answer"), [
+    ("draft_process_read", *PROCESS_READS["draft_process_read"], {"path": PROCESS, "xml": XML}),
+    (
+        "draft_process_read", {"path": PROCESS, "published": True}, "GET", "draft/main/process", {"path": PROCESS},
+        None, {"path": PROCESS, "xml": XML},
+    ),
+    (
+        "draft_process_read", {"path": PROCESS, "published": False}, "GET", "draft/process", {"path": PROCESS}, None,
+        {"path": PROCESS, "xml": XML},
+    ),
+    ("draft_process_check", *PROCESS_READS["draft_process_check"], CHECK),
+    ("draft_process_reference", *PROCESS_READS["draft_process_reference"], REFERENCE),
+], ids=["read", "read-published", "read-draft", "check", "reference"])
+async def test_each_process_read_goes_to_its_door_route(
+    fake_keel: _FakeKeel, tool, arguments, method, route, params, body, answer,
+):
+    designer = _designer()
+    fake_keel.answer(200, answer)
+
+    result = await _call(tool, arguments, designer)
+
+    [request] = fake_keel.requests
+    assert request.method == method
+    assert request.url.path == f"/api/harness/sessions/{designer.id}/{route}"
+    assert dict(request.url.params) == params
+    assert request.headers["authorization"] == "Bearer door-key"
+    assert request.content == b""
+    assert json.loads(result) == answer
+
+
+async def test_a_process_file_too_long_to_give_whole_comes_back_cut(fake_keel: _FakeKeel):
+    xml = "a" * 400_000
+    fake_keel.answer(200, {"path": PROCESS, "xml": xml})
+
+    result = json.loads(await _call("draft_process_read", {"path": PROCESS}, _designer()))
+
+    assert result["path"] == PROCESS
+    assert result["truncated"] is True
+    assert 0 < len(result["xml"]) < len(xml)
+    assert xml.startswith(result["xml"])
+    assert len(json.dumps(result, ensure_ascii=False)) <= 300_000
+
+
+async def test_a_process_file_within_the_result_is_given_whole_and_not_marked_cut(fake_keel: _FakeKeel):
+    fake_keel.answer(200, {"path": PROCESS, "xml": XML})
+
+    result = json.loads(await _call("draft_process_read", {"path": PROCESS}, _designer()))
+
+    assert result == {"path": PROCESS, "xml": XML}
+
+
+async def test_a_path_that_names_no_process_file_is_never_sent(fake_keel: _FakeKeel):
+    designer = _designer()
+    named = "path must name a process's file, processes/<key>.bpmn, as draft_files lists it."
+
+    for tool in ("draft_process_read", "draft_process_check"):
+        for arguments in (
+            {}, {"path": ""}, {"path": 5}, {"path": "case-types/loan.json"}, {"path": "processes/"},
+            {"path": "processes/a/b.bpmn"}, {"path": "processes/review.json"}, {"path": "/processes/review.bpmn"},
+        ):
+            assert json.loads(await _call(tool, arguments, designer)) == {"error": named}, (tool, arguments)
+    for published in ("yes", 1, None):
+        result = json.loads(await _call("draft_process_read", {"path": PROCESS, "published": published}, designer))
+        assert result == {"error": "published must be true or false, or be left out."}, published
+    assert fake_keel.requests == []
+
+
+async def test_a_keel_without_the_process_routes_is_named_not_taken_for_a_missing_file(fake_keel: _FakeKeel):
+    for tool, (arguments, *_) in PROCESS_READS.items():
+        fake_keel.answer(404, {"code": "not-found", "message": "Not Found"})
+
+        assert json.loads(await _call(tool, arguments, _designer())) == {"error": NO_PROCESS_ROUTES}, tool
+
+
+
+async def test_a_process_file_the_draft_lacks_comes_back_in_keels_words(fake_keel: _FakeKeel):
+    fake_keel.answer(404, {"code": "unknown-file", "message": "draft d1 has no processes/review.bpmn"})
+
+    assert json.loads(await _call("draft_process_read", {"path": PROCESS}, _designer())) == {
+        "error": "draft d1 has no processes/review.bpmn", "code": "unknown-file",
+    }
+
+
+async def test_an_old_keel_is_not_named_for_a_json_tool(fake_keel: _FakeKeel):
+    fake_keel.answer(404, {"code": "not-found", "message": "Not Found"})
+
+    assert json.loads(await _call("draft_files", {}, _designer())) == {"error": "Not Found", "code": "not-found"}
+
+
+async def test_a_session_without_a_delegation_is_told_to_open_the_designer_on_a_process_tool(fake_keel: _FakeKeel):
+    fake_keel.answer(404, {"code": "no-delegation", "message": "This session holds no delegation."})
+
+    for tool, (arguments, *_) in PROCESS_READS.items():
+        assert json.loads(await _call(tool, arguments, _designer())) == {"error": NO_DELEGATION}, tool
+
+
+async def test_a_process_tool_in_a_case_session_reaches_nothing(fake_keel: _FakeKeel):
+    for session in (_step(deepcopy(CONTRACT)), _case_agent()):
+        for tool, (arguments, *_) in PROCESS_READS.items():
+            assert "error" in json.loads(await _call(tool, arguments, session)), (tool, session.config)
+    assert fake_keel.requests == []
+
+
+async def test_without_a_link_to_keel_a_process_tool_says_so(fake_keel: _FakeKeel):
+    use_keel_client(None)
+
+    for tool, (arguments, *_) in PROCESS_READS.items():
+        assert json.loads(await _call(tool, arguments, _designer())) == {"error": "This runtime has no link to Keel."}
+
+
+@pytest.mark.parametrize("tool", PROCESS_TOOLS)
+def test_the_process_tools_run_in_the_harness(tool: str):
+    router = ToolRouter(registry=_registry(), sandbox_pool=None, governance=None)
+
+    assert router.resolve_location(tool) is ToolLocation.HARNESS
+
+
+def test_a_process_tools_first_sentence_has_no_em_dash_and_says_what_it_does():
+    described = {
+        schema["function"]["name"]: schema["function"]["description"]
+        for schema in _registry().get_schemas({"draft_process_read", "draft_process_check", "draft_process_reference"})
+    }
+    firsts = {name: re.split(r"(?<=\.)\s", text, maxsplit=1)[0] for name, text in described.items()}
+
+    assert set(described) == set(PROCESS_READS)
+    assert all("\u2014" not in text for text in described.values())
+    assert firsts["draft_process_read"].startswith("Read one of the draft's process files")
+    assert firsts["draft_process_check"].startswith("Check one of the draft's process files as a publish would")
+    assert firsts["draft_process_reference"].startswith("Read Keel's reference for process files")

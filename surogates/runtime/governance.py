@@ -113,6 +113,8 @@ KEEL_PROCESS_TOOLS: frozenset[str] = frozenset({
 # give.
 KEEL_DESIGNER_TOOLS: frozenset[str] = frozenset({
     "draft_files", "draft_read", "draft_main", "draft_save_file", "draft_save_scenario", "draft_dry_run",
+    "draft_process_read", "draft_process_save", "draft_process_edit", "draft_process_check",
+    "draft_process_reference",
 })
 
 # Tools no agent policy may take away. The ops catalog omits these names

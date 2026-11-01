@@ -198,6 +198,11 @@ TOOL_LOCATIONS: dict[str, ToolLocation] = {
     "draft_save_file": ToolLocation.HARNESS,
     "draft_save_scenario": ToolLocation.HARNESS,
     "draft_dry_run": ToolLocation.HARNESS,
+    "draft_process_read": ToolLocation.HARNESS,
+    "draft_process_save": ToolLocation.HARNESS,
+    "draft_process_edit": ToolLocation.HARNESS,
+    "draft_process_check": ToolLocation.HARNESS,
+    "draft_process_reference": ToolLocation.HARNESS,
     # An intake agent starts a case through Keel's door: the worker's door key.
     "start_case": ToolLocation.HARNESS,
     # Sandbox (code execution, file mutation, need isolation)
