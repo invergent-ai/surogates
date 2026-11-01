@@ -200,15 +200,15 @@ Each key is written once. A repeated key writes nothing and wakes nothing, and a
 
 ## A person's case agent
 
-A person's case agent is the agent that helps one person on one case: it answers their questions about the case and drafts into their form. `POST /v1/keel/case-agent-sessions?agent_id=<agent>` starts its session. Its body is `{"org_id", "case_id", "case_number", "person_id", "idempotency_key", "session_id"}`: `case_number` and `idempotency_key` are 1 to 200 characters, and keys the runtime does not know are ignored. The answer is `201 {"session_id"}` when the call made the session, and `200 {"session_id"}` when Keel's key already holds it. The key holds this case agent's session when that session has Keel's id, the agent, the case and the person. Any other session under the key, a step's or an item's among them, or another session with Keel's id, is `409 key-in-use`. The agent is checked as for a step: `404 unknown-agent`, `409 agent-stopped`. Nothing is written to the session or queued: the person's first message wakes it.
+A person's case agent is the agent that helps one person on one case, or on one process instance: it answers their questions about it and drafts into their form. `POST /v1/keel/case-agent-sessions?agent_id=<agent>` starts its session. Its body is `{"org_id", "case_id", "case_number", "person_id", "idempotency_key", "session_id", "subject"}`: `case_number` and `idempotency_key` are 1 to 200 characters, `subject` is `case` (the default) or `process`, and keys the runtime does not know are ignored. For the subject `process`, `case_id` is the instance's id and `case_number` its number. The answer is `201 {"session_id"}` when the call made the session, and `200 {"session_id"}` when Keel's key already holds it. The key holds this case agent's session when that session has Keel's id, the agent, the case or instance, the person and the subject. Any other session under the key, one of another subject among them, a step's or an item's among them, or another session with Keel's id, is `409 key-in-use`. The agent is checked as for a step: `404 unknown-agent`, `409 agent-stopped`. Nothing is written to the session or queued: the person's first message wakes it.
 
 ### Its owner and the person
 
-`person_id` must be a user of the org `org_id`, a home user or a member: anyone else is `409 not-a-member`, and nothing is made. The session is not the person's. It is made with the id Keel gives it, on the `api` channel, with no user, owned by the org's `keel-case-agent` service account: one per org, of the same kind as the case types' accounts, which nobody signs in as and no admin route lists. Keel acts as the person when the agent reads the case. The session's config holds `case_agent`, `{"case_id", "case_number", "person_id"}`, and only keel-link sets it: every other way of creating a session drops it, and a helper never copies it.
+`person_id` must be a user of the org `org_id`, a home user or a member: anyone else is `409 not-a-member`, and nothing is made. The session is not the person's. It is made with the id Keel gives it, on the `api` channel, with no user, owned by the org's `keel-case-agent` service account: one per org, of the same kind as the case types' accounts, which nobody signs in as and no admin route lists. Keel acts as the person when the agent reads the case. The session's config holds `case_agent`, `{"case_id", "case_number", "person_id"}` and, for an instance, `"subject": "process"` (a case's config holds no `subject`), and only keel-link sets it: every other way of creating a session drops it, and a helper never copies it.
 
 ### Its boundary and its workspace
 
-The session carries the case's `case:<case id>` memory boundary, and nothing more of the case's. The boundary is memory-only, as an evaluation's is: the agent works in a scratch workspace of its own, the per-session one, never in the case's files, and reads those only through Keel. A session whose `case_agent` names another case than its boundary is no case agent: the case agent routes answer it `404 unknown-session`.
+The session carries the case's `case:<case id>` memory boundary (for an instance, `case:<instance id>`), and nothing more of the case's. The boundary is memory-only, as an evaluation's is: the agent works in a scratch workspace of its own, the per-session one, never in the case's files, and reads those only through Keel. A session whose `case_agent` names another case than its boundary is no case agent: the case agent routes answer it `404 unknown-session`.
 
 Its memory keeps no facts about people. The `memory` tool refuses the `user` target with `This session keeps no facts about people: save to the 'memory' target.`, and writes nothing; the `memory` target works as in any session of the case.
 
@@ -216,11 +216,11 @@ Its memory keeps no facts about people. The `memory` tool refuses the `user` tar
 
 A person waits on a case agent, so its wakes queue at its channel's priority, 0 on `api`, beside people's work and ahead of every step and item session.
 
-It is offered the agent's own tools that a case allows, less skills (`skills_list`, `skill_view`, `skill_step`), the terminal (`terminal`, `process`), file writing (`write_file`, `patch`), office (`office_read`, `office_edit`) and helpers (`delegate_task`, `spawn_worker`, `send_worker_message`, `stop_worker`). Its prompt names no skill. It gets the case tools in their place: `case_read`, `case_history`, `case_files`, `case_file_read` and `case_draft_form`, which read the case as the person, and draft into their form, through Keel's door (see [How it reads the case](#how-it-reads-the-case)). It gets no step or item tool. Unlike the step and item tools, an agent's policy can take the case tools away.
+It is offered the agent's own tools that a case allows, less skills (`skills_list`, `skill_view`, `skill_step`), the terminal (`terminal`, `process`), file writing (`write_file`, `patch`), office (`office_read`, `office_edit`) and helpers (`delegate_task`, `spawn_worker`, `send_worker_message`, `stop_worker`). Its prompt names no skill. It gets the case tools in their place: `case_read`, `case_history`, `case_files`, `case_file_read` and `case_draft_form`, which read the case as the person, and draft into their form, through Keel's door (see [How it reads the case](#how-it-reads-the-case)). A case agent on a process instance gets the process tools instead, and no case tool: `process_read`, `process_history`, `process_waits`, `process_move_check` and `process_draft_form` (see [How it reads a process instance](#how-it-reads-a-process-instance)). It gets no step or item tool. Unlike the step and item tools, an agent's policy can take the case and process tools away.
 
 ### Case sessions' guidance
 
-Every case session, a step's, an item's or a case agent's, and every helper it starts, runs without the brainstorming gate: its prompt never sends the agent to design before it works, and its skill index leaves the brainstorming skill out. Each one's prompt carries the `case_session` guidance instead: the case's people never see the agent's skills, tools or instructions, so nothing they read, a reply, a question, a returned item or a comment in a document, names a skill, a tool, a procedure or those instructions. The case agent's prompt also carries the `case_agent` guidance: it cites each fact it uses with the `cite` label of the read that gave it, drafts into the person's form only when they ask, and never submits a form, decides a step or moves the case.
+Every case session, a step's, an item's or a case agent's, and every helper it starts, runs without the brainstorming gate: its prompt never sends the agent to design before it works, and its skill index leaves the brainstorming skill out. Each one's prompt carries the `case_session` guidance instead: the case's people never see the agent's skills, tools or instructions, so nothing they read, a reply, a question, a returned item or a comment in a document, names a skill, a tool, a procedure or those instructions. The case agent's prompt also carries the `case_agent` guidance (on a process instance, the `process_agent` guidance): it cites each fact it uses with the `cite` label of the read that gave it, drafts into the person's form only when they ask, and never submits a form, decides a step, moves the case, or retries, cancels or moves an instance.
 
 ### How it reads the case
 
@@ -250,6 +250,22 @@ Text longer than 200,000 characters is cut there, and `truncated` is true. Text 
 | Anything else | Keel's message, or `Keel refused the call (<status>).`, as an error with Keel's code, and Keel's `problems` when it gave them. |
 
 No other session, a step's, an item's or a chat's, is offered the case tools, and one called from any of them reaches no Keel. A worker without both settings has no link to Keel: each case tool answers `This runtime has no link to Keel.`
+
+### How it reads a process instance
+
+A case agent whose reference names the subject `process` reads its instance the same way, through Keel's door and as the person, with the process tools in place of the case tools. Each read is logged as a view through the case agent.
+
+| Tool | Door route | The model reads |
+|---|---|---|
+| `process_read` | `GET /api/harness/sessions/{session_id}/process` | Keel's answer: the instance, its data field by field, its open tasks and its incidents. |
+| `process_history` | `GET /api/harness/sessions/{session_id}/process/history` | Keel's answer: the instance's history, entry by entry. |
+| `process_waits` | `GET /api/harness/sessions/{session_id}/process/waits` | Keel's answer: what the instance waits for, and the cases and processes it started. |
+| `process_move_check` | `GET /api/harness/sessions/{session_id}/process/move` | Keel's answer: whether the instance can move to its process's newest version, and why not. It moves nothing. |
+| `process_draft_form` | `POST /api/harness/sessions/{session_id}/process/form-draft` | Keel's answer, `{"drafted": [field, …]}`, as it came. |
+
+`process_draft_form` posts `{"task", "values", "sources"}`: the open task's id, the values by form field, and where they come from, a non-empty list of objects. It drafts values only: a call that names an `outcome` is never sent. The other limits are the case draft's. Of the tools only these five reach the instance, and none completes a task, retries, cancels, moves the instance, or sends a message or a signal.
+
+A case tool called in a process session, and a process tool called in a case session or any other, reaches no Keel. A Keel that does not know the subject answers the process routes `404`, and the model reads that Keel refused the call. A runtime that does not know the subject treats the session as a case's, and Keel refuses its case tools.
 
 ### A person's message
 
