@@ -58,7 +58,8 @@ CASE_TOOLS = {"case_read", "case_history", "case_files", "case_file_read", "case
 PROCESS_TOOLS = {"process_read", "process_history", "process_waits", "process_move_check", "process_draft_form"}
 DESIGNER_TOOLS = {
     "draft_files", "draft_read", "draft_main", "draft_save_file", "draft_save_scenario", "draft_dry_run",
-    "draft_process_read", "draft_process_check", "draft_process_reference",
+    "draft_process_read", "draft_process_save", "draft_process_edit", "draft_process_check",
+    "draft_process_reference",
 }
 HELPER_TOOLS = {"delegate_task", "spawn_worker", "send_worker_message", "stop_worker"}
 # What a person's case agent never gets: skills, the terminal, file writing,
