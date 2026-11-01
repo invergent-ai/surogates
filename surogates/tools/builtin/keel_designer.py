@@ -65,6 +65,10 @@ _SAVE_TOO_LARGE = (
     "The file is over the 1 MiB Keel takes: change it with draft_process_edit, a few elements at a time."
 )
 _EDITS_TOO_LARGE = "The edits are over the 1 MiB Keel takes: send fewer at a time."
+_EDIT_LOST = (
+    "Keel could not be reached, so the edits may or may not have been saved: read the file again with "
+    "draft_process_read, and send only the edits it still needs."
+)
 _JSON_TOOL_ON_A_PROCESS = (
     "processes/<key>.bpmn is a process's BPMN file: read it with draft_process_read, and change it with "
     "draft_process_edit or draft_process_save."
@@ -298,6 +302,9 @@ def _told(answer: KeelAnswer, tool: str) -> str:
         return _error(_NO_DELEGATION)
     if answer.status == 404 and answer.code == "not-found" and tool in PROCESS_TOOLS:
         return _error(_OLD_KEEL)
+    if answer.transient and tool == "draft_process_edit":
+        # A save sent again stores the same file; an edit sent again may apply twice.
+        return _error(_EDIT_LOST)
     return answered(answer, tool)
 
 

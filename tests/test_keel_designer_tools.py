@@ -546,3 +546,86 @@ async def test_no_log_line_carries_a_process_file(fake_keel: _FakeKeel, caplog: 
     logged = " ".join(record.getMessage() for record in caplog.records)
     assert marker not in logged
     assert PROCESS not in logged
+
+
+@pytest.mark.parametrize(("name", "line", "size"), [
+    ("lf lines", '<bpmn:userTask id="t" name="Review">\n', 5_000_000),
+    ("crlf lines and tabs", '\t<bpmn:userTask id="t" name="Review">\r\n', 3_000_000),
+    ("quotes", '""""""""""""""""""""', 2_000_000),
+], ids=lambda value: value if isinstance(value, str) and len(value) < 24 else "")
+async def test_a_long_process_file_comes_back_as_much_as_fits(fake_keel: _FakeKeel, name, line, size):
+    # Newlines, tabs and quotes cost two characters of JSON each: the result still gives as much of the file as fits.
+    xml = (line * (size // len(line) + 1))[:size]
+    fake_keel.answer(200, {"path": PROCESS, "xml": xml})
+
+    raw = await _call("draft_process_read", {"path": PROCESS}, _designer())
+
+    result = json.loads(raw)
+    assert result["truncated"] is True
+    assert xml.startswith(result["xml"])
+    assert len(raw) <= 300_000
+    # More than half of the room is the file, whatever its escapes cost.
+    assert len(result["xml"]) >= 100_000, name
+
+
+async def test_a_long_json_file_is_given_as_much_as_fits_too(fake_keel: _FakeKeel):
+    content = {"description": 'a "b"\n' * 200_000}
+    fake_keel.answer(200, {"path": "case_types/loan.json", "content": content})
+
+    raw = await _call("draft_read", {"path": "case_types/loan.json"}, _designer())
+
+    result = json.loads(raw)
+    assert result["truncated"] is True
+    assert len(raw) <= 300_000
+    assert len(result["content"]) >= 100_000
+
+
+async def test_an_edit_whose_answer_was_lost_is_not_repeated_blindly(fake_keel: _FakeKeel):
+    # An edit that inserts next to its anchor applies twice if it is sent twice: read the file again first.
+    fake_keel.unreachable()
+
+    result = json.loads(await _call("draft_process_edit", {"path": PROCESS, "edits": EDITS}, _designer()))
+
+    assert result == {
+        "error": (
+            "Keel could not be reached, so the edits may or may not have been saved: read the file again with "
+            "draft_process_read, and send only the edits it still needs."
+        ),
+    }
+
+
+async def test_a_save_whose_answer_was_lost_may_be_sent_again(fake_keel: _FakeKeel):
+    fake_keel.unreachable()
+
+    result = json.loads(await _call("draft_process_save", {"path": PROCESS, "xml": "<x/>"}, _designer()))
+
+    assert result == {"error": "Keel could not be reached; call draft_process_save again."}
+
+
+async def test_a_save_and_an_edit_reach_nothing_in_a_case_session_without_a_link_or_a_delegation(
+    fake_keel: _FakeKeel,
+):
+    # Pins the writing tools to the same boundaries as the reading ones.
+    writes = (
+        ("draft_process_save", {"path": PROCESS, "xml": "<x/>"}),
+        ("draft_process_edit", {"path": PROCESS, "edits": EDITS}),
+    )
+    for session in (_step(deepcopy(CONTRACT)), _case_agent()):
+        for tool, arguments in writes:
+            assert "error" in json.loads(await _call(tool, arguments, session)), (tool, session.config)
+    assert fake_keel.requests == []
+
+    fake_keel.answer(404, {"code": "no-delegation", "message": "This session holds no delegation."})
+    for tool, arguments in writes:
+        assert json.loads(await _call(tool, arguments, _designer())) == {"error": NO_DELEGATION}, tool
+
+    use_keel_client(None)
+    for tool, arguments in writes:
+        assert json.loads(await _call(tool, arguments, _designer())) == {"error": "This runtime has no link to Keel."}
+
+
+def test_no_process_tool_description_has_an_em_dash():
+    descriptions = [schema["function"]["description"] for schema in _registry().get_schemas(set(PROCESS_TOOLS))]
+
+    assert len(descriptions) == 5
+    assert all("\u2014" not in description for description in descriptions)

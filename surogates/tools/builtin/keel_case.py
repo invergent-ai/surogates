@@ -233,17 +233,26 @@ def fit_result(fields: dict[str, Any], key: str) -> str:
     """*fields*, which hold a text under *key* and ``truncated``, as JSON of at most :data:`_RESULT_CHARS`.
 
     Escapes can make the JSON of a text far longer than the text: the text
-    is then shortened until the result fits, and ``truncated`` is true.
-    Each character cut takes at least one off the JSON.
+    is then cut to the longest start of it whose JSON fits, and ``truncated``
+    is true.  The JSON of a start never shrinks as the start grows, so the
+    longest is found by halving.
     """
     fields = dict(fields)
-    while True:
-        result = json.dumps(fields, ensure_ascii=False)
-        over = len(result) - _RESULT_CHARS
-        text = fields[key]
-        if over <= 0 or not text:
-            return result
-        fields[key], fields["truncated"] = text[: max(len(text) - over, 0)], True
+    result = json.dumps(fields, ensure_ascii=False)
+    text = fields[key]
+    if len(result) <= _RESULT_CHARS or not text:
+        return result
+    fields["truncated"] = True
+    low, high = 0, min(len(text), _RESULT_CHARS)
+    while low < high:
+        middle = (low + high + 1) // 2
+        fields[key] = text[:middle]
+        if len(json.dumps(fields, ensure_ascii=False)) <= _RESULT_CHARS:
+            low = middle
+        else:
+            high = middle - 1
+    fields[key] = text[:low]
+    return json.dumps(fields, ensure_ascii=False)
 
 
 def _draft(arguments: dict) -> dict[str, Any] | str:
