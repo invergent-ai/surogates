@@ -58,6 +58,8 @@ CASE_TOOLS = {"case_read", "case_history", "case_files", "case_file_read", "case
 PROCESS_TOOLS = {"process_read", "process_history", "process_waits", "process_move_check", "process_draft_form"}
 DESIGNER_TOOLS = {
     "draft_files", "draft_read", "draft_main", "draft_save_file", "draft_save_scenario", "draft_dry_run",
+    "draft_process_read", "draft_process_save", "draft_process_edit", "draft_process_check",
+    "draft_process_reference",
 }
 HELPER_TOOLS = {"delegate_task", "spawn_worker", "send_worker_message", "stop_worker"}
 # What a person's case agent never gets: skills, the terminal, file writing,
@@ -446,6 +448,15 @@ async def test_an_allow_list_naming_the_designer_tools_offers_them():
     for session in (await _step(store), await _item(store), await _case_agent(store)):
         for offered in _offered(session, registry, policy=policy):
             assert offered.isdisjoint(DESIGNER_TOOLS), session.config
+
+
+async def test_a_process_agents_session_is_offered_no_designer_tool():
+    # Pins the gate's rule for the process tools of the designer: a session on a process instance is a case's.
+    registry = _registry()
+    policy = {"allowed_tools": [*sorted(DESIGNER_TOOLS), "web_search"]}
+
+    for offered in _offered(await _process_agent(_SessionStore()), registry, policy=policy):
+        assert offered.isdisjoint(DESIGNER_TOOLS)
 
 
 async def test_a_rerun_and_its_helpers_never_reach_the_terminal_or_the_browser():
