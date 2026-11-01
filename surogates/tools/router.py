@@ -182,6 +182,14 @@ TOOL_LOCATIONS: dict[str, ToolLocation] = {
     "case_files": ToolLocation.HARNESS,
     "case_file_read": ToolLocation.HARNESS,
     "case_draft_form": ToolLocation.HARNESS,
+    # A person's case agent on a process instance reads it, and drafts into
+    # the person's form, through Keel's door: the worker's door key.  It never
+    # reads the instance's workspace.
+    "process_read": ToolLocation.HARNESS,
+    "process_history": ToolLocation.HARNESS,
+    "process_waits": ToolLocation.HARNESS,
+    "process_move_check": ToolLocation.HARNESS,
+    "process_draft_form": ToolLocation.HARNESS,
     # The designer agent works on a builder's draft through Keel's door: the
     # worker's door key.
     "draft_files": ToolLocation.HARNESS,
