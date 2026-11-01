@@ -20,7 +20,7 @@ from surogates.orchestrator import worker as worker_module
 from surogates.sandbox.pool import SandboxPool
 from surogates.tools.loader import SkillDef
 from tests.test_case_step_isolation import _SessionStore
-from tests.test_case_tool_gate import _case_agent, _chat, _item, _registry, _step, _tenant
+from tests.test_case_tool_gate import _case_agent, _chat, _item, _process_agent, _registry, _step, _tenant
 
 SKILLS = [
     SkillDef(name="brainstorming", description="You MUST use this before any creative work", content="b", source="platform"),
@@ -83,6 +83,21 @@ async def test_the_case_agent_is_told_to_cite_with_the_labels():
     step = _builder(await _step(store))._tool_guidance_section()
     assert "in square brackets" not in step
     assert "case_draft_form" not in step
+
+
+async def test_a_process_agent_reads_the_process_agent_guidance():
+    store = _SessionStore()
+
+    process = _builder(await _process_agent(store))._tool_guidance_section()
+    case = _builder(await _case_agent(store))._tool_guidance_section()
+
+    assert "This session answers one person's questions about one process instance" in process
+    assert "process_draft_form" in process
+    assert "in square brackets" in process
+    assert "This session answers one person's questions about one case," not in process
+    assert "case_draft_form" not in process
+    assert "This session answers one person's questions about one case," in case
+    assert "process_draft_form" not in case
 
 
 async def test_a_case_agents_prompt_names_no_skill_and_it_is_sent_no_skill_step(monkeypatch):

@@ -1,7 +1,8 @@
 """The ``keel_case`` tools: a person's case agent reads its case, and drafts into the person's form, through Keel.
 
-Only a case agent's own session is offered them
-(:func:`surogates.keel.steps.gate_case_tools`).  The agent never reads the
+Only a case agent's own session on a case is offered them
+(:func:`surogates.keel.steps.gate_case_tools`); one on a process instance has the
+``keel_process`` tools instead, and these refuse it.  The agent never reads the
 case's workspace: each tool asks Keel's door, under the session's id, and
 Keel answers as the person, logging each read as a view through the case
 agent.  Every item Keel gives carries a ``cite`` label the agent cites.
@@ -29,6 +30,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from surogates.channels.memory_boundary import is_case_agent_config
+from surogates.keel.case_agents import is_process_agent_config
 from surogates.keel.client import KeelAnswer, KeelClient, keel_client
 from surogates.tools.builtin.case_step import _error, _sent
 from surogates.tools.builtin.file_ops import _DOCUMENT_EXTENSIONS, DocumentParseError, _parse_document_to_text
@@ -170,8 +172,9 @@ async def file_text(data: bytes, path: str) -> tuple[str, bool]:
 
 def _keel(kwargs: dict[str, Any]) -> KeelClient | str:
     """The client this tool call asks Keel through; or the error the model reads when it reaches no Keel: its
-    session is no case agent's, or this runtime has no link to Keel."""
-    if not is_case_agent_config(kwargs.get("session_config")):
+    session is no case agent's on a case, or this runtime has no link to Keel."""
+    config = kwargs.get("session_config")
+    if not is_case_agent_config(config) or is_process_agent_config(config):
         return _error(_NOT_A_CASE_AGENT)
     client = keel_client()
     return _error(_NO_LINK) if client is None else client

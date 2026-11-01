@@ -139,6 +139,35 @@ async def test_keel_creates_a_case_agent_session_for_one_person(
     assert await queue_score(redis_client, session) is None
 
 
+async def test_keel_creates_a_process_agent_session_for_one_person(link, org, session_store, session_factory):
+    person_id, _ = await person(session_factory, org)
+    request = agent_body(org, person_id, case_number="P-000001", subject="process")
+
+    created = await post(link, request)
+
+    assert created.status_code == 201, created.text
+    session = await session_store.get_session(UUID(request["session_id"]))
+    assert session.config["memory_boundary"] == f"case:{CASE_ID}"
+    assert session.config["case_agent"] == {
+        "case_id": CASE_ID, "case_number": "P-000001", "person_id": str(person_id), "subject": "process",
+    }
+
+
+async def test_the_same_key_with_another_subject_is_another_sessions(link, org, session_store, session_factory):
+    person_id, _ = await person(session_factory, org)
+    request = agent_body(org, person_id, case_number="P-000001", subject="process")
+
+    first = await post(link, request)
+    again = await post(link, request)
+    as_a_case = await post(link, {**request, "subject": "case"})
+
+    assert first.status_code == 201, first.text
+    assert (again.status_code, again.json()) == (200, {"session_id": request["session_id"]})
+    assert (as_a_case.status_code, code_of(as_a_case)) == (409, "key-in-use"), as_a_case.text
+    held = await session_store.get_session(UUID(request["session_id"]))
+    assert held.config["case_agent"]["subject"] == "process"
+
+
 async def test_a_retry_finds_the_case_agent_session(link, org, session_store, session_factory):
     person_id, _ = await person(session_factory, org)
     other_person, _ = await person(session_factory, org)

@@ -43,6 +43,7 @@ from surogates.runtime.governance import (
     CASE_ITEM_TOOLS,
     CASE_STEP_TOOLS,
     KEEL_CASE_TOOLS,
+    KEEL_PROCESS_TOOLS,
     WORKER_SELF_TOOLS,
 )
 
@@ -65,6 +66,7 @@ __all__ = [
     "KEELS_WORD",
     "KEEL_CASE_TOOLS",
     "KEEL_MESSAGES",
+    "KEEL_PROCESS_TOOLS",
     "KICKOFF_MARKER",
     "MENTION_MARKER",
     "MESSAGE_MARKER",
@@ -372,7 +374,8 @@ def gate_case_tools(tools: set[str], session: object) -> set[str]:
 
     Runs last in both places that decide what is offered, the prompt and the
     schemas, so they agree.  A session of no case only loses the step, item
-    and case agent tools.  A session of a case keeps the case's allowed
+    and case agent tools, those of a case agent on a process instance
+    included.  A session of a case keeps the case's allowed
     tools, its agent's MCP tools and its execution's self-tools; a scope that
     names work tools narrows the allowed ones to those and
     :data:`ALWAYS_KEPT`.  Only the step's own session gets the step tools,
@@ -382,18 +385,20 @@ def gate_case_tools(tools: set[str], session: object) -> set[str]:
     session of a case keeps them.  A person's case agent keeps the allowed
     tools less :data:`CASE_AGENT_REFUSED`, and gets
     :data:`KEEL_CASE_TOOLS`, which no other session gets, and no step or
-    item tool.  A rerun's session and its helpers' lose
+    item tool; a case agent on a process instance gets
+    :data:`KEEL_PROCESS_TOOLS`, which no other session gets, in their place.
+    A rerun's session and its helpers' lose
     :data:`RERUN_REFUSED`, the terminal and the browser, before the step and
     office tools are added.  Nothing else is ever added, so a tool an
     earlier gate dropped stays dropped.
     """
     # Here, not at the top: each imports this module, the office guard through its own imports.
-    from surogates.keel.case_agents import is_case_agent
+    from surogates.keel.case_agents import is_case_agent, is_process_agent
     from surogates.keel.items import is_case_item
     from surogates.office.guard import OFFICE_TOOLS
 
     if not is_case_session(session):
-        return set(tools) - CASE_STEP_TOOLS - CASE_ITEM_TOOLS - KEEL_CASE_TOOLS
+        return set(tools) - CASE_STEP_TOOLS - CASE_ITEM_TOOLS - KEEL_CASE_TOOLS - KEEL_PROCESS_TOOLS
 
     def platform(name: str) -> bool:
         return name.startswith("mcp__") or name in WORKER_SELF_TOOLS or name in BOARD_SELF_TOOLS
@@ -406,7 +411,7 @@ def gate_case_tools(tools: set[str], session: object) -> set[str]:
     if rerun_kind_of(session) is not None:
         kept -= RERUN_REFUSED
     if is_case_agent(session):
-        return (kept - CASE_AGENT_REFUSED) | KEEL_CASE_TOOLS
+        return (kept - CASE_AGENT_REFUSED) | (KEEL_PROCESS_TOOLS if is_process_agent(session) else KEEL_CASE_TOOLS)
     if is_case_step(session):
         kept |= CASE_STEP_TOOLS
         if step_contract_of(session).mode == "draft":
