@@ -53,6 +53,13 @@ export function createExampleChatAdapter(baseUrl = "/api"): AgentChatAdapter {
         reason: input.reason,
       });
     },
+    async submitUserFeedback(input) {
+      return postJson(`${baseUrl}/sessions/${encodeURIComponent(input.sessionId)}/feedback`, {
+        llmResponseEventId: input.llmResponseEventId,
+        rating: input.rating,
+        reason: input.reason,
+      });
+    },
     async listSlashCommands() {
       return getJson(`${baseUrl}/slash-commands`);
     },

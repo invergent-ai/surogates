@@ -10,7 +10,7 @@ import {
   submitAskUserQuestionDemo,
   submitExpertFeedbackDemo,
 } from "./demo-commands";
-import { resolveOpenAiConfig, streamChatCompletions } from "./openai";
+import { countTokens, fakeReply, streamReply } from "./fake-llm";
 import {
   ExampleSessionStore,
   normalizePath,
@@ -20,27 +20,19 @@ import { writeSseEvent } from "./events";
 
 export interface CreateExampleAppInput {
   store?: ExampleSessionStore;
-  fetchImpl?: typeof fetch;
+  /** Pause between the chunks of a reply; tests pass 0. */
+  chunkDelayMs?: number;
 }
 
 const upload = multer({ storage: multer.memoryStorage() });
 
 export function createExampleApp({
   store = new ExampleSessionStore(),
-  fetchImpl = fetch,
+  chunkDelayMs,
 }: CreateExampleAppInput = {}) {
   const app = express();
   app.locals.store = store;
   app.use(express.json({ limit: "1mb" }));
-
-  app.get("/api/config", (_request, response) => {
-    const config = resolveOpenAiConfig();
-    response.json({
-      model: config.model,
-      baseUrl: config.baseUrl,
-      hasApiKey: Boolean(config.apiKey),
-    });
-  });
 
   app.get("/api/sessions", (request, response) => {
     response.json(store.list(numberQuery(request, "limit", 50), numberQuery(request, "offset", 0)));
@@ -64,7 +56,7 @@ export function createExampleApp({
     response.status(204).end();
   });
 
-  app.post("/api/sessions/:sessionId/messages", async (request, response, next) => {
+  app.post("/api/sessions/:sessionId/messages", async (request, response) => {
     const record = requireRecord(store, request);
     const content = stringBody(request, "content");
     if (!content) {
@@ -72,6 +64,7 @@ export function createExampleApp({
       return;
     }
     const userEvent = record.events.append("user.message", { content });
+    if (!record.session.messageCount) record.session.title = content.slice(0, 48);
     record.history.push({ role: "user", content });
     record.lastUserMessage = content;
     record.session.messageCount = (record.session.messageCount ?? 0) + 1;
@@ -81,18 +74,19 @@ export function createExampleApp({
       return;
     }
     response.json({ eventId: userEvent.eventId, status: "accepted" });
-    await runRealLlmTurn(record, fetchImpl, next);
+    await runFakeTurn(record, chunkDelayMs);
   });
 
   app.post("/api/sessions/:sessionId/pause", (request, response) => {
     const record = requireRecord(store, request);
+    record.turn++;
     store.setStatus(record, "paused");
     record.events.append("session.pause", {});
     record.events.append("session.done", {});
     response.status(204).end();
   });
 
-  app.post("/api/sessions/:sessionId/retry", async (request, response, next) => {
+  app.post("/api/sessions/:sessionId/retry", async (request, response) => {
     const record = requireRecord(store, request);
     if (!record.lastUserMessage) {
       response.json(record.session);
@@ -101,7 +95,7 @@ export function createExampleApp({
     store.setStatus(record, "active");
     record.events.append("session.resume", {});
     response.json(record.session);
-    await runRealLlmTurn(record, fetchImpl, next);
+    await runFakeTurn(record, chunkDelayMs);
   });
 
   app.get("/api/sessions/:sessionId/events", (request, response) => {
@@ -135,6 +129,17 @@ export function createExampleApp({
       reason: typeof request.body?.reason === "string" ? request.body.reason : undefined,
     });
     response.json({ eventId: record.events.replay().at(-1)?.eventId });
+  });
+
+  app.post("/api/sessions/:sessionId/feedback", (request, response) => {
+    const record = requireRecord(store, request);
+    const event = record.events.append("user.feedback", {
+      source: "user",
+      target_event_id: Number(request.body?.llmResponseEventId ?? 0),
+      rating: request.body?.rating === "down" ? "down" : "up",
+      reason: typeof request.body?.reason === "string" ? request.body.reason : undefined,
+    });
+    response.json({ eventId: event.eventId, eventType: event.type });
   });
 
   app.get("/api/slash-commands", (_request, response) => {
@@ -206,51 +211,29 @@ export function createExampleApp({
   return app;
 }
 
-async function runRealLlmTurn(
-  record: ExampleSessionRecord,
-  fetchImpl: typeof fetch,
-  next: (error: unknown) => void,
-) {
+async function runFakeTurn(record: ExampleSessionRecord, chunkDelayMs?: number) {
+  const turn = ++record.turn;
   record.events.append("harness.wake", {});
   record.events.append("llm.request", { model: record.session.model });
-  let content = "";
-  let inputTokens = 0;
-  let outputTokens = 0;
-  try {
-    for await (const chunk of streamChatCompletions({
-      config: resolveOpenAiConfig(),
-      messages: record.history,
-      fetchImpl,
-    })) {
-      if (chunk.type === "delta") {
-        content += chunk.content;
-        record.events.append("llm.delta", { content: chunk.content });
-      } else if (chunk.type === "usage") {
-        record.session.model = chunk.model || record.session.model;
-        inputTokens = chunk.inputTokens;
-        outputTokens = chunk.outputTokens;
-      }
-    }
-    record.history.push({ role: "assistant", content });
-    record.session.inputTokens = (record.session.inputTokens ?? 0) + inputTokens;
-    record.session.outputTokens = (record.session.outputTokens ?? 0) + outputTokens;
-    record.events.append("llm.response", {
-      message: { content },
-      input_tokens: inputTokens,
-      output_tokens: outputTokens,
-      model: record.session.model,
-    });
-    record.events.append("session.done", {});
-  } catch (error) {
-    record.events.append("session.fail", {
-      error_category: "provider_error",
-      error_title: "Provider request failed",
-      error_detail: error instanceof Error ? error.message : "Unknown provider error",
-      retryable: true,
-    });
-    record.events.append("session.done", {});
-    next(error);
+  const reply = fakeReply(record.lastUserMessage ?? "");
+  for await (const chunk of streamReply(reply, chunkDelayMs)) {
+    // Stop (or a newer turn) ends this one where it is.
+    if (record.turn !== turn) return;
+    record.events.append("llm.delta", { content: chunk });
   }
+  if (record.turn !== turn) return;
+  const inputTokens = record.history.reduce((sum, entry) => sum + countTokens(entry.content), 0);
+  const outputTokens = countTokens(reply);
+  record.history.push({ role: "assistant", content: reply });
+  record.session.inputTokens = (record.session.inputTokens ?? 0) + inputTokens;
+  record.session.outputTokens = (record.session.outputTokens ?? 0) + outputTokens;
+  record.events.append("llm.response", {
+    message: { content: reply },
+    input_tokens: inputTokens,
+    output_tokens: outputTokens,
+    model: record.session.model,
+  });
+  record.events.append("session.done", {});
 }
 
 function requireRecord(store: ExampleSessionStore, request: Request) {

@@ -1,37 +1,33 @@
 import { useEffect, useMemo, useState } from "react";
 import { AgentChat, type AgentChatSession } from "@invergent/agent-chat-react";
-import {
-  MessageSquareIcon,
-  PlusIcon,
-  TrashIcon,
-} from "lucide-react";
+import { Button } from "@invergent/ui-sdk/button";
+import { EmptyState } from "@invergent/ui-sdk/empty-state";
+import { ListRow } from "@invergent/ui-sdk/list-row";
+import { SectionLabel } from "@invergent/ui-sdk/section-label";
+import { Sidebar, SidebarBrand } from "@invergent/ui-sdk/sidebar";
+import { MessageSquareIcon, PlusIcon, TrashIcon } from "lucide-react";
 import { createExampleChatAdapter } from "./adapter";
 
-interface Config {
-  model: string;
-  baseUrl: string;
-  hasApiKey: boolean;
-}
+// Titles and statuses change as turns run; the list is polled rather than wired to events.
+const REFRESH_MS = 2000;
 
 export function App() {
   const adapter = useMemo(() => createExampleChatAdapter(), []);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [sessions, setSessions] = useState<AgentChatSession[]>([]);
-  const [config, setConfig] = useState<Config | null>(null);
+
+  async function refreshSessions() {
+    const list = await adapter.listSessions({ limit: 50, offset: 0 });
+    setSessions(list.sessions);
+    setSessionId((current) => current ?? list.sessions[0]?.id ?? null);
+  }
 
   useEffect(() => {
     void refreshSessions();
-    fetch("/api/config")
-      .then((response) => response.json() as Promise<Config>)
-      .then(setConfig)
-      .catch(() => setConfig(null));
-  }, []);
-
-  async function refreshSessions() {
-    const list = await adapter.listSessions({ limit: 20, offset: 0 });
-    setSessions(list.sessions);
-    if (!sessionId && list.sessions[0]) setSessionId(list.sessions[0].id);
-  }
+    const timer = setInterval(() => void refreshSessions(), REFRESH_MS);
+    return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [adapter]);
 
   async function newSession() {
     const session = await adapter.createSession({});
@@ -47,60 +43,44 @@ export function App() {
   }
 
   return (
-    <main className="app-shell">
-      <aside className="session-sidebar">
-        <div className="sidebar-header">
-          <span className="brand-mark">
-            <MessageSquareIcon aria-hidden="true" />
-          </span>
-          <div>
-            <h1>Surogates</h1>
-            <p>Agent Chat Example</p>
-          </div>
-        </div>
-
-        <div className="sidebar-actions">
-          <button className="new-session-button" type="button" onClick={() => void newSession()}>
+    <main className="flex h-full w-full overflow-hidden bg-background text-foreground">
+      <Sidebar>
+        <SidebarBrand title="Surogates" subtitle="Agent chat example" />
+        <div className="px-3 pb-2">
+          <Button className="w-full" variant="outline" onClick={() => void newSession()}>
             <PlusIcon aria-hidden="true" />
             New session
-          </button>
-          <div className="config-panel">
-            <span>{config?.model ?? "OpenAI-compatible streaming"}</span>
-            <strong>{config?.hasApiKey ? "API key configured" : "API key missing"}</strong>
-          </div>
+          </Button>
         </div>
-
-        <nav className="session-list" aria-label="Sessions">
+        <SectionLabel label="Sessions" className="mx-3" />
+        <nav aria-label="Sessions" className="min-h-0 flex-1 space-y-0.5 overflow-y-auto px-3 py-1">
           {sessions.map((session) => (
-            <button
+            <ListRow
               key={session.id}
-              className={`session-row ${session.id === sessionId ? "active" : ""}`}
-              type="button"
+              icon={MessageSquareIcon}
+              label={session.title || "New chat"}
+              meta={session.status}
+              isActive={session.id === sessionId}
               onClick={() => setSessionId(session.id)}
-            >
-              <MessageSquareIcon aria-hidden="true" />
-              <span>
-                <strong>{session.title || "New session"}</strong>
-                <small>{session.model ?? config?.model ?? "default"} · {session.status}</small>
-              </span>
-            </button>
+            />
           ))}
           {sessions.length === 0 && (
-            <div className="empty-sessions">No sessions yet</div>
+            <EmptyState className="py-8" logoClassName="size-9" title="No sessions yet" />
           )}
         </nav>
-
-        <button
-          className="delete-session-button"
-          type="button"
-          disabled={!sessionId}
-          onClick={() => void deleteCurrentSession()}
-        >
-          <TrashIcon aria-hidden="true" />
-          Delete current
-        </button>
-      </aside>
-      <section className="chat-surface">
+        <div className="px-3 pb-3">
+          <Button
+            className="w-full"
+            variant="ghost"
+            disabled={!sessionId}
+            onClick={() => void deleteCurrentSession()}
+          >
+            <TrashIcon aria-hidden="true" />
+            Delete current
+          </Button>
+        </div>
+      </Sidebar>
+      <section className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
         <AgentChat
           adapter={adapter}
           sessionId={sessionId}
@@ -108,7 +88,6 @@ export function App() {
             setSessionId(nextSessionId);
             void refreshSessions();
           }}
-          disabled={config?.hasApiKey === false}
         />
       </section>
     </main>

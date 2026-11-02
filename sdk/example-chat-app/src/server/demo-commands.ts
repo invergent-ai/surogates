@@ -94,6 +94,7 @@ export function runDemoCommand(
     case "/demo-errors":
       emitErrorDemo(record);
       return true;
+    case "/clear":
     case "/demo-context":
       record.events.append("context.compact", { strategy: "clear" });
       record.events.append("session.done", {});

@@ -8,6 +8,7 @@ import type {
   ExampleWorkspaceUpload,
 } from "../shared/types";
 import { SessionEventLog } from "./events";
+import { FAKE_MODEL } from "./fake-llm";
 
 export interface ChatTurn {
   role: "user" | "assistant";
@@ -21,6 +22,8 @@ export interface ExampleSessionRecord {
   artifacts: Map<string, ExampleArtifactPayload>;
   workspace: Map<string, ExampleWorkspaceFile>;
   lastUserMessage: string | null;
+  /** Counts the turns started or stopped; a running turn ends when it is no longer the latest. */
+  turn: number;
 }
 
 export class ExampleSessionStore {
@@ -45,7 +48,7 @@ export class ExampleSessionStore {
       channel: "example-chat-app",
       status: "active",
       title: "New chat",
-      model: process.env.OPENAI_MODEL ?? "gpt-4o-mini",
+      model: FAKE_MODEL,
       messageCount: 0,
       toolCallCount: 0,
       inputTokens: 0,
@@ -60,6 +63,7 @@ export class ExampleSessionStore {
       artifacts: new Map(),
       workspace: seedWorkspace(),
       lastUserMessage: null,
+      turn: 0,
     };
     record.events.append("session.start", { session_id: id });
     this.sessions.set(id, record);
