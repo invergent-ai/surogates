@@ -40,7 +40,9 @@ _TAPS = {
     "whatsapp": (
         'a reply button: {"button_reply": {"id", "title"}} from interactive.action.buttons[].reply; '
         'a list row: {"list_reply": {"id", "title"}} from interactive.action.sections[].rows[]; '
-        'a template quick reply: {"quick_reply": {"text", "payload"}}'
+        'a template quick reply: {"quick_reply": {"text", "payload"}}; '
+        'a form (interactive.type "flow"): fill it in with {"form_reply": {<field name>: <answer>, ..., '
+        '"flow_token": <interactive.action.parameters.flow_token>}}, using the fields listed below'
     ),
     "telegram": 'an inline button: {"callback": {"message_id": <the message id>, "data": <its callback_data>}}',
     "slack": (
@@ -72,8 +74,32 @@ def _client(settings) -> tuple[AsyncOpenAI, str] | None:
     return AsyncOpenAI(api_key=api_key, base_url=base_url or None, timeout=60, max_retries=1), model
 
 
-def _prompt(person, channel: str, thread) -> list[dict[str, str]]:
+def _forms(flows, thread) -> str:
+    """The fields of every WhatsApp Flow the agent sent, so the person can fill it in."""
+    sent = {str(m.body.get("interactive", {}).get("action", {}).get("parameters", {}).get("flow_id"))
+            for m in thread if m.direction == "out" and isinstance(m.body, dict)}
+    lines = []
+    for flow in flows or []:
+        if str(flow.get("id")) not in sent:
+            continue
+        for screen in (flow.get("json") or {}).get("screens", []):
+            for field in screen.get("layout", {}).get("children", []):
+                if not field.get("name"):
+                    continue
+                options = [o.get("id") for o in field.get("data-source", []) if isinstance(o, dict)]
+                lines.append(
+                    f"- {field['name']} ({field.get('type')}, {field.get('label', '')}"
+                    f"{', required' if field.get('required') else ''}"
+                    f"{', one of ' + ' / '.join(map(str, options)) if options else ''})"
+                )
+        if lines:
+            lines.insert(0, f"Form {flow.get('id')} ({flow.get('name', '')}), its fields:")
+    return "\n".join(lines)
+
+
+def _prompt(person, channel: str, thread, flows=None, refused: str | None = None) -> list[dict[str, str]]:
     taps = _TAPS.get(channel)
+    forms = _forms(flows, thread) if channel == "whatsapp" else ""
     lines = []
     for m in thread:
         who = "You" if m.direction == "in" else "Agent"
@@ -89,6 +115,8 @@ def _prompt(person, channel: str, thread) -> list[dict[str, str]]:
         "When your character would give up, choose give_up.\n"
         + (f"You can tap what the assistant offers: {taps}. Copy ids exactly from its message."
            if taps else "You can only write text.")
+        + (f"\n{forms}\nAn OptIn field is true or false; a date is YYYY-MM-DD." if forms else "")
+        + (f"\nYour last move was refused ({refused}); make a different one." if refused else "")
         + '\nAnswer with JSON: {"action": "write"|"tap"|"done"|"give_up", "text", "tap", "note"}.'
     )
     chat = "\n".join(lines) or "(Nothing yet: you write first.)"
@@ -114,6 +142,7 @@ class Actor:
         self.state = state
         self.busy: set = set()
         self.strikes: dict = {}
+        self.refused: dict = {}
 
     async def run(self) -> None:
         while True:
@@ -134,6 +163,7 @@ class Actor:
             await self._move(run, person)
         except Exception as exc:
             logger.warning("[simulation] the AI couldn't move as %s: %s", person.id, exc)
+            self.refused[person.id] = str(exc)
             self.strikes[person.id] = self.strikes.get(person.id, 0) + 1
             if self.strikes[person.id] >= STRIKES:
                 await self._stop(person, "failed", f"The AI couldn't continue as {person.name}")
@@ -158,7 +188,8 @@ class Actor:
         llm, model = client
         try:
             move = await generate_structured(
-                llm_client=llm, model=model, messages=_prompt(person, run.channel, thread),
+                llm_client=llm, model=model, messages=_prompt(person, run.channel, thread, run.flows,
+                                                         self.refused.get(person.id)),
                 output_model=Move, max_tokens=600, temperature=0.7,
             )
         finally:
@@ -179,4 +210,5 @@ class Actor:
         except HTTPException as exc:
             raise RuntimeError(f"the move was refused: {exc.detail}") from None
         self.strikes.pop(person.id, None)
+        self.refused.pop(person.id, None)
         await store.update_person(sf, person.id, ai_acted_at=datetime.now(timezone.utc))

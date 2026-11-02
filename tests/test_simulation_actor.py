@@ -96,3 +96,21 @@ async def test_the_ai_only_writes_on_chat_channels(rsf):  # noqa: F811
         "persona": "Ana", "channel": "voice",
     })
     assert r.status_code == 422
+
+
+def test_a_sent_form_is_described_and_a_refusal_is_fed_back():
+    flow = {"id": "7", "name": "signup", "json": {"screens": [{"layout": {"children": [
+        {"type": "TextBody", "text": "Hi"},
+        {"name": "who", "type": "RadioButtonsGroup", "label": "Who", "required": True,
+         "data-source": [{"id": "me"}, {"id": "family"}]},
+        {"name": "ok", "type": "OptIn", "label": "Agree"},
+    ]}}]}}
+    sent = SimpleNamespace(direction="out", wamid="w1", kind="interactive", status="sent", body={
+        "interactive": {"type": "flow", "action": {"parameters": {"flow_id": "7", "flow_token": "t"}}}})
+    person = SimpleNamespace(name="Ana", persona="You are Ana.")
+    system = actor._prompt(person, "whatsapp", [sent], [flow], "Write something")[0]["content"]
+    assert "who (RadioButtonsGroup, Who, required, one of me / family)" in system
+    assert "ok (OptIn, Agree)" in system
+    assert "form_reply" in system
+    assert "refused (Write something)" in system
+    assert "Form" not in actor._prompt(person, "whatsapp", [], [flow])[0]["content"]
