@@ -1963,28 +1963,6 @@ function useDelayedRunningIndicator(isRunning: boolean): boolean {
   return visible;
 }
 
-// How long after the loaded history shows its height may still change, as markdown and code blocks render.
-const HISTORY_SETTLE_MS = 1500;
-
-/**
- * False while the history loads and for ``settleMs`` after it shows, true from then on.
- * A thread that never loaded a history starts true.
- */
-export function useHistorySettled(isLoadingHistory: boolean, settleMs: number): boolean {
-  const [settled, setSettled] = useState(!isLoadingHistory);
-
-  useEffect(() => {
-    if (isLoadingHistory) {
-      setSettled(false);
-      return;
-    }
-    const timeout = window.setTimeout(() => setSettled(true), settleMs);
-    return () => window.clearTimeout(timeout);
-  }, [isLoadingHistory, settleMs]);
-
-  return settled;
-}
-
 // ── Main thread ──────────────────────────────────────────────────────
 
 export function ChatThread({
@@ -2070,7 +2048,6 @@ export function ChatThread({
   // status. A pending question also suppresses it while awaiting input.
   const showWorkingOnIt =
     useDelayedRunningIndicator(isRunning) && !awaitingInput && !inlineRunningIndicator;
-  const historySettled = useHistorySettled(isLoadingHistory, HISTORY_SETTLE_MS);
   // A conversational ask leaves the composer open — it IS the answer
   // field, and ``awaitingAnswer`` keeps Enter from stopping the session
   // (isRunning stays true while the agent is parked). A multi-question
@@ -2230,11 +2207,9 @@ export function ChatThread({
   return (
     // data-transcript: the host's transcript settings shape this, the composer with it.
     <div data-transcript="" className={cn(TRANSCRIPT_WIDTH, "flex flex-1 flex-col overflow-hidden bg-background text-base")}>
-      {/* Loaded history is a new view: it opens at the bottom of the finished conversation, not scrolled down to it.
-          Until it settles, height changes follow without animating, so it does not look like it scrolls; live streaming then glides. */}
+      {/* Loaded history is a new view: it opens at the bottom of the finished conversation, not scrolled down to it. */}
       <Conversation
         key={isLoadingHistory ? "loading" : "loaded"}
-        resize={historySettled ? "smooth" : "instant"}
         className="relative flex-1 min-h-0"
       >
         <ConversationContent className="mx-auto w-full max-w-4xl">
