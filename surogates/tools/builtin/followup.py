@@ -724,6 +724,15 @@ async def handle_followup_status(arguments: dict, **kwargs: Any) -> str:
             "the business's notices here. They are not someone followed — do not "
             "enrol them or ask them a step's questions."
         )
+        from surogates.tools.builtin.team import _ABILITY_WORDS
+
+        rights = followup_store.member_permissions(settings, ctx.user_id)["can"]
+        cannot = [words for ability, words in _ABILITY_WORDS.items() if ability not in rights]
+        if cannot:
+            lines.append(
+                f"From here they may not {'; '.join(cannot)}. When they ask for one of "
+                "these, say so at once, before collecting any details."
+            )
     speaker = await ctx.speaker(sf)
     if speaker is not None:
         lines.append(followup_store.writer_line(speaker) + ".")
