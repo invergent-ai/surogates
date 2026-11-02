@@ -41,6 +41,11 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/internal", dependencies=[Depends(_require_internal_token)])
 
 
+class OtherPerson(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    persona: str = Field(min_length=1, max_length=4000)
+
+
 class StartRun(BaseModel):
     org_id: uuid.UUID
     agent_id: str
@@ -52,6 +57,11 @@ class StartRun(BaseModel):
     channel: Literal["whatsapp", "telegram", "slack", "teams", "discord", "website", "voice"] = "whatsapp"
     #: Who the AI plays; none and the user types as the person.
     persona: Optional[str] = Field(default=None, max_length=4000)
+    #: More customers in the same run, every one played by Autopilot.
+    others: list[OtherPerson] = Field(default_factory=list, max_length=5)
+    #: What a team member's stand-in asks the agent on their own, by member id.
+    team_tasks: dict[str, str] = Field(default_factory=dict)
+    via: Optional[Literal["copilot"]] = None
 
 
 class PersonMessage(BaseModel):
@@ -77,14 +87,26 @@ def _message(m) -> dict[str, Any]:
 
 
 async def _detail(sf, run) -> dict[str, Any]:
+    from surogates.followup.store import get_settings, member_permissions
+
     now = datetime.now(timezone.utc)
     people, user_ids = [], []
-    for person in await store.people(sf, run.id):
+    found = await store.people(sf, run.id)
+    settings = (await get_settings(sf, org_id=run.org_id, agent_id=run.agent_id)
+                if any(p.stands_for for p in found) else None)
+    for person in found:
         if person.user_id:
             user_ids.append(person.user_id)
         messages = await store.thread(sf, person.id)
+        rights = member_permissions(settings, person.stands_for) if person.stands_for else None
         people.append({"id": str(person.id), "name": person.name, "channel": person.channel,
                        "team": person.stands_for is not None,
+                       "user_id": str(person.user_id) if person.user_id else None,
+                       "task": person.task,
+                       "stands_for": str(person.stands_for) if person.stands_for else None,
+                       "permissions": rights and {"receives": sorted(rights["receives"]),
+                                                  "can": sorted(rights["can"]),
+                                                  "handles": rights["handles"]},
                        "address": person.address, "persona": person.persona,
                        "driver": person.driver, "ai_state": person.ai_state,
                        "ai_note": person.ai_note,
@@ -94,7 +116,7 @@ async def _detail(sf, run) -> dict[str, Any]:
     return {"id": str(run.id), "agent_id": run.agent_id, "status": run.status,
             "channel": run.channel,
             "phone_number_id": run.phone_number_id, "created_by": run.created_by,
-            "created_at": run.created_at.isoformat(),
+            "via": run.via, "created_at": run.created_at.isoformat(),
             "ended_at": run.ended_at.isoformat() if run.ended_at else None, "people": people,
             "flows": run.flows or [],
             "review": run.review,
@@ -112,13 +134,14 @@ async def _run_in_org(request: Request, run_id: uuid.UUID, org_id: uuid.UUID):
 async def start_run(body: StartRun, request: Request):
     state = request.app.state
     persona = (body.persona or "").strip() or None
-    if persona and body.channel not in AI_CHANNELS:
+    if (persona or body.others) and body.channel not in AI_CHANNELS:
         raise HTTPException(status_code=422, detail="Autopilot writes on chat channels only")
     run = await store.create_run(
         state.session_factory, state.vault, org_id=body.org_id, agent_id=body.agent_id,
         created_by=body.created_by, routing_config=body.routing_config,
         person_name=body.person_name.strip(), provision=state.provision,
         templates=body.templates, flows=body.flows, channel=body.channel, persona=persona,
+        others=[o.model_dump() for o in body.others], team_tasks=body.team_tasks, via=body.via,
     )
     return await _detail(state.session_factory, run)
 
@@ -134,7 +157,7 @@ async def list_runs(org_id: uuid.UUID, agent_id: str, request: Request):
         first = people[0] if people else None
         summaries.append({
             "id": str(r.id), "status": r.status, "channel": r.channel,
-            "created_by": r.created_by,
+            "created_by": r.created_by, "via": r.via,
             "created_at": r.created_at.isoformat(),
             "ended_at": r.ended_at.isoformat() if r.ended_at else None,
             "people": [p.name for p in people if p.stands_for is None],
@@ -144,6 +167,11 @@ async def list_runs(org_id: uuid.UUID, agent_id: str, request: Request):
             "ai_note": first.ai_note if first else None,
             "messages": counts.get(r.id, 0),
             "verdict": (r.review or {}).get("verdict"),
+            "changes": [
+                {"title": f.get("title"), "target": (f.get("proposal") or {}).get("target"),
+                 "name": (f.get("proposal") or {}).get("name"), "applied_at": f.get("applied_at")}
+                for f in (r.review or {}).get("findings") or [] if f.get("state") == "applied"
+            ],
         })
     return summaries
 

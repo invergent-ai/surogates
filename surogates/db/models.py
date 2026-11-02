@@ -2943,6 +2943,8 @@ class SimulationRun(Base):
     ended_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
     #: The judge's review of the run and the fixes it proposed; ops writes it whole.
     review: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONB, nullable=True)
+    #: ``copilot`` when the platform Copilot started it for the user; None from Studio.
+    via: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
 
 class SimulationPerson(Base):
@@ -2964,6 +2966,8 @@ class SimulationPerson(Base):
     #: Who the AI plays when it plays this person; none for a hand-typed one.
     #: The team member this person stands in for; None for the run's customers.
     stands_for: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), nullable=True)
+    #: What a team stand-in asks the agent on their own, writing first; None to only answer it.
+    task: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     persona: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     #: ``ai`` while the AI writes as them, ``human`` while the user does.
     driver: Mapped[str] = mapped_column(Text, nullable=False, default="human", server_default="human")

@@ -74,7 +74,12 @@ async def create_run(
     flows: list[dict[str, Any]] | None = None,
     channel: str = "whatsapp",
     persona: str | None = None,
+    others: list[dict[str, str]] | None = None,
+    team_tasks: dict[str, str] | None = None,
+    via: str | None = None,
 ) -> SimulationRun:
+    """A run with its first person, *others* (``{name, persona}``) beside them,
+    and on WhatsApp a stand-in for each team member, given their *team_tasks*."""
     if channel == "telegram":
         account, token = new_bot_username(), new_bot_token()
     elif channel == "slack":
@@ -94,7 +99,7 @@ async def create_run(
         org_id=org_id, agent_id=agent_id, created_by=created_by, channel=channel,
         phone_number_id=account, access_token=token, app_secret=secrets.token_hex(16),
         routing_config=dict(routing_config or {}), templates=list(templates or []),
-        flows=list(flows or []),
+        flows=list(flows or []), via=via,
     )
     async with sf() as db:
         db.add(run)
@@ -119,9 +124,11 @@ async def create_run(
     for name, value in creds.items():
         await vault.store(org_id, f"{channel}_{name}_{run.phone_number_id}", value)
     await add_person(sf, run, name=person_name, provision=provision, persona=persona)
+    for other in others or []:
+        await add_person(sf, run, name=other["name"], provision=provision, persona=other["persona"])
     from surogates.simulation.team import add_team
 
-    await add_team(sf, run, provision, autopilot=persona is not None)
+    await add_team(sf, run, provision, autopilot=persona is not None, tasks=team_tasks)
     return run
 
 
@@ -267,6 +274,14 @@ async def log_message(
                                body=body, wamid=wamid, status=status)
     async with sf() as db:
         db.add(message)
+        if direction == "out":
+            # A team member is never done for good: the agent writing again wakes them.
+            await db.execute(sa.update(SimulationPerson)
+                             .where(SimulationPerson.id == person_id,
+                                    SimulationPerson.stands_for.isnot(None),
+                                    SimulationPerson.driver == "ai",
+                                    SimulationPerson.ai_state == "done")
+                             .values(ai_state="talking", ai_note=None))
         await db.commit()
     return message
 

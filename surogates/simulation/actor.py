@@ -175,8 +175,8 @@ class Actor:
         if now - run.created_at > RUN_CAP:
             return await self._stop(person, "gave_up", "The simulation ran out of time")
         thread = await store.thread(sf, person.id)
-        if person.stands_for is not None and not any(m.direction == "out" for m in thread):
-            return  # The team answers the agent; it never starts the conversation.
+        if person.stands_for is not None and not person.task and not any(m.direction == "out" for m in thread):
+            return  # The team answers the agent; only one given a task starts the conversation.
         waiting = _waiting(person, thread, now)
         if waiting == "no_reply":
             return await self._stop(person, "no_reply", "The agent didn't answer for 3 minutes")

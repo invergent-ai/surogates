@@ -1462,3 +1462,7 @@ ALTER TABLE IF EXISTS simulation_people
 -- How a finished simulation went, judged, and the fixes it proposed.
 ALTER TABLE IF EXISTS simulation_runs
     ADD COLUMN IF NOT EXISTS review jsonb;
+
+-- Who started a simulation, and what a team stand-in asks the agent unprompted.
+ALTER TABLE IF EXISTS simulation_runs ADD COLUMN IF NOT EXISTS via text;
+ALTER TABLE IF EXISTS simulation_people ADD COLUMN IF NOT EXISTS task text;
