@@ -2960,6 +2960,8 @@ class SimulationPerson(Base):
     #: When the agent last showed "typing…" to this person; a send clears it.
     agent_typing_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
     #: Who the AI plays when it plays this person; none for a hand-typed one.
+    #: The team member this person stands in for; None for the run's customers.
+    stands_for: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), nullable=True)
     persona: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     #: ``ai`` while the AI writes as them, ``human`` while the user does.
     driver: Mapped[str] = mapped_column(Text, nullable=False, default="human", server_default="human")

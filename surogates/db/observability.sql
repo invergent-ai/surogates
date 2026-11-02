@@ -1454,3 +1454,7 @@ ALTER TABLE IF EXISTS simulation_people
     ADD COLUMN IF NOT EXISTS ai_state text,
     ADD COLUMN IF NOT EXISTS ai_note text,
     ADD COLUMN IF NOT EXISTS ai_acted_at timestamptz;
+
+-- A simulation person standing in for one of the agent's team members.
+ALTER TABLE IF EXISTS simulation_people
+    ADD COLUMN IF NOT EXISTS stands_for uuid;

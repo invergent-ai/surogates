@@ -59,6 +59,7 @@ from surogates.followup.outreach import (
 from surogates.runtime.memory_io import read_user_memory
 from surogates.runtime.memory_protocol import memory_object_key
 from surogates.session.events import EventType
+from surogates.simulation.team import in_scope
 from surogates.session.interactive_input import fold_label
 from surogates.tools.registry import ToolSchema
 
@@ -348,9 +349,11 @@ async def team_tool_exclusions(
 ) -> frozenset[str]:
     """The team tools, unless this session's user is on the team."""
     if programs_enabled and getattr(session, "user_id", None) is not None:
-        settings = await followup_store.get_settings(
+        from surogates.simulation.team import run_settings
+
+        settings = await run_settings(session_factory, await followup_store.get_settings(
             session_factory, org_id=session.org_id, agent_id=session.agent_id,
-        )
+        ), session.user_id)
         if followup_store.is_team_member(settings, session.user_id):
             return frozenset()
     return TEAM_TOOL_NAMES
@@ -434,6 +437,8 @@ async def _people(sf: Any, org_id: uuid.UUID, agent_id: str, settings: Any) -> l
     for row in await followup_store.enrollments(sf, org_id=org_id, agent_id=agent_id):
         if not followup_store.is_team_member(settings, row.user_id):
             by_user.setdefault(row.user_id, []).append(row)
+    seen = await in_scope(sf, settings, set(by_user))
+    by_user = {u: rows for u, rows in by_user.items() if u in seen}
     described = await describe_people(sf, org_id=org_id, agent_id=agent_id, rows_by_user=by_user)
     out = [_Person(d) for d in described.values()]
     links = await followup_store.contacts(sf, org_id=org_id, agent_id=agent_id)
@@ -522,6 +527,7 @@ async def _escalated_people(sf: Any, ctx: Any, settings: Any) -> list[_Person]:
         e.user_id for e in await followup_store.open_escalations(sf, org_id=ctx.org_id, agent_id=ctx.agent_id)
         if e.user_id not in enrolled and not followup_store.is_team_member(settings, e.user_id)
     }
+    ids = await in_scope(sf, settings, ids)
     described = await describe_people(sf, org_id=ctx.org_id, agent_id=ctx.agent_id, user_ids=ids)
     return [_Person(d) for d in described.values()]
 

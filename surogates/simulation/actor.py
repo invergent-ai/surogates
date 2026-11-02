@@ -166,7 +166,7 @@ class Actor:
             self.refused[person.id] = str(exc)
             self.strikes[person.id] = self.strikes.get(person.id, 0) + 1
             if self.strikes[person.id] >= STRIKES:
-                await self._stop(person, "failed", f"The AI couldn't continue as {person.name}")
+                await self._stop(person, "failed", f"Autopilot couldn't continue as {person.name}")
         finally:
             self.busy.discard(person.id)
 
@@ -175,6 +175,8 @@ class Actor:
         if now - run.created_at > RUN_CAP:
             return await self._stop(person, "gave_up", "The simulation ran out of time")
         thread = await store.thread(sf, person.id)
+        if person.stands_for is not None and not any(m.direction == "out" for m in thread):
+            return  # The team answers the agent; it never starts the conversation.
         waiting = _waiting(person, thread, now)
         if waiting == "no_reply":
             return await self._stop(person, "no_reply", "The agent didn't answer for 3 minutes")

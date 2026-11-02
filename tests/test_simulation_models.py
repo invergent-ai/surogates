@@ -24,7 +24,7 @@ from tests.conftest import sqlite_tables
 SIMULATION_TABLES = (
     "orgs", "users", "channel_identities", "agent_users", "followup_enrollments",
     "simulation_runs", "simulation_people", "simulation_messages", "simulation_media",
-    "outreach_messages",
+    "outreach_messages", "followup_settings",
 )
 
 

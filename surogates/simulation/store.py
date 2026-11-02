@@ -119,6 +119,9 @@ async def create_run(
     for name, value in creds.items():
         await vault.store(org_id, f"{channel}_{name}_{run.phone_number_id}", value)
     await add_person(sf, run, name=person_name, provision=provision, persona=persona)
+    from surogates.simulation.team import add_team
+
+    await add_team(sf, run, provision, autopilot=persona is not None)
     return run
 
 

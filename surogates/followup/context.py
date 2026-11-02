@@ -182,7 +182,9 @@ async def load_context(kwargs: dict) -> tuple[Context | None, Any]:
     settings = await followup_store.get_settings(
         sf, org_id=ctx.org_id, agent_id=ctx.agent_id,
     )
-    return ctx, settings
+    from surogates.simulation.team import run_settings
+
+    return ctx, await run_settings(sf, settings, ctx.user_id)
 
 
 def parse_start_date(raw: Any) -> date | None:

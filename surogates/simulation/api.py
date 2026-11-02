@@ -84,6 +84,7 @@ async def _detail(sf, run) -> dict[str, Any]:
             user_ids.append(person.user_id)
         messages = await store.thread(sf, person.id)
         people.append({"id": str(person.id), "name": person.name, "channel": person.channel,
+                       "team": person.stands_for is not None,
                        "address": person.address, "persona": person.persona,
                        "driver": person.driver, "ai_state": person.ai_state,
                        "ai_note": person.ai_note,
@@ -111,7 +112,7 @@ async def start_run(body: StartRun, request: Request):
     state = request.app.state
     persona = (body.persona or "").strip() or None
     if persona and body.channel not in AI_CHANNELS:
-        raise HTTPException(status_code=422, detail="The AI writes on chat channels only")
+        raise HTTPException(status_code=422, detail="Autopilot writes on chat channels only")
     run = await store.create_run(
         state.session_factory, state.vault, org_id=body.org_id, agent_id=body.agent_id,
         created_by=body.created_by, routing_config=body.routing_config,
@@ -135,7 +136,7 @@ async def list_runs(org_id: uuid.UUID, agent_id: str, request: Request):
             "created_by": r.created_by,
             "created_at": r.created_at.isoformat(),
             "ended_at": r.ended_at.isoformat() if r.ended_at else None,
-            "people": [p.name for p in people],
+            "people": [p.name for p in people if p.stands_for is None],
             "persona": first.persona if first else None,
             "driver": first.driver if first else None,
             "ai_state": first.ai_state if first else None,
@@ -181,7 +182,7 @@ async def set_driver(run_id: uuid.UUID, person_id: uuid.UUID, org_id: uuid.UUID,
     run = await _run_in_org(request, run_id, org_id)
     person = await _running_person(state, run, person_id)
     if not person.persona:
-        raise HTTPException(status_code=422, detail="Nobody told the AI who this person is")
+        raise HTTPException(status_code=422, detail="Autopilot needs to know who this person is")
     values: dict[str, Any] = {"driver": body.driver}
     if body.driver == "ai":
         # Handing back restarts the AI, whatever stopped it.

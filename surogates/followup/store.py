@@ -1140,14 +1140,14 @@ async def queue_outreach(
         )
         not_before = held[0] if held else None
     async with session_factory() as db:
-        # A message to the team about a simulated person stays in the
-        # simulation: the run shows it, nobody real receives it.
-        simulated = (
-            subject_user_id is not None and subject_user_id != user_id
-            and await db.scalar(
-                sa.select(User.simulation_run_id).where(User.id == subject_user_id)
-            ) is not None
-        )
+        # A message to the real team about a simulated person stays in the
+        # simulation: the run shows it, nobody real receives it.  One to the
+        # run's own stand-in goes out into the run.
+        runs = dict((await db.execute(
+            sa.select(User.id, User.simulation_run_id)
+            .where(User.id.in_({subject_user_id, user_id} - {None}))
+        )).all()) if subject_user_id is not None and subject_user_id != user_id else {}
+        simulated = runs.get(subject_user_id) is not None and runs.get(user_id) is None
         row = OutreachMessageRow(
             org_id=org_id, agent_id=agent_id, user_id=user_id,
             platform=platform, channel_identifier=channel_identifier,
