@@ -99,6 +99,35 @@ function _parseAttrs(rawAttrs: string): Record<string, string> {
   return out;
 }
 
+// Words a period follows without ending the sentence: Romanian and English abbreviations agents write in legal and
+// administrative text ("Decizia nr. 31", "art. 5 alin. (1) lit. a)").
+const _ABBREVIATIONS = new Set([
+  "nr", "art", "alin", "lit", "pct", "par", "cap", "sec", "anx", "ex", "etc", "vol", "pag", "p", "pp", "dl", "dna",
+  "dr", "mr", "mrs", "ms", "st", "vs", "cf", "no", "fig", "approx", "jud", "mun", "str", "bd",
+]);
+
+/**
+ * Index of the period, ``!`` or ``?`` that ends the first sentence of ``head``, or -1.  A terminator ends the sentence
+ * only when what follows is the end of the text or white space and then a capital letter, an opening quote or bracket,
+ * or markup -- and, for a period, the word before it is neither a known abbreviation nor a single letter (an initial,
+ * or a company form such as ``S.R.L.``).
+ */
+function _sentenceEnd(head: string): number {
+  const terminator = /[.!?](?=\s|$)/g;
+  for (let m = terminator.exec(head); m; m = terminator.exec(head)) {
+    const at = m.index;
+    const after = head.slice(at + 1).trimStart();
+    if (after && !/^[\p{Lu}"„“'(\[*_#-]/u.test(after)) continue;
+    if (head[at] === ".") {
+      const word = /([\p{L}.]+)$/u.exec(head.slice(0, at))?.[1] ?? "";
+      const last = word.split(".").filter(Boolean).pop() ?? "";
+      if (_ABBREVIATIONS.has(last.toLowerCase()) || last.length === 1) continue;
+    }
+    return at;
+  }
+  return -1;
+}
+
 /**
  * Heuristic fallback: pull the first sentence of the assistant
  * content for use as a narration line when the model didn't emit a
@@ -115,11 +144,8 @@ function _inferNarration(text: string): string | null {
   // Pull the first paragraph or first 240 chars, whichever is shorter,
   // then split on the first hard sentence terminator (./!/?).
   const head = text.trimStart().split(/\n\s*\n/, 1)[0].slice(0, 240);
-  const endMatch = /([.!?])(\s|$)/.exec(head);
-  const firstSentence = (endMatch
-    ? head.slice(0, endMatch.index + 1)
-    : head
-  ).trim();
+  const end = _sentenceEnd(head);
+  const firstSentence = (end >= 0 ? head.slice(0, end + 1) : head).trim();
   if (!firstSentence || firstSentence.length > 200) return null;
   return firstSentence;
 }
