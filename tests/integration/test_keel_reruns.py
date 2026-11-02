@@ -338,6 +338,15 @@ async def test_a_repeat_finds_its_rerun(link, org, session_store):
     assert (as_trial.status_code, code_of(as_trial)) == (409, "key-in-use")
 
 
+async def test_a_rerun_has_a_file_pane_as_its_step_does(link, org, session_store):
+    # A rerun replays its step: its agent makes the case's documents with the office tools, as the step's did.
+    created = await create_rerun(link, rerun_body(org))
+
+    assert created.status_code == 201, created.text
+    session = await session_store.get_session(UUID(created.json()["session_id"]))
+    assert session.config["file_pane"] is True
+
+
 def _changed(path: tuple[str, ...], value):
     def change(payload: dict) -> None:
         target = payload

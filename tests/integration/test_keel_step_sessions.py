@@ -280,18 +280,17 @@ async def test_a_draft_step_says_a_person_submits(link, org, session_store):
     assert "Finish the step with complete_step" not in content
 
 
-async def test_a_draft_step_has_a_file_pane_and_a_complete_step_none(link, org, session_store):
+async def test_every_step_has_a_file_pane_a_draft_step_and_one_its_agent_finishes_alone(link, org, session_store):
+    # Both make the case's documents with the office tools, which go only where there is a file pane.
     draft = await post(link, body(org, "keel:c:1:1", mode="draft"))
     complete = await post(link, body(org, "keel:c:1:2"))
 
     assert draft.status_code == 201, draft.text
     assert complete.status_code == 201, complete.text
-    drafting = await session_store.get_session(UUID(draft.json()["session_id"]))
-    completing = await session_store.get_session(UUID(complete.json()["session_id"]))
-    assert drafting.config["file_pane"] is True
-    assert has_file_pane(drafting)
-    assert "file_pane" not in completing.config
-    assert not has_file_pane(completing)
+    for created in (draft, complete):
+        session = await session_store.get_session(UUID(created.json()["session_id"]))
+        assert session.config["file_pane"] is True
+        assert has_file_pane(session)
 
 
 async def test_a_retry_makes_one_session_and_one_kickoff(link, org, session_store):
