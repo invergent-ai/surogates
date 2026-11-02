@@ -1,4 +1,4 @@
-"""A voice rehearsal: the Studio user phones the agent from their browser.
+"""A voice simulation: the Studio user phones the agent from their browser.
 
 There is no world to stand in for: the browser joins a LiveKit room as a SIP
 caller does, carrying the attributes LiveKit SIP sets (the number called, the
@@ -18,11 +18,11 @@ TOKEN_TTL = timedelta(hours=1)
 
 
 def room_prefix(run) -> str:
-    return f"rehearsal-{run.id}-"
+    return f"simulation-{run.id}-"
 
 
 def public_url(settings) -> str:
-    return settings.rehearsal.livekit_public_url or settings.voice.livekit_url
+    return settings.simulation.livekit_public_url or settings.voice.livekit_url
 
 
 def call_token(settings, run, person) -> dict[str, Any]:

@@ -1,4 +1,4 @@
-"""The AI that plays a rehearsal's people.
+"""The AI that plays a simulation's people.
 
 It reads a person's chat as the person sees it, the agent's messages in the
 platform's own shape, buttons included, and writes or taps through the same
@@ -20,8 +20,8 @@ from openai import AsyncOpenAI
 from pydantic import BaseModel
 
 from surogates.harness.structured_output import generate_structured
-from surogates.rehearsal import store
-from surogates.rehearsal.api import PersonMessage, write
+from surogates.simulation import store
+from surogates.simulation.api import PersonMessage, write
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +63,7 @@ class Move(BaseModel):
 
 
 def _client(settings) -> tuple[AsyncOpenAI, str] | None:
-    r, llm = settings.rehearsal, settings.llm
+    r, llm = settings.simulation, settings.llm
     model = r.model or llm.summary_model
     base_url = r.base_url or llm.summary_base_url or llm.base_url
     api_key = r.api_key or llm.summary_api_key or llm.api_key
@@ -123,7 +123,7 @@ class Actor:
                         self.busy.add(person.id)
                         asyncio.create_task(self._turn(run, person))
             except Exception:
-                logger.exception("[rehearsal] the AI people's loop failed a pass")
+                logger.exception("[simulation] the AI people's loop failed a pass")
             await asyncio.sleep(TICK_SECONDS)
 
     async def _stop(self, person, state: str, note: str) -> None:
@@ -133,7 +133,7 @@ class Actor:
         try:
             await self._move(run, person)
         except Exception as exc:
-            logger.warning("[rehearsal] the AI couldn't move as %s: %s", person.id, exc)
+            logger.warning("[simulation] the AI couldn't move as %s: %s", person.id, exc)
             self.strikes[person.id] = self.strikes.get(person.id, 0) + 1
             if self.strikes[person.id] >= STRIKES:
                 await self._stop(person, "failed", f"The AI couldn't continue as {person.name}")
@@ -143,7 +143,7 @@ class Actor:
     async def _move(self, run, person) -> None:
         sf, now = self.state.session_factory, datetime.now(timezone.utc)
         if now - run.created_at > RUN_CAP:
-            return await self._stop(person, "gave_up", "The rehearsal ran out of time")
+            return await self._stop(person, "gave_up", "The simulation ran out of time")
         thread = await store.thread(sf, person.id)
         waiting = _waiting(person, thread, now)
         if waiting == "no_reply":

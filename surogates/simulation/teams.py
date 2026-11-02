@@ -1,10 +1,10 @@
-"""A rehearsal world's Microsoft Teams, called by the runtime's real Teams adapter.
+"""A simulation world's Microsoft Teams, called by the runtime's real Teams adapter.
 
 Mounted at ``/m``, it is the three Microsoft services the adapter talks to for
-a rehearsal App ID: Entra's token endpoint (``/m/login``), the Bot Framework
+a simulation App ID: Entra's token endpoint (``/m/login``), the Bot Framework
 signing keys (``/m/keys``) and the Bot Connector (``/m/v3/conversations``,
 the ``serviceUrl`` of every activity the world sends).  The world signs its
-activities with its own key, which the adapter trusts for rehearsal App IDs
+activities with its own key, which the adapter trusts for simulation App IDs
 only.
 """
 
@@ -23,11 +23,11 @@ from fastapi.responses import JSONResponse
 from jose import jwk, jwt
 
 from surogates.channels.platforms.teams import BOT_FRAMEWORK_ISSUER
-from surogates.rehearsal import store
+from surogates.simulation import store
 
 router = APIRouter(prefix="/m")
 
-KID = "rehearsal"
+KID = "simulation"
 _THREAD_MARK = ";messageid="
 
 
@@ -41,7 +41,7 @@ def _private_pem() -> bytes:
 
 
 def service_url(settings) -> str:
-    return f"{settings.rehearsal.url.rstrip('/')}/m"
+    return f"{settings.simulation.url.rstrip('/')}/m"
 
 
 def sign(app_id: str, service: str) -> str:

@@ -10,7 +10,7 @@ import httpx
 import pytest
 import respx
 
-from surogates.rehearsal.webhook import envelope, post_webhook
+from surogates.simulation.webhook import envelope, post_webhook
 
 PNID = "9990000000000001"
 

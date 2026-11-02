@@ -657,7 +657,7 @@ async def run_channels(settings: Any, kind: str | None = None) -> None:
     discord = next((p for p in enabled if p.kind == "discord"), None)
     if discord is not None:
         from surogates.channels.gateway import DiscordGatewaySupervisor
-        from surogates.rehearsal.store import running_routings
+        from surogates.simulation.store import running_routings
 
         supervisor = DiscordGatewaySupervisor(
             platform=discord,
@@ -665,9 +665,9 @@ async def run_channels(settings: Any, kind: str | None = None) -> None:
             vault=vault,
             redis=redis,
             ingest=app.state.channel_dispatcher.ingest_from_socket,
-            rehearsals=(
+            simulations=(
                 functools.partial(running_routings, sf, "discord")
-                if os.environ.get("SUROGATES_REHEARSAL_URL") else None
+                if os.environ.get("SUROGATES_SIMULATION_URL") else None
             ),
         )
         tasks.append(asyncio.create_task(supervisor.run(), name="discord-gateway"))

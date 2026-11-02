@@ -64,9 +64,9 @@ def call_info(room_name: str, attributes: Mapping[str, str]) -> CallInfo | None:
                     caller=(attributes.get("sip.phoneNumber") or "").strip() or None)
 
 
-def rehearsal_of(tenant: Mapping[str, Any] | None) -> str | None:
-    """The rehearsal run a call belongs to, from its routing; ``None`` for a real call."""
-    return ((tenant or {}).get("config") or {}).get("rehearsal_run_id") or None
+def simulation_of(tenant: Mapping[str, Any] | None) -> str | None:
+    """The simulation run a call belongs to, from its routing; ``None`` for a real call."""
+    return ((tenant or {}).get("config") or {}).get("simulation_run_id") or None
 
 
 class ProviderUnavailable(Exception):
@@ -268,7 +268,7 @@ async def entrypoint(ctx: JobContext) -> None:
 
     async def report(outcome: str) -> None:
         """Tell ops about this call (recorded now, charged later). Never raises."""
-        if rehearsal_of(tenant):  # a Studio user's own test call is never recorded nor charged
+        if simulation_of(tenant):  # a Studio user's own test call is never recorded nor charged
             return
         ended = datetime.now(timezone.utc)
         await rt.client.report_voice_call(
@@ -344,7 +344,7 @@ async def entrypoint(ctx: JobContext) -> None:
         else:
             call = await rt.sessions.open_call(
                 CallTarget(org_id=org_id, agent_id=tenant["agent_id"],
-                           remember_callers=config.remember_callers, rehearsal_run_id=rehearsal_of(tenant)),
+                           remember_callers=config.remember_callers, simulation_run_id=simulation_of(tenant)),
                 call_id=info.call_id, called=info.called, caller=info.caller, greeting=greeting,
                 language=config.language, lines=config.lines)
     except Exception:

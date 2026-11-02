@@ -1,4 +1,4 @@
-"""A voice rehearsal: Studio phones the run's +999 number through LiveKit, as
+"""A voice simulation: Studio phones the run's +999 number through LiveKit, as
 a SIP caller would, and the voice worker keeps the call inside the run."""
 
 from __future__ import annotations
@@ -12,19 +12,19 @@ from fastapi import FastAPI
 from httpx import ASGITransport
 from livekit import api as lk
 
-from surogates.rehearsal import api, store
-from surogates.rehearsal.ids import is_rehearsal_id, is_rehearsal_voice_number, new_voice_number
+from surogates.simulation import api, store
+from surogates.simulation.ids import is_simulation_id, is_simulation_voice_number, new_voice_number
 from surogates.voice import sessions as voice_sessions
 from surogates.voice.sessions import CallTarget, VoiceSessions
-from surogates.voice.worker import call_info, rehearsal_of
-from tests.test_rehearsal_api import TOKEN
-from tests.test_rehearsal_models import rsf  # noqa: F401
-from tests.test_rehearsal_store import FakeVault, make_org, provision_into
+from surogates.voice.worker import call_info, simulation_of
+from tests.test_simulation_api import TOKEN
+from tests.test_simulation_models import rsf  # noqa: F401
+from tests.test_simulation_store import FakeVault, make_org, provision_into
 
 
 class Settings:
-    class rehearsal:
-        url = "http://rehearsal:8004"
+    class simulation:
+        url = "http://simulation:8004"
         channels_url = "http://channels:8003"
         internal_token = TOKEN
         livekit_public_url = "wss://calls.example"
@@ -38,9 +38,9 @@ class Settings:
 
 def test_only_a_reserved_number_routes_from_the_runtime():
     number = new_voice_number()
-    assert is_rehearsal_voice_number(number) and is_rehearsal_id(number)
-    assert not is_rehearsal_voice_number("+40722000111")
-    assert not is_rehearsal_voice_number("+9991234")
+    assert is_simulation_voice_number(number) and is_simulation_id(number)
+    assert not is_simulation_voice_number("+40722000111")
+    assert not is_simulation_voice_number("+9991234")
 
 
 @pytest.mark.asyncio
@@ -51,7 +51,7 @@ async def test_voice_run_places_a_call_the_worker_reads_as_sip(rsf):  # noqa: F8
     app.state.session_factory, app.state.settings = rsf, Settings
     app.state.vault, app.state.provision = FakeVault(), provision_into(rsf)
     app.state.http = httpx.AsyncClient()
-    client = httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://rehearsal",
+    client = httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://simulation",
                                headers={"Authorization": f"Bearer {TOKEN}"})
     run = (await client.post("/internal/runs", json={
         "org_id": str(org_id), "agent_id": "a1", "created_by": "u1", "person_name": "Ana",
@@ -59,7 +59,7 @@ async def test_voice_run_places_a_call_the_worker_reads_as_sip(rsf):  # noqa: F8
     })).json()
     number, person, org = run["phone_number_id"], run["people"][0], {"org_id": str(org_id)}
     routing = await store.routing_for(rsf, "voice", number)
-    assert routing["agent_id"] == "a1" and rehearsal_of(routing) == run["id"]
+    assert routing["agent_id"] == "a1" and simulation_of(routing) == run["id"]
 
     base = f"/internal/runs/{run['id']}/people/{person['id']}"
     assert (await client.post(f"{base}/messages", params=org, json={"text": "x"})).status_code == 422
@@ -67,7 +67,7 @@ async def test_voice_run_places_a_call_the_worker_reads_as_sip(rsf):  # noqa: F8
     assert placed["url"] == "wss://calls.example"
     claims = lk.TokenVerifier(Settings.voice.livekit_api_key, Settings.voice.livekit_api_secret).verify(
         placed["token"])
-    assert claims.video.room == placed["room"] and placed["room"].startswith(f"rehearsal-{run['id']}-")
+    assert claims.video.room == placed["room"] and placed["room"].startswith(f"simulation-{run['id']}-")
     assert claims.room_config.agents[0].agent_name == "surogate-voice"
     # The worker reads the browser participant exactly as a SIP caller.
     info = call_info(placed["room"], claims.attributes)
@@ -78,7 +78,7 @@ async def test_voice_run_places_a_call_the_worker_reads_as_sip(rsf):  # noqa: F8
 
 
 @pytest.mark.asyncio
-async def test_a_rehearsal_call_stays_in_its_run(monkeypatch):
+async def test_a_simulation_call_stays_in_its_run(monkeypatch):
     seen: dict = {}
 
     async def identity(sf, *, platform, platform_user_id, org_id, display_name=""):
@@ -93,10 +93,10 @@ async def test_a_rehearsal_call_stays_in_its_run(monkeypatch):
 
     monkeypatch.setattr(voice_sessions, "get_or_create_channel_identity", identity)
     monkeypatch.setattr(voice_sessions, "get_or_create_channel_session", session)
-    monkeypatch.setattr(voice_sessions, "_mark_rehearsal", mark)
+    monkeypatch.setattr(voice_sessions, "_mark_simulation", mark)
     run_id = str(uuid.uuid4())
-    target = CallTarget(org_id=uuid.uuid4(), agent_id="a1", rehearsal_run_id=run_id)
+    target = CallTarget(org_id=uuid.uuid4(), agent_id="a1", simulation_run_id=run_id)
     await VoiceSessions(store=None, redis=None, session_factory=None).open_call(
-        target, call_id="rehearsal-x", called="+9990000000001", caller="+9991111111111")
-    assert seen["config"]["memory_boundary"] == f"rehearsal:{run_id}:voice:call:rehearsal-x"
+        target, call_id="simulation-x", called="+9990000000001", caller="+9991111111111")
+    assert seen["config"]["memory_boundary"] == f"simulation:{run_id}:voice:call:simulation-x"
     assert seen["marked"] == run_id

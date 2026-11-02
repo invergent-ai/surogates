@@ -1,4 +1,4 @@
-"""A Telegram rehearsal: the person's updates reach the real adapter's route,
+"""A Telegram simulation: the person's updates reach the real adapter's route,
 and what the adapter sends, edits and reacts with lands in the run."""
 
 from __future__ import annotations
@@ -13,19 +13,19 @@ from fastapi import FastAPI
 from httpx import ASGITransport
 
 from surogates.channels.platforms.telegram import _bot_api_url
-from surogates.rehearsal import api, store, telegram
-from tests.test_rehearsal_api import TOKEN, Settings
-from tests.test_rehearsal_models import rsf  # noqa: F401
-from tests.test_rehearsal_store import FakeVault, make_org, provision_into
+from surogates.simulation import api, store, telegram
+from tests.test_simulation_api import TOKEN, Settings
+from tests.test_simulation_models import rsf  # noqa: F401
+from tests.test_simulation_store import FakeVault, make_org, provision_into
 
 
-def test_only_a_rehearsal_bot_reaches_the_world(monkeypatch):
-    monkeypatch.setenv("SUROGATES_REHEARSAL_URL", "http://rehearsal:8004")
+def test_only_a_simulation_bot_reaches_the_world(monkeypatch):
+    monkeypatch.setenv("SUROGATES_SIMULATION_URL", "http://simulation:8004")
     assert _bot_api_url("9991234567890:abc", "sendMessage") == (
-        "http://rehearsal:8004/t/bot9991234567890:abc/sendMessage")
+        "http://simulation:8004/t/bot9991234567890:abc/sendMessage")
     assert _bot_api_url("7123456789:abc", "sendMessage").startswith("https://api.telegram.org/")
     assert _bot_api_url("999123456:abc", "sendMessage").startswith("https://api.telegram.org/")
-    monkeypatch.delenv("SUROGATES_REHEARSAL_URL")
+    monkeypatch.delenv("SUROGATES_SIMULATION_URL")
     assert _bot_api_url("9991234567890:abc", "sendMessage").startswith("https://api.telegram.org/")
 
 
@@ -38,7 +38,7 @@ async def _app(sf):
     app.state.session_factory, app.state.settings = sf, Settings
     app.state.vault, app.state.provision = vault, provision_into(sf)
     app.state.http = httpx.AsyncClient()
-    client = httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://rehearsal:8004",
+    client = httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://simulation:8004",
                                headers={"Authorization": f"Bearer {TOKEN}"})
     return org_id, vault, client
 

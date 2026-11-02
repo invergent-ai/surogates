@@ -1,4 +1,4 @@
-"""A Teams rehearsal: the real adapter verifies the world's activities, logs in
+"""A Teams simulation: the real adapter verifies the world's activities, logs in
 to the world and posts, edits and types into it, and nothing of it reaches a
 real App ID."""
 
@@ -14,21 +14,21 @@ import respx
 from fastapi import FastAPI
 from httpx import ASGITransport
 
-from surogates.channels.platforms.teams import TeamsPlatform, _rehearsal_base
-from surogates.rehearsal import api, store, teams
-from surogates.rehearsal.ids import is_rehearsal_teams_app, new_teams_app_id
-from tests.test_rehearsal_api import TOKEN, Settings
-from tests.test_rehearsal_models import rsf  # noqa: F401
-from tests.test_rehearsal_store import FakeVault, make_org, provision_into
+from surogates.channels.platforms.teams import TeamsPlatform, _simulation_base
+from surogates.simulation import api, store, teams
+from surogates.simulation.ids import is_simulation_teams_app, new_teams_app_id
+from tests.test_simulation_api import TOKEN, Settings
+from tests.test_simulation_models import rsf  # noqa: F401
+from tests.test_simulation_store import FakeVault, make_org, provision_into
 
 
-def test_only_a_rehearsal_app_id_reaches_the_world(monkeypatch):
-    monkeypatch.setenv("SUROGATES_REHEARSAL_URL", "http://rehearsal:8004")
+def test_only_a_simulation_app_id_reaches_the_world(monkeypatch):
+    monkeypatch.setenv("SUROGATES_SIMULATION_URL", "http://simulation:8004")
     app_id = new_teams_app_id()
-    assert is_rehearsal_teams_app(app_id) and _rehearsal_base(app_id) == "http://rehearsal:8004/m"
+    assert is_simulation_teams_app(app_id) and _simulation_base(app_id) == "http://simulation:8004/m"
     # Entra issues version-4 GUIDs: one that happens to start with 999 is real.
     real = "999" + str(uuid.uuid4())[3:]
-    assert _rehearsal_base(real) == ""
+    assert _simulation_base(real) == ""
 
 
 def _inbound(request: httpx.Request, app_id: str):
@@ -37,7 +37,7 @@ def _inbound(request: httpx.Request, app_id: str):
 
 @pytest.mark.asyncio
 async def test_teams_run(rsf, monkeypatch):  # noqa: F811
-    monkeypatch.setenv("SUROGATES_REHEARSAL_URL", "http://rehearsal:8004")
+    monkeypatch.setenv("SUROGATES_SIMULATION_URL", "http://simulation:8004")
     org_id = await make_org(rsf)
     app = FastAPI()
     app.include_router(api.router)
@@ -46,7 +46,7 @@ async def test_teams_run(rsf, monkeypatch):  # noqa: F811
     app.state.session_factory, app.state.settings = rsf, Settings
     app.state.vault, app.state.provision = vault, provision_into(rsf)
     app.state.http = httpx.AsyncClient()
-    client = httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://rehearsal:8004",
+    client = httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://simulation:8004",
                                headers={"Authorization": f"Bearer {TOKEN}"})
     run = (await client.post("/internal/runs", json={
         "org_id": str(org_id), "agent_id": "a1", "created_by": "u1", "person_name": "Ana",
@@ -64,7 +64,7 @@ async def test_teams_run(rsf, monkeypatch):  # noqa: F811
                           json={"text": "Salut"})
     sent = hook.calls[0].request
     activity = json.loads(sent.content)
-    assert activity["text"] == "Salut" and activity["serviceUrl"] == "http://rehearsal:8004/m"
+    assert activity["text"] == "Salut" and activity["serviceUrl"] == "http://simulation:8004/m"
 
     platform = TeamsPlatform()
     platform._http = httpx.AsyncClient(transport=ASGITransport(app=app))

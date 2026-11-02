@@ -329,7 +329,7 @@ class DiscordGatewaySupervisor:
         ingest: Callable[[Any, str, Any], Awaitable[Any]],
         client_factory: Callable[..., Any] = DiscordGatewayClient,
         holder_id: str | None = None,
-        rehearsals: Callable[[], Awaitable[list[dict]]] | None = None,
+        simulations: Callable[[], Awaitable[list[dict]]] | None = None,
     ) -> None:
         self._platform = platform
         self._platform_client = platform_client
@@ -337,8 +337,8 @@ class DiscordGatewaySupervisor:
         self._redis = redis
         self._ingest = ingest
         self._client_factory = client_factory
-        #: Running rehearsal bots, which route from the runtime DB, not ops.
-        self._rehearsals = rehearsals
+        #: Running simulation bots, which route from the runtime DB, not ops.
+        self._simulations = simulations
         self._holder = holder_id or f"{socket.gethostname()}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
         self._held: dict[str, _Held] = {}
         #: Bots stopped on a fatal close or a missing token; left alone until
@@ -366,11 +366,11 @@ class DiscordGatewaySupervisor:
                 # dropping every connection.
                 logger.warning("[discord] listing routings failed; keeping connections", exc_info=True)
                 return
-            if self._rehearsals is not None:
+            if self._simulations is not None:
                 try:
-                    routings = [*routings, *await self._rehearsals()]
+                    routings = [*routings, *await self._simulations()]
                 except Exception:
-                    logger.warning("[discord] listing rehearsal bots failed", exc_info=True)
+                    logger.warning("[discord] listing simulation bots failed", exc_info=True)
             wanted = {r["channel_identifier"]: r for r in routings if r.get("channel_identifier")}
             if changed is not None:
                 self._halted.discard(changed)

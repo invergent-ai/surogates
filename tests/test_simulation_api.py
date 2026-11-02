@@ -11,16 +11,16 @@ import respx
 from fastapi import FastAPI
 from httpx import ASGITransport
 
-from surogates.rehearsal.api import router
-from tests.test_rehearsal_models import rsf  # noqa: F401
-from tests.test_rehearsal_store import FakeVault, make_org, provision_into
+from surogates.simulation.api import router
+from tests.test_simulation_models import rsf  # noqa: F401
+from tests.test_simulation_store import FakeVault, make_org, provision_into
 
 TOKEN = "internal-token"
 
 
 class Settings:
-    class rehearsal:
-        url = "http://rehearsal:8004"
+    class simulation:
+        url = "http://simulation:8004"
         channels_url = "http://channels:8003"
         internal_token = TOKEN
 
@@ -32,7 +32,7 @@ async def _client(sf):
     app.state.session_factory, app.state.settings = sf, Settings
     app.state.vault, app.state.provision = FakeVault(), provision_into(sf)
     app.state.http = httpx.AsyncClient()
-    client = httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://rehearsal:8004",
+    client = httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://simulation:8004",
                                headers={"Authorization": f"Bearer {TOKEN}"})
     return org_id, client
 

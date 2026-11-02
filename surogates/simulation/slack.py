@@ -1,6 +1,6 @@
-"""A rehearsal world's Slack Web API, called by the runtime's real Slack adapter.
+"""A simulation world's Slack Web API, called by the runtime's real Slack adapter.
 
-Mounted at ``/s/api/{method}``: the adapter's SDK client for a rehearsal bot
+Mounted at ``/s/api/{method}``: the adapter's SDK client for a simulation bot
 token posts here, so what it posts, edits, deletes and the modals it opens
 land in the run that owns the app.  The workspace has two members: the
 person, and the agent's bot.
@@ -15,7 +15,7 @@ from typing import Any
 
 from fastapi import APIRouter, Request
 
-from surogates.rehearsal import store
+from surogates.simulation import store
 
 router = APIRouter(prefix="/s")
 
@@ -85,7 +85,7 @@ async def call(method: str, request: Request):
         return _error("invalid_auth" if token else "not_authed")
 
     if method == "auth.test":
-        return {"ok": True, "url": "https://rehearsal.slack.com/", "team": "Rehearsal",
+        return {"ok": True, "url": "https://simulation.slack.com/", "team": "Simulation",
                 "user": "agent", "team_id": team_id(run), "user_id": bot_user_id(run),
                 "bot_id": bot_user_id(run), "app_id": run.phone_number_id,
                 "is_enterprise_install": False}

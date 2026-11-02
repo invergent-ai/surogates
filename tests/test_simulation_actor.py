@@ -9,9 +9,9 @@ import httpx
 import pytest
 import respx
 
-from surogates.rehearsal import actor, store
-from tests.test_rehearsal_api import Settings, _client
-from tests.test_rehearsal_models import rsf  # noqa: F401
+from surogates.simulation import actor, store
+from tests.test_simulation_api import Settings, _client
+from tests.test_simulation_models import rsf  # noqa: F401
 
 
 class _LLM:

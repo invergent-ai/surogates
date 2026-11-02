@@ -1,4 +1,4 @@
-"""A Discord rehearsal: the runtime's real Gateway client holds the world's
+"""A Discord simulation: the runtime's real Gateway client holds the world's
 Gateway, the person's messages arrive on it as MESSAGE_CREATE, and what the
 adapter posts, edits and types lands in the run."""
 
@@ -16,23 +16,23 @@ from fastapi import FastAPI
 
 from surogates.channels.gateway import DiscordGatewayClient, DiscordGatewaySupervisor
 from surogates.channels.platforms.discord import DiscordPlatform, _api_base, open_dm, parse
-from surogates.rehearsal import api, discord, store
-from surogates.rehearsal.ids import new_discord_bot_token, new_discord_id
-from tests.test_rehearsal_api import TOKEN
-from tests.test_rehearsal_models import rsf  # noqa: F401
-from tests.test_rehearsal_store import FakeVault, make_org, provision_into
+from surogates.simulation import api, discord, store
+from surogates.simulation.ids import new_discord_bot_token, new_discord_id
+from tests.test_simulation_api import TOKEN
+from tests.test_simulation_models import rsf  # noqa: F401
+from tests.test_simulation_store import FakeVault, make_org, provision_into
 
 
-def test_only_a_rehearsal_token_reaches_the_world(monkeypatch):
-    monkeypatch.setenv("SUROGATES_REHEARSAL_URL", "http://rehearsal:8004")
-    assert _api_base(new_discord_bot_token(new_discord_id())) == "http://rehearsal:8004/d/api/v10"
+def test_only_a_simulation_token_reaches_the_world(monkeypatch):
+    monkeypatch.setenv("SUROGATES_SIMULATION_URL", "http://simulation:8004")
+    assert _api_base(new_discord_bot_token(new_discord_id())) == "http://simulation:8004/d/api/v10"
     # A real token starts with the base64 of the bot's id.
     assert _api_base("MTk5OTk5OTk5OTk5OTk5OTk5.Gx.abc").startswith("https://discord.com/")
     assert _api_base("999123.abc").startswith("https://discord.com/")
 
 
 @pytest.mark.asyncio
-async def test_the_supervisor_holds_running_rehearsal_bots():
+async def test_the_supervisor_holds_running_simulation_bots():
     started: list[str] = []
 
     class Client:
@@ -60,19 +60,19 @@ async def test_the_supervisor_holds_running_rehearsal_bots():
         async def list_channel_routings(self, kind):
             return [{"channel_identifier": "real", "org_id": "o"}]
 
-    async def rehearsals():
-        return [{"channel_identifier": "999rehearsal", "org_id": "o", "config": {}}]
+    async def simulations():
+        return [{"channel_identifier": "999simulation", "org_id": "o", "config": {}}]
 
     import surogates.channels.gateway as gw
     original, gw.RedisLeaderLock = gw.RedisLeaderLock, Lock
     try:
         supervisor = DiscordGatewaySupervisor(
             platform=DiscordPlatform(), platform_client=Ops(), vault=Vault(), redis=None,
-            ingest=None, client_factory=Client, rehearsals=rehearsals,
+            ingest=None, client_factory=Client, simulations=simulations,
         )
         await supervisor.reconcile()
-        assert supervisor.held == {"real", "999rehearsal"}
-        assert sorted(started) == ["tok-999rehearsal", "tok-real"]
+        assert supervisor.held == {"real", "999simulation"}
+        assert sorted(started) == ["tok-999simulation", "tok-real"]
         await supervisor.shutdown()
     finally:
         gw.RedisLeaderLock = original
@@ -96,10 +96,10 @@ async def _until(check, timeout=10.0):
 async def test_discord_run(rsf, monkeypatch):  # noqa: F811
     port = _free_port()
     base = f"http://127.0.0.1:{port}"
-    monkeypatch.setenv("SUROGATES_REHEARSAL_URL", base)
+    monkeypatch.setenv("SUROGATES_SIMULATION_URL", base)
 
     class Settings:
-        class rehearsal:
+        class simulation:
             url = base
             internal_token = TOKEN
             channels_url = "http://channels:8003"

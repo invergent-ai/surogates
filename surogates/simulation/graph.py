@@ -1,6 +1,6 @@
-"""A rehearsal world's Meta Graph API, called by the runtime's real WhatsApp adapter.
+"""A simulation world's Meta Graph API, called by the runtime's real WhatsApp adapter.
 
-Mounted at ``/w/{phone_number_id}/whatsapp``: ``graph_base`` sends a rehearsal
+Mounted at ``/w/{phone_number_id}/whatsapp``: ``graph_base`` sends a simulation
 number here, so the adapter's ``/messages``, ``/media`` and media lookups land
 on the world that owns the number.
 """
@@ -13,8 +13,8 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, BackgroundTasks, Request
 from fastapi.responses import JSONResponse, Response
 
-from surogates.rehearsal import store
-from surogates.rehearsal.webhook import post_webhook
+from surogates.simulation import store
+from surogates.simulation.webhook import post_webhook
 
 router = APIRouter(prefix="/w/{phone_number_id}/whatsapp")
 
@@ -41,7 +41,7 @@ async def _report_statuses(app, run, wamid: str, recipient: str) -> None:
     for status in ("sent", "delivered"):
         await store.set_status(sf, run.id, wamid, status)
         await post_webhook(
-            app.state.http, channels_url=settings.rehearsal.channels_url,
+            app.state.http, channels_url=settings.simulation.channels_url,
             phone_number_id=run.phone_number_id, app_secret=run.app_secret,
             value={"statuses": [{"id": wamid, "status": status, "recipient_id": recipient,
                                  "timestamp": str(int(datetime.now(timezone.utc).timestamp()))}]},
@@ -80,7 +80,7 @@ async def media_meta(phone_number_id: str, version: str, media_id: str, request:
     media = await store.get_media(request.app.state.session_factory, run.id, media_id)
     if media is None:
         return _graph_error(404, 100, "Unsupported get request.")
-    base = request.app.state.settings.rehearsal.url.rstrip("/")
+    base = request.app.state.settings.simulation.url.rstrip("/")
     return {"url": f"{base}/w/{phone_number_id}/whatsapp/media-bytes/{media_id}",
             "mime_type": media.mime_type, "file_size": len(media.data), "id": media_id}
 

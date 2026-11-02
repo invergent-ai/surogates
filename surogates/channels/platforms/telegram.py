@@ -46,7 +46,7 @@ from surogates.channels.platforms.telegram_interactive import (
     tool_call_digest,
 )
 from surogates.channels.text_split import split_text
-from surogates.rehearsal.ids import is_rehearsal_bot_token
+from surogates.simulation.ids import is_simulation_bot_token
 
 __all__ = [
     "TelegramPlatform",
@@ -335,14 +335,14 @@ def _parse(body: dict, *, bot_username: str) -> InboundMessage | None:
 
 
 def _api_base(bot_token: str) -> str:
-    """Telegram, or the rehearsal world that owns a rehearsal bot.
+    """Telegram, or the simulation world that owns a simulation bot.
 
-    A world is reached only for a rehearsal token and only on a deployment
-    that runs the rehearsal process.
+    A world is reached only for a simulation token and only on a deployment
+    that runs the simulation process.
     """
-    rehearsal_url = os.environ.get("SUROGATES_REHEARSAL_URL", "").rstrip("/")
-    if rehearsal_url and is_rehearsal_bot_token(bot_token):
-        return f"{rehearsal_url}/t"
+    simulation_url = os.environ.get("SUROGATES_SIMULATION_URL", "").rstrip("/")
+    if simulation_url and is_simulation_bot_token(bot_token):
+        return f"{simulation_url}/t"
     return TELEGRAM_API_BASE
 
 

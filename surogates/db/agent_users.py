@@ -100,14 +100,14 @@ def visible_users_filter(org_id: UUID, agent_id: str):
     somewhere or they become unmanageable orphans. A tombstoned
     (removed) binding is deliberately neither: the user neither shows
     on this agent nor resurfaces everywhere as an orphan — re-adding
-    them is the explicit attach path. A rehearsal run's stand-in users
+    them is the explicit attach path. A simulation run's stand-in users
     are never listed.
     """
     any_binding_row = select(AgentUser.user_id).where(
         AgentUser.org_id == org_id,
     )
     return and_(
-        User.rehearsal_run_id.is_(None),
+        User.simulation_run_id.is_(None),
         or_(
             User.id.in_(active_bound_user_ids(org_id, [agent_id])),
             User.id.not_in(any_binding_row),

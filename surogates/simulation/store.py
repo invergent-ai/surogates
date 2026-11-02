@@ -2,7 +2,7 @@
 
 A run's credentials live in the vault under the names the runtime's adapter
 already reads (``whatsapp_<cred>_<phone_number_id>``,
-``telegram_<cred>_<bot username>``), so the real adapter serves a rehearsal
+``telegram_<cred>_<bot username>``), so the real adapter serves a simulation
 account exactly as it serves a real one.
 """
 
@@ -17,9 +17,9 @@ import sqlalchemy as sa
 
 from surogates.channels.identity import ResolvedIdentity, get_or_create_channel_identity
 from surogates.channels.platforms.whatsapp_api import DEFAULT_API_VERSION
-from surogates.db.models import RehearsalMedia, RehearsalMessage, RehearsalPerson, RehearsalRun, User
-from surogates.rehearsal.ids import (
-    is_rehearsal_id,
+from surogates.db.models import SimulationMedia, SimulationMessage, SimulationPerson, SimulationRun, User
+from surogates.simulation.ids import (
+    is_simulation_id,
     new_bot_token,
     new_bot_username,
     new_discord_bot_token,
@@ -67,7 +67,7 @@ async def create_run(
     flows: list[dict[str, Any]] | None = None,
     channel: str = "whatsapp",
     persona: str | None = None,
-) -> RehearsalRun:
+) -> SimulationRun:
     if channel == "telegram":
         account, token = new_bot_username(), new_bot_token()
     elif channel == "slack":
@@ -83,7 +83,7 @@ async def create_run(
         token = new_discord_bot_token(account)
     else:
         account, token = new_phone_number_id(), "EAA" + secrets.token_urlsafe(96)
-    run = RehearsalRun(
+    run = SimulationRun(
         org_id=org_id, agent_id=agent_id, created_by=created_by, channel=channel,
         phone_number_id=account, access_token=token, app_secret=secrets.token_hex(16),
         routing_config=dict(routing_config or {}), templates=list(templates or []),
@@ -115,11 +115,11 @@ async def create_run(
     return run
 
 
-async def add_person(sf, run: RehearsalRun, *, name: str, provision: Provision,
-                     persona: str | None = None) -> RehearsalPerson:
+async def add_person(sf, run: SimulationRun, *, name: str, provision: Provision,
+                     persona: str | None = None) -> SimulationPerson:
     if run.channel == "website":
         # A visitor is anonymous: the widget's own cookie names them, no user row.
-        person = RehearsalPerson(run_id=run.id, name=name, channel=run.channel, address="visitor")
+        person = SimulationPerson(run_id=run.id, name=name, channel=run.channel, address="visitor")
         async with sf() as db:
             db.add(person)
             await db.commit()
@@ -133,78 +133,78 @@ async def add_person(sf, run: RehearsalRun, *, name: str, provision: Provision,
     identity = await provision(
         sf, platform=run.channel, platform_user_id=address, org_id=run.org_id, display_name=name,
     )
-    person = RehearsalPerson(run_id=run.id, name=name, channel=run.channel, address=address,
+    person = SimulationPerson(run_id=run.id, name=name, channel=run.channel, address=address,
                              user_id=identity.user_id, persona=persona,
                              driver="ai" if persona else "human",
                              ai_state="talking" if persona else None)
     async with sf() as db:
         await db.execute(sa.update(User).where(User.id == identity.user_id)
-                         .values(rehearsal_run_id=run.id))
+                         .values(simulation_run_id=run.id))
         db.add(person)
         await db.commit()
     return person
 
 
-async def ai_people(sf) -> Sequence[tuple[RehearsalRun, RehearsalPerson]]:
+async def ai_people(sf) -> Sequence[tuple[SimulationRun, SimulationPerson]]:
     """The people the AI is writing as right now, with their runs."""
     async with sf() as db:
         rows = await db.execute(
-            sa.select(RehearsalRun, RehearsalPerson)
-            .join(RehearsalPerson, RehearsalPerson.run_id == RehearsalRun.id)
-            .where(RehearsalRun.status == "running", RehearsalPerson.driver == "ai",
-                   RehearsalPerson.ai_state == "talking")
+            sa.select(SimulationRun, SimulationPerson)
+            .join(SimulationPerson, SimulationPerson.run_id == SimulationRun.id)
+            .where(SimulationRun.status == "running", SimulationPerson.driver == "ai",
+                   SimulationPerson.ai_state == "talking")
         )
         return [tuple(r) for r in rows.all()]
 
 
 async def update_person(sf, person_id: uuid.UUID, **values: Any) -> None:
     async with sf() as db:
-        await db.execute(sa.update(RehearsalPerson).where(RehearsalPerson.id == person_id).values(**values))
+        await db.execute(sa.update(SimulationPerson).where(SimulationPerson.id == person_id).values(**values))
         await db.commit()
 
 
-async def get_run(sf, run_id: uuid.UUID) -> RehearsalRun | None:
+async def get_run(sf, run_id: uuid.UUID) -> SimulationRun | None:
     async with sf() as db:
-        return await db.get(RehearsalRun, run_id)
+        return await db.get(SimulationRun, run_id)
 
 
-async def run_by_number(sf, phone_number_id: str) -> RehearsalRun | None:
+async def run_by_number(sf, phone_number_id: str) -> SimulationRun | None:
     async with sf() as db:
         return (await db.execute(
-            sa.select(RehearsalRun).where(RehearsalRun.phone_number_id == phone_number_id)
+            sa.select(SimulationRun).where(SimulationRun.phone_number_id == phone_number_id)
         )).scalar_one_or_none()
 
 
-async def run_by_token(sf, token: str) -> RehearsalRun | None:
+async def run_by_token(sf, token: str) -> SimulationRun | None:
     async with sf() as db:
         return (await db.execute(
-            sa.select(RehearsalRun).where(RehearsalRun.access_token == token)
+            sa.select(SimulationRun).where(SimulationRun.access_token == token)
         )).scalar_one_or_none()
 
 
-async def list_runs(sf, *, org_id: uuid.UUID, agent_id: str) -> Sequence[RehearsalRun]:
+async def list_runs(sf, *, org_id: uuid.UUID, agent_id: str) -> Sequence[SimulationRun]:
     async with sf() as db:
         return (await db.execute(
-            sa.select(RehearsalRun)
-            .where(RehearsalRun.org_id == org_id, RehearsalRun.agent_id == agent_id)
-            .order_by(RehearsalRun.created_at.desc())
+            sa.select(SimulationRun)
+            .where(SimulationRun.org_id == org_id, SimulationRun.agent_id == agent_id)
+            .order_by(SimulationRun.created_at.desc())
             .limit(50)
         )).scalars().all()
 
 
-async def people(sf, run_id: uuid.UUID) -> Sequence[RehearsalPerson]:
+async def people(sf, run_id: uuid.UUID) -> Sequence[SimulationPerson]:
     async with sf() as db:
         return (await db.execute(
-            sa.select(RehearsalPerson).where(RehearsalPerson.run_id == run_id)
-            .order_by(RehearsalPerson.created_at)
+            sa.select(SimulationPerson).where(SimulationPerson.run_id == run_id)
+            .order_by(SimulationPerson.created_at)
         )).scalars().all()
 
 
-async def person_by_address(sf, run_id: uuid.UUID, address: str) -> RehearsalPerson | None:
+async def person_by_address(sf, run_id: uuid.UUID, address: str) -> SimulationPerson | None:
     async with sf() as db:
         return (await db.execute(
-            sa.select(RehearsalPerson).where(
-                RehearsalPerson.run_id == run_id, RehearsalPerson.address == address,
+            sa.select(SimulationPerson).where(
+                SimulationPerson.run_id == run_id, SimulationPerson.address == address,
             )
         )).scalar_one_or_none()
 
@@ -212,8 +212,8 @@ async def person_by_address(sf, run_id: uuid.UUID, address: str) -> RehearsalPer
 async def log_message(
     sf, *, run_id: uuid.UUID, person_id: uuid.UUID, direction: str, kind: str,
     body: dict[str, Any], wamid: str, status: str = "",
-) -> RehearsalMessage:
-    message = RehearsalMessage(run_id=run_id, person_id=person_id, direction=direction, kind=kind,
+) -> SimulationMessage:
+    message = SimulationMessage(run_id=run_id, person_id=person_id, direction=direction, kind=kind,
                                body=body, wamid=wamid, status=status)
     async with sf() as db:
         db.add(message)
@@ -224,9 +224,9 @@ async def log_message(
 async def replace_body(sf, run_id: uuid.UUID, wamid: str, body: dict[str, Any]) -> bool:
     """An edit: the message keeps its place in the thread with its new body."""
     async with sf() as db:
-        result = await db.execute(sa.update(RehearsalMessage)
-                                  .where(RehearsalMessage.run_id == run_id,
-                                         RehearsalMessage.wamid == wamid)
+        result = await db.execute(sa.update(SimulationMessage)
+                                  .where(SimulationMessage.run_id == run_id,
+                                         SimulationMessage.wamid == wamid)
                                   .values(body=body))
         await db.commit()
     return result.rowcount > 0
@@ -234,33 +234,33 @@ async def replace_body(sf, run_id: uuid.UUID, wamid: str, body: dict[str, Any]) 
 
 async def delete_message(sf, run_id: uuid.UUID, wamid: str) -> bool:
     async with sf() as db:
-        result = await db.execute(sa.delete(RehearsalMessage).where(
-            RehearsalMessage.run_id == run_id, RehearsalMessage.wamid == wamid,
-            RehearsalMessage.direction == "out",
+        result = await db.execute(sa.delete(SimulationMessage).where(
+            SimulationMessage.run_id == run_id, SimulationMessage.wamid == wamid,
+            SimulationMessage.direction == "out",
         ))
         await db.commit()
     return result.rowcount > 0
 
 
-async def message(sf, run_id: uuid.UUID, wamid: str) -> RehearsalMessage | None:
+async def message(sf, run_id: uuid.UUID, wamid: str) -> SimulationMessage | None:
     async with sf() as db:
-        return (await db.execute(sa.select(RehearsalMessage).where(
-            RehearsalMessage.run_id == run_id, RehearsalMessage.wamid == wamid,
+        return (await db.execute(sa.select(SimulationMessage).where(
+            SimulationMessage.run_id == run_id, SimulationMessage.wamid == wamid,
         ))).scalar_one_or_none()
 
 
 async def next_message_id(sf, run_id: uuid.UUID) -> int:
     """Telegram numbers a chat's messages 1, 2, 3…; a run has one chat per person."""
     async with sf() as db:
-        count = (await db.execute(sa.select(sa.func.count()).select_from(RehearsalMessage)
-                                  .where(RehearsalMessage.run_id == run_id))).scalar_one()
+        count = (await db.execute(sa.select(sa.func.count()).select_from(SimulationMessage)
+                                  .where(SimulationMessage.run_id == run_id))).scalar_one()
     return int(count) + 1
 
 
 async def set_status(sf, run_id: uuid.UUID, wamid: str, status: str) -> None:
     async with sf() as db:
-        await db.execute(sa.update(RehearsalMessage)
-                         .where(RehearsalMessage.run_id == run_id, RehearsalMessage.wamid == wamid)
+        await db.execute(sa.update(SimulationMessage)
+                         .where(SimulationMessage.run_id == run_id, SimulationMessage.wamid == wamid)
                          .values(status=status))
         await db.commit()
 
@@ -268,16 +268,16 @@ async def set_status(sf, run_id: uuid.UUID, wamid: str, status: str) -> None:
 async def mark_read_up_to(sf, run_id: uuid.UUID, wamid: str) -> None:
     """A read receipt turns that message, and every earlier one from the person, blue."""
     async with sf() as db:
-        target = (await db.execute(sa.select(RehearsalMessage).where(
-            RehearsalMessage.run_id == run_id, RehearsalMessage.wamid == wamid,
-            RehearsalMessage.direction == "in",
+        target = (await db.execute(sa.select(SimulationMessage).where(
+            SimulationMessage.run_id == run_id, SimulationMessage.wamid == wamid,
+            SimulationMessage.direction == "in",
         ))).scalar_one_or_none()
         if target is None:
             return
-        await db.execute(sa.update(RehearsalMessage).where(
-            RehearsalMessage.person_id == target.person_id,
-            RehearsalMessage.direction == "in",
-            RehearsalMessage.id <= target.id,
+        await db.execute(sa.update(SimulationMessage).where(
+            SimulationMessage.person_id == target.person_id,
+            SimulationMessage.direction == "in",
+            SimulationMessage.id <= target.id,
         ).values(status="read"))
         await db.commit()
 
@@ -285,36 +285,36 @@ async def mark_read_up_to(sf, run_id: uuid.UUID, wamid: str) -> None:
 async def set_typing(sf, run_id: uuid.UUID, wamid: str, typing: bool) -> None:
     """Show or clear "typing…" for the person the message *wamid* belongs to."""
     async with sf() as db:
-        person_id = (await db.execute(sa.select(RehearsalMessage.person_id).where(
-            RehearsalMessage.run_id == run_id, RehearsalMessage.wamid == wamid,
+        person_id = (await db.execute(sa.select(SimulationMessage.person_id).where(
+            SimulationMessage.run_id == run_id, SimulationMessage.wamid == wamid,
         ))).scalar_one_or_none()
         if person_id is not None:
-            await db.execute(sa.update(RehearsalPerson).where(RehearsalPerson.id == person_id)
+            await db.execute(sa.update(SimulationPerson).where(SimulationPerson.id == person_id)
                              .values(agent_typing_at=datetime.now(timezone.utc) if typing else None))
             await db.commit()
 
 
 async def set_person_typing(sf, person_id: uuid.UUID, typing: bool) -> None:
     async with sf() as db:
-        await db.execute(sa.update(RehearsalPerson).where(RehearsalPerson.id == person_id)
+        await db.execute(sa.update(SimulationPerson).where(SimulationPerson.id == person_id)
                          .values(agent_typing_at=datetime.now(timezone.utc) if typing else None))
         await db.commit()
 
 
-def is_typing(person: RehearsalPerson, now: datetime) -> bool:
+def is_typing(person: SimulationPerson, now: datetime) -> bool:
     shown = _TYPING.get(person.channel, timedelta(seconds=5))
     return person.agent_typing_at is not None and now - person.agent_typing_at < shown
 
 
-async def thread(sf, person_id: uuid.UUID) -> Sequence[RehearsalMessage]:
+async def thread(sf, person_id: uuid.UUID) -> Sequence[SimulationMessage]:
     async with sf() as db:
         return (await db.execute(
-            sa.select(RehearsalMessage).where(RehearsalMessage.person_id == person_id)
-            .order_by(RehearsalMessage.id)
+            sa.select(SimulationMessage).where(SimulationMessage.person_id == person_id)
+            .order_by(SimulationMessage.id)
         )).scalars().all()
 
 
-def with_template_definition(run: RehearsalRun, body: dict[str, Any]) -> dict[str, Any]:
+def with_template_definition(run: SimulationRun, body: dict[str, Any]) -> dict[str, Any]:
     """A template send, with the template's components as the account defines them."""
     sent = body.get("template") or {}
     language = (sent.get("language") or {}).get("code")
@@ -324,7 +324,7 @@ def with_template_definition(run: RehearsalRun, body: dict[str, Any]) -> dict[st
     return body
 
 
-def window_open(messages: Sequence[RehearsalMessage], now: datetime) -> bool:
+def window_open(messages: Sequence[SimulationMessage], now: datetime) -> bool:
     """WhatsApp's customer-service window: 24 hours from the person's last message."""
     last_in = max((m.created_at for m in messages if m.direction == "in"), default=None)
     return last_in is not None and now - last_in < _WINDOW
@@ -333,43 +333,43 @@ def window_open(messages: Sequence[RehearsalMessage], now: datetime) -> bool:
 async def put_media(sf, run_id: uuid.UUID, data: bytes, mime_type: str) -> str:
     media_id = f"media{secrets.token_hex(8)}"
     async with sf() as db:
-        db.add(RehearsalMedia(id=media_id, run_id=run_id, mime_type=mime_type, data=data))
+        db.add(SimulationMedia(id=media_id, run_id=run_id, mime_type=mime_type, data=data))
         await db.commit()
     return media_id
 
 
-async def get_media(sf, run_id: uuid.UUID, media_id: str) -> RehearsalMedia | None:
+async def get_media(sf, run_id: uuid.UUID, media_id: str) -> SimulationMedia | None:
     async with sf() as db:
-        media = await db.get(RehearsalMedia, media_id)
+        media = await db.get(SimulationMedia, media_id)
     return media if media is not None and media.run_id == run_id else None
 
 
 async def routing_for(sf, kind: str, identifier: str) -> dict[str, Any] | None:
-    """The routing record a running rehearsal number resolves to, else ``None``."""
-    if kind not in CHANNELS or not is_rehearsal_id(identifier):
+    """The routing record a running simulation number resolves to, else ``None``."""
+    if kind not in CHANNELS or not is_simulation_id(identifier):
         return None
     run = await run_by_number(sf, identifier)
     if run is None or run.status != "running" or run.channel != kind:
         return None
     return {
         "org_id": str(run.org_id), "agent_id": run.agent_id,
-        "config": {**(run.routing_config or {}), "rehearsal_run_id": str(run.id)},
+        "config": {**(run.routing_config or {}), "simulation_run_id": str(run.id)},
     }
 
 
 async def running_routings(sf, kind: str) -> list[dict[str, Any]]:
-    """Every running rehearsal on *kind*, shaped as ops lists a channel's routings."""
+    """Every running simulation on *kind*, shaped as ops lists a channel's routings."""
     async with sf() as db:
-        runs = (await db.execute(sa.select(RehearsalRun).where(
-            RehearsalRun.channel == kind, RehearsalRun.status == "running",
+        runs = (await db.execute(sa.select(SimulationRun).where(
+            SimulationRun.channel == kind, SimulationRun.status == "running",
         ))).scalars().all()
     return [{"channel_identifier": r.phone_number_id, "org_id": str(r.org_id),
              "config": dict(r.routing_config or {})} for r in runs]
 
 
-async def end_run(sf, vault, run_id: uuid.UUID) -> RehearsalRun | None:
+async def end_run(sf, vault, run_id: uuid.UUID) -> SimulationRun | None:
     async with sf() as db:
-        run = await db.get(RehearsalRun, run_id)
+        run = await db.get(SimulationRun, run_id)
         if run is None:
             return None
         run.status, run.ended_at = "ended", datetime.now(timezone.utc)

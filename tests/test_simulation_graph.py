@@ -10,15 +10,15 @@ import respx
 from fastapi import FastAPI
 from httpx import ASGITransport
 
-from surogates.rehearsal import store
-from surogates.rehearsal.graph import router
-from tests.test_rehearsal_models import rsf  # noqa: F401
-from tests.test_rehearsal_store import make_run
+from surogates.simulation import store
+from surogates.simulation.graph import router
+from tests.test_simulation_models import rsf  # noqa: F401
+from tests.test_simulation_store import make_run
 
 
 class Settings:
-    class rehearsal:
-        url = "http://rehearsal:8004"
+    class simulation:
+        url = "http://simulation:8004"
         channels_url = "http://channels:8003"
 
 
@@ -29,7 +29,7 @@ async def _world(sf):
     app.include_router(router)
     app.state.session_factory, app.state.settings = sf, Settings
     app.state.http = httpx.AsyncClient()
-    client = httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://rehearsal:8004")
+    client = httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://simulation:8004")
     base = f"/w/{run.phone_number_id}/whatsapp/v23.0/{run.phone_number_id}"
     auth = {"Authorization": f"Bearer {run.access_token}"}
     return run, person, client, base, auth
@@ -96,5 +96,5 @@ async def test_read_receipt_and_media_round_trip(rsf):  # noqa: F811
     world = f"/w/{run.phone_number_id}/whatsapp"
     meta = (await client.get(f"{world}/v23.0/{media_id}", headers=auth)).json()
     assert meta["mime_type"] == "image/png" and meta["file_size"] == 3
-    blob = await client.get(meta["url"].removeprefix("http://rehearsal:8004"), headers=auth)
+    blob = await client.get(meta["url"].removeprefix("http://simulation:8004"), headers=auth)
     assert blob.content == b"png"

@@ -1,9 +1,9 @@
-"""A rehearsal world's Discord, held open by the runtime's real Gateway client.
+"""A simulation world's Discord, held open by the runtime's real Gateway client.
 
-Mounted at ``/d``: the REST API the adapter calls for a rehearsal bot token
+Mounted at ``/d``: the REST API the adapter calls for a simulation bot token
 (``/d/api/v10/…``), and the Gateway its ``GET /gateway/bot`` points to
 (``/d/gateway``), where the channels service keeps a websocket per running
-rehearsal bot and the person's messages arrive as ``MESSAGE_CREATE``.  A
+simulation bot and the person's messages arrive as ``MESSAGE_CREATE``.  A
 message written before the bot has connected waits for its READY.
 """
 
@@ -18,7 +18,7 @@ from typing import Any
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, Response
 
-from surogates.rehearsal import store
+from surogates.simulation import store
 
 router = APIRouter(prefix="/d")
 
@@ -49,7 +49,7 @@ def author(person) -> dict[str, Any]:
 
 
 class Gateways:
-    """The open Gateway connection of each running rehearsal bot."""
+    """The open Gateway connection of each running simulation bot."""
 
     def __init__(self) -> None:
         self._sockets: dict[uuid.UUID, WebSocket] = {}
@@ -93,7 +93,7 @@ GATEWAYS = Gateways()
 
 
 def gateway_url(settings) -> str:
-    base = settings.rehearsal.url.rstrip("/").replace("https://", "wss://").replace("http://", "ws://")
+    base = settings.simulation.url.rstrip("/").replace("https://", "wss://").replace("http://", "ws://")
     return f"{base}/d/gateway"
 
 

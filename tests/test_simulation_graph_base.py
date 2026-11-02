@@ -1,4 +1,4 @@
-"""Only a rehearsal phone-number id, on a deployment running Rehearsal, leaves Meta."""
+"""Only a simulation phone-number id, on a deployment running Simulation, leaves Meta."""
 
 from __future__ import annotations
 
@@ -14,32 +14,32 @@ from surogates.channels.platforms.whatsapp_api import (
 )
 
 REAL = "100000000000001"
-REHEARSAL = "9991234567890123"
+SIMULATION = "9991234567890123"
 
 
 def test_real_id_always_reaches_meta(monkeypatch):
-    monkeypatch.setenv("SUROGATES_REHEARSAL_URL", "http://rehearsal:8004")
+    monkeypatch.setenv("SUROGATES_SIMULATION_URL", "http://simulation:8004")
     assert graph_base(REAL) == GRAPH_API_BASE
     assert graph_url(REAL, "messages").startswith(GRAPH_API_BASE + "/")
 
 
-def test_rehearsal_id_reaches_its_world(monkeypatch):
-    monkeypatch.setenv("SUROGATES_REHEARSAL_URL", "http://rehearsal:8004/")
-    assert graph_base(REHEARSAL) == f"http://rehearsal:8004/w/{REHEARSAL}/whatsapp"
-    assert graph_url(REHEARSAL, "messages") == (
-        f"http://rehearsal:8004/w/{REHEARSAL}/whatsapp/v23.0/{REHEARSAL}/messages"
+def test_simulation_id_reaches_its_world(monkeypatch):
+    monkeypatch.setenv("SUROGATES_SIMULATION_URL", "http://simulation:8004/")
+    assert graph_base(SIMULATION) == f"http://simulation:8004/w/{SIMULATION}/whatsapp"
+    assert graph_url(SIMULATION, "messages") == (
+        f"http://simulation:8004/w/{SIMULATION}/whatsapp/v23.0/{SIMULATION}/messages"
     )
 
 
-def test_rehearsal_id_without_rehearsal_deployment_reaches_meta(monkeypatch):
-    monkeypatch.delenv("SUROGATES_REHEARSAL_URL", raising=False)
-    assert graph_base(REHEARSAL) == GRAPH_API_BASE
+def test_simulation_id_without_simulation_deployment_reaches_meta(monkeypatch):
+    monkeypatch.delenv("SUROGATES_SIMULATION_URL", raising=False)
+    assert graph_base(SIMULATION) == GRAPH_API_BASE
 
 
 @pytest.mark.asyncio
 async def test_download_media_uses_the_world(monkeypatch):
-    monkeypatch.setenv("SUROGATES_REHEARSAL_URL", "http://rehearsal:8004")
-    world = f"http://rehearsal:8004/w/{REHEARSAL}/whatsapp"
+    monkeypatch.setenv("SUROGATES_SIMULATION_URL", "http://simulation:8004")
+    world = f"http://simulation:8004/w/{SIMULATION}/whatsapp"
     async with httpx.AsyncClient() as client:
         with respx.mock(assert_all_called=True) as router:
             router.get(f"{world}/v23.0/media7").mock(return_value=httpx.Response(
@@ -50,6 +50,6 @@ async def test_download_media_uses_the_world(monkeypatch):
             )
             data, mime = await download_media(
                 client, token="t", media_id="media7", max_bytes=100,
-                phone_number_id=REHEARSAL,
+                phone_number_id=SIMULATION,
             )
     assert (data, mime) == (b"png", "image/png")

@@ -1,16 +1,16 @@
-"""``surogates rehearsal`` serves the world and the internal API from one app."""
+"""``surogates simulation`` serves the world and the internal API from one app."""
 
 from __future__ import annotations
 
 from surogates.cli.main import COMMANDS, build_parser
-from surogates.config import RehearsalSettings
-from surogates.rehearsal.app import create_app
+from surogates.config import SimulationSettings
+from surogates.simulation.app import create_app
 
 
 def test_settings_read_the_environment(monkeypatch):
-    monkeypatch.setenv("SUROGATES_REHEARSAL_PORT", "8104")
-    monkeypatch.setenv("SUROGATES_REHEARSAL_URL", "http://127.0.0.1:8104")
-    settings = RehearsalSettings()
+    monkeypatch.setenv("SUROGATES_SIMULATION_PORT", "8104")
+    monkeypatch.setenv("SUROGATES_SIMULATION_URL", "http://127.0.0.1:8104")
+    settings = SimulationSettings()
     assert settings.port == 8104 and settings.url == "http://127.0.0.1:8104"
 
 
@@ -23,5 +23,5 @@ def test_app_mounts_both_surfaces():
 
 
 def test_cli_has_the_command():
-    assert "rehearsal" in COMMANDS
-    assert build_parser().parse_args(["rehearsal"]).command == "rehearsal"
+    assert "simulation" in COMMANDS
+    assert build_parser().parse_args(["simulation"]).command == "simulation"

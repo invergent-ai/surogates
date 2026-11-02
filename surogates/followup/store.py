@@ -189,7 +189,7 @@ async def enrollments(
         ))
         .where(~sa.exists().where(
             User.id == FollowupEnrollmentRow.user_id,
-            User.rehearsal_run_id.isnot(None),
+            User.simulation_run_id.isnot(None),
         ))
         .order_by(FollowupEnrollmentRow.created_at)
     )

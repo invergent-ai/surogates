@@ -207,9 +207,9 @@ class User(Base):
     preferences: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, server_default="{}"
     )
-    # Set on the stand-in users a rehearsal run creates, so no reader of real
+    # Set on the stand-in users a simulation run creates, so no reader of real
     # people ever lists them.
-    rehearsal_run_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+    simulation_run_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         UUID(as_uuid=True), nullable=True, index=True,
     )
     created_at: Mapped[datetime] = mapped_column(
@@ -2904,7 +2904,7 @@ class WebPushSubscription(Base):
 
 
 # ---------------------------------------------------------------------------
-# Rehearsal
+# Simulation
 # ---------------------------------------------------------------------------
 
 
@@ -2912,14 +2912,14 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-class RehearsalRun(Base):
-    """One rehearsal: its world, the agent's account in it, and its status.
+class SimulationRun(Base):
+    """One simulation: its world, the agent's account in it, and its status.
 
     The account columns keep their WhatsApp names; on Telegram they hold the
     bot's username, its token and its webhook secret.
     """
 
-    __tablename__ = "rehearsal_runs"
+    __tablename__ = "simulation_runs"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     org_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("orgs.id"), nullable=False)
@@ -2943,14 +2943,14 @@ class RehearsalRun(Base):
     ended_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
 
 
-class RehearsalPerson(Base):
+class SimulationPerson(Base):
     """Someone a run's user writes as."""
 
-    __tablename__ = "rehearsal_people"
+    __tablename__ = "simulation_people"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     run_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("rehearsal_runs.id", ondelete="CASCADE"), nullable=False, index=True,
+        UUID(as_uuid=True), ForeignKey("simulation_runs.id", ondelete="CASCADE"), nullable=False, index=True,
     )
     name: Mapped[str] = mapped_column(Text, nullable=False)
     channel: Mapped[str] = mapped_column(Text, nullable=False)
@@ -2971,17 +2971,17 @@ class RehearsalPerson(Base):
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False, default=_utcnow)
 
 
-class RehearsalMessage(Base):
+class SimulationMessage(Base):
     """One message in a world, in Meta's own shape."""
 
-    __tablename__ = "rehearsal_messages"
+    __tablename__ = "simulation_messages"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     run_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("rehearsal_runs.id", ondelete="CASCADE"), nullable=False, index=True,
+        UUID(as_uuid=True), ForeignKey("simulation_runs.id", ondelete="CASCADE"), nullable=False, index=True,
     )
     person_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("rehearsal_people.id", ondelete="CASCADE"), nullable=False,
+        UUID(as_uuid=True), ForeignKey("simulation_people.id", ondelete="CASCADE"), nullable=False,
     )
     #: ``in``: the person wrote it; ``out``: the agent sent it.
     direction: Mapped[str] = mapped_column(Text, nullable=False)
@@ -2992,14 +2992,14 @@ class RehearsalMessage(Base):
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False, default=_utcnow)
 
 
-class RehearsalMedia(Base):
+class SimulationMedia(Base):
     """A file uploaded into a world, by the agent or by the person."""
 
-    __tablename__ = "rehearsal_media"
+    __tablename__ = "simulation_media"
 
     id: Mapped[str] = mapped_column(Text, primary_key=True)
     run_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("rehearsal_runs.id", ondelete="CASCADE"), nullable=False,
+        UUID(as_uuid=True), ForeignKey("simulation_runs.id", ondelete="CASCADE"), nullable=False,
     )
     mime_type: Mapped[str] = mapped_column(Text, nullable=False)
     data: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)

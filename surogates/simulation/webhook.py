@@ -1,4 +1,4 @@
-"""Meta's webhook, as a rehearsal world sends it to the channels service."""
+"""Meta's webhook, as a simulation world sends it to the channels service."""
 
 from __future__ import annotations
 
@@ -38,7 +38,7 @@ async def post_webhook(
             headers={"Content-Type": "application/json", "X-Hub-Signature-256": f"sha256={signature}"},
         )
     except httpx.HTTPError as exc:
-        logger.warning("[rehearsal] webhook to channels failed (%s)", exc)
+        logger.warning("[simulation] webhook to channels failed (%s)", exc)
         return 0
     return response.status_code
 
@@ -54,7 +54,7 @@ async def post_telegram_update(
             headers={"X-Telegram-Bot-Api-Secret-Token": webhook_secret},
         )
     except httpx.HTTPError as exc:
-        logger.warning("[rehearsal] telegram update to channels failed (%s)", exc)
+        logger.warning("[simulation] telegram update to channels failed (%s)", exc)
         return 0
     return response.status_code
 
@@ -74,7 +74,7 @@ async def post_slack(
                      "X-Slack-Signature": signature},
         )
     except httpx.HTTPError as exc:
-        logger.warning("[rehearsal] slack delivery to channels failed (%s)", exc)
+        logger.warning("[simulation] slack delivery to channels failed (%s)", exc)
         return 0
     return response.status_code
 
@@ -90,6 +90,6 @@ async def post_teams_activity(
             headers={"Authorization": f"Bearer {token}"},
         )
     except httpx.HTTPError as exc:
-        logger.warning("[rehearsal] teams activity to channels failed (%s)", exc)
+        logger.warning("[simulation] teams activity to channels failed (%s)", exc)
         return 0
     return response.status_code

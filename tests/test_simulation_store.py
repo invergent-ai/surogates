@@ -9,9 +9,9 @@ import pytest
 
 from surogates.channels.identity import ResolvedIdentity
 from surogates.db.models import Org, User
-from surogates.rehearsal import store
-from surogates.rehearsal.ids import is_rehearsal_id
-from tests.test_rehearsal_models import rsf  # noqa: F401
+from surogates.simulation import store
+from surogates.simulation.ids import is_simulation_id
+from tests.test_simulation_models import rsf  # noqa: F401
 
 
 class FakeVault:
@@ -58,18 +58,18 @@ async def make_run(sf, vault=None, routing_config=None):
 async def test_create_run_provisions_world(rsf):  # noqa: F811
     vault = FakeVault()
     run = await make_run(rsf, vault, {"identity_policy": "shadow"})
-    assert is_rehearsal_id(run.phone_number_id)
+    assert is_simulation_id(run.phone_number_id)
     names = {name for (_, name) in vault.items}
     assert names == {f"whatsapp_{c}_{run.phone_number_id}" for c in store.VAULT_CREDENTIALS["whatsapp"]}
     [person] = await store.people(rsf, run.id)
-    assert person.name == "Ana" and is_rehearsal_id(person.address)
+    assert person.name == "Ana" and is_simulation_id(person.address)
     async with rsf() as db:
         user = await db.get(User, person.user_id)
-    assert user.rehearsal_run_id == run.id
+    assert user.simulation_run_id == run.id
 
     routing = await store.routing_for(rsf, "whatsapp", run.phone_number_id)
     assert routing == {"org_id": str(run.org_id), "agent_id": "a1",
-                       "config": {"identity_policy": "shadow", "rehearsal_run_id": str(run.id)}}
+                       "config": {"identity_policy": "shadow", "simulation_run_id": str(run.id)}}
 
     await store.end_run(rsf, vault, run.id)
     assert vault.items == {}

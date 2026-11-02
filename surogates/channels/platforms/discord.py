@@ -35,7 +35,7 @@ from surogates.channels.capabilities import ChannelCapabilities
 from surogates.channels.inbound import InboundFileRef, InboundMessage
 from surogates.channels.registry import ChannelDescriptor
 from surogates.channels.text_split import split_text
-from surogates.rehearsal.ids import is_rehearsal_discord_token
+from surogates.simulation.ids import is_simulation_discord_token
 
 __all__ = ["DISCORD_API_BASE", "DiscordPlatform", "open_dm", "parse"]
 
@@ -48,10 +48,10 @@ DISCORD_API_BASE = (
 ).rstrip("/")
 
 def _api_base(token: str) -> str:
-    """Discord, or the rehearsal world that owns a rehearsal bot token."""
-    rehearsal_url = os.environ.get("SUROGATES_REHEARSAL_URL", "").rstrip("/")
-    if rehearsal_url and is_rehearsal_discord_token(token):
-        return f"{rehearsal_url}/d/api/v10"
+    """Discord, or the simulation world that owns a simulation bot token."""
+    simulation_url = os.environ.get("SUROGATES_SIMULATION_URL", "").rstrip("/")
+    if simulation_url and is_simulation_discord_token(token):
+        return f"{simulation_url}/d/api/v10"
     return DISCORD_API_BASE
 
 

@@ -22,7 +22,7 @@ __all__ = [
     "CASE_RERUN_KEY",
     "EVAL_BOUNDARY_PREFIX",
     "PROJECT_BOUNDARY_PREFIX",
-    "REHEARSAL_BOUNDARY_PREFIX",
+    "SIMULATION_BOUNDARY_PREFIX",
     "RERUN_KINDS",
     "VISITOR_BOUNDARY_PREFIX",
     "boundary_token",
@@ -31,7 +31,7 @@ __all__ = [
     "is_case_config",
     "is_case_session",
     "is_visitor_boundary",
-    "rehearsal_boundary",
+    "simulation_boundary",
     "is_eval_session",
     "rerun_kind_in",
     "rerun_kind_of",
@@ -80,13 +80,13 @@ def is_visitor_boundary(boundary: str | None) -> bool:
 # parent's.
 CASE_BOUNDARY_PREFIX = "case:"
 
-# A rehearsal run's sessions: their memory never meets a real person's, and
+# A simulation run's sessions: their memory never meets a real person's, and
 # ops hides them from every reader of real data, as it hides a case's.
-REHEARSAL_BOUNDARY_PREFIX = "rehearsal:"
+SIMULATION_BOUNDARY_PREFIX = "simulation:"
 
 
-def rehearsal_boundary(run_id: object, boundary: str) -> str:
-    return f"{REHEARSAL_BOUNDARY_PREFIX}{run_id}:{boundary}"
+def simulation_boundary(run_id: object, boundary: str) -> str:
+    return f"{SIMULATION_BOUNDARY_PREFIX}{run_id}:{boundary}"
 
 # A person's case agent is a session of the case too: it carries the case's
 # ``case:`` boundary for its memory alone, never the case's workspace, and

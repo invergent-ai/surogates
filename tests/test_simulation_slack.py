@@ -1,4 +1,4 @@
-"""A Slack rehearsal: the member's events reach the real adapter's routes signed
+"""A Slack simulation: the member's events reach the real adapter's routes signed
 as Slack signs, and what the adapter posts, edits, deletes and opens lands in
 the run."""
 
@@ -17,16 +17,16 @@ from fastapi import FastAPI
 from httpx import ASGITransport
 
 from surogates.channels.platforms.slack import _api_base
-from surogates.rehearsal import api, slack, store
-from surogates.rehearsal.ids import new_slack_bot_token
-from tests.test_rehearsal_api import TOKEN, Settings
-from tests.test_rehearsal_models import rsf  # noqa: F401
-from tests.test_rehearsal_store import FakeVault, make_org, provision_into
+from surogates.simulation import api, slack, store
+from surogates.simulation.ids import new_slack_bot_token
+from tests.test_simulation_api import TOKEN, Settings
+from tests.test_simulation_models import rsf  # noqa: F401
+from tests.test_simulation_store import FakeVault, make_org, provision_into
 
 
-def test_only_a_rehearsal_token_reaches_the_world(monkeypatch):
-    monkeypatch.setenv("SUROGATES_REHEARSAL_URL", "http://rehearsal:8004")
-    assert _api_base(new_slack_bot_token()) == "http://rehearsal:8004/s/api/"
+def test_only_a_simulation_token_reaches_the_world(monkeypatch):
+    monkeypatch.setenv("SUROGATES_SIMULATION_URL", "http://simulation:8004")
+    assert _api_base(new_slack_bot_token()) == "http://simulation:8004/s/api/"
     assert _api_base("xoxb-1234567890-abc").startswith("https://slack.com/")
     assert _api_base("xoxb-9991234567-2222222222-abc").startswith("https://slack.com/")
 
@@ -48,7 +48,7 @@ async def test_slack_run(rsf):  # noqa: F811
     app.state.session_factory, app.state.settings = rsf, Settings
     app.state.vault, app.state.provision = vault, provision_into(rsf)
     app.state.http = httpx.AsyncClient()
-    client = httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://rehearsal:8004",
+    client = httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://simulation:8004",
                                headers={"Authorization": f"Bearer {TOKEN}"})
     run = (await client.post("/internal/runs", json={
         "org_id": str(org_id), "agent_id": "a1", "created_by": "u1", "person_name": "Ana",
@@ -68,7 +68,7 @@ async def test_slack_run(rsf):  # noqa: F811
     event = json.loads(hook.calls[0].request.content)["event"]
     assert event["text"] == "Salut" and event["channel_type"] == "im"
 
-    web = httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://rehearsal:8004/s/api/",
+    web = httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://simulation:8004/s/api/",
                             headers={"Authorization": f"Bearer {row.access_token}"})
     assert (await web.post("auth.test")).json()["app_id"] == app_id
     dm = (await web.post("conversations.open", data={"users": person["address"]})).json()["channel"]["id"]

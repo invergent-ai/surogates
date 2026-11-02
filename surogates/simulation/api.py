@@ -1,6 +1,6 @@
 """The internal API ops calls to start runs and write as their people.
 
-Only ops calls it, with ``rehearsal.internal_token``; ops checks the Studio
+Only ops calls it, with ``simulation.internal_token``; ops checks the Studio
 user's rights on the agent first and passes the org every call is scoped to.
 """
 
@@ -19,9 +19,9 @@ from urllib.parse import urlencode
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from surogates.rehearsal import store
-from surogates.rehearsal import discord, slack, teams, voice
-from surogates.rehearsal.webhook import (
+from surogates.simulation import store
+from surogates.simulation import discord, slack, teams, voice
+from surogates.simulation.webhook import (
     post_slack,
     post_teams_activity,
     post_telegram_update,
@@ -30,10 +30,10 @@ from surogates.rehearsal.webhook import (
 
 
 def _require_internal_token(request: Request) -> None:
-    expected = request.app.state.settings.rehearsal.internal_token
+    expected = request.app.state.settings.simulation.internal_token
     given = request.headers.get("authorization", "").removeprefix("Bearer ").strip()
     if not expected or not secrets.compare_digest(given, expected):
-        raise HTTPException(status_code=401, detail="Rehearsal internal token required")
+        raise HTTPException(status_code=401, detail="Simulation internal token required")
 
 
 logger = logging.getLogger(__name__)
@@ -99,7 +99,7 @@ async def _detail(sf, run) -> dict[str, Any]:
 async def _run_in_org(request: Request, run_id: uuid.UUID, org_id: uuid.UUID):
     run = await store.get_run(request.app.state.session_factory, run_id)
     if run is None or run.org_id != org_id:
-        raise HTTPException(status_code=404, detail="Rehearsal run not found")
+        raise HTTPException(status_code=404, detail="Simulation run not found")
     return run
 
 
@@ -145,10 +145,10 @@ async def write_as_person(run_id: uuid.UUID, person_id: uuid.UUID, org_id: uuid.
 
 async def _running_person(state, run, person_id: uuid.UUID):
     if run.status != "running":
-        raise HTTPException(status_code=409, detail="This rehearsal has ended")
+        raise HTTPException(status_code=409, detail="This simulation has ended")
     person = next((p for p in await store.people(state.session_factory, run.id) if p.id == person_id), None)
     if person is None:
-        raise HTTPException(status_code=404, detail="No such person in this rehearsal")
+        raise HTTPException(status_code=404, detail="No such person in this simulation")
     return person
 
 
@@ -214,7 +214,7 @@ async def write(state, run, person, body: PersonMessage) -> dict[str, Any]:
     await store.log_message(state.session_factory, run_id=run.id, person_id=person.id,
                             direction="in", kind=message["type"], body=message, wamid=wamid)
     status = await post_webhook(
-        state.http, channels_url=state.settings.rehearsal.channels_url,
+        state.http, channels_url=state.settings.simulation.channels_url,
         phone_number_id=run.phone_number_id, app_secret=run.app_secret,
         value={"contacts": [{"profile": {"name": person.name}, "wa_id": person.address}],
                "messages": [message]},
@@ -240,7 +240,7 @@ async def _write_on_telegram(state, run, person, body: PersonMessage) -> dict[st
             "message": tapped.body, "data": str(body.callback.get("data") or ""),
         }}
         status = await post_telegram_update(
-            state.http, channels_url=state.settings.rehearsal.channels_url,
+            state.http, channels_url=state.settings.simulation.channels_url,
             bot_username=run.phone_number_id, webhook_secret=run.app_secret, update=update,
         )
         return {"delivered": 200 <= status < 300, "channels_status": status}
@@ -252,7 +252,7 @@ async def _write_on_telegram(state, run, person, body: PersonMessage) -> dict[st
     await store.log_message(sf, run_id=run.id, person_id=person.id, direction="in", kind="text",
                             body=message, wamid=wamid)
     status = await post_telegram_update(
-        state.http, channels_url=state.settings.rehearsal.channels_url,
+        state.http, channels_url=state.settings.simulation.channels_url,
         bot_username=run.phone_number_id, webhook_secret=run.app_secret,
         update={"update_id": update_id, "message": message},
     )
@@ -322,7 +322,7 @@ async def _write_on_teams(state, run, person, body: PersonMessage) -> dict[str, 
     await store.log_message(sf, run_id=run.id, person_id=person.id, direction="in",
                             kind="message", body=activity, wamid=activity_id)
     status = await post_teams_activity(
-        state.http, channels_url=state.settings.rehearsal.channels_url,
+        state.http, channels_url=state.settings.simulation.channels_url,
         app_id=run.phone_number_id, token=teams.sign(run.phone_number_id, service),
         activity=activity,
     )
@@ -334,11 +334,11 @@ async def _write_on_teams(state, run, person, body: PersonMessage) -> dict[str, 
 async def _write_on_slack(state, run, person, body: PersonMessage) -> dict[str, Any]:
     """The member's message, button click or modal, as Slack would deliver it."""
     sf = state.session_factory
-    team = {"id": slack.team_id(run), "domain": "rehearsal"}
+    team = {"id": slack.team_id(run), "domain": "simulation"}
     user = {"id": person.address, "username": person.name.lower(), "name": person.name.lower(),
             "team_id": team["id"]}
     deliver = functools.partial(
-        post_slack, state.http, channels_url=state.settings.rehearsal.channels_url,
+        post_slack, state.http, channels_url=state.settings.simulation.channels_url,
         app_id=run.phone_number_id, signing_secret=run.app_secret,
     )
     trigger = f"{person.address}.{secrets.token_hex(6)}"
@@ -394,7 +394,7 @@ async def _write_on_slack(state, run, person, body: PersonMessage) -> dict[str, 
     await store.log_message(sf, run_id=run.id, person_id=person.id, direction="in", kind="message",
                             body=event, wamid=ts)
     raw = json.dumps({
-        "token": "rehearsal", "team_id": team["id"], "api_app_id": run.phone_number_id,
+        "token": "simulation", "team_id": team["id"], "api_app_id": run.phone_number_id,
         "event": event, "type": "event_callback", "event_id": f"Ev{secrets.token_hex(6)}",
         "event_time": int(datetime.now(timezone.utc).timestamp()),
         "authorizations": [{"team_id": team["id"], "user_id": slack.bot_user_id(run), "is_bot": True}],
@@ -411,12 +411,12 @@ async def call_as_person(run_id: uuid.UUID, person_id: uuid.UUID, org_id: uuid.U
     state = request.app.state
     run = await _run_in_org(request, run_id, org_id)
     if run.channel != "voice":
-        raise HTTPException(status_code=422, detail="Only a voice rehearsal places calls")
+        raise HTTPException(status_code=422, detail="Only a voice simulation places calls")
     if run.status != "running":
-        raise HTTPException(status_code=409, detail="This rehearsal has ended")
+        raise HTTPException(status_code=409, detail="This simulation has ended")
     person = next((p for p in await store.people(state.session_factory, run.id) if p.id == person_id), None)
     if person is None:
-        raise HTTPException(status_code=404, detail="No such person in this rehearsal")
+        raise HTTPException(status_code=404, detail="No such person in this simulation")
     if not state.settings.voice.livekit_api_key:
         raise HTTPException(status_code=503, detail="Phone calls are not set up on this deployment")
     return voice.call_token(state.settings, run, person)
@@ -433,5 +433,5 @@ async def end_run(run_id: uuid.UUID, org_id: uuid.UUID, request: Request):
         try:
             await voice.hang_up_all(state.settings, run)
         except Exception:  # noqa: BLE001 - the run is ended; a call left ringing ends at its own limit
-            logger.warning("could not hang up the calls of rehearsal %s", run.id, exc_info=True)
+            logger.warning("could not hang up the calls of simulation %s", run.id, exc_info=True)
     return await _detail(state.session_factory, run)

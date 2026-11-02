@@ -1432,23 +1432,23 @@ WHERE o.state IN ('queued', 'awaiting_reply')
 ALTER TABLE browser_profiles
     ADD COLUMN IF NOT EXISTS use_in_channels text[] NOT NULL DEFAULT '{}'::text[];
 
--- The stand-in users a rehearsal run creates; readers of real people skip them.
+-- The stand-in users a simulation run creates; readers of real people skip them.
 ALTER TABLE users
-    ADD COLUMN IF NOT EXISTS rehearsal_run_id uuid;
-CREATE INDEX IF NOT EXISTS ix_users_rehearsal_run_id ON users (rehearsal_run_id);
+    ADD COLUMN IF NOT EXISTS simulation_run_id uuid;
+CREATE INDEX IF NOT EXISTS ix_users_simulation_run_id ON users (simulation_run_id);
 
--- When the agent last showed a rehearsal person "typing…".
-ALTER TABLE IF EXISTS rehearsal_people
+-- When the agent last showed a simulation person "typing…".
+ALTER TABLE IF EXISTS simulation_people
     ADD COLUMN IF NOT EXISTS agent_typing_at timestamptz;
-ALTER TABLE IF EXISTS rehearsal_runs
+ALTER TABLE IF EXISTS simulation_runs
     ADD COLUMN IF NOT EXISTS templates jsonb NOT NULL DEFAULT '[]'::jsonb;
-ALTER TABLE IF EXISTS rehearsal_runs
+ALTER TABLE IF EXISTS simulation_runs
     ADD COLUMN IF NOT EXISTS flows jsonb NOT NULL DEFAULT '[]'::jsonb;
-ALTER TABLE IF EXISTS rehearsal_runs
+ALTER TABLE IF EXISTS simulation_runs
     ADD COLUMN IF NOT EXISTS channel text NOT NULL DEFAULT 'whatsapp';
 
 -- A person the AI plays, and where it is in the conversation.
-ALTER TABLE IF EXISTS rehearsal_people
+ALTER TABLE IF EXISTS simulation_people
     ADD COLUMN IF NOT EXISTS persona text,
     ADD COLUMN IF NOT EXISTS driver text NOT NULL DEFAULT 'human',
     ADD COLUMN IF NOT EXISTS ai_state text,

@@ -46,7 +46,7 @@ from fastapi import APIRouter, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
-from surogates.channels.memory_boundary import rehearsal_boundary, visitor_boundary
+from surogates.channels.memory_boundary import simulation_boundary, visitor_boundary
 from surogates.channels.website_keys import (
     PUBLISHABLE_KEY_PREFIX,
     is_publishable_key,
@@ -273,8 +273,8 @@ def _visitor_memory_boundary(
     buyer = config.get("commerce_buyer") or {}
     identity = buyer.get("firebase_uid") or visitor_id
     boundary = visitor_boundary(agent_id, config.get("embed_end_user_id"), identity)
-    if config.get("rehearsal_run_id"):
-        return rehearsal_boundary(config["rehearsal_run_id"], boundary)
+    if config.get("simulation_run_id"):
+        return simulation_boundary(config["simulation_run_id"], boundary)
     return boundary
 
 
@@ -792,8 +792,8 @@ async def bootstrap_website_session(
         "website_origin": normalized_origin,
         "channel_identifier": publishable_key,
     }
-    if routing_config.get("rehearsal_run_id"):
-        config["rehearsal_run_id"] = str(routing_config["rehearsal_run_id"])
+    if routing_config.get("simulation_run_id"):
+        config["simulation_run_id"] = str(routing_config["simulation_run_id"])
     if single_session:
         # The fresh session becomes the visitor's canonical conversation
         # that every later re-bootstrap resolves to.

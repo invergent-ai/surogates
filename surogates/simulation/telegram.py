@@ -1,6 +1,6 @@
-"""A rehearsal world's Telegram Bot API, called by the runtime's real Telegram adapter.
+"""A simulation world's Telegram Bot API, called by the runtime's real Telegram adapter.
 
-Mounted at ``/t``: the adapter sends a rehearsal bot's ``/bot{token}/{method}``
+Mounted at ``/t``: the adapter sends a simulation bot's ``/bot{token}/{method}``
 calls here, so what it sends, edits and reacts with lands in the run that owns
 the bot.  Answers keep the Bot API's ``{"ok", "result"}`` / ``{"ok": false,
 "error_code", "description"}`` shape.
@@ -15,7 +15,7 @@ from typing import Any
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from surogates.rehearsal import store
+from surogates.simulation import store
 
 router = APIRouter(prefix="/t")
 
@@ -108,4 +108,4 @@ async def call(token: str, method: str, request: Request):
                                 wamid=f"reaction{secrets.token_hex(6)}", status="sent")
         return _ok(True)
 
-    return _error(400, f"Bad Request: {method} is not available in a rehearsal yet")
+    return _error(400, f"Bad Request: {method} is not available in a simulation yet")

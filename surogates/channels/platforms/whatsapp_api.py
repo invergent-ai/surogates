@@ -20,7 +20,7 @@ from typing import Any
 
 import httpx
 
-from surogates.rehearsal.ids import is_rehearsal_id
+from surogates.simulation.ids import is_simulation_id
 
 __all__ = [
     "DEFAULT_API_VERSION",
@@ -47,15 +47,15 @@ GRAPH_API_BASE = (
 
 
 def graph_base(phone_number_id: str = "") -> str:
-    """Meta's Graph, or the rehearsal world that owns *phone_number_id*.
+    """Meta's Graph, or the simulation world that owns *phone_number_id*.
 
-    A world is reached only for a rehearsal id and only on a deployment that
-    runs Rehearsal, so a real number always gets Meta.  Read per call: the
+    A world is reached only for a simulation id and only on a deployment that
+    runs Simulation, so a real number always gets Meta.  Read per call: the
     YAML config reaches the environment after this module is imported.
     """
-    rehearsal_url = os.environ.get("SUROGATES_REHEARSAL_URL", "").rstrip("/")
-    if rehearsal_url and is_rehearsal_id(phone_number_id):
-        return f"{rehearsal_url}/w/{phone_number_id}/whatsapp"
+    simulation_url = os.environ.get("SUROGATES_SIMULATION_URL", "").rstrip("/")
+    if simulation_url and is_simulation_id(phone_number_id):
+        return f"{simulation_url}/w/{phone_number_id}/whatsapp"
     return GRAPH_API_BASE
 
 #: Meta removes v20.0 on 2026-09-24; never pin below v23.0.
