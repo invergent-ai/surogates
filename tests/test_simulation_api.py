@@ -92,6 +92,8 @@ async def test_run_lifecycle(rsf):  # noqa: F811
 
     listed = (await client.get("/internal/runs", params={**org, "agent_id": "a1"})).json()
     assert [r["id"] for r in listed] == [run["id"]]
+    assert listed[0]["messages"] == 3 and listed[0]["driver"] == "human"
+    assert listed[0]["persona"] is None and listed[0]["ended_at"] is None
 
     ended = (await client.post(f"/internal/runs/{run['id']}/end", params=org)).json()
     assert ended["status"] == "ended"

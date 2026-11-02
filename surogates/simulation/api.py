@@ -121,11 +121,25 @@ async def start_run(body: StartRun, request: Request):
 @router.get("/runs")
 async def list_runs(org_id: uuid.UUID, agent_id: str, request: Request):
     sf = request.app.state.session_factory
-    return [{"id": str(r.id), "status": r.status, "channel": r.channel,
-             "created_by": r.created_by,
-             "created_at": r.created_at.isoformat(),
-             "people": [p.name for p in await store.people(sf, r.id)]}
-            for r in await store.list_runs(sf, org_id=org_id, agent_id=agent_id)]
+    runs = await store.list_runs(sf, org_id=org_id, agent_id=agent_id)
+    counts = await store.message_counts(sf, [r.id for r in runs])
+    summaries = []
+    for r in runs:
+        people = await store.people(sf, r.id)
+        first = people[0] if people else None
+        summaries.append({
+            "id": str(r.id), "status": r.status, "channel": r.channel,
+            "created_by": r.created_by,
+            "created_at": r.created_at.isoformat(),
+            "ended_at": r.ended_at.isoformat() if r.ended_at else None,
+            "people": [p.name for p in people],
+            "persona": first.persona if first else None,
+            "driver": first.driver if first else None,
+            "ai_state": first.ai_state if first else None,
+            "ai_note": first.ai_note if first else None,
+            "messages": counts.get(r.id, 0),
+        })
+    return summaries
 
 
 @router.get("/runs/{run_id}")

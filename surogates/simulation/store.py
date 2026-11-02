@@ -192,6 +192,18 @@ async def list_runs(sf, *, org_id: uuid.UUID, agent_id: str) -> Sequence[Simulat
         )).scalars().all()
 
 
+async def message_counts(sf, run_ids: Sequence[uuid.UUID]) -> dict[uuid.UUID, int]:
+    if not run_ids:
+        return {}
+    async with sf() as db:
+        rows = await db.execute(
+            sa.select(SimulationMessage.run_id, sa.func.count())
+            .where(SimulationMessage.run_id.in_(run_ids))
+            .group_by(SimulationMessage.run_id)
+        )
+        return {run_id: count for run_id, count in rows.all()}
+
+
 async def people(sf, run_id: uuid.UUID) -> Sequence[SimulationPerson]:
     async with sf() as db:
         return (await db.execute(
