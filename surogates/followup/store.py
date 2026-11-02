@@ -124,6 +124,8 @@ ABILITIES = (
 DESTINATION_RECEIVES = ("urgent", "attention", "missed_replies")
 #: The recipient of a message sent to a shared destination, not a person.
 NO_PERSON = uuid.UUID(int=0)
+#: Why a team message about a simulated person was never sent.
+SIMULATED = "Kept in the simulation: nobody real was told"
 #: Allowed ranges, inclusive, for the settings that time outreach.  The
 #: passes that act on them look back far enough to cover the maximum.
 SETTINGS_RANGES = {
@@ -1138,13 +1140,22 @@ async def queue_outreach(
         )
         not_before = held[0] if held else None
     async with session_factory() as db:
+        # A message to the team about a simulated person stays in the
+        # simulation: the run shows it, nobody real receives it.
+        simulated = (
+            subject_user_id is not None and subject_user_id != user_id
+            and await db.scalar(
+                sa.select(User.simulation_run_id).where(User.id == subject_user_id)
+            ) is not None
+        )
         row = OutreachMessageRow(
             org_id=org_id, agent_id=agent_id, user_id=user_id,
             platform=platform, channel_identifier=channel_identifier,
             kind=kind, text=text, template_name=template_name or None,
             template_language=template_language or None,
             # Recorded, not sent, when nothing could carry it (*failed_reason*).
-            state="failed" if failed_reason else "queued", reason=failed_reason,
+            state="simulated" if simulated else "failed" if failed_reason else "queued",
+            reason=SIMULATED if simulated else failed_reason,
             subject_user_id=subject_user_id, created_by=created_by,
             dedupe_key=dedupe_key, severity=severity, alert_reason=alert_reason,
             destination=destination or None,

@@ -17,7 +17,14 @@ import sqlalchemy as sa
 
 from surogates.channels.identity import ResolvedIdentity, get_or_create_channel_identity
 from surogates.channels.platforms.whatsapp_api import DEFAULT_API_VERSION
-from surogates.db.models import SimulationMedia, SimulationMessage, SimulationPerson, SimulationRun, User
+from surogates.db.models import (
+    OutreachMessageRow,
+    SimulationMedia,
+    SimulationMessage,
+    SimulationPerson,
+    SimulationRun,
+    User,
+)
 from surogates.simulation.ids import (
     is_simulation_id,
     new_bot_token,
@@ -202,6 +209,28 @@ async def message_counts(sf, run_ids: Sequence[uuid.UUID]) -> dict[uuid.UUID, in
             .group_by(SimulationMessage.run_id)
         )
         return {run_id: count for run_id, count in rows.all()}
+
+
+async def team_messages(sf, user_ids: Sequence[uuid.UUID]) -> list[dict[str, Any]]:
+    """What the agent told its team about these people, oldest first."""
+    if not user_ids:
+        return []
+    async with sf() as db:
+        rows = (await db.execute(
+            sa.select(OutreachMessageRow)
+            .where(OutreachMessageRow.subject_user_id.in_(user_ids))
+            .order_by(OutreachMessageRow.created_at)
+        )).scalars().all()
+        names = dict((await db.execute(
+            sa.select(User.id, User.display_name)
+            .where(User.id.in_({row.user_id for row in rows}))
+        )).all()) if rows else {}
+    return [
+        {"id": str(row.id), "at": row.created_at.isoformat(), "kind": row.kind,
+         "platform": row.platform, "to": row.destination or names.get(row.user_id) or "The team",
+         "group": row.destination is not None, "text": row.text, "severity": row.severity}
+        for row in rows
+    ]
 
 
 async def people(sf, run_id: uuid.UUID) -> Sequence[SimulationPerson]:

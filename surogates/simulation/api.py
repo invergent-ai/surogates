@@ -78,8 +78,10 @@ def _message(m) -> dict[str, Any]:
 
 async def _detail(sf, run) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
-    people = []
+    people, user_ids = [], []
     for person in await store.people(sf, run.id):
+        if person.user_id:
+            user_ids.append(person.user_id)
         messages = await store.thread(sf, person.id)
         people.append({"id": str(person.id), "name": person.name, "channel": person.channel,
                        "address": person.address, "persona": person.persona,
@@ -93,7 +95,8 @@ async def _detail(sf, run) -> dict[str, Any]:
             "phone_number_id": run.phone_number_id, "created_by": run.created_by,
             "created_at": run.created_at.isoformat(),
             "ended_at": run.ended_at.isoformat() if run.ended_at else None, "people": people,
-            "flows": run.flows or []}
+            "flows": run.flows or [],
+            "team": await store.team_messages(sf, user_ids)}
 
 
 async def _run_in_org(request: Request, run_id: uuid.UUID, org_id: uuid.UUID):

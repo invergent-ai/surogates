@@ -60,3 +60,33 @@ async def test_enrollments_skip_simulation_users():
 
     await followup_store.enrollments(lambda: Capture(), org_id=uuid.uuid4(), agent_id="a1")
     assert "users.simulation_run_id IS NOT NULL" in seen[0]
+
+
+@pytest.mark.asyncio
+async def test_team_messages_about_a_simulated_person_stay_in_the_run(rsf):  # noqa: F811
+    from surogates.simulation import store as simulation_store
+
+    org_id = uuid.uuid4()
+    doctor, patient, staged = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    async with rsf() as db:
+        db.add(Org(id=org_id, name="Org"))
+        await db.flush()
+        db.add(User(id=doctor, org_id=org_id, email="d@x", display_name="Dr Ana"))
+        db.add(User(id=patient, org_id=org_id, email="p@x", display_name="Real patient"))
+        db.add(User(id=staged, org_id=org_id, email="s@x", display_name="Staged",
+                    simulation_run_id=uuid.uuid4()))
+        await db.commit()
+
+    def alert(subject):
+        return followup_store.queue_outreach(
+            rsf, org_id=org_id, agent_id="a1", user_id=doctor, platform="whatsapp",
+            channel_identifier="100", kind="alert", text="Bruise at the puncture site",
+            template_name=None, template_language=None, subject_user_id=subject,
+        )
+
+    kept, sent = await alert(staged), await alert(patient)
+    assert (kept.state, kept.reason) == ("simulated", followup_store.SIMULATED)
+    assert sent.state == "queued"
+    team = await simulation_store.team_messages(rsf, [staged])
+    assert [(m["to"], m["text"], m["platform"]) for m in team] == [
+        ("Dr Ana", "Bruise at the puncture site", "whatsapp")]
