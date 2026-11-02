@@ -125,6 +125,19 @@ describe.skipIf(!itEnabled)("editing a document", () => {
     expect(apart.results[0].reads.map((b: Any) => [b.kind, b.label])).toEqual([["heading2", undefined], ["numbered", "1."]]);
   });
 
+  it("inserts a table as wide as the text", async () => {
+    const agent = await alone();
+    const result = await edit(agent, [
+      { op: "insert", target: { end: true }, content: { markdown: "| Lot | Câștigător |\n|---|---|\n| 1 | CDI |\n| 2 | Vârsana Rutier |" } },
+    ]);
+    const width = await (await pool.get(agent)).command(
+      "function () { var t = AscCommon.g_oTableId.Get_ById(scope.id); return [t.Pr.TableW.Type, t.Pr.TableW.W]; }",
+      { id: result.results[0].ids[0] },
+    );
+    // 3 is a width in percent: the table takes the whole text width.
+    expect(width.value).toEqual([3, 100]);
+  });
+
   it("joins one level down", async () => {
     const agent = await alone();
     const first = (await numbered(agent))[0];
