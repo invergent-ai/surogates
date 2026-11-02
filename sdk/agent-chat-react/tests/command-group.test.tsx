@@ -115,7 +115,7 @@ describe("Simple-mode command groups", () => {
     expect(dom.textContent).toContain("Read the lead story");
   });
 
-  it("keeps a running run open under the running command's label", () => {
+  it("keeps a running run shut under the running command's label until it is opened", () => {
     const live = command("b", "unused while live", {
       status: "streaming",
       iterationSummary: undefined,
@@ -124,8 +124,10 @@ describe("Simple-mode command groups", () => {
     const dom = render([command("a", "Pulled the front page"), live], true);
     expect(dom.textContent).not.toContain("Ran ");
     const running = header(dom, "Running");
-    expect(running?.getAttribute("aria-expanded")).toBe("true");
-    // The finished command shows, and so does the running one, as rows.
+    expect(running?.getAttribute("aria-expanded")).toBe("false");
+    expect(dom.querySelector('[data-testid="command-group-rows"]')).toBeNull();
+    act(() => running!.click());
+    // Opened, the finished command shows, and so does the running one, as rows.
     const rows = dom.querySelector('[data-testid="command-group-rows"]');
     expect(rows?.textContent).toContain("Pulled the front page");
     expect(rows?.textContent).toContain("Running");

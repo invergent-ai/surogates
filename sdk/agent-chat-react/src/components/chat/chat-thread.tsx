@@ -1410,13 +1410,12 @@ interface CommandGroupProps {
 
 /**
  * Adjacent commands under one header. While the run goes on, the header is
- * the running iteration's label with its orb and a clock, and the box is
- * open so the work shows as it happens; once done it reads "Ran N commands"
- * and folds to that one line. A click on the header overrides both.
+ * the running iteration's label with its orb and a clock; once done it reads
+ * "Ran N commands". The box stays shut until the header is clicked: opened on
+ * its own, a run of quick commands made it jump with every one.
  */
 function CommandGroup({ commands, live }: CommandGroupProps) {
-  const [chosen, setChosen] = useState<boolean | null>(null);
-  const open = chosen ?? live !== undefined;
+  const [open, setOpen] = useState(false);
   // ponytail: createdAt is when this client saw the event, so a reload
   // mid-run restarts the clock; needs the event's own timestamp to fix.
   const elapsed = useElapsedSeconds(live ? (commands[0]?.message ?? live).createdAt : undefined);
@@ -1425,7 +1424,7 @@ function CommandGroup({ commands, live }: CommandGroupProps) {
     <div className="space-y-1.5">
       <button
         type="button"
-        onClick={() => setChosen(!open)}
+        onClick={() => setOpen(!open)}
         aria-expanded={open}
         className="flex max-w-full items-center gap-2 py-0.5 text-left text-sm"
       >
