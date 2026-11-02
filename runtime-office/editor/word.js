@@ -309,6 +309,8 @@
     for (var r = 0; r < rows.length; r++) columns = Math.max(columns, rows[r].length);
     var table = Api.CreateTable(columns, rows.length), grid = doc.GetStyle("Table Grid");
     if (grid) table.SetStyle(grid);
+    // A table spans the text width, as documents' tables do: Api.CreateTable leaves its width unset (auto).
+    try { table.SetWidth("percent", 100); } catch (e) { /* an editor without the setter keeps the auto width */ }
     for (var row = 0; row < rows.length; row++) {
       for (var c = 0; c < rows[row].length; c++) {
         addRuns(table.GetCell(row, c).GetContent().GetElement(0), row === 0 ? bold(rows[row][c]) : rows[row][c], 0);
