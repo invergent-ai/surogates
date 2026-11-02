@@ -135,4 +135,13 @@ describe("demo commands", () => {
     expect(types).toContain("session.fail");
     expect(types).toContain("context.compact");
   });
+
+  it("clears the conversation for the composer's /clear", () => {
+    const store = new ExampleSessionStore();
+    const record = store.create();
+
+    expect(runDemoCommand(store, record, "/clear")).toBe(true);
+
+    expect(record.events.replay().map((event) => event.type)).toContain("context.compact");
+  });
 });
