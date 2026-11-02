@@ -173,6 +173,12 @@ async def update_person(sf, person_id: uuid.UUID, **values: Any) -> None:
         await db.commit()
 
 
+async def set_review(sf, run_id: uuid.UUID, review: dict[str, Any]) -> None:
+    async with sf() as db:
+        await db.execute(sa.update(SimulationRun).where(SimulationRun.id == run_id).values(review=review))
+        await db.commit()
+
+
 async def get_run(sf, run_id: uuid.UUID) -> SimulationRun | None:
     async with sf() as db:
         return await db.get(SimulationRun, run_id)

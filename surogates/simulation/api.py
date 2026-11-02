@@ -97,6 +97,7 @@ async def _detail(sf, run) -> dict[str, Any]:
             "created_at": run.created_at.isoformat(),
             "ended_at": run.ended_at.isoformat() if run.ended_at else None, "people": people,
             "flows": run.flows or [],
+            "review": run.review,
             "team": await store.team_messages(sf, user_ids)}
 
 
@@ -142,6 +143,7 @@ async def list_runs(org_id: uuid.UUID, agent_id: str, request: Request):
             "ai_state": first.ai_state if first else None,
             "ai_note": first.ai_note if first else None,
             "messages": counts.get(r.id, 0),
+            "verdict": (r.review or {}).get("verdict"),
         })
     return summaries
 
@@ -150,6 +152,15 @@ async def list_runs(org_id: uuid.UUID, agent_id: str, request: Request):
 async def get_run(run_id: uuid.UUID, org_id: uuid.UUID, request: Request):
     run = await _run_in_org(request, run_id, org_id)
     return await _detail(request.app.state.session_factory, run)
+
+
+@router.put("/runs/{run_id}/review")
+async def put_review(run_id: uuid.UUID, org_id: uuid.UUID, review: dict[str, Any], request: Request):
+    run = await _run_in_org(request, run_id, org_id)
+    sf = request.app.state.session_factory
+    await store.set_review(sf, run.id, review)
+    run.review = review
+    return await _detail(sf, run)
 
 
 @router.post("/runs/{run_id}/people/{person_id}/messages")

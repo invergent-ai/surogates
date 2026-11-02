@@ -2941,6 +2941,8 @@ class SimulationRun(Base):
     flows: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, default=list)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False, default=_utcnow)
     ended_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    #: The judge's review of the run and the fixes it proposed; ops writes it whole.
+    review: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONB, nullable=True)
 
 
 class SimulationPerson(Base):

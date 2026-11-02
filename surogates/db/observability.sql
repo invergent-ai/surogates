@@ -1458,3 +1458,7 @@ ALTER TABLE IF EXISTS simulation_people
 -- A simulation person standing in for one of the agent's team members.
 ALTER TABLE IF EXISTS simulation_people
     ADD COLUMN IF NOT EXISTS stands_for uuid;
+
+-- How a finished simulation went, judged, and the fixes it proposed.
+ALTER TABLE IF EXISTS simulation_runs
+    ADD COLUMN IF NOT EXISTS review jsonb;
