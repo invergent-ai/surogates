@@ -158,7 +158,7 @@ async def create_rerun(request: Request) -> JSONResponse:
             request,
             body.model_copy(update={"contract": contract}),
             agent_id,
-            file_pane=contract.mode == "draft",
+            file_pane=True,
             case_step=contract.model_dump(mode="json"),
             case_rerun=rerun_config(body.kind, agent),
         )

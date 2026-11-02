@@ -618,7 +618,7 @@ async def create_step_session(request: Request) -> JSONResponse:
             body,
             matches=this_step,
             make=lambda: create_case_session(
-                request, body, agent_id, file_pane=contract.mode == "draft", case_step=contract.model_dump(mode="json"),
+                request, body, agent_id, file_pane=True, case_step=contract.model_dump(mode="json"),
             ),
             start=start,
         )
@@ -640,8 +640,9 @@ async def create_case_session(
     It is on ``api``, owned by the org's account for the body's case type,
     inside the case's ``case:`` memory and workspace boundaries, narrowed to
     the contract's MCP servers when it names them, and scoped to its tools
-    and knowledge.  With *file_pane*, a draft step's, it shows the case's
-    documents beside the person, so its agent may edit them.  *work* is the
+    and knowledge.  With *file_pane*, every step's, its agent may make and
+    edit the case's documents with the office tools: beside the person in a
+    draft step, alone otherwise.  *work* is the
     contract as it is stamped: ``case_step`` or ``case_item``.
     """
     contract = body.contract
