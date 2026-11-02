@@ -1,7 +1,7 @@
 // Copyright (c) 2026, Invergent SA, developed by Flavius Burca
 // SPDX-License-Identifier: AGPL-3.0-only
 //
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   File as FileIcon,
   FileArchive,
@@ -12,6 +12,9 @@ import {
   FileVideo,
   ClockIcon,
   CloudIcon,
+  EllipsisIcon,
+  FolderIcon,
+  GlobeIcon,
   HardDriveIcon,
   IdCardIcon,
   ListTreeIcon,
@@ -75,7 +78,17 @@ import {
   ComposerCommandMenu,
   type ComposerMenuMode,
 } from "./composer-command-menu";
-import { ComposerTray, type ComposerTrayProps } from "./composer-tray";
+import {
+  ComposerTrayFold,
+  trayTab,
+  type ComposerTrayProps,
+  type TrayTab,
+} from "./composer-tray";
+
+// Every control in the composer's row: 36px with a cursor, the 44px floor on touch.
+const ROW_ICON = "size-11 shrink-0 rounded-[10px] pointer-fine:size-9";
+// One line of the message, padding included: past it the message takes the row's full width.
+const ONE_LINE_PX = 40;
 
 // ── Slash command entry ──────────────────────────────────────────────
 
@@ -287,40 +300,48 @@ function formatBytes(n?: number): string {
 
 // ── Menu toggles ─────────────────────────────────────────────────────
 //
-// The three buttons that open the slash menu in a pre-selected scope are
-// identical bar their icon, label and target mode, so they share one
-// presentational button. Pressed while their scope is the one showing.
-// A phone keeps the icons and moves the words to the accessible name.
+// An icon in the composer's row: the slash menu's three scopes (Commands,
+// Skills, Scheduled) and the tray's two resources (Files, Browser). Pressed
+// while what it opens is showing; its word is the tooltip and the accessible
+// name. A phone has no room for them: they are in the More menu there.
 
-function ComposerMenuToggle({
+function ComposerRowIcon({
   icon: Icon,
   label,
   pressed,
   disabled,
   onClick,
+  menuToggle = false,
+  testId,
 }: {
   icon: LucideIcon;
   label: string;
   pressed: boolean;
   disabled?: boolean;
   onClick: () => void;
+  /** Opens the slash menu, so a press on it is not a click outside that menu. */
+  menuToggle?: boolean;
+  testId?: string;
 }) {
   return (
     <button
       type="button"
-      data-composer-menu-toggle=""
+      data-composer-menu-toggle={menuToggle ? "" : undefined}
+      data-testid={testId}
       aria-pressed={pressed}
       disabled={disabled}
       onClick={onClick}
+      title={label}
       className={cn(
-        "inline-flex h-11 items-center gap-2 rounded-xl px-2.5 text-sm font-medium transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-400 disabled:pointer-events-none disabled:opacity-50",
+        ROW_ICON,
+        "inline-flex items-center justify-center transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-400 disabled:pointer-events-none disabled:opacity-50 max-sm:hidden",
         pressed
           ? "bg-accent text-foreground"
-          : "text-foreground/75 hover:bg-accent hover:text-foreground",
+          : "text-muted-foreground hover:bg-accent hover:text-foreground",
       )}
     >
       <Icon className="size-4" aria-hidden="true" />
-      <span className="max-sm:sr-only">{label}</span>
+      <span className="sr-only">{label}</span>
     </button>
   );
 }
@@ -462,6 +483,12 @@ function ChatComposerInner({
   const activeBrowserProfile =
     (browserProfiles ?? []).find((p) => p.id === browserProfileId) ?? null;
   const { textInput, attachments } = usePromptInputController();
+  const [trayPicked, setTrayPicked] = useState<TrayTab>("files");
+  const [moreOpen, setMoreOpen] = useState(false);
+  // A message that outgrows one line takes the row's full width, the icons
+  // moving under it, and keeps it until it is cleared: given the width back,
+  // a message that just fits would fall back to one line and flicker.
+  const [expanded, setExpanded] = useState(false);
   // While the agent is parked on a question, the turn is technically
   // still running but the user is the one being waited on: the composer
   // must read as "reply", not "stop the agent".
@@ -675,6 +702,21 @@ function ChatComposerInner({
   // A pressed toggle closes its menu; another one switches the open menu to
   // its scope. Opening folds the tray, so the card does not stand a list of
   // files under a list of commands.
+  useLayoutEffect(() => {
+    if (!textInput.value) {
+      setExpanded(false);
+      return;
+    }
+    const textarea = textareaRef.current;
+    if (
+      !expanded &&
+      (textInput.value.includes("\n") ||
+        (textarea !== null && textarea.offsetHeight > ONE_LINE_PX))
+    ) {
+      setExpanded(true);
+    }
+  }, [textInput.value, expanded]);
+
   const toggleMenu = (mode: ComposerMenuMode) => {
     if (menuOpen && menuMode === mode) {
       setButtonMenuOpen(false);
@@ -837,29 +879,45 @@ function ChatComposerInner({
   // awaiting-answer session without profiles has exactly nothing.
   const showToolsPanel = canAttach || canPickProfile;
   const showTray = Boolean(paneCards && (paneCards.browser || paneCards.files));
+  const tab = trayTab(trayPicked, paneCards ?? {});
+  // An icon opens the fold on its resource, and closes it when that shows.
+  // Opening folds the slash menu, so the card does not stand a list of files
+  // under a list of commands.
+  const pickTray = (next: TrayTab) => {
+    if (!paneCards) return;
+    const opening = !(paneCards.open && tab === next);
+    setTrayPicked(next);
+    if (opening && menuOpen) {
+      setButtonMenuOpen(false);
+      setMenuDismissed(true);
+    }
+    paneCards.onOpenChange(opening);
+  };
   // Send reads as ready only once there is something to send; Stop always
   // carries the accent, since it is live whatever the textarea holds.
   const canSend = textInput.value.trim().length > 0;
   const submitLit = canSend || status === "streaming";
 
   // A segmented control, not two buttons that happen to touch: one track,
-  // one segment per view, only the selected one filled. A phone has no room
-  // for the words beside Send, so there the icons stand in and the words move
-  // to the accessible name (which both widths carry anyway).
+  // one segment per view, only the selected one filled. Icons, the words in
+  // the tooltip and the accessible name. A phone has it in the More menu.
   //
   // Plain <div> rather than ButtonGroup: the group squares off the inner
   // edges of every child, which fights the track and leaves each segment
   // outlined inside an outline.
+  const viewModes = VIEW_MODE_SEGMENTS.filter(
+    ({ mode }) => mode !== "whiteboard" || whiteboardEnabled,
+  );
+  const menuTogglesShown = !disabled;
+
   const viewModeToggle = onViewModeChange ? (
     <div
       role="group"
       aria-label="Chat view mode"
-      className="flex shrink-0 items-center gap-0.5 rounded-xl border border-input bg-background p-0.75"
+      className="flex shrink-0 items-center gap-0.5 rounded-[10px] bg-muted p-0.5 max-sm:hidden"
     >
-      {VIEW_MODE_SEGMENTS.filter(
-        // A board the agent cannot draw on is a dead end, not a view.
-        ({ mode }) => mode !== "whiteboard" || whiteboardEnabled,
-      ).map(({ mode, label, icon: Icon, tooltip }) => {
+      {/* A board the agent cannot draw on is a dead end, not a view. */}
+      {viewModes.map(({ mode, label, icon: Icon, tooltip }) => {
         const selected = viewMode === mode;
         return (
           <PromptInputButton
@@ -875,19 +933,89 @@ function ChatComposerInner({
               // bump takes the segment to the 44px touch floor either way.
               // Words, not the shouted uppercase the button base defaults to —
               // this is a label on a switch, not a call to action.
-              "h-9 gap-1.5 rounded-[9px] border-0 bg-transparent px-3 text-sm font-medium normal-case tracking-normal md:h-9 pointer-coarse:h-11 pointer-coarse:px-4",
+              "size-8 rounded-lg border-0 bg-transparent p-0",
               selected
-                ? "bg-accent text-foreground hover:bg-accent"
+                ? "bg-background text-foreground shadow-xs hover:bg-background"
                 : "text-muted-foreground hover:bg-transparent hover:text-foreground dark:hover:bg-transparent",
             )}
           >
-            <Icon className="size-4 md:hidden" />
-            <span className="hidden md:inline">{label}</span>
+            <Icon className="size-4" />
+            <span className="sr-only">{label}</span>
           </PromptInputButton>
         );
       })}
     </div>
   ) : null;
+
+  const moreItems = [
+    paneCards?.files && { key: "files", icon: FolderIcon, label: "Files", run: () => pickTray("files") },
+    paneCards?.browser && { key: "browser", icon: GlobeIcon, label: "Browser", run: () => pickTray("browser") },
+    menuTogglesShown && commandsEnabled && { key: "commands", icon: TerminalIcon, label: "Commands", run: () => toggleMenu("commands") },
+    menuTogglesShown && skillsEnabled && { key: "skills", icon: SparklesIcon, label: "Skills", run: () => toggleMenu("skills") },
+    menuTogglesShown && loopsEnabled && { key: "scheduled", icon: ClockIcon, label: "Scheduled", run: () => toggleMenu("scheduled") },
+  ].filter((item): item is { key: string; icon: LucideIcon; label: string; run: () => void } => Boolean(item));
+  // A phone's row holds the attach button, the message, More and Send: the
+  // icons and the view switch are this menu's items there.
+  const moreMenu =
+    moreItems.length > 0 || onViewModeChange ? (
+      <div className="sm:hidden">
+        <ResponsivePanel
+          open={moreOpen}
+          onOpenChange={setMoreOpen}
+          title="More"
+          align="end"
+          trigger={
+            <PromptInputButton
+              aria-label="More"
+              className={cn(ROW_ICON, "border-0 bg-transparent text-muted-foreground hover:bg-accent hover:text-foreground")}
+            >
+              <EllipsisIcon className="size-4" />
+            </PromptInputButton>
+          }
+        >
+          <Command>
+            <CommandList className="max-md:max-h-none">
+              {moreItems.length > 0 && (
+                <CommandGroup>
+                  {moreItems.map(({ key, icon: Icon, label, run }) => (
+                    <CommandItem
+                      key={key}
+                      disabled={awaitingAnswer && key !== "files" && key !== "browser"}
+                      onSelect={() => {
+                        setMoreOpen(false);
+                        run();
+                      }}
+                      className={TOOLS_ITEM_CLASS}
+                    >
+                      <Icon className="size-4 shrink-0 text-muted-foreground" />
+                      {label}
+                    </CommandItem>
+                  ))}
+                </CommandGroup>
+              )}
+              {onViewModeChange && (
+                <CommandGroup heading="View">
+                  {viewModes.map(({ mode, label, icon: Icon }) => (
+                    <CommandItem
+                      key={mode}
+                      data-checked={viewMode === mode || undefined}
+                      onSelect={() => {
+                        setMoreOpen(false);
+                        onViewModeChange(mode);
+                      }}
+                      className={TOOLS_ITEM_CLASS}
+                    >
+                      <Icon className="size-4 shrink-0 text-muted-foreground" />
+                      {label}
+                    </CommandItem>
+                  ))}
+                </CommandGroup>
+              )}
+            </CommandList>
+          </Command>
+        </ResponsivePanel>
+      </div>
+    ) : null;
 
   return (
     <Popover
@@ -919,24 +1047,16 @@ function ChatComposerInner({
           beamActive={status === "streaming"}
         >
           <PromptInputBody>
-            {showTray && paneCards && <ComposerTray {...paneCards} />}
+            {showTray && paneCards && <ComposerTrayFold {...paneCards} tab={tab} />}
             <AttachmentPreviewStrip />
-            <PromptInputTextarea
-              ref={textareaRef}
-              className="min-h-21 px-5 pt-4 pb-1 text-base leading-normal"
-              placeholder={
-                disabled
-                  ? disabledReason ?? "Session disabled"
-                  : placeholder ??
-                    (slashMenuAvailable
-                      ? "Send a message…  ( / for commands )"
-                      : "Send a message…")
-              }
-              disabled={disabled}
-            />
           </PromptInputBody>
-          <PromptInputFooter className="gap-1.5 px-3 pt-2 pb-3">
-            <PromptInputTools className="gap-1.5">
+          {/* One row: the attach button, the message, the icons. Past one
+              line the message moves ahead of them at the full width, and
+              they wrap under it. */}
+          <PromptInputFooter
+            className={cn("gap-0.5 p-1.5", expanded ? "flex-wrap" : "flex-nowrap")}
+          >
+            <PromptInputTools className="gap-0.5">
               {showToolsPanel && (
                 <ResponsivePanel
                   open={addMenuOpen}
@@ -962,9 +1082,9 @@ function ChatComposerInner({
                           ? "Attach files and browser profile"
                           : "Browser profile"
                       }
-                      className="size-11 rounded-xl border-input bg-transparent text-foreground/80 hover:bg-accent hover:text-foreground md:size-11"
+                      className={cn(ROW_ICON, "border-0 bg-transparent text-foreground/80 hover:bg-accent hover:text-foreground")}
                     >
-                      <PlusIcon className="size-4.5" />
+                      <PlusIcon className="size-4" />
                     </PromptInputButton>
                   }
                 >
@@ -1044,46 +1164,74 @@ function ChatComposerInner({
                   </Command>
                 </ResponsivePanel>
               )}
-              {!disabled && (commandsEnabled || skillsEnabled || loopsEnabled) && (
-                <>
-                  {showToolsPanel && (
-                    <span aria-hidden="true" className="mx-1.5 h-5.5 w-px bg-border" />
-                  )}
-                  {/* While a question is open the menu cannot open: a slash
-                      command would route around the answer and leave it parked. */}
-                  {commandsEnabled && (
-                    <ComposerMenuToggle
-                      icon={TerminalIcon}
-                      label="Commands"
-                      pressed={menuOpen && menuMode === "commands"}
-                      disabled={awaitingAnswer}
-                      onClick={() => toggleMenu("commands")}
-                    />
-                  )}
-                  {skillsEnabled && (
-                    <ComposerMenuToggle
-                      icon={SparklesIcon}
-                      label="Skills"
-                      pressed={menuOpen && menuMode === "skills"}
-                      disabled={awaitingAnswer}
-                      onClick={() => toggleMenu("skills")}
-                    />
-                  )}
-                  {loopsEnabled && (
-                    <ComposerMenuToggle
-                      icon={ClockIcon}
-                      label="Scheduled"
-                      pressed={menuOpen && menuMode === "scheduled"}
-                      disabled={awaitingAnswer}
-                      onClick={() => toggleMenu("scheduled")}
-                    />
-                  )}
-                </>
-              )}
             </PromptInputTools>
-            {/* ml-auto keeps this group right-aligned once the footer wraps,
-                where justify-between no longer applies to a lone line. */}
-            <div className="ml-auto flex shrink-0 items-center gap-1.5">
+            <PromptInputTextarea
+              ref={textareaRef}
+              className={cn(
+                "max-h-72 min-h-9 min-w-0 select-text py-1.5 text-base leading-6 font-normal text-foreground focus-visible:bg-transparent",
+                expanded ? "order-first basis-full px-2.5 pt-1.5" : "flex-1 px-2",
+              )}
+              placeholder={
+                disabled
+                  ? disabledReason ?? "Session disabled"
+                  : placeholder ??
+                    (slashMenuAvailable
+                      ? "Send a message…  ( / for commands )"
+                      : "Send a message…")
+              }
+              disabled={disabled}
+            />
+            <div className="ml-auto flex shrink-0 items-center gap-0.5">
+              {paneCards?.files && (
+                <ComposerRowIcon
+                  testId="composer-tray-files"
+                  icon={FolderIcon}
+                  label="Files"
+                  pressed={paneCards.open && tab === "files"}
+                  onClick={() => pickTray("files")}
+                />
+              )}
+              {paneCards?.browser && (
+                <ComposerRowIcon
+                  testId="composer-tray-browser"
+                  icon={GlobeIcon}
+                  label="Browser"
+                  pressed={paneCards.open && tab === "browser"}
+                  onClick={() => pickTray("browser")}
+                />
+              )}
+              {/* While a question is open the menu cannot open: a slash
+                  command would route around the answer and leave it parked. */}
+              {menuTogglesShown && commandsEnabled && (
+                <ComposerRowIcon
+                  menuToggle
+                  icon={TerminalIcon}
+                  label="Commands"
+                  pressed={menuOpen && menuMode === "commands"}
+                  disabled={awaitingAnswer}
+                  onClick={() => toggleMenu("commands")}
+                />
+              )}
+              {menuTogglesShown && skillsEnabled && (
+                <ComposerRowIcon
+                  menuToggle
+                  icon={SparklesIcon}
+                  label="Skills"
+                  pressed={menuOpen && menuMode === "skills"}
+                  disabled={awaitingAnswer}
+                  onClick={() => toggleMenu("skills")}
+                />
+              )}
+              {menuTogglesShown && loopsEnabled && (
+                <ComposerRowIcon
+                  menuToggle
+                  icon={ClockIcon}
+                  label="Scheduled"
+                  pressed={menuOpen && menuMode === "scheduled"}
+                  disabled={awaitingAnswer}
+                  onClick={() => toggleMenu("scheduled")}
+                />
+              )}
               {!disabled && tokenUsage && tokenUsage.contextWindow > 0 && (
                 <ContextValueProvider
                   usedTokens={tokenUsage.totalTokens}
@@ -1115,14 +1263,11 @@ function ChatComposerInner({
                         // weight as Send while saying far less. It keeps a
                         // full-height hit area — padding, not bulk.
                         variant="ghost"
-                        className="h-11 gap-2 rounded-xl border-0 bg-transparent px-1.5 text-[13px] font-normal normal-case tracking-normal text-muted-foreground hover:bg-accent hover:text-foreground md:h-11"
+                        className="h-11 min-w-11 gap-1.5 rounded-[10px] border-0 bg-transparent px-1.5 text-xs font-normal normal-case tracking-normal text-muted-foreground hover:bg-accent hover:text-foreground pointer-fine:h-9 pointer-fine:min-w-9"
                       >
-                        <ContextIcon className="size-5" />
-                        <span>
-                          <span className="font-mono tabular-nums text-foreground/85">
-                            {contextPercentLabel}
-                          </span>
-                          <span className="max-sm:hidden"> context</span>
+                        <ContextIcon className="size-4" />
+                        <span className="font-mono tabular-nums max-sm:hidden">
+                          {contextPercentLabel}
                         </span>
                       </PromptInputButton>
                     }
@@ -1178,13 +1323,15 @@ function ChatComposerInner({
                 </ContextValueProvider>
               )}
               {viewModeToggle}
+              {moreMenu}
               {!disabled && (
                 <PromptInputSubmit
                   status={status}
                   onStop={onStop}
                   aria-disabled={!submitLit || undefined}
                   className={cn(
-                    "ml-1 size-11 rounded-[14px] md:size-11",
+                    ROW_ICON,
+                    "ml-1",
                     submitLit
                       ? "bg-amber-400 text-[#1a1100] hover:bg-amber-500"
                       : "cursor-default bg-accent text-muted-foreground hover:bg-accent",

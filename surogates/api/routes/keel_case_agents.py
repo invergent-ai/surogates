@@ -2,7 +2,10 @@
 its session, gives it the person's messages, reads its status and its events,
 by page and live, and stops its turn.
 
-A case agent is one person's agent on one case (:mod:`surogates.keel.case_agents`).
+A case agent is one person's agent on one case, or on one process instance
+when the request names the subject ``process`` (:mod:`surogates.keel.case_agents`);
+an instance's id is the ``case_id``, and its session works inside the memory boundary
+``case:<instance id>``, as a process's agent task sessions do.
 Its session is on ``api``, owned by the org's ``keel-case-agent`` account,
 never by the person, with the case's ``case:`` memory boundary and a scratch
 workspace of its own.  A person waits on it, so its wakes queue beside
@@ -14,7 +17,7 @@ Mounted only on the keel-link app, never on the public API.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Request, status
@@ -54,7 +57,10 @@ router = APIRouter()
 
 
 class CaseAgentSessionRequest(BaseModel):
-    """Keel's request to start one person's case agent on one case.  Keys this runtime does not know are ignored."""
+    """Keel's request to start one person's case agent on one case, or on one process instance.
+
+    Keys this runtime does not know are ignored; a request without ``subject`` is a case's.
+    """
 
     model_config = ConfigDict(extra="ignore")
 
@@ -66,6 +72,8 @@ class CaseAgentSessionRequest(BaseModel):
     idempotency_key: str = Field(min_length=1, max_length=200)
     # Keel's id for the session: the runtime creates it with exactly this one.
     session_id: UUID
+    # What ``case_id`` names: a case, or a process instance.
+    subject: Literal["case", "process"] = "case"
 
 
 class CaseAgentMessage(BaseModel):
@@ -97,7 +105,9 @@ async def create_case_agent_session(request: Request) -> JSONResponse:
     agent_id = agent_id_of(request)
     await resolve_agent(request, agent_id, body.org_id)
     await refuse_a_reruns_folder(request, body.case_id)
-    ref = CaseAgentRef(case_id=body.case_id, case_number=body.case_number, person_id=body.person_id)
+    ref = CaseAgentRef(
+        case_id=body.case_id, case_number=body.case_number, person_id=body.person_id, subject=body.subject,
+    )
 
     def this_agent(existing: Any) -> bool:
         held = case_agent_of(existing)
@@ -106,6 +116,7 @@ async def create_case_agent_session(request: Request) -> JSONResponse:
             and held is not None
             and held.case_id == ref.case_id
             and held.person_id == ref.person_id
+            and held.subject == ref.subject
         )
 
     async def make() -> Any:
@@ -122,7 +133,8 @@ async def create_case_agent_session(request: Request) -> JSONResponse:
             service_account_id=account_id,
             idempotency_key=body.idempotency_key,
             session_id=body.session_id,
-            case_agent=ref.model_dump(mode="json"),
+            # Without its defaults, so a case's session config is what it always was.
+            case_agent=ref.model_dump(mode="json", exclude_defaults=True),
         )
 
     async def start(_session: Any) -> None:

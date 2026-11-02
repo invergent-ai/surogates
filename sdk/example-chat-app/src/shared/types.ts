@@ -27,12 +27,6 @@ export interface SendMessageResponse {
   status: string;
 }
 
-export interface ConfigResponse {
-  model: string;
-  baseUrl: string;
-  hasApiKey: boolean;
-}
-
 export interface AskUserQuestionResponseRequest {
   responses: AgentChatAskUserQuestionAnswer[];
 }

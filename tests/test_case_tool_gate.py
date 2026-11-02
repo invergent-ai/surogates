@@ -55,8 +55,11 @@ OFFICE_TOOLS = {"office_read", "office_edit"}
 STEP_TOOLS = {"complete_step", "raise_hand"}
 ITEM_TOOLS = {"complete_item", "return_item"}
 CASE_TOOLS = {"case_read", "case_history", "case_files", "case_file_read", "case_draft_form"}
+PROCESS_TOOLS = {"process_read", "process_history", "process_waits", "process_move_check", "process_draft_form"}
 DESIGNER_TOOLS = {
     "draft_files", "draft_read", "draft_main", "draft_save_file", "draft_save_scenario", "draft_dry_run",
+    "draft_process_read", "draft_process_save", "draft_process_edit", "draft_process_check",
+    "draft_process_reference",
 }
 HELPER_TOOLS = {"delegate_task", "spawn_worker", "send_worker_message", "stop_worker"}
 # What a person's case agent never gets: skills, the terminal, file writing,
@@ -206,8 +209,9 @@ async def _item(store, *, file_pane: bool = False):
     return await _case_session(store, file_pane=file_pane, case_item=ITEM_CONTRACT)
 
 
-async def _case_agent(store, *, file_pane: bool = False):
-    """A person's case agent session, made as the Keel link makes one, with a file pane when *file_pane*."""
+async def _case_agent(store, *, file_pane: bool = False, subject: str | None = None):
+    """A person's case agent session, made as the Keel link makes one, with a file pane when *file_pane*, and on a
+    process instance when *subject* is ``process``."""
     _, request, _, _ = _route_fixtures("/v1/api/sessions", service_account=True)
     case_id = str(uuid4())
     config: dict = {"memory_boundary": f"case:{case_id}"}
@@ -223,8 +227,14 @@ async def _case_agent(store, *, file_pane: bool = False):
         channel="api",
         config=config,
         service_account_id=uuid4(),
-        case_agent={"case_id": case_id, "case_number": "LD-000001", "person_id": str(uuid4())},
+        case_agent={"case_id": case_id, "case_number": "LD-000001", "person_id": str(uuid4()),
+                    **({"subject": subject} if subject is not None else {})},
     )
+
+
+async def _process_agent(store, *, file_pane: bool = False):
+    """A person's case agent session on a process instance."""
+    return await _case_agent(store, file_pane=file_pane, subject="process")
 
 
 def _chat(config: dict) -> Session:
@@ -386,6 +396,30 @@ async def test_no_other_session_gets_the_case_tools():
             assert offered.isdisjoint(CASE_TOOLS), session.config
 
 
+async def test_a_process_agent_gets_the_process_tools_and_not_the_case_tools():
+    registry = _registry()
+    agent = await _process_agent(_SessionStore())
+
+    prompt = _prompt_tools(agent, registry)
+    schema = _schema_tools(agent, registry)
+
+    assert prompt == schema
+    assert PROCESS_TOOLS | {"web_search", "memory", "read_file", "todo", MCP_TOOL} <= prompt
+    assert prompt.isdisjoint(CASE_TOOLS | HELPER_TOOLS | NEVER_FOR_A_CASE_AGENT | STEP_TOOLS | ITEM_TOOLS)
+    assert prompt.isdisjoint(NEVER_IN_A_CASE)
+
+
+async def test_no_other_session_gets_the_process_tools():
+    registry = _registry()
+    store = _SessionStore()
+    # Even a chat whose config names them.
+    narrowed = _chat({"allowed_tools": ["read_file", *sorted(PROCESS_TOOLS)]})
+
+    for session in (await _case_agent(store), await _step(store), await _item(store), _chat({}), narrowed):
+        for offered in (_prompt_tools(session, registry), _schema_tools(session, registry)):
+            assert offered.isdisjoint(PROCESS_TOOLS), session.config
+
+
 async def test_an_open_policy_offers_no_designer_tool():
     registry = _registry()
     chat = _chat({})
@@ -414,6 +448,15 @@ async def test_an_allow_list_naming_the_designer_tools_offers_them():
     for session in (await _step(store), await _item(store), await _case_agent(store)):
         for offered in _offered(session, registry, policy=policy):
             assert offered.isdisjoint(DESIGNER_TOOLS), session.config
+
+
+async def test_a_process_agents_session_is_offered_no_designer_tool():
+    # Pins the gate's rule for the process tools of the designer: a session on a process instance is a case's.
+    registry = _registry()
+    policy = {"allowed_tools": [*sorted(DESIGNER_TOOLS), "web_search"]}
+
+    for offered in _offered(await _process_agent(_SessionStore()), registry, policy=policy):
+        assert offered.isdisjoint(DESIGNER_TOOLS)
 
 
 async def test_a_rerun_and_its_helpers_never_reach_the_terminal_or_the_browser():

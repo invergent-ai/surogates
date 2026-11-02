@@ -302,12 +302,21 @@ def sampling_kwargs(config: dict[str, Any]) -> dict[str, Any]:
     Nothing by default: a value is sent only when the session config
     carries one. Otherwise the model's own defaults apply, or the ones a
     user set for it, which the platform proxy merges in.
+
+    ``reasoning_effort`` is the OpenAI field. ``enable_thinking`` is for a
+    chat-template server, and goes in ``extra_body`` because the client
+    refuses an argument it does not know.
     """
-    return {
+    kwargs: dict[str, Any] = {
         key: config[key]
-        for key in ("temperature", "max_tokens")
+        for key in ("temperature", "max_tokens", "reasoning_effort")
         if config.get(key) is not None
     }
+    if config.get("enable_thinking") is not None:
+        kwargs["extra_body"] = {
+            "chat_template_kwargs": {"enable_thinking": config["enable_thinking"]},
+        }
+    return kwargs
 
 
 def apply_developer_role(messages: list[dict], model_id: str) -> list[dict]:

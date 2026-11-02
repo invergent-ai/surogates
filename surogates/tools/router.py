@@ -182,6 +182,14 @@ TOOL_LOCATIONS: dict[str, ToolLocation] = {
     "case_files": ToolLocation.HARNESS,
     "case_file_read": ToolLocation.HARNESS,
     "case_draft_form": ToolLocation.HARNESS,
+    # A person's case agent on a process instance reads it, and drafts into
+    # the person's form, through Keel's door: the worker's door key.  It never
+    # reads the instance's workspace.
+    "process_read": ToolLocation.HARNESS,
+    "process_history": ToolLocation.HARNESS,
+    "process_waits": ToolLocation.HARNESS,
+    "process_move_check": ToolLocation.HARNESS,
+    "process_draft_form": ToolLocation.HARNESS,
     # The designer agent works on a builder's draft through Keel's door: the
     # worker's door key.
     "draft_files": ToolLocation.HARNESS,
@@ -190,6 +198,11 @@ TOOL_LOCATIONS: dict[str, ToolLocation] = {
     "draft_save_file": ToolLocation.HARNESS,
     "draft_save_scenario": ToolLocation.HARNESS,
     "draft_dry_run": ToolLocation.HARNESS,
+    "draft_process_read": ToolLocation.HARNESS,
+    "draft_process_save": ToolLocation.HARNESS,
+    "draft_process_edit": ToolLocation.HARNESS,
+    "draft_process_check": ToolLocation.HARNESS,
+    "draft_process_reference": ToolLocation.HARNESS,
     # An intake agent starts a case through Keel's door: the worker's door key.
     "start_case": ToolLocation.HARNESS,
     # Sandbox (code execution, file mutation, need isolation)

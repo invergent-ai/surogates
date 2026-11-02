@@ -98,6 +98,14 @@ CASE_ITEM_TOOLS: frozenset[str] = frozenset({"complete_item", "return_item"})
 KEEL_CASE_TOOLS: frozenset[str] = frozenset({
     "case_read", "case_history", "case_files", "case_file_read", "case_draft_form",
 })
+# How a person's case agent reads a process instance, and drafts into the
+# person's form on one of its tasks, through Keel: only a case agent whose
+# reference names the subject ``process`` is offered them, in place of
+# :data:`KEEL_CASE_TOOLS` (``surogates.keel.steps.gate_case_tools``).  Not
+# protected, as the case tools are not: ops's catalog names them.
+KEEL_PROCESS_TOOLS: frozenset[str] = frozenset({
+    "process_read", "process_history", "process_waits", "process_move_check", "process_draft_form",
+})
 # How the designer agent works on the draft a builder opened it on, through
 # Keel: offered only where an agent's policy has an allow-list naming them
 # (``GovernanceGate.allow_listed``), never under an open or deny-only policy,
@@ -105,6 +113,8 @@ KEEL_CASE_TOOLS: frozenset[str] = frozenset({
 # give.
 KEEL_DESIGNER_TOOLS: frozenset[str] = frozenset({
     "draft_files", "draft_read", "draft_main", "draft_save_file", "draft_save_scenario", "draft_dry_run",
+    "draft_process_read", "draft_process_save", "draft_process_edit", "draft_process_check",
+    "draft_process_reference",
 })
 
 # Tools no agent policy may take away. The ops catalog omits these names

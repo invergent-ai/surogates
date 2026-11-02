@@ -1,7 +1,8 @@
-"""A person's case agent: one person's agent on one case, which reads the case only through Keel.
+"""A person's case agent: one person's agent on one case or process instance, which reads it only through Keel.
 
 Keel starts its session through the internal link, which stamps which case
-and which person into the config of the agent's own session under
+(or process instance, for the subject ``process``) and which person into the
+config of the agent's own session under
 ``case_agent`` (:data:`~surogates.channels.memory_boundary.CASE_AGENT_KEY`),
 beside the case's ``case:`` memory boundary.  The session is owned by the
 org's :data:`CASE_AGENT_ACCOUNT` service account, never by the person: Keel
@@ -17,12 +18,12 @@ or a config that is not a mapping reads as no case agent.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
 
-from surogates.channels.memory_boundary import CASE_AGENT_KEY, CASE_BOUNDARY_PREFIX
+from surogates.channels.memory_boundary import CASE_AGENT_KEY, CASE_BOUNDARY_PREFIX, is_case_agent_config
 from surogates.keel.steps import _read
 
 __all__ = [
@@ -31,6 +32,8 @@ __all__ = [
     "case_agent_in",
     "case_agent_of",
     "is_case_agent",
+    "is_process_agent",
+    "is_process_agent_config",
 ]
 
 #: The name of the org's service account that owns every case agent's session.
@@ -38,14 +41,20 @@ CASE_AGENT_ACCOUNT = "keel-case-agent"
 
 
 class CaseAgentRef(BaseModel):
-    """Which case a case agent works on, and for which person.  Keys this runtime does not know are ignored."""
+    """Which case or process instance a case agent works on, and for which person.
+
+    Keys this runtime does not know are ignored; a reference without ``subject`` is a case's.
+    """
 
     model_config = ConfigDict(extra="ignore")
 
+    # The case's id, or the process instance's for the subject ``process``.
     case_id: UUID
+    # C-000001, or P-000001 for an instance.
     case_number: str
     # The user of the org whose agent this is.
     person_id: UUID
+    subject: Literal["case", "process"] = "case"
 
 
 def case_agent_in(config: Mapping[str, Any] | None, *, session_id: object = None) -> CaseAgentRef | None:
@@ -68,3 +77,17 @@ def is_case_agent(session: object) -> bool:
         return False
     config = getattr(session, "config", None) or {}
     return str(config.get("memory_boundary") or "").strip() == f"{CASE_BOUNDARY_PREFIX}{ref.case_id}"
+
+
+def is_process_agent_config(config: Mapping[str, Any] | None) -> bool:
+    """True for the config of a case agent on a process instance: a case agent's config
+    (:func:`~surogates.channels.memory_boundary.is_case_agent_config`) whose reference names the subject ``process``."""
+    if not is_case_agent_config(config):
+        return False
+    ref = case_agent_in(config)
+    return ref is not None and ref.subject == "process"
+
+
+def is_process_agent(session: object) -> bool:
+    """True for a case agent's own session (:func:`is_case_agent`) on a process instance."""
+    return is_case_agent(session) and case_agent_of(session).subject == "process"

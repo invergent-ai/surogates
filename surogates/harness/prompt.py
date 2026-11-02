@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any
 
 from surogates.channels.constants import ADAPTER_CHANNELS
 from surogates.channels.memory_boundary import is_case_agent_session, is_case_session
+from surogates.keel.case_agents import is_process_agent_config
 from surogates.devices.binding import device_of
 from surogates.harness.loop_context_replay import sanitize_sender_name
 from surogates.harness.model_metadata import get_model_info
@@ -370,11 +371,13 @@ class PromptBuilder:
 
         # A case's people never see the agent's skills, tools or
         # instructions, so no session of the case names them.  A person's
-        # case agent also answers from the case's reads alone and cites them.
+        # case agent also answers from the case's reads alone and cites them;
+        # on a process instance, from the instance's.
         if is_case_session(self._session):
             parts.append(self._prompts.get("guidance/case_session"))
             if is_case_agent_session(self._session):
-                parts.append(self._prompts.get("guidance/case_agent"))
+                on_a_process = is_process_agent_config(getattr(self._session, "config", None))
+                parts.append(self._prompts.get("guidance/process_agent" if on_a_process else "guidance/case_agent"))
 
         # Execution discipline (verification, missing_context,
         # execute-don't-narrate, etc.) applies to any response from a

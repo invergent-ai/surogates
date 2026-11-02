@@ -224,12 +224,22 @@ async def _via_images(
     client: Any, model: str, *, prompt: str, aspect_ratio: str, transparent: bool,
 ) -> GeneratedImage:
     extra: dict[str, Any] = {"background": "transparent", "output_format": "png"} if transparent else {}
-    try:
-        response = await client.images.generate(
-            model=model, prompt=prompt, n=1, size=_images_size(aspect_ratio), extra_body=extra,
-        )
-    except Exception as exc:  # noqa: BLE001
-        raise _refusal(exc) from exc
+    # A ratio goes as itself, so the gateway picks the model's own size for it
+    # (Gemini serves 1344x768 for 16:9, not 1536x1024). A provider that does not
+    # take the field refuses it unbilled, and gets the nearest OpenAI size.
+    asks: list[dict[str, Any]] = []
+    if parse_ratio(aspect_ratio) is not None:
+        asks.append({"extra_body": {**extra, "aspect_ratio": aspect_ratio}})
+    asks.append({"size": _images_size(aspect_ratio), "extra_body": extra})
+    for i, ask in enumerate(asks):
+        try:
+            response = await client.images.generate(model=model, prompt=prompt, n=1, **ask)
+            break
+        except Exception as exc:  # noqa: BLE001
+            refusal = _refusal(exc)
+            if i + 1 < len(asks) and refusal.status in _SHAPE_REJECTED:
+                continue
+            raise refusal from exc
     entries = getattr(response, "data", None) or []
     first = entries[0] if entries else None
     b64 = getattr(first, "b64_json", None) if first is not None else None

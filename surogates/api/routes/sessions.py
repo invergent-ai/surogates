@@ -336,6 +336,16 @@ class AttachmentRef(BaseModel):
 class SendMessageRequest(BaseModel):
     content: str
     images: list[ImageBlock] | None = None
+    # Set by a chat proxy relaying a person's typed reply (see description).
+    answers_open_question: bool = Field(
+        default=False,
+        description=(
+            "Set only when the content is text a person typed in a chat that "
+            "shows the agent's question, relayed by a proxy; it then answers "
+            "the session's open question, if any. Leave it unset for text a "
+            "program sends."
+        ),
+    )
     # Free-form per-message metadata.  Used by the platform copilot to
     # carry UI ``view_context`` (the page the user is currently looking
     # at) so the harness can inject a transient system note for the
@@ -1279,8 +1289,8 @@ async def deliver_message(
     # until its timeout).  Guards, in order: only a message its person
     # typed (a route's own message, a mention's, is no reply); only
     # genuinely-active sessions (a terminal session's tool already
-    # cancelled itself); only real web users (an API service-account
-    # client cannot detect the reinterpretation); only pure text
+    # cancelled itself); only real web users, or a chat proxy that sets
+    # answers_open_question for a person's typed text; only pure text
     # (images/attachments are new material for the next turn).  The
     # claim is atomic among claim-first callers; the form's respond
     # route emits first and claims best-effort, so the helper also
@@ -1291,7 +1301,7 @@ async def deliver_message(
     if (
         extra is None
         and was_active
-        and not request.url.path.startswith("/v1/api/")
+        and (not request.url.path.startswith("/v1/api/") or body.answers_open_question)
         and body.content.strip()
         and not body.images
         and not body.attachments
