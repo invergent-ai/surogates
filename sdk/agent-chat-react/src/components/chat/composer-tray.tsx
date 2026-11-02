@@ -1,26 +1,21 @@
 // Copyright (c) 2026, Invergent SA, developed by Flavius Burca
 // SPDX-License-Identifier: AGPL-3.0-only
 //
-import { useState } from "react";
 import { Button } from "@invergent/ui-sdk/button";
 import {
-  ChevronDownIcon,
-  FolderIcon,
-  GlobeIcon,
   Maximize2Icon,
   Minimize2Icon,
   PanelTopIcon,
   RefreshCwIcon,
-  type LucideIcon,
 } from "lucide-react";
-import { cn } from "../../lib/utils";
 
 /**
- * What the session has produced, offered at the top of the composer card.
+ * What the session has produced, offered in the composer card.
  *
- * One tab per resource over one fold: the tabs pick what the fold shows and
- * the chevron opens or closes it. The fold is part of the card rather than a
- * panel stacked behind it, so the composer stays one surface.
+ * One icon per resource in the composer's row over one fold above the message:
+ * an icon opens the fold on its resource and closes it when it already shows.
+ * The fold is part of the card rather than a panel stacked behind it, so the
+ * composer stays one surface.
  */
 export interface ComposerTrayProps {
   browser?: {
@@ -42,104 +37,46 @@ export interface ComposerTrayProps {
   onOpenChange: (open: boolean) => void;
 }
 
-type TrayTab = "files" | "browser";
+export type TrayTab = "files" | "browser";
 
-// 44px targets, the size every control in the card is built to.
+// 44px targets, the size every control in the fold is built to.
 const ICON_BUTTON = "size-11";
 
-export function ComposerTray({ browser, files, open, onOpenChange }: ComposerTrayProps) {
-  const [picked, setPicked] = useState<TrayTab>("files");
-  // A tab whose resource has gone (a browser destroyed mid-session) falls
-  // back to the one that remains rather than folding open onto nothing.
-  const tab: TrayTab =
-    picked === "browser" ? (browser ? "browser" : "files") : files ? "files" : "browser";
+/**
+ * The tab that shows: the one picked, or, when its resource has gone (a browser
+ * destroyed mid-session), the one that remains.
+ */
+export function trayTab(
+  picked: TrayTab,
+  { browser, files }: Pick<ComposerTrayProps, "browser" | "files">,
+): TrayTab {
+  return picked === "browser" ? (browser ? "browser" : "files") : files ? "files" : "browser";
+}
 
-  // The open tab closes the fold; any other opens it on itself.
-  const pick = (next: TrayTab) => {
-    setPicked(next);
-    onOpenChange(!(open && tab === next));
-  };
-
+/**
+ * The tray's fold, above the message: the workspace tree or the browser's
+ * preview. Its tabs are icons in the composer's row.
+ */
+export function ComposerTrayFold({
+  browser,
+  files,
+  open,
+  tab,
+}: ComposerTrayProps & { tab: TrayTab }) {
   return (
-    <div data-testid="composer-tray" className="w-full border-b border-border">
-      <div className="flex h-14 items-center gap-1 pr-2 pl-2.5">
-        {files && (
-          <TrayTabButton
-            testId="composer-tray-files"
-            icon={FolderIcon}
-            label="Files"
-            selected={open && tab === "files"}
-            onClick={() => pick("files")}
-          />
-        )}
-        {browser && (
-          <TrayTabButton
-            testId="composer-tray-browser"
-            icon={GlobeIcon}
-            label="Browser"
-            selected={open && tab === "browser"}
-            onClick={() => pick("browser")}
-          />
-        )}
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon-lg"
-          aria-expanded={open}
-          aria-label={open ? "Hide panel" : "Show panel"}
-          onClick={() => onOpenChange(!open)}
-          className={cn(ICON_BUTTON, "ml-auto")}
-        >
-          <ChevronDownIcon
-            className={cn("size-4 transition-transform", open && "rotate-180")}
-            aria-hidden="true"
-          />
-        </Button>
-      </div>
+    <div data-testid="composer-tray" className="w-full">
       {open && tab === "files" && files && (
         // A fixed height, not content height: the tree scrolls inside it, and
         // the textarea must stay put when a folder with a hundred files opens.
         <div
           data-testid="files-accordion"
-          className="flex h-56 min-h-0 flex-col border-t border-border"
+          className="flex h-56 min-h-0 flex-col border-b border-border"
         >
           {files.panel}
         </div>
       )}
       {open && tab === "browser" && browser && <BrowserFold {...browser} />}
     </div>
-  );
-}
-
-function TrayTabButton({
-  testId,
-  icon: Icon,
-  label,
-  selected,
-  onClick,
-}: {
-  testId: string;
-  icon: LucideIcon;
-  label: string;
-  selected: boolean;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      data-testid={testId}
-      aria-pressed={selected}
-      onClick={onClick}
-      className={cn(
-        "inline-flex h-11 items-center gap-2 rounded-xl px-3.5 text-sm font-medium transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-400",
-        selected
-          ? "bg-accent text-foreground"
-          : "text-foreground/75 hover:bg-accent hover:text-foreground",
-      )}
-    >
-      <Icon className="size-4.5 text-muted-foreground" strokeWidth={1.8} aria-hidden="true" />
-      {label}
-    </button>
   );
 }
 
@@ -153,7 +90,7 @@ function BrowserFold({
 }: NonNullable<ComposerTrayProps["browser"]>) {
   const openLabel = showing ? "Hide the browser" : "Open the browser";
   return (
-    <div data-testid="browser-fold" className="flex flex-col border-t border-border">
+    <div data-testid="browser-fold" className="flex flex-col border-b border-border">
       <div className="flex h-12 items-center gap-1 pr-2.5 pl-[18px]">
         <span className="min-w-0 flex-1 truncate text-[13px] text-muted-foreground">
           {subtitle}
