@@ -311,7 +311,6 @@ from the log.
 |---|---|
 | `surogates/` | Python backend — API server, worker harness, tools, storage, governance, jobs |
 | `web/` | React web application for the hosted chat UI |
-| `sdk/agent-chat-react/` | Shared React chat and inbox components |
 | `sdk/website-widget/` | Embeddable website widget SDK |
 | `docs/` | User, operator and architecture documentation |
 | `k8s/` | Cluster setup script and manifests |
@@ -323,8 +322,10 @@ from the log.
 uv sync                                  # Python deps
 uv run pytest                            # backend tests
 cd web && npm run typecheck && npm run build
-cd sdk/agent-chat-react && npm test
 ```
+
+The UI kit (`@invergent/ui-sdk`) and the agent chat (`@invergent/agent-chat-react`) live in
+[invergent-ai/ui-kit](https://github.com/invergent-ai/ui-kit); the web client installs them from npm.
 
 Some integration tests need PostgreSQL, Redis, Docker, browser images or
 Kubernetes, depending on the marker.
