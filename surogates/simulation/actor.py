@@ -215,6 +215,11 @@ class Actor:
             return await self._stop(person, "no_reply", "The agent didn't answer in time")
         if waiting:
             return
+        # Something the platform sends on its own, a disclosure or a receipt,
+        # is not the agent's answer.
+        if (person.ai_acted_at is None or now - person.ai_acted_at < PATIENCE) and \
+                await store.agent_working(sf, person):
+            return
         if sum(m.direction == "in" for m in thread) >= MOVE_CAP:
             return await self._stop(person, "gave_up", f"{person.name} wrote {MOVE_CAP} times")
         client = _client(self.state.settings)

@@ -18,6 +18,7 @@ import sqlalchemy as sa
 from surogates.channels.identity import ResolvedIdentity, get_or_create_channel_identity
 from surogates.channels.platforms.whatsapp_api import DEFAULT_API_VERSION
 from surogates.db.models import (
+    Event,
     OutreachMessageRow,
     Session,
     SessionLease,
@@ -374,14 +375,27 @@ def is_typing(person: SimulationPerson, now: datetime) -> bool:
 
 
 async def agent_working(sf, person: SimulationPerson) -> bool:
-    """Whether a turn is running in one of *person*'s conversations right now."""
+    """Whether the agent owes *person* an answer: a turn is running in one of
+    their conversations, or their last message has not been taken up yet."""
+    def latest(*types: str):
+        return (sa.select(sa.func.coalesce(sa.func.max(Event.id), 0))
+                .where(Event.session_id == Session.id, Event.type.in_(types))
+                .scalar_subquery())
+
     async with sf() as db:
-        return await db.scalar(
+        running = await db.scalar(
             sa.select(SessionLease.session_id)
             .join(Session, Session.id == SessionLease.session_id)
             .where(Session.user_id == person.user_id, SessionLease.expires_at > sa.func.now())
             .limit(1)
-        ) is not None
+        )
+        unanswered = await db.scalar(
+            sa.select(Session.id)
+            .where(Session.user_id == person.user_id)
+            .where(latest("user.message") > latest("session.complete", "inbox.input_required"))
+            .limit(1)
+        )
+    return running is not None or unanswered is not None
 
 
 async def thread(sf, person_id: uuid.UUID) -> Sequence[SimulationMessage]:

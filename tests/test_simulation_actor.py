@@ -158,3 +158,34 @@ def test_a_sent_form_is_described_and_a_refusal_is_fed_back():
     assert "choose action \"form\"" in system
     assert "refused (Write something)" in system
     assert "Form" not in actor._prompt(person, "whatsapp", [], [flow])[0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_the_agent_owes_an_answer_until_its_turn_ends(rsf):  # noqa: F811
+    import uuid
+
+    from surogates.db.models import Event, Org, Session, User
+
+    org_id, user_id, session_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    async with rsf() as db:
+        db.add(Org(id=org_id, name="Org"))
+        await db.flush()
+        db.add(User(id=user_id, org_id=org_id, email="a@x", display_name="Ana"))
+        db.add(Session(id=session_id, org_id=org_id, agent_id="a1", channel="whatsapp",
+                       user_id=user_id, config={}))
+        await db.commit()
+    person = SimpleNamespace(user_id=user_id)
+
+    async def say(event_type):
+        async with rsf() as db:
+            db.add(Event(session_id=session_id, type=event_type, data={}))
+            await db.commit()
+
+    assert not await store.agent_working(rsf, person)
+    await say("user.message")
+    assert await store.agent_working(rsf, person)  # Not taken up yet: a disclosure is no answer.
+    await say("inbox.input_required")
+    assert not await store.agent_working(rsf, person)  # It asked back: the person's turn.
+    await say("user.message")
+    await say("session.complete")
+    assert not await store.agent_working(rsf, person)
