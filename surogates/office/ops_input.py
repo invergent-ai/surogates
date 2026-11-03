@@ -80,6 +80,12 @@ _CLOSE = 0.4
 _ABOUT_AS_CLOSE = 0.1
 _EMPTY = '"ops" is a non-empty list of ops.'
 _AS_TEXT = '"ops" was JSON text, not a list: read as the JSON it holds'
+# Said after a text that is not JSON: a model that wrote the list as text and broke it on a quote in its content, told
+# only where, writes the same text again.
+_SEND_THE_LIST = (
+    'Send "ops" itself as a JSON list of ops, not as text holding one: as text, every double quote in your content '
+    'must be escaped.'
+)
 
 
 class OpsInputError(ValueError):
@@ -213,7 +219,7 @@ def _parsed(text: str, read_as: list[str]) -> object:
             where = f", just after {before!r}" if before else ""
             # Some of json's messages end in "at" ("Unterminated string starting at"): the place is said once.
             what = exc.msg.removesuffix(" at")
-            raise OpsInputError(f"ops is not valid JSON: {what} at character {exc.pos}{where}.") from None
+            raise OpsInputError(f"ops is not valid JSON: {what} at character {exc.pos}{where}. {_SEND_THE_LIST}") from None
         fixed, added = closed
         read_as.append(f"{_AS_TEXT}, adding the {', the '.join(added)}.")
         return json.loads(fixed)

@@ -91,7 +91,8 @@ def test_anything_but_closers_after_the_end_is_refused():
         with pytest.raises(OpsInputError) as refused:
             read_ops(extra, "docx")
         assert str(refused.value) == (
-            f"ops is not valid JSON: Extra data at character {where}, just after {extra[where - 40:where]!r}."
+            f"ops is not valid JSON: Extra data at character {where}, just after {extra[where - 40:where]!r}. "
+            + SEND_THE_LIST
         ), extra
         assert refused.value.read_as == []
 
@@ -111,11 +112,28 @@ def test_where_the_json_breaks_is_said_in_plain_words():
     with pytest.raises(OpsInputError) as refused:
         read_ops('[{"op": "delete", "target": "unterminated', "docx")
     assert str(refused.value) == (
-        "ops is not valid JSON: Unterminated string starting at character 28, just after '[{\"op\": \"delete\", \"target\": '."
+        "ops is not valid JSON: Unterminated string starting at character 28, just after '[{\"op\": \"delete\", \"target\": '. "
+        + SEND_THE_LIST
     )
     with pytest.raises(OpsInputError) as refused:
         read_ops('[{"op": "delete", "x": "a\nb"}]', "docx")
     assert str(refused.value).startswith("ops is not valid JSON: Invalid control character at character 25, ")
+
+
+SEND_THE_LIST = (
+    'Send "ops" itself as a JSON list of ops, not as text holding one: as text, every double quote in your content '
+    'must be escaped.'
+)
+
+
+def test_text_that_breaks_on_a_quote_in_the_content_says_to_send_the_list_itself():
+    # A model wrote the list as text and closed a quotation in its content with a bare double quote: the text breaks
+    # there, and the model, told only where, wrote the same text again until it was stopped.
+    broken = '[{"op": "insert", "target": {"end": true}, "content": {"markdown": "the \u201eraport" de investigatie"}}]'
+    with pytest.raises(OpsInputError) as refused:
+        read_ops(broken, "docx")
+    assert str(refused.value).startswith("ops is not valid JSON: Expecting ',' delimiter at character ")
+    assert str(refused.value).endswith(SEND_THE_LIST)
 
 
 def test_single_op_object():
