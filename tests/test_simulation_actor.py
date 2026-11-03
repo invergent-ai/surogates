@@ -147,6 +147,8 @@ def test_a_form_is_filled_in_not_tapped():
     assert "empty" in actor._wrong_tap(thread, PersonMessage(form_reply={"flow_token": "inrolare:t1"}))
     assert actor._form_token([SimpleNamespace(direction="out", body={"interactive": {"type": "flow"}})]) is None
     assert actor._wrong_tap(thread, PersonMessage(form_reply={"nume": "Ana", "flow_token": "x"})) is None
+    listed = [SimpleNamespace(direction="out", body={"type": "text", "text": {"body": "1. Da 2. Nu"}})]
+    assert "as text" in actor._wrong_tap(listed, PersonMessage(button_reply={"id": "choice:0", "title": "Da"}))
 
 
 @pytest.mark.asyncio
@@ -247,3 +249,24 @@ async def test_an_edited_placeholder_is_the_agents_answer(rsf):  # noqa: F811
     assert await store.replace_body(rsf, run_id, "1.1", {"text": "Vă pot programa marți."})
     later = datetime.now(timezone.utc) + actor.QUIET + timedelta(seconds=1)
     assert actor._waiting(person, await store.thread(rsf, person_id), later) is None
+
+
+@pytest.mark.asyncio
+async def test_a_person_handed_back_after_failing_starts_clean(monkeypatch):
+    ai = actor.Actor(SimpleNamespace(session_factory=None, settings=Settings, http=None))
+    stopped = []
+
+    async def refuse(run, person):
+        raise RuntimeError("the move was refused")
+
+    async def stop(person, state, note):
+        stopped.append(state)
+
+    monkeypatch.setattr(ai, "_move", refuse)
+    monkeypatch.setattr(ai, "_stop", stop)
+    person = SimpleNamespace(id=1, name="Ana")
+    for _ in range(actor.STRIKES):
+        await ai._turn(None, person)
+    assert stopped == ["failed"]
+    await ai._turn(None, person)  # Handed back: one refusal is a first strike, not a failure.
+    assert stopped == ["failed"]

@@ -132,6 +132,8 @@ def _wrong_tap(thread, body: PersonMessage, tap: dict | None = None) -> str | No
         return None
     if any(i.get("type") == "flow" for i in sent):
         return _A_FORM
+    if not ids:
+        return "the agent sent no buttons: write your answer as text"
     return f"no button has the id {body.button_reply.get('id')!r}; copy one from the agent's buttons"
 
 
@@ -204,6 +206,9 @@ class Actor:
             self.refused[person.id] = str(exc)
             self.strikes[person.id] = self.strikes.get(person.id, 0) + 1
             if self.strikes[person.id] >= STRIKES:
+                # Handed back later, the person starts with a clean slate.
+                self.strikes.pop(person.id, None)
+                self.refused.pop(person.id, None)
                 await self._stop(person, "failed", f"Autopilot couldn't continue as {person.name}")
         finally:
             self.busy.discard(person.id)
