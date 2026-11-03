@@ -1694,7 +1694,10 @@ TEAM_TELL_MEMBER_SCHEMA = ToolSchema(
         "Team only. Pass a team member's words to a colleague on the team "
         "(\"tell the doctor to enrol Vasile\"): it reaches that colleague the "
         "way alerts do, signed with who asked. Their answer comes back to you "
-        "in their own conversation; pass it on with this tool too."
+        "in their own conversation; pass it on with this tool too. Only for "
+        "words a member asked you to pass on: it says they asked, so never use "
+        "it for your own alerts or updates, which escalate and the team's "
+        "notices carry."
     ),
     parameters={
         "type": "object",
