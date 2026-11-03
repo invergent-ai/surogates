@@ -67,7 +67,7 @@ logger = logging.getLogger(__name__)
 
 TEAM_TOOL_NAMES: frozenset[str] = frozenset({
     "team_overview", "team_message_person", "team_update_person",
-    "team_enroll_person", "team_escalation",
+    "team_enroll_person", "team_escalation", "team_tell_member",
 })
 
 NOT_TEAM = (
@@ -349,11 +349,10 @@ async def team_tool_exclusions(
 ) -> frozenset[str]:
     """The team tools, unless this session's user is on the team."""
     if programs_enabled and getattr(session, "user_id", None) is not None:
-        from surogates.simulation.team import run_settings
-
-        settings = await run_settings(session_factory, await followup_store.get_settings(
+        settings = await followup_store.settings_for(
             session_factory, org_id=session.org_id, agent_id=session.agent_id,
-        ), session.user_id)
+            user_id=session.user_id,
+        )
         if followup_store.is_team_member(settings, session.user_id):
             return frozenset()
     return TEAM_TOOL_NAMES
@@ -1729,7 +1728,9 @@ async def handle_team_tell_member(arguments: dict, **kwargs: Any) -> str:
         names = dict((await db.execute(
             sa.select(User.id, User.display_name).where(User.id.in_(others))
         )).all()) if others else {}
-    matches = [u for u, name in names.items() if wanted in fold_label(name or "")]
+    folded = {u: fold_label(name or "") for u, name in names.items()}
+    matches = ([u for u, name in folded.items() if name == wanted]
+               or [u for u, name in folded.items() if wanted in name])
     if len(matches) != 1:
         team = ", ".join(sorted(n for n in names.values() if n)) or "nobody else"
         return (f"Nothing sent: '{arguments.get('member')}' "
@@ -1739,7 +1740,9 @@ async def handle_team_tell_member(arguments: dict, **kwargs: Any) -> str:
     queued, why_not = await _tell_team(
         sf, ctx, settings, kind="notice", only_user_id=colleague,
         text=followup_store.wording(settings, "team_relay", member=_member(ctx), text=text[:1500]),
-        dedupe_prefix=f"relay:{ctx.user_id}:{hashlib.sha256(text.encode()).hexdigest()[:16]}",
+        # One relay per call: a retried call is not sent twice, the same words
+        # said again later are.
+        dedupe_prefix=f"relay:{kwargs.get('tool_call_id') or secrets.token_hex(8)}",
     )
     if not queued:
         return f"Nothing sent to {names[colleague]}: {why_not}."

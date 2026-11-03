@@ -28,6 +28,7 @@ from surogates.db.models import (
     SimulationRun,
     User,
 )
+from surogates.harness.landing import TURN_ENDS
 from surogates.simulation.ids import (
     is_simulation_id,
     new_bot_token,
@@ -392,7 +393,7 @@ async def agent_working(sf, person: SimulationPerson) -> bool:
         unanswered = await db.scalar(
             sa.select(Session.id)
             .where(Session.user_id == person.user_id)
-            .where(latest("user.message") > latest("session.complete", "inbox.input_required"))
+            .where(latest("user.message") > latest(*TURN_ENDS, "inbox.input_required"))
             .limit(1)
         )
     return running is not None or unanswered is not None

@@ -107,7 +107,7 @@ def _form_token(thread) -> str | None:
     for m in reversed(thread):
         i = m.body.get("interactive", {}) if m.direction == "out" and isinstance(m.body, dict) else {}
         if i.get("type") == "flow":
-            return i["action"]["parameters"].get("flow_token")
+            return i.get("action", {}).get("parameters", {}).get("flow_token")
     return None
 
 
@@ -217,8 +217,9 @@ class Actor:
             return
         # Something the platform sends on its own, a disclosure or a receipt,
         # is not the agent's answer.
-        if (person.ai_acted_at is None or now - person.ai_acted_at < PATIENCE) and \
-                await store.agent_working(sf, person):
+        last_in = max((m.created_at for m in thread if m.direction == "in"), default=None)
+        since = person.ai_acted_at or last_in or run.created_at
+        if now - since < PATIENCE and await store.agent_working(sf, person):
             return
         if sum(m.direction == "in" for m in thread) >= MOVE_CAP:
             return await self._stop(person, "gave_up", f"{person.name} wrote {MOVE_CAP} times")
@@ -241,7 +242,7 @@ class Actor:
             return await self._stop(person, state, move.note or "")
         tap = move.tap if move.action == "tap" else None
         if move.action == "form" or (tap and "flow_token" in tap and "form_reply" not in tap):
-            tap = {"form_reply": {**(move.form or tap or {}), "flow_token": _form_token(thread)}}
+            tap = {"form_reply": {**(move.form or move.tap or {}), "flow_token": _form_token(thread)}}
         body = PersonMessage(**tap) if tap else PersonMessage(text=move.text)
         wrong = _wrong_tap(thread, body) if run.channel == "whatsapp" else None
         if wrong:

@@ -179,12 +179,9 @@ async def load_context(kwargs: dict) -> tuple[Context | None, Any]:
             return None, None
         user = await db.get(User, session.user_id) if session.user_id else None
         ctx = Context(session, user)
-    settings = await followup_store.get_settings(
-        sf, org_id=ctx.org_id, agent_id=ctx.agent_id,
+    return ctx, await followup_store.settings_for(
+        sf, org_id=ctx.org_id, agent_id=ctx.agent_id, user_id=ctx.user_id,
     )
-    from surogates.simulation.team import run_settings
-
-    return ctx, await run_settings(sf, settings, ctx.user_id)
 
 
 def parse_start_date(raw: Any) -> date | None:

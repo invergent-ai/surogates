@@ -102,7 +102,7 @@ async def test_a_person_waits_while_the_agent_is_still_working(rsf, monkeypatch)
     monkeypatch.setattr(ai, "_stop", stop)
     monkeypatch.setattr(store, "thread", thread)
     now = datetime.now(timezone.utc)
-    run = SimpleNamespace(created_at=now)
+    run = SimpleNamespace(created_at=now, channel="whatsapp", flows=None)
     person = SimpleNamespace(id=1, stands_for=None, task=None, agent_typing_at=None,
                              ai_acted_at=now - timedelta(minutes=4))
 
@@ -115,6 +115,22 @@ async def test_a_person_waits_while_the_agent_is_still_working(rsf, monkeypatch)
     person.ai_acted_at = now - timedelta(minutes=11)
     await ai._move(run, person)
     assert stopped == ["no_reply"]
+
+    # Handed to Autopilot after a stuck turn: the wait still has a ceiling.
+    moved = []
+
+    async def generate(**kw):
+        moved.append(1)
+        return None
+
+    monkeypatch.setattr(actor, "generate_structured", generate)
+    monkeypatch.setattr(actor, "_client", lambda settings: (_LLM(), "m"))
+    stuck = SimpleNamespace(id=2, name="Ana", persona="Ana", stands_for=None, task=None,
+                            agent_typing_at=None, ai_acted_at=None)
+    run.created_at = now - timedelta(minutes=11)
+    with pytest.raises(RuntimeError):
+        await ai._move(run, stuck)
+    assert moved
 
 
 def test_a_form_is_filled_in_not_tapped():
@@ -129,6 +145,7 @@ def test_a_form_is_filled_in_not_tapped():
     assert "form" in actor._wrong_tap(thread, PersonMessage(button_reply={"id": "flow", "title": "Open"}))
     assert actor._wrong_tap(thread, PersonMessage(button_reply={"id": "choice:0", "title": "Da"})) is None
     assert "empty" in actor._wrong_tap(thread, PersonMessage(form_reply={"flow_token": "inrolare:t1"}))
+    assert actor._form_token([SimpleNamespace(direction="out", body={"interactive": {"type": "flow"}})]) is None
     assert actor._wrong_tap(thread, PersonMessage(form_reply={"nume": "Ana", "flow_token": "x"})) is None
 
 
@@ -188,4 +205,7 @@ async def test_the_agent_owes_an_answer_until_its_turn_ends(rsf):  # noqa: F811
     assert not await store.agent_working(rsf, person)  # It asked back: the person's turn.
     await say("user.message")
     await say("session.complete")
+    assert not await store.agent_working(rsf, person)
+    await say("user.message")
+    await say("session.fail")  # A failed turn is over too: silence decides then.
     assert not await store.agent_working(rsf, person)

@@ -972,6 +972,11 @@ async def test_a_team_member_passes_words_to_one_colleague(sf, practice):
     [row] = await _outreach(sf)
     assert row.user_id == practice.doctor and row.kind == "notice"
     assert row.text == "Ioana Marin asks you: Please enrol Vasile Cirstea."
+    again = await team.handle_team_tell_member(
+        {"member": "ionescu", "text": "Please enrol Vasile Cirstea."}, **kw, tool_call_id="call-2",
+    )
+    assert again.startswith("Sent to") and len(await _outreach(sf)) == 2
+
 
     assert "is not on the team" in await team.handle_team_tell_member(
         {"member": "Ion Popescu", "text": "Hi"}, **kw,
@@ -983,3 +988,11 @@ async def test_a_team_member_passes_words_to_one_colleague(sf, practice):
     assert await team.handle_team_tell_member(
         {"member": "Ionescu", "text": "Hi"}, **patient_kw,
     ) == team.NOT_TEAM
+
+    ana, _ = await _person(sf, "Ana", "40700000097", enrol=False)
+    await _person(sf, "Ioana Ana Pop", "40700000096", enrol=False)
+    async with sf() as db:
+        ids = [practice.doctor, nurse, ana] + [u for u in (await db.execute(
+            sa.select(User.id).where(User.display_name == "Ioana Ana Pop"))).scalars()]
+    await store.update_settings(sf, org_id=ORG, agent_id=AGENT, alert_recipient_user_ids=ids)
+    assert (await team.handle_team_tell_member({"member": "Ana", "text": "Hi"}, **kw)).startswith("Sent to Ana")
