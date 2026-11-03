@@ -628,6 +628,7 @@ THREAD_REFUSED_TOOLS: frozenset[str] = refused_in_a_thread(SESSION_STARTING_TOOL
 TELLS_OTHERS_TOOLS: frozenset[str] = frozenset({
     "escalate", "followup_enroll", "followup_update", "followup_withdraw_consent",
     "team_message_person", "team_update_person", "team_enroll_person", "team_escalation",
+    "team_tell_member",
 })
 # A case step's report to Keel carries what its session has used, the call of
 # the model that makes the report included: that call's usage arrives last in

@@ -956,3 +956,30 @@ def test_every_preferred_channel_enum_names_each_text_channel_that_writes_first(
     text_channels = set(initiating_platforms()) - {"voice", "web", "api"}
     for schema in (followup_tools.FOLLOWUP_UPDATE_SCHEMA, team_tools.TEAM_UPDATE_PERSON_SCHEMA):
         assert set(schema.parameters["properties"]["preferred_channel"]["enum"]) == text_channels
+
+
+@pytest.mark.asyncio
+async def test_a_team_member_passes_words_to_one_colleague(sf, practice):
+    nurse, nurse_session = await _person(sf, "Ioana Marin", "40700000098", enrol=False)
+    await store.update_settings(
+        sf, org_id=ORG, agent_id=AGENT, alert_recipient_user_ids=[practice.doctor, nurse],
+    )
+    kw = _kw(sf, nurse_session)
+    out = await team.handle_team_tell_member(
+        {"member": "ionescu", "text": "Please enrol Vasile Cirstea."}, **kw,
+    )
+    assert out.startswith("Sent to Dr. Ionescu")
+    [row] = await _outreach(sf)
+    assert row.user_id == practice.doctor and row.kind == "notice"
+    assert row.text == "Ioana Marin asks you: Please enrol Vasile Cirstea."
+
+    assert "is not on the team" in await team.handle_team_tell_member(
+        {"member": "Ion Popescu", "text": "Hi"}, **kw,
+    )
+    assert "is not on the team" in await team.handle_team_tell_member(
+        {"member": "Ioana", "text": "Note to self"}, **kw,
+    )
+    patient_kw = _kw(sf, practice.ion[1])
+    assert await team.handle_team_tell_member(
+        {"member": "Ionescu", "text": "Hi"}, **patient_kw,
+    ) == team.NOT_TEAM

@@ -1691,6 +1691,61 @@ async def handle_team_escalation(arguments: dict, **kwargs: Any) -> str:
     )
 
 
+TEAM_TELL_MEMBER_SCHEMA = ToolSchema(
+    name="team_tell_member",
+    description=(
+        "Team only. Pass a team member's words to a colleague on the team "
+        "(\"tell the doctor to enrol Vasile\"): it reaches that colleague the "
+        "way alerts do, signed with who asked. Their answer comes back to you "
+        "in their own conversation; pass it on with this tool too."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "member": {"type": "string", "description": "The colleague's name, or part of it."},
+            "text": {"type": "string", "description": "What to tell them, in the asker's words."},
+        },
+        "required": ["member", "text"],
+    },
+)
+
+#: How a colleague's words reach them; ``followup_settings.texts`` words it
+#: in the business's language.
+RELAY_TEXTS = {"team_relay": "{member} asks you: {text}"}
+
+
+async def handle_team_tell_member(arguments: dict, **kwargs: Any) -> str:
+    sf = kwargs["session_factory"]
+    ctx, settings, refused = await _team(kwargs)
+    if refused:
+        return refused
+    wanted = fold_label(str(arguments.get("member") or ""))
+    text = str(arguments.get("text") or "").strip()
+    if not wanted or not text:
+        return "Nothing sent: name the colleague and say what to tell them."
+    others = [uuid.UUID(str(m)) for m in settings.alert_recipient_user_ids or []
+              if str(m) != str(ctx.user_id)]
+    async with sf() as db:
+        names = dict((await db.execute(
+            sa.select(User.id, User.display_name).where(User.id.in_(others))
+        )).all()) if others else {}
+    matches = [u for u, name in names.items() if wanted in fold_label(name or "")]
+    if len(matches) != 1:
+        team = ", ".join(sorted(n for n in names.values() if n)) or "nobody else"
+        return (f"Nothing sent: '{arguments.get('member')}' "
+                f"{'matches more than one' if matches else 'is not on the team'}. "
+                f"The rest of the team: {team}.")
+    [colleague] = matches
+    queued, why_not = await _tell_team(
+        sf, ctx, settings, kind="notice", only_user_id=colleague,
+        text=followup_store.wording(settings, "team_relay", member=_member(ctx), text=text[:1500]),
+        dedupe_prefix=f"relay:{ctx.user_id}:{hashlib.sha256(text.encode()).hexdigest()[:16]}",
+    )
+    if not queued:
+        return f"Nothing sent to {names[colleague]}: {why_not}."
+    return f"Sent to {names[colleague]}. Their answer comes back in their own conversation."
+
+
 def register(registry: Any) -> None:
     for name, schema, handler in (
         ("team_overview", TEAM_OVERVIEW_SCHEMA, handle_team_overview),
@@ -1699,6 +1754,7 @@ def register(registry: Any) -> None:
         ("team_update_person", TEAM_UPDATE_PERSON_SCHEMA,
          handle_team_update_person),
         ("team_escalation", TEAM_ESCALATION_SCHEMA, handle_team_escalation),
+        ("team_tell_member", TEAM_TELL_MEMBER_SCHEMA, handle_team_tell_member),
         ("team_enroll_person", TEAM_ENROLL_PERSON_SCHEMA,
          handle_team_enroll_person),
     ):
