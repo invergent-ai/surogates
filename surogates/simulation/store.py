@@ -390,6 +390,9 @@ async def agent_working(sf, person: SimulationPerson) -> bool:
             sa.exists().where(
                 SessionLease.session_id == Session.id, Session.user_id == person.user_id,
                 SessionLease.expires_at > sa.func.now(),
+                # A question waiting on its answer holds the lease too, but
+                # then the person is the one owed a move.
+                latest("inbox.input_required") <= latest("user.message", "ask_user_question.response"),
             )
             | sa.exists().where(
                 Session.user_id == person.user_id,

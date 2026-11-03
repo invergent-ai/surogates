@@ -211,3 +211,16 @@ async def test_the_agent_owes_an_answer_until_its_turn_ends(rsf):  # noqa: F811
     await say("user.message")
     await say("session.fail")  # A failed turn is over too: silence decides then.
     assert not await store.agent_working(rsf, person)
+
+    from datetime import datetime, timedelta, timezone
+
+    from surogates.db.models import SessionLease
+    async with rsf() as db:
+        db.add(SessionLease(session_id=session_id, owner_id="w", lease_token=uuid.uuid4(),
+                            expires_at=datetime.now(timezone.utc) + timedelta(minutes=1)))
+        await db.commit()
+    assert await store.agent_working(rsf, person)  # A turn is running.
+    await say("inbox.input_required")
+    assert not await store.agent_working(rsf, person)  # Its question waits on the person.
+    await say("ask_user_question.response")
+    assert await store.agent_working(rsf, person)  # Answered: the turn goes on.
