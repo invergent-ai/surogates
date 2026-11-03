@@ -405,6 +405,22 @@ async def agent_working(sf, person: SimulationPerson) -> bool:
         )))
 
 
+async def left_unanswered(sf, person: SimulationPerson) -> bool:
+    """Whether the agent's turn on *person*'s last message completed without a
+    word to them: it chose to stay silent (a thank-you needs no answer)."""
+    def latest(*types: str):
+        return (sa.select(sa.func.coalesce(sa.func.max(Event.id), 0))
+                .where(Event.session_id == Session.id, Event.type.in_(types))
+                .scalar_subquery())
+
+    async with sf() as db:
+        return bool(await db.scalar(sa.select(sa.exists().where(
+            Session.user_id == person.user_id,
+            latest("session.complete") > latest("user.message"),
+            latest("session.fail", "session.stopped") < latest("user.message"),
+        ))))
+
+
 async def thread(sf, person_id: uuid.UUID) -> Sequence[SimulationMessage]:
     async with sf() as db:
         return (await db.execute(

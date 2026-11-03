@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -109,7 +110,11 @@ async def test_a_person_waits_while_the_agent_is_still_working(rsf, monkeypatch)
     async def working(sf, p):
         return True
 
+    async def answered(sf, p):
+        return False
+
     monkeypatch.setattr(store, "agent_working", working)
+    monkeypatch.setattr(store, "left_unanswered", answered)
     await ai._move(run, person)
     assert stopped == []
     person.ai_acted_at = now - timedelta(minutes=11)
@@ -228,6 +233,16 @@ async def test_the_agent_owes_an_answer_until_its_turn_ends(rsf):  # noqa: F811
     assert await store.agent_working(rsf, person)  # Answered: the turn goes on.
 
 
+    # A completed turn with no word back: silence chosen, not missed.
+    await say("user.message")
+    assert not await store.left_unanswered(rsf, person)
+    await say("session.complete")
+    assert await store.left_unanswered(rsf, person)
+    await say("user.message")
+    await say("session.fail")
+    assert not await store.left_unanswered(rsf, person)
+
+
 @pytest.mark.asyncio
 async def test_an_edited_placeholder_is_the_agents_answer(rsf):  # noqa: F811
     """Slack's "Thinking…" edited into the answer: the person's turn comes, not a timeout."""
@@ -270,3 +285,21 @@ async def test_a_person_handed_back_after_failing_starts_clean(monkeypatch):
     assert stopped == ["failed"]
     await ai._turn(None, person)  # Handed back: one refusal is a first strike, not a failure.
     assert stopped == ["failed"]
+
+
+@pytest.mark.asyncio
+async def test_a_stand_in_the_agent_never_wrote_to_ends_done_not_out_of_time(monkeypatch):
+    ai = actor.Actor(SimpleNamespace(session_factory=None, settings=Settings, http=None))
+    stopped = []
+
+    async def stop(person, state, note):
+        stopped.append((state, note))
+
+    async def thread(sf, person_id):
+        return []
+
+    monkeypatch.setattr(ai, "_stop", stop)
+    monkeypatch.setattr(store, "thread", thread)
+    run = SimpleNamespace(created_at=datetime.now(timezone.utc) - actor.RUN_CAP - timedelta(minutes=1))
+    await ai._move(run, SimpleNamespace(id=1, stands_for=uuid4(), task=None))
+    assert stopped == [("done", "The agent never wrote to them")]

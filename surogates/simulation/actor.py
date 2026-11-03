@@ -215,11 +215,16 @@ class Actor:
 
     async def _move(self, run, person) -> None:
         sf, now = self.state.session_factory, datetime.now(timezone.utc)
-        if now - run.created_at > RUN_CAP:
-            return await self._stop(person, "gave_up", "The simulation ran out of time")
         thread = await store.thread(sf, person.id)
-        if person.stands_for is not None and not person.task and not any(m.direction == "out" for m in thread):
-            return  # The team answers the agent; only one given a task starts the conversation.
+        # The team answers the agent; only one given a task starts the conversation.
+        untouched = person.stands_for is not None and not person.task and not any(
+            m.direction == "out" for m in thread)
+        if now - run.created_at > RUN_CAP:
+            if untouched:
+                return await self._stop(person, "done", "The agent never wrote to them")
+            return await self._stop(person, "gave_up", "The simulation ran out of time")
+        if untouched:
+            return
         waiting = _waiting(person, thread, now)
         if waiting == "agent":
             return
@@ -230,6 +235,8 @@ class Actor:
         if now - since < PATIENCE and await store.agent_working(sf, person):
             return
         if waiting == "no_reply":
+            if await store.left_unanswered(sf, person):
+                return await self._stop(person, "done", "The agent left the last message unanswered")
             return await self._stop(person, "no_reply", "The agent didn't answer in time")
         if sum(m.direction == "in" for m in thread) >= MOVE_CAP:
             return await self._stop(person, "gave_up", f"{person.name} wrote {MOVE_CAP} times")
