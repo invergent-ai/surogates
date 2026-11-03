@@ -128,8 +128,11 @@ def register(registry: ToolRegistry) -> None:
                 "Each item: {id: string, content: string, "
                 "status: pending|in_progress|completed|cancelled}\n"
                 "List order is priority. Only ONE item in_progress at a time.\n"
-                "Mark items completed immediately when done. If something fails, "
-                "cancel it and add a revised item.\n\n"
+                "Keep the list current as you work, not at the end: the moment "
+                "an item is done, call todo with merge=true to mark it completed "
+                "and the next one in_progress. People watch this list to follow "
+                "your progress. If something fails, cancel it and add a revised "
+                "item.\n\n"
                 "Always returns the full current list."
             ),
             parameters={
