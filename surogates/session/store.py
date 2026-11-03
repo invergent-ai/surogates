@@ -359,6 +359,7 @@ def _strip_trailing_question(content: str, questions: Any) -> str:
 #: emphasised stage direction such as "*(no new message; the question is
 #: still pending)*".  Both reached patients as messages.  A plain
 #: "(Thank you.)" is a reply and goes out.
+_SILENT_LINE = re.compile(rf"^[ \t]*{SILENT_REPLY}[ \t]*$\n?", re.MULTILINE)
 _NOT_A_MESSAGE = re.compile(r"[\s.\u2026]*|\s*([_*])\([^()\n]*\)\1[\s.]*")
 
 
@@ -374,8 +375,10 @@ def _build_channel_payload(event_type: EventType, data: dict, channel: str) -> d
             content = strip_next_action_blocks(content)
             if channel in ADAPTER_CHANNELS:
                 content = _without_trailing_prompt(content, msg.get("tool_calls"), channel)
-        if content and content.strip() == SILENT_REPLY:
-            content = ""  # the agent chose to write nothing
+        if content and SILENT_REPLY in content:
+            # The model sometimes puts the marker on a line of its own above
+            # what it does want sent; the marker itself is never for the person.
+            content = _SILENT_LINE.sub("", content).strip()
         if content and _NOT_A_MESSAGE.fullmatch(content):
             content = ""
         if content:

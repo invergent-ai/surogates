@@ -48,3 +48,8 @@ def test_the_web_chat_is_not_told_about_the_silent_marker():
 def test_the_advertised_marker_is_what_delivery_drops():
     said = {"message": {"role": "assistant", "content": SILENT_REPLY}}
     assert _build_channel_payload(EventType.LLM_RESPONSE, said, "whatsapp") == {}
+
+
+def test_a_marker_line_beside_real_text_is_dropped_and_the_text_sent():
+    said = {"message": {"role": "assistant", "content": f"{SILENT_REPLY}\nVrei să îi trimit totuși?"}}
+    assert _build_channel_payload(EventType.LLM_RESPONSE, said, "whatsapp")["content"] == "Vrei să îi trimit totuși?"
