@@ -564,7 +564,9 @@ class ChannelInboundPipeline:
         # ------------------------------------------------------------------
         # Gate 1: Deduplication.
         # ------------------------------------------------------------------
-        if self._dedup.is_duplicate(msg.ts):
+        # A platform numbers messages per app (a Telegram update_id is per bot),
+        # and one adapter serves every tenant's app: the key names the app.
+        if msg.ts and self._dedup.is_duplicate(f"{routing.platform}:{routing.identifier}:{msg.ts}"):
             return InboundOutcome.DROPPED
 
         # ------------------------------------------------------------------

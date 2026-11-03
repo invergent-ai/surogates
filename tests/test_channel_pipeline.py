@@ -473,6 +473,29 @@ async def test_provisioning_failure_drops_instead_of_crashing():
 
 
 @pytest.mark.asyncio
+async def test_the_same_ts_from_another_tenants_app_is_not_a_duplicate():
+    """Telegram numbers updates per bot: update 1 to one tenant's bot and
+    update 1 to another's are two messages."""
+    pipeline = ChannelInboundPipeline()
+    for app in ("bot_a", "bot_b"):
+        result = await pipeline.handle(_make_msg(is_dm=True, ts="1"), routing=_make_routing(identifier=app),
+                                       config=_make_config(), deps=_make_deps())
+        assert result == InboundOutcome.PROCESSED
+
+
+def test_a_seen_message_is_forgotten_after_the_ttl(monkeypatch):
+    from surogates.channels import dedup
+
+    clock = [1000.0]
+    monkeypatch.setattr(dedup.time, "time", lambda: clock[0])
+    seen = dedup.MessageDeduplicator(ttl_seconds=300)
+    assert not seen.is_duplicate("1")
+    assert seen.is_duplicate("1")
+    clock[0] += 301
+    assert not seen.is_duplicate("1")
+
+
+@pytest.mark.asyncio
 async def test_f_dedup_drops_duplicate_ts():
     """(f) Identical ts → second call dropped immediately."""
     msg = _make_msg(is_dm=True, ts="7.0")
