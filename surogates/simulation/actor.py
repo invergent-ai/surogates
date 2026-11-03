@@ -262,6 +262,9 @@ class Actor:
         else:
             tap = move.tap if move.action == "tap" else None
         body = PersonMessage(**tap) if tap else PersonMessage(text=move.text)
+        if tap and not body.model_dump(exclude_none=True):
+            raise RuntimeError(f"the move was refused: {json.dumps(tap)} is not a tap; "
+                               f"use {_TAPS.get(run.channel, 'text')}")
         wrong = _wrong_tap(thread, body, tap) if run.channel == "whatsapp" else None
         if wrong:
             raise RuntimeError(f"the move was refused: {wrong}")

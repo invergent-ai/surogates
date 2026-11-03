@@ -303,3 +303,27 @@ async def test_a_stand_in_the_agent_never_wrote_to_ends_done_not_out_of_time(mon
     run = SimpleNamespace(created_at=datetime.now(timezone.utc) - actor.RUN_CAP - timedelta(minutes=1))
     await ai._move(run, SimpleNamespace(id=1, stands_for=uuid4(), task=None))
     assert stopped == [("done", "The agent never wrote to them")]
+
+
+@pytest.mark.asyncio
+async def test_a_tap_in_the_wrong_shape_is_refused_with_the_right_one(monkeypatch):
+    ai = actor.Actor(SimpleNamespace(session_factory=None, settings=Settings, http=None))
+
+    async def thread(sf, person_id):
+        return []
+
+    async def idle(sf, person):
+        return False
+
+    async def generate(**kw):
+        return actor.Move(action="tap", tap={"ts": "1.1", "action_id": "choice:0"})
+
+    monkeypatch.setattr(store, "thread", thread)
+    monkeypatch.setattr(store, "agent_working", idle)
+    monkeypatch.setattr(actor, "generate_structured", generate)
+    monkeypatch.setattr(actor, "_client", lambda settings: (_LLM(), "m"))
+    run = SimpleNamespace(created_at=datetime.now(timezone.utc), channel="slack", flows=None)
+    person = SimpleNamespace(id=1, name="Ana", persona="Ana", stands_for=None, task=None,
+                             agent_typing_at=None, ai_acted_at=None)
+    with pytest.raises(RuntimeError, match='is not a tap; use a button: {"action"'):
+        await ai._move(run, person)
