@@ -154,3 +154,25 @@ async def test_a_team_stand_in_who_was_done_answers_the_agent_again(rsf):  # noq
                                 kind="text", body={}, wamid=f"w{person.id}")
     customer, stand_in = await store.people(rsf, run.id)
     assert (customer.ai_state, stand_in.ai_state) == ("done", "talking")
+
+
+@pytest.mark.asyncio
+async def test_a_run_without_a_team_still_keeps_to_its_own_people(rsf):  # noqa: F811
+    # Without the mark a simulated relative's claim was matched against the
+    # real roster, and a real patient was asked to confirm them.
+    org_id = await make_org(rsf)
+    patient = uuid.uuid4()
+    async with rsf() as db:
+        db.add(User(id=patient, org_id=org_id, email="p@x", display_name="Real patient"))
+        db.add(FollowupSettingsRow(org_id=org_id, agent_id="a1", alert_recipient_user_ids=[]))
+        await db.commit()
+    run = await store.create_run(
+        rsf, FakeVault(), org_id=org_id, agent_id="a1", created_by="u1", routing_config={},
+        person_name="Maria", provision=provision_into(rsf),
+    )
+    [customer] = await store.people(rsf, run.id)
+    real = await followup_store.get_settings(rsf, org_id=org_id, agent_id="a1")
+    inside = await run_settings(rsf, real, customer.user_id)
+    assert inside.simulation_run_id == run.id
+    assert inside.alert_recipient_user_ids == []
+    assert await in_scope(rsf, inside, {patient, customer.user_id}) == {customer.user_id}

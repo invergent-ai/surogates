@@ -43,6 +43,19 @@ class RunSettings:
         return getattr(self._settings, name)
 
 
+class InRun:
+    """The agent's settings, unchanged, marked as seen from inside a run that
+    has no stand-ins: rosters and lookups then keep to the run's people, and
+    team alerts still reach the real team's names only as "not sent"."""
+
+    def __init__(self, settings: Any, run_id: uuid.UUID) -> None:
+        self._settings = settings
+        self.simulation_run_id = run_id
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._settings, name)
+
+
 def team_persona(name: str, permissions: dict[str, Any], task: str | None = None) -> str:
     """Who Autopilot plays when it answers for a team member."""
     handles = permissions.get("handles")
@@ -128,7 +141,7 @@ async def run_settings(sf, settings: Any, user_id: Any) -> Any:
             .where(SimulationPerson.stands_for.isnot(None))
         )).all()
     if not team:
-        return settings
+        return InRun(settings, run.id)
     return RunSettings(settings, {str(m): str(u) for m, u in team}, run.phone_number_id, run.id)
 
 

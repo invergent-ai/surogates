@@ -472,7 +472,7 @@ async def covered_by_business(
     its journeys (active, paused or ended: someone whose follow-up ended can
     still write about an emergency), or a confirmed contact of someone who
     ever was."""
-    settings = await settings_for(session_factory, org_id=org_id, agent_id=agent_id, user_id=user_id)
+    settings = await get_settings(session_factory, org_id=org_id, agent_id=agent_id)
     if is_team_member(settings, user_id):
         return True
     if await enrollments(session_factory, org_id=org_id, agent_id=agent_id, user_id=user_id):
