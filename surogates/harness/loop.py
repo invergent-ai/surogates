@@ -662,6 +662,17 @@ def _carries_information(text: str) -> bool:
 _REVIVED_BY_NEWS = frozenset({"worker_report", "history_redo", "unread_browser_hand_back"})
 
 
+
+def rescue_context(reply: str | None, question: str) -> str:
+    """The reply a question was drawn from, without the question itself: a
+    channel shows the context, then the question, so a question left in its
+    reply reached the person twice."""
+    context = (reply or "").strip()
+    at = context.casefold().find(question.casefold())
+    if at < 0:
+        return context
+    return (context[:at] + context[at + len(question):]).strip()
+
 class AgentHarness(
     BoardMixin,
     ArborHarvestMixin,
@@ -5203,7 +5214,7 @@ class AgentHarness(
         # The context is the reply being converted, word for word: channels
         # deliver it as the agent talking to the person, and the judge's own
         # summary of it reached a person as "Asistentul" in place of the reply.
-        context = (content or "").strip()
+        context = rescue_context(content, question)
 
         tool_call_id = f"{ASK_USER_QUESTION_RESCUE_PREFIX}{uuid4().hex[:24]}"
         assistant_message["content"] = None
