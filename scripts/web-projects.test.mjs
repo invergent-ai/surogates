@@ -6,7 +6,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { FetchSseEventStream } from "../sdk/agent-chat-react/src/runtime/fetch-sse-stream.ts";
+import { FetchSseEventStream } from "../web/node_modules/@invergent/agent-chat-react/dist/index.js";
 import { workstreamRoutes } from "../web/src/api/workstream-routes.ts";
 import { libraryEntryOf, projectOf, threadRowOf } from "../web/src/lib/projects-wire.ts";
 import { savedName } from "../web/src/lib/save-file.ts";

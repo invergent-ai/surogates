@@ -6,7 +6,7 @@
 import { parseArgs } from "node:util";
 
 import { PageProjects } from "../desktop/dist/shell/projects.js";
-import { FetchSseEventStream } from "../sdk/agent-chat-react/src/runtime/fetch-sse-stream.ts";
+import { FetchSseEventStream } from "../web/node_modules/@invergent/agent-chat-react/dist/index.js";
 import { workstreamRoutes } from "../web/src/api/workstream-routes.ts";
 
 const { values } = parseArgs({

@@ -10,8 +10,6 @@ import { pathToFileURL } from "node:url";
 
 const web = new URL("../web/", import.meta.url);
 const fromWeb = createRequire(new URL("package.json", web));
-// The DOM the SDK's own tests draw in: the web depends on the SDK.
-const fromSdk = createRequire(new URL("../sdk/agent-chat-react/package.json", import.meta.url));
 const load = (from, name) => import(pathToFileURL(from.resolve(name)).href);
 
 // What the page reads and calls, the test's own (globalThis.chatPage): the store, the route, the
@@ -46,7 +44,7 @@ let React;
 let createRoot;
 
 before(async () => {
-  const { Window } = await load(fromSdk, "happy-dom");
+  const { Window } = await load(fromWeb, "happy-dom");
   const window = new Window({ url: "https://agent.example/chat" });
   Object.assign(globalThis, { window, document: window.document, IS_REACT_ACT_ENVIRONMENT: true });
   const { createServer } = await load(fromWeb, "vite");
@@ -56,9 +54,8 @@ before(async () => {
     logLevel: "error",
     appType: "custom",
     server: { middlewareMode: true, hmr: false, ws: false },
-    // The shared UI from its source, as the web's own config has it, and one React for both.
+    // One React for the page and the shared UI.
     resolve: {
-      alias: { "@invergent/ui-sdk": new URL("../sdk/ui-sdk/src", import.meta.url).pathname },
       dedupe: ["react", "react-dom"],
     },
     ssr: { noExternal: ["@tanstack/react-router", "@invergent/agent-chat-react"] },

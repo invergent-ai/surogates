@@ -10,7 +10,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
-const ts = createRequire(join(root, "sdk/agent-chat-react/package.json"))("typescript");
+const ts = createRequire(join(root, "web/package.json"))("typescript");
 const EM_DASH = "—";
 
 function sources(dir) {
@@ -50,7 +50,7 @@ function emDashes(path) {
   return found;
 }
 
-for (const dir of ["web/src", "sdk/agent-chat-react/src"]) {
+for (const dir of ["web/src"]) {
   test(`${dir} copy has no em dashes, apart from the bare empty-value placeholder`, () => {
     assert.deepEqual(sources(join(root, dir)).flatMap(emDashes), []);
   });
