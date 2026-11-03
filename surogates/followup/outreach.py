@@ -164,11 +164,13 @@ async def busy_line_for(
     """The business's ``busy_safety_line`` and the running turn's lease token,
     when *user_id* writes mid-turn; ``None`` when it is unset, no turn runs,
     or they are on the team (nobody waits on the agent for them)."""
+    settings = await followup_store.settings_for(
+        session_factory, org_id=org_id, agent_id=agent_id, user_id=user_id,
+    )
+    line = wording(settings, "busy_safety_line").strip() if settings is not None else ""
+    if not line or followup_store.is_team_member(settings, user_id):
+        return None
     async with session_factory() as db:
-        settings = await db.get(FollowupSettingsRow, (org_id, agent_id))
-        line = wording(settings, "busy_safety_line").strip() if settings is not None else ""
-        if not line or followup_store.is_team_member(settings, user_id):
-            return None
         token = await live_lease_token(db, session_id)
     return (line, token) if token is not None else None
 

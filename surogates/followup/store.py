@@ -250,7 +250,7 @@ async def upsert_enrollment(
     """
     if enrolled_by not in ENROLLMENT_SOURCES:
         raise ValueError(f"enrolled_by must be one of {', '.join(ENROLLMENT_SOURCES)}")
-    settings = await get_settings(session_factory, org_id=org_id, agent_id=agent_id)
+    settings = await settings_for(session_factory, org_id=org_id, agent_id=agent_id, user_id=user_id)
     if is_team_member(settings, user_id):
         raise TeamMember("this person is on the team, not someone followed")
     protocol = protocol.strip()
@@ -463,7 +463,7 @@ async def covered_by_business(
     its journeys (active, paused or ended: someone whose follow-up ended can
     still write about an emergency), or a confirmed contact of someone who
     ever was."""
-    settings = await get_settings(session_factory, org_id=org_id, agent_id=agent_id)
+    settings = await settings_for(session_factory, org_id=org_id, agent_id=agent_id, user_id=user_id)
     if is_team_member(settings, user_id):
         return True
     if await enrollments(session_factory, org_id=org_id, agent_id=agent_id, user_id=user_id):
@@ -620,6 +620,19 @@ async def get_settings(
 ) -> FollowupSettingsRow | None:
     async with session_factory() as db:
         return await db.get(FollowupSettingsRow, (org_id, agent_id))
+
+
+async def settings_for(
+    session_factory: Any, *, org_id: uuid.UUID, agent_id: str, user_id: uuid.UUID | None,
+) -> Any:
+    """The settings as a conversation with *user_id* sees them: inside a
+    simulation, with the team swapped for the run's stand-ins."""
+    from surogates.simulation.team import run_settings
+
+    return await run_settings(
+        session_factory, await get_settings(session_factory, org_id=org_id, agent_id=agent_id),
+        user_id,
+    )
 
 
 def _normalised(field: str, value: Any) -> Any:
@@ -1655,7 +1668,9 @@ async def link_contact(
         raise ValueError("status must be confirmed or pending")
     if contact_user_id == person_user_id:
         raise ValueError("the person cannot be their own contact")
-    settings = await get_settings(session_factory, org_id=org_id, agent_id=agent_id)
+    settings = await settings_for(
+        session_factory, org_id=org_id, agent_id=agent_id, user_id=contact_user_id,
+    )
     if is_team_member(settings, contact_user_id):
         raise TeamMember("this person is on the team, not a contact")
     relation = (relation or "").strip()[:200] or None

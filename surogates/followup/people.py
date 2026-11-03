@@ -238,7 +238,7 @@ async def honour_stop(
     True when it withdrew."""
     if not is_stop(text):
         return False
-    settings = await followup_store.get_settings(sf, org_id=org_id, agent_id=agent_id)
+    settings = await followup_store.settings_for(sf, org_id=org_id, agent_id=agent_id, user_id=user_id)
     if followup_store.is_team_member(settings, user_id):
         return False
     await withdraw_consent(

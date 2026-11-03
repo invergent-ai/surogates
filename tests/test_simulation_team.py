@@ -54,6 +54,17 @@ async def test_the_team_is_swapped_for_stand_ins_inside_the_run_only(rsf):  # no
     summary = (await store.list_runs(rsf, org_id=org_id, agent_id="a1"))[0]
     assert summary.id == run.id
 
+    # What a person on the team is spared, their stand-in is spared too.
+    as_seen = await followup_store.settings_for(
+        rsf, org_id=org_id, agent_id="a1", user_id=stand_in.user_id,
+    )
+    assert followup_store.is_team_member(as_seen, stand_in.user_id)
+    with pytest.raises(followup_store.TeamMember):
+        await followup_store.upsert_enrollment(
+            rsf, org_id=org_id, agent_id="a1", user_id=stand_in.user_id,
+            protocol="p", start_date=None, phase=None, enrolled_by="agent",
+        )
+
 
 @pytest.mark.asyncio
 async def test_an_autopilot_run_plays_its_team_too_and_the_team_never_writes_first(rsf):  # noqa: F811
