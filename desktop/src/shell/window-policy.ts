@@ -5,7 +5,7 @@
 
 import { fileURLToPath } from "node:url";
 
-// The Composio sign-in popup (sdk/agent-chat-react/src/lib/oauth-popup.ts): the page watches it close.
+// The Composio sign-in popup (invergent-ai/ui-kit, packages/agent-chat-react/src/lib/oauth-popup.ts): the page watches it close.
 const POPUP = { name: "composio-oauth", origin: "https://connect.composio.dev" };
 
 const PERMISSIONS: ReadonlySet<string> = new Set(["notifications", "clipboard-sanitized-write"]);

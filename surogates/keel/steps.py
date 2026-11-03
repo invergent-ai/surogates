@@ -379,10 +379,10 @@ def gate_case_tools(tools: set[str], session: object) -> set[str]:
     tools, its agent's MCP tools and its execution's self-tools; a scope that
     names work tools narrows the allowed ones to those and
     :data:`ALWAYS_KEPT`.  Only the step's own session gets the step tools,
-    and only a work item's own session the item tools.  A draft step's own
+    and only a work item's own session the item tools.  A step's own
     session also keeps the office tools it has, whatever its scope names:
-    its agent edits the case's documents beside the person.  No other
-    session of a case keeps them.  A person's case agent keeps the allowed
+    its agent makes and edits the case's documents, beside the person in a
+    draft step and alone otherwise.  No other session of a case keeps them.  A person's case agent keeps the allowed
     tools less :data:`CASE_AGENT_REFUSED`, and gets
     :data:`KEEL_CASE_TOOLS`, which no other session gets, and no step or
     item tool; a case agent on a process instance gets
@@ -413,9 +413,7 @@ def gate_case_tools(tools: set[str], session: object) -> set[str]:
     if is_case_agent(session):
         return (kept - CASE_AGENT_REFUSED) | (KEEL_PROCESS_TOOLS if is_process_agent(session) else KEEL_CASE_TOOLS)
     if is_case_step(session):
-        kept |= CASE_STEP_TOOLS
-        if step_contract_of(session).mode == "draft":
-            kept |= set(tools) & OFFICE_TOOLS
+        kept |= CASE_STEP_TOOLS | (set(tools) & OFFICE_TOOLS)
     if is_case_item(session):
         kept |= CASE_ITEM_TOOLS
     return kept

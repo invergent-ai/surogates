@@ -183,12 +183,12 @@ for (const path of [
 
 {
   const sdkIndex = readFileSync(
-    repoPath("sdk/agent-chat-react/src/index.ts"),
+    repoPath("web/node_modules/@invergent/agent-chat-react/dist/index.d.ts"),
     "utf8",
   );
   assert.match(
     sdkIndex,
     /SessionTreePanel/,
-    "sdk/agent-chat-react should export SessionTreePanel",
+    "@invergent/agent-chat-react should export SessionTreePanel",
   );
 }

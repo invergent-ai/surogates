@@ -514,6 +514,16 @@ async def test_a_draft_step_gets_the_office_tools():
         assert offered.isdisjoint({"terminal", "write_file", "browser_navigate"})
 
 
+async def test_a_step_its_agent_finishes_alone_gets_the_office_tools():
+    registry = _registry()
+    store = _SessionStore()
+    alone = await _step(store, file_pane=True)
+
+    # Its documents are Word, Excel or PowerPoint files the agent makes with the office tools, as a draft step's are.
+    for offered in (_prompt_tools(alone, registry), _schema_tools(alone, registry)):
+        assert OFFICE_TOOLS | STEP_TOOLS <= offered
+
+
 async def test_no_other_case_session_gets_the_office_tools():
     registry = _registry()
     store = _SessionStore()
@@ -524,7 +534,7 @@ async def test_no_other_case_session_gets_the_office_tools():
 
     # Each with a file pane, so only the case decides.
     others = (
-        await _step(store, file_pane=True), helper, paned_helper,
+        helper, paned_helper,
         await _item(store, file_pane=True), await _case_agent(store, file_pane=True),
     )
     for session in others:
