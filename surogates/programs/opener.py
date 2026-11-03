@@ -46,9 +46,9 @@ import sqlalchemy as sa
 from surogates.channels.capabilities import capabilities_for
 from surogates.channels.dm import DmTarget, OpenerUndeliverable, dm_key, dm_target
 from surogates.channels.identity import get_or_create_channel_session
-from surogates.channels.memory_boundary import boundary_token
+from surogates.channels.memory_boundary import boundary_token, simulation_boundary
 from surogates.channels.whatsapp_flows import new_flow_token
-from surogates.db.models import ProgramInvitationRow, Session as SessionRow
+from surogates.db.models import ProgramInvitationRow, Session as SessionRow, User
 from surogates.followup.store import last_inbound, shared_memory_boundary
 from surogates.session.events import CHECKIN_OPENER_MARKER
 from surogates.session.models import REUSABLE_SESSION_STATUSES
@@ -90,6 +90,22 @@ async def dm_session(
     reply arrives in a conversation that never asked anything.
     *session_config* is the target's :attr:`DmTarget.session_config`.
     """
+    # The followed person's record, shared with their contacts.
+    boundary = await shared_memory_boundary(
+        session_factory, org_id=org_id, agent_id=agent_id, user_id=user_id,
+    ) or boundary_token(
+        platform=platform, channel_id=channel_id, visibility="dm",
+        source={"chat_type": "private"}, fallback_id=session_key,
+    )
+    # Writing first to a simulation's person (a team stand-in) opens the
+    # session their reply lands in: it must be the run's, or ops shows it
+    # among the agent's real conversations.
+    run_id = None
+    if session_factory is not None:
+        async with session_factory() as db:
+            run_id = await db.scalar(sa.select(User.simulation_run_id).where(User.id == user_id))
+    if run_id:
+        boundary = simulation_boundary(run_id, boundary)
     return await get_or_create_channel_session(
         session_store, redis,
         session_key=session_key,
@@ -101,13 +117,7 @@ async def dm_session(
             f"{platform}_channel_id": channel_id,
             f"{platform}_thread_key": None,
             "channel_identifier": sender,
-            # The followed person's record, shared with their contacts.
-            "memory_boundary": await shared_memory_boundary(
-                session_factory, org_id=org_id, agent_id=agent_id, user_id=user_id,
-            ) or boundary_token(
-                platform=platform, channel_id=channel_id, visibility="dm",
-                source={"chat_type": "private"}, fallback_id=session_key,
-            ),
+            "memory_boundary": boundary,
             "multi_party": False,
             **(session_config or {}),
         },

@@ -514,3 +514,35 @@ async def test_a_due_step_wakes_the_agent_in_the_persons_own_conversation(sf, mo
     assert isinstance(result, steps.Woken) and w.delivery.calls == []  # no word-for-word opener
     assert keys == [key] and w.woke == [steps.SESSION]
     assert w.store.emitted[0][1]["synthetic"] == "checkin"
+
+
+async def test_a_simulation_persons_first_message_opens_a_session_of_the_run(sf, monkeypatch):
+    """A team stand-in the agent writes to first: their session is the run's, so
+    ops never counts it among the agent's real conversations."""
+    from surogates.channels.memory_boundary import SIMULATION_BOUNDARY_PREFIX
+    from surogates.db.models import Org, User
+    from surogates.programs import opener as opener_mod
+
+    org_id, run_id, stand_in, real = uuid4(), uuid4(), uuid4(), uuid4()
+    async with sf() as db:
+        db.add(Org(id=org_id, name="Org"))
+        await db.flush()
+        db.add(User(id=stand_in, org_id=org_id, email="s@x", display_name="Marius",
+                    simulation_run_id=run_id))
+        db.add(User(id=real, org_id=org_id, email="r@x", display_name="Ana"))
+        await db.commit()
+    seen = []
+
+    async def get_or_create(store, redis, *, config, **kw):
+        seen.append(config["memory_boundary"])
+        return uuid4()
+
+    monkeypatch.setattr(opener_mod, "get_or_create_channel_session", get_or_create)
+    for user_id in (stand_in, real):
+        await opener_mod.dm_session(
+            None, None, session_factory=sf, storage=None, settings=None, org_id=org_id,
+            agent_id="agent-1", user_id=user_id, platform="whatsapp",
+            session_key="agent:whatsapp:dm:4071", channel_id="999", sender="4071",
+        )
+    assert seen[0].startswith(f"{SIMULATION_BOUNDARY_PREFIX}{run_id}:")
+    assert not seen[1].startswith(SIMULATION_BOUNDARY_PREFIX)
