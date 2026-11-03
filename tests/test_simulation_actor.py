@@ -224,3 +224,26 @@ async def test_the_agent_owes_an_answer_until_its_turn_ends(rsf):  # noqa: F811
     assert not await store.agent_working(rsf, person)  # Its question waits on the person.
     await say("ask_user_question.response")
     assert await store.agent_working(rsf, person)  # Answered: the turn goes on.
+
+
+@pytest.mark.asyncio
+async def test_an_edited_placeholder_is_the_agents_answer(rsf):  # noqa: F811
+    """Slack's "Thinking…" edited into the answer: the person's turn comes, not a timeout."""
+    org_id, client = await _client(rsf)
+    r = await client.post("/internal/runs", json={
+        "org_id": str(org_id), "agent_id": "a1", "created_by": "u1", "person_name": "Ana",
+        "persona": "Ana", "channel": "slack",
+    })
+    import uuid
+
+    run_id, person_id = uuid.UUID(r.json()["id"]), uuid.UUID(r.json()["people"][0]["id"])
+    await store.log_message(rsf, run_id=run_id, person_id=person_id, direction="out", kind="message",
+                            body={"text": "_Thinking…_"}, wamid="1.1")
+    acted = datetime.now(timezone.utc)
+    person = SimpleNamespace(ai_acted_at=acted, agent_typing_at=None, channel="slack")
+    later = acted + actor.QUIET + timedelta(seconds=1)
+    assert actor._waiting(person, await store.thread(rsf, person_id), later) == "agent"
+
+    assert await store.replace_body(rsf, run_id, "1.1", {"text": "Vă pot programa marți."})
+    later = datetime.now(timezone.utc) + actor.QUIET + timedelta(seconds=1)
+    assert actor._waiting(person, await store.thread(rsf, person_id), later) is None

@@ -291,12 +291,16 @@ async def log_message(
 
 
 async def replace_body(sf, run_id: uuid.UUID, wamid: str, body: dict[str, Any]) -> bool:
-    """An edit: the message keeps its place in the thread with its new body."""
+    """An edit: the message keeps its place in the thread with its new body.
+
+    Its time becomes the edit's: an agent that edits a placeholder ("Thinking…")
+    into its answer has just spoken, and the person's turn follows that.
+    """
     async with sf() as db:
         result = await db.execute(sa.update(SimulationMessage)
                                   .where(SimulationMessage.run_id == run_id,
                                          SimulationMessage.wamid == wamid)
-                                  .values(body=body))
+                                  .values(body=body, created_at=datetime.now(timezone.utc)))
         await db.commit()
     return result.rowcount > 0
 
