@@ -53,3 +53,14 @@ def test_guidance_never_names_ask_user_question_without_it():
     assert "`ask_user_question` is never part of a batch" in _builder(
         tools | {"ask_user_question"},
     )._tool_guidance_section()
+
+
+def test_guidance_never_sends_an_agent_without_a_terminal_to_one(monkeypatch):
+    builder = _builder({"read_file", "web_search"})
+    monkeypatch.setattr(builder, "_get_model_id", lambda: "gpt-5")
+    text = builder._tool_guidance_section()
+    assert "**Current date**" in text
+    assert "use terminal" not in text
+    with_terminal = _builder({"read_file", "web_search", "terminal"})
+    monkeypatch.setattr(with_terminal, "_get_model_id", lambda: "gpt-5")
+    assert "Clock time and timezone are NOT in your context → use terminal" in with_terminal._tool_guidance_section()
