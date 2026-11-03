@@ -84,6 +84,7 @@ class ToolRuntime:
             terminal,
             threads,
             todo,
+            tool_groups,
             user_reports,
             vision,
             web_search,
@@ -114,6 +115,7 @@ class ToolRuntime:
             session_search,
             user_reports,  # operator-only Users-page reports (owner-scoped)
             todo,
+            tool_groups,  # load_tools (held-back tool groups of a prompt profile)
             ask_user_question,
             cron,
             coordinator,

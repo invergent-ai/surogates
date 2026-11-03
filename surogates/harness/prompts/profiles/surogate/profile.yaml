@@ -1,4 +1,32 @@
 # Prompt profile for Surogate 3.x (35B-A3B, Qwen3.5-MoE family).
 # Selected by surogates.harness.prompt_profile; measured with the harness lab
-# (benchmarks/prompt_lab): see its README for the A/B behind every overlay here.
+# (benchmarks/prompt_lab): see its RESULTS.md for the A/B behind it.
 compact_context: true
+
+# On-demand tool groups (surogates.harness.tool_groups): schemas held back
+# until load_tools (or a direct call) brings the group in. Tools stay
+# callable throughout. `guide` is returned by load_tools.
+# generate_image/generate_video stay shown: held back, the model drew an SVG
+# for "generate a logo" in 1 of 3 runs instead of loading them (prompt_lab).
+tool_groups:
+  - name: browser
+    summary: a real web browser, for pages that need clicks, forms, logins or JavaScript, or that web_extract cannot read
+    prefixes: [browser_]
+    guide: >-
+      browser_navigate returns the page outline: act on its @eN refs (they are not CSS
+      selectors). Call browser_get_state again only after the page changed or the outline
+      was cut; use browser_evaluate to read data in bulk (whole tables, all options). If a
+      cookie or consent banner blocks the page, dismiss it with its accept/close button
+      first. Confirm a click worked before saying so.
+  - name: scheduling
+    summary: run a prompt later or on a repeating schedule; list, change, pause or cancel schedules
+    tools: [cron_create, cron_list, cron_get, cron_update, cron_pause, cron_resume, cron_delete, cron_run_now]
+  - name: github
+    summary: the GitHub API for the agent's configured repositories (issues, pull requests, files, commits)
+    tools: [github]
+  - name: research
+    summary: an evidence bank and outline for long, multi-source research reports
+    tools: [research_memory, research_outline]
+  - name: skill_authoring
+    summary: create, edit or delete skills
+    tools: [skill_manage]

@@ -47,6 +47,8 @@ class SimTools:
         self.web_queries: list[str] = []
         self.answers = list(scenario.get("answers", []))
         self.custom_calls: list = []
+        self.group_catalog: dict = {}
+        self.browser = {"url": None, "fields": {}, "history": []}
         self.state: dict = {}
 
     # ------------------------------------------------------------ helpers
@@ -298,6 +300,107 @@ class SimTools:
         self.artifacts.append({"name": name, "kind": kind, "spec": spec, "artifact_id": aid})
         return _j({"success": True, "artifact_id": aid, "name": name, "kind": kind, "version": 1})
 
+    # ------------------------------------------------------------ tool groups
+    def t_load_tools(self, groups=None, **_):
+        groups = [groups] if isinstance(groups, str) else list(groups or [])
+        loaded = [g for g in groups if g in self.group_catalog]
+        if not loaded:
+            return _j({"success": False, "error": f"No such tool group: {', '.join(map(str, groups)) or '(none given)'}.",
+                       "groups": sorted(self.group_catalog)})
+        out = {"success": True, "loaded": loaded, "message": "Loaded. Their tools are available from your next step."}
+        guides = {g: self.group_catalog[g]["guide"] for g in loaded if self.group_catalog[g].get("guide")}
+        if guides:
+            out["guide"] = guides
+        return _j(out)
+
+    # ------------------------------------------------------------ browser (scripted site)
+    def _page(self):
+        p = (self.sc.get("site") or {}).get(self.browser["url"])
+        return p(self) if callable(p) else p
+
+    def _outline(self):
+        p = self._page()
+        if p is None:
+            return f"# Error\nCould not load {self.browser['url']} (net::ERR_NAME_NOT_RESOLVED)"
+        lines = [f"# {p['title']}"] + list(p.get("text", []))
+        for e in p.get("elements", []):
+            val = self.browser["fields"].get((self.browser["url"], e["ref"]))
+            extra = f' value="{val}"' if val else ""
+            lines.append(f'- {e["role"]} @{e["ref"]} "{e["name"]}"{extra}')
+        return "\n".join(lines)
+
+    def t_browser_navigate(self, url, **_):
+        self.browser["url"] = url.rstrip("/") if url.rstrip("/") in (self.sc.get("site") or {}) else url
+        self.browser["history"].append(("navigate", url))
+        p = self._page()
+        return _j({"success": p is not None, "url": self.browser["url"], "title": p["title"] if p else "", "snapshot": self._outline()})
+
+    def t_browser_get_state(self, **_):
+        return _j({"success": True, "url": self.browser["url"], "snapshot": self._outline()})
+
+    def t_browser_click(self, ref=None, **_):
+        p = self._page()
+        if p is None:
+            return _j({"success": False, "error": "No page open."})
+        ref = (ref or "").lstrip("@")
+        e = next((x for x in p.get("elements", []) if x["ref"] == ref), None)
+        if e is None:
+            return _j({"success": False, "error": f"No element @{ref} on this page; call browser_get_state."})
+        self.browser["history"].append(("click", ref))
+        if e.get("action"):
+            nxt = e["action"](self)
+            if nxt:
+                self.browser["url"] = nxt
+        elif e.get("href"):
+            self.browser["url"] = e["href"]
+        return _j({"success": True, "url": self.browser["url"], "snapshot": self._outline()})
+
+    def t_browser_type(self, text=None, ref=None, **_):
+        ref = (ref or "").lstrip("@")
+        p = self._page()
+        if p is None or not any(x["ref"] == ref for x in p.get("elements", [])):
+            return _j({"success": False, "error": f"No field @{ref} on this page."})
+        self.browser["fields"][(self.browser["url"], ref)] = text
+        self.browser["history"].append(("type", ref, text))
+        return _j({"success": True, "typed": text, "ref": "@" + ref})
+
+    def t_browser_evaluate(self, code="", **_):
+        p = self._page()
+        return _j({"success": True, "result": (p or {}).get("text", [])})
+
+    def t_browser_press_key(self, **_):
+        return _j({"success": True})
+
+    def t_browser_scroll(self, **_):
+        return _j({"success": True, "at_bottom": True})
+
+    def t_browser_wait(self, **_):
+        return _j({"success": True})
+
+    def t_browser_close(self, **_):
+        self.browser["url"] = None
+        return _j({"success": True})
+
+    def t_browser_screenshot(self, **_):
+        return _j({"success": True, "path": "media/screenshots/shot.png", "note": "Open it with read_file to see it."})
+
+    # ------------------------------------------------------------ github / media
+    def t_github(self, path="", method="GET", params=None, body=None, **_):
+        gh = self.sc.get("github") or {}
+        for pattern, resp in gh.items():
+            if re.fullmatch(pattern, path or ""):
+                return _j(resp(params or {}, body) if callable(resp) else resp)
+        return _j({"success": False, "status": 404, "error": f"Not Found: {path}"})
+
+    def t_generate_image(self, prompt="", output_path=None, aspect_ratio=None, **_):
+        rel = output_path or "media/images/image-0001.png"
+        q = self._path(rel)
+        q.parent.mkdir(parents=True, exist_ok=True)
+        q.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 64)
+        self.state.setdefault("images", []).append({"prompt": prompt, "aspect_ratio": aspect_ratio, "path": rel})
+        w, h = (1024, 1024) if aspect_ratio in (None, "1:1") else (1344, 768)
+        return _j({"success": True, "path": rel, "width": w, "height": h, "delivery": "Shown in the chat automatically."})
+
     # ------------------------------------------------------------ web
     def t_web_search(self, query, limit=5, **_):
         self.web_queries.append(query)
@@ -317,6 +420,10 @@ class SimTools:
         results = []
         for u in urls if isinstance(urls, list) else [urls]:
             p = corpus.get(u)
+            blocked = (self.sc.get("extract_blocked") or {})
+            if any(u.startswith(b) for b in blocked):
+                results.append({"url": u, "title": "", "content": "", "error": next(v for b, v in blocked.items() if u.startswith(b))})
+                continue
             if p:
                 results.append({"url": u, "title": p["title"], "content": p.get("content", p.get("snippet", ""))})
             else:

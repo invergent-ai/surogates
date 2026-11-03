@@ -40,7 +40,7 @@ STUDIO = [
     "todo", "ask_user_question", "create_artifact", "github",
     "research_memory", "research_outline",
     "cron_create", "cron_list", "cron_get", "cron_update", "cron_pause",
-    "cron_resume", "cron_delete", "cron_run_now",
+    "cron_resume", "cron_delete", "cron_run_now", "load_tools",
 ]
 KB = ["kb_search_pages", "kb_list_pages", "kb_read_page"]
 
@@ -79,11 +79,12 @@ def load_skills():
     return skills
 
 
-def render(profile: str, model: str = "surogate") -> dict:
+def render(profile: str, model: str = "surogate", groups: bool = True) -> dict:
+    """groups=False renders the checkout without on-demand tool groups (no load_tools)."""
     prof = PROFILES[profile]
     reg = ToolRegistry()
     ToolRuntime(reg).register_builtins()
-    names = [n for n in prof["tools"] if reg.has(n)]
+    names = [n for n in prof["tools"] if reg.has(n) and (groups or n != "load_tools")]
     now = datetime(2026, 11, 3, tzinfo=timezone.utc)
     session = Session(
         id=UUID(int=1), user_id=UUID(int=2), org_id=UUID(int=3), agent_id="agent-lab",
@@ -107,11 +108,21 @@ def render(profile: str, model: str = "surogate") -> dict:
         pass
     order = {n: i for i, n in enumerate(names)}
     tools.sort(key=lambda t: order[t["function"]["name"]])
+    held, catalog = {}, {}
+    try:
+        from surogates.harness.tool_groups import defer_tool_groups, tool_groups
+        tg = tool_groups(getattr(builder, "prompt_profile", None)) if groups else ()
+        tools, deferred = defer_tool_groups(tools, tg)
+        held = deferred.held
+        catalog = {g.name: {"tools": list(g.tools), "prefixes": list(g.prefixes), "guide": g.guide} for g in tg}
+    except ImportError:
+        pass
     return {"profile": profile, "repo": str(REPO), "model": model, "prompt_profile": getattr(builder, "prompt_profile", None),
-            "system": system, "tools": tools}
+            "system": system, "tools": tools, "held": held, "groups": catalog}
 
 
 if __name__ == "__main__":
     out = render(sys.argv[1] if len(sys.argv) > 1 else "studio",
-                 sys.argv[2] if len(sys.argv) > 2 else "surogate")
+                 sys.argv[2] if len(sys.argv) > 2 else "surogate",
+                 groups=not (len(sys.argv) > 3 and sys.argv[3] == "nogroups"))
     json.dump(out, sys.stdout)

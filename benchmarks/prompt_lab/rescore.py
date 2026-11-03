@@ -20,6 +20,7 @@ class State:
         self.artifacts, self.questions, self.skill_loads, self.web_queries = [], [], [], []
         self.read_paths = set()
         self.todos = []
+        self.state = {}
         for c in calls:
             a = c.get("args") or {}
             n = c["name"]

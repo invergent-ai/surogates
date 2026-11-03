@@ -26,8 +26,9 @@ way it does in a one-shot benchmark.
 
 ## Scenarios
 
-`scenarios.py` (30, everyday workplace work) and `scenarios_hard.py` (13,
-multi-step with traps): chat and drafting in English and Romanian, CSV/JSON
+`scenarios.py` (30, everyday workplace work), `scenarios_hard.py` (13,
+multi-step with traps) and `scenarios_groups.py` (4 that need a held-back tool
+group: browser pages and a form on a scripted site, GitHub, image generation): chat and drafting in English and Romanian, CSV/JSON
 analysis, xlsx/docx/pptx creation and editing, PDF reading, code fixes and a
 feature with hidden tests, YAML edits that must keep comments, web research
 with stale and conflicting sources, multi-hop lookups, KB grounding (covered,
@@ -54,7 +55,10 @@ $LAB_PYTHON run.py \
 python3 report.py runs/ab1 --vs base
 ```
 
-A variant is `name=<checkout>[@<session model id>]`. The model id decides the
+A variant is `name=<checkout>[@<session model id>][#nogroups]` (`#nogroups`
+renders the profile without its on-demand tool groups; with them the runner
+holds schemas back and releases them on `load_tools` or a direct call, as the
+harness loop does). The model id decides the
 prompt profile exactly as in production (`surogate/Surogate3.7-35B-A3B`
 selects `surogate`; the `surogate` tier sentinel selects nothing unless
 `SUROGATES_PROMPT_PROFILES=surogate=surogate` maps it). One engine is used per conversation, as

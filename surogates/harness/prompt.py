@@ -326,7 +326,8 @@ class PromptBuilder:
             parts.append(self._prompts.get("guidance/ask_user_question"))
         if "create_artifact" in self._available_tools:
             parts.append(self._prompts.get("guidance/artifact"))
-        if any(tool.startswith("browser_") for tool in self._available_tools):
+        # A held-back browser group carries this guidance in its load result.
+        if any(tool.startswith("browser_") for tool in self._available_tools) and not self._held_back("browser_navigate"):
             parts.append(self._prompts.get("guidance/browser"))
         # Search guidance covers both finding (web_search) and reading
         # (web_extract); either tool alone still benefits from the
@@ -421,6 +422,14 @@ class PromptBuilder:
                 line for line in guidance.split("\n") if not any(m in line for m in missing)
             )
         return guidance
+
+    def _held_back(self, tool: str) -> bool:
+        """Whether *tool* waits for load_tools in this session (a profile tool group)."""
+        if "load_tools" not in self._available_tools:
+            return False
+        from surogates.harness.tool_groups import group_of, tool_groups
+
+        return group_of(tool, tool_groups(self.prompt_profile)) is not None
 
     def _working_principles_section(self) -> str:
         """Always-loaded working principles fragment.

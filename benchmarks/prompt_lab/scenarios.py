@@ -627,3 +627,7 @@ SCENARIOS = [
 from scenarios_hard import HARD  # noqa: E402
 
 SCENARIOS += HARD
+
+from scenarios_groups import GROUPS  # noqa: E402
+
+SCENARIOS += GROUPS

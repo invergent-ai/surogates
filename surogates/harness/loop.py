@@ -148,6 +148,13 @@ from surogates.keel.steps import (
     step_contract_of,
 )
 from surogates.harness.prompt_profile import apply_tool_profile
+from surogates.harness.tool_groups import (
+    defer_tool_groups,
+    loaded_by,
+    loaded_in_history,
+    refresh_load_tools,
+    tool_groups,
+)
 from surogates.harness.tool_schemas import (
     CRON_OWN_SCHEDULE_TOOLS,
     CRON_WRITE_TOOLS,
@@ -3140,14 +3147,20 @@ class AgentHarness(
         )
         # The model may call only what it was sent.  The registry is the
         # worker's, so it also holds what this session's gates took away.
-        offered_tools = frozenset(s["function"]["name"] for s in tool_schemas)
+        # A profile's on-demand tool groups: their schemas wait for
+        # load_tools (or a direct call), but their tools stay callable, so
+        # they count as offered. Without groups, load_tools is dropped here.
+        _tool_groups = tool_groups(getattr(self._prompt, "prompt_profile", None))
+        tool_schemas, deferred_tools = defer_tool_groups(
+            tool_schemas, _tool_groups, loaded_in_history(messages, _tool_groups),
+        )
+        offered_tools = (
+            frozenset(s["function"]["name"] for s in tool_schemas) | deferred_tools.names
+        )
 
         # The browser pause notice costs a Redis read, and only a session
         # that can drive a browser can ever be holding one.
-        has_browser_tools = any(
-            (s.get("function") or {}).get("name", "").startswith("browser_")
-            for s in tool_schemas
-        )
+        has_browser_tools = any(name.startswith("browser_") for name in offered_tools)
 
         while self._budget.remaining > 0:
             iteration += 1
@@ -4423,6 +4436,18 @@ class AgentHarness(
 
             # 8. Append tool results to messages.
             messages.extend(tool_results)
+
+            # 8a. Show the tool groups this step loaded (load_tools, or a
+            #     direct call to one of a group's tools) from the next request.
+            if deferred_tools.held and tool_calls_raw:
+                released = deferred_tools.take(
+                    loaded_by(tool_calls_raw, tool_results)
+                    | deferred_tools.groups_of_calls(
+                        (tc.get("function") or {}).get("name", "") for tc in tool_calls_raw
+                    )
+                )
+                if released:
+                    tool_schemas = refresh_load_tools([*tool_schemas, *released], deferred_tools)
 
             # A guardrail hard stop ends the turn: continuing would let
             # the model re-issue the same call, and providers reject

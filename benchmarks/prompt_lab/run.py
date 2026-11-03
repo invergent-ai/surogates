@@ -3,6 +3,9 @@
   python run.py --variant base=/path/to/checkout-a --variant opt=/path/to/checkout-b@surogate/Surogate3.7-35B-A3B \
       --samples 3 --out runs/r1 [--only id1,id2]
 
+A variant is name=<checkout>[@<session model id>][#nogroups]; #nogroups renders
+the checkout without its profile's on-demand tool groups.
+
 Environment: LAB_BASE_URLS (comma-separated OpenAI-compatible base URLs; one is
 picked per conversation), LAB_API_KEY, LAB_MODEL, LAB_PYTHON (an interpreter
 with the product's dependencies; it renders each checkout with
@@ -48,9 +51,10 @@ def render(repo: str, profile: str) -> dict:
     """repo may carry '@<model id>' (default: the 'surogate' tier sentinel)."""
     k = (repo, profile)
     if k not in _render_cache:
-        path, _, model = repo.partition("@")
+        spec, _, flag = repo.partition("#")
+        path, _, model = spec.partition("@")
         env = dict(os.environ, PYTHONPATH=str(Path(path).resolve()))
-        out = subprocess.run([PY, str(LAB / "render.py"), profile, model or "surogate"], env=env, capture_output=True, text=True, check=True)
+        out = subprocess.run([PY, str(LAB / "render.py"), profile, model or "surogate", flag or "groups"], env=env, capture_output=True, text=True, check=True)
         _render_cache[k] = json.loads(out.stdout)
     return _render_cache[k]
 
@@ -108,10 +112,16 @@ async def run_one(client, eps: Endpoints, variant: str, repo: str, sc: dict, sam
             else:
                 p.write_text(content)
         r = render(repo, sc.get("profile", "studio"))
-        repo_path = repo.partition("@")[0]
+        repo_path = repo.partition("#")[0].partition("@")[0]
         tools = SimTools(ws, sc, Path(repo_path) / "skills", skills_index(repo_path))
         system = r["system"]
         all_tools = r["tools"] + list(sc.get("extra_tools") or [])
+        # On-demand tool groups, as the harness loop runs them: held schemas
+        # are callable but not shown until load_tools or a direct call.
+        held = {g: list(v) for g, v in (r.get("held") or {}).items()}
+        groups = r.get("groups") or {}
+        tools.group_catalog = groups
+        loads = []
         messages = [{"role": "system", "content": system}]
         turns = list(sc["turns"]) if "turns" in sc else [sc["prompt"]]
         messages.append({"role": "user", "content": turns.pop(0)})
@@ -120,7 +130,8 @@ async def run_one(client, eps: Endpoints, variant: str, repo: str, sc: dict, sam
         autoreplies = 0
         bad_calls = 0
         unknown_tools = 0
-        tool_names = {t["function"]["name"] for t in r["tools"]} | {t["function"]["name"] for t in sc.get("extra_tools") or []}
+        tool_names = ({t["function"]["name"] for t in r["tools"]} | {t["function"]["name"] for t in sc.get("extra_tools") or []}
+                      | {t["function"]["name"] for v in held.values() for t in v})
         calls = []
         finals = []
         error = None
@@ -168,6 +179,24 @@ async def run_one(client, eps: Endpoints, variant: str, repo: str, sc: dict, sam
                             res = await asyncio.to_thread(tools.call, fn, args)
                     calls.append({"name": fn, "args": args, "result": res[:3000]})
                     messages.append({"role": "tool", "tool_call_id": tc["id"], "content": res})
+                    # Group loading (mirrors surogates.harness.tool_groups).
+                    newly = set()
+                    if fn == "load_tools" and '"success": true' in res:
+                        newly |= set(json.loads(res).get("loaded") or [])
+                    for gname, g in groups.items():
+                        if gname in held and (fn in g["tools"] or any(fn.startswith(p) for p in g["prefixes"])):
+                            newly.add(gname)
+                    released = [sch for gname in newly for sch in held.pop(gname, [])]
+                    if released:
+                        loads.append({"it": it, "groups": sorted(newly), "via": fn})
+                        all_tools = [t for t in all_tools if t["function"]["name"] != "load_tools"] + released
+                        pending = [gname for gname in groups if gname in held]
+                        lt = next((t for t in r["tools"] if t["function"]["name"] == "load_tools"), None)
+                        if pending and lt is not None:
+                            lt = json.loads(json.dumps(lt))
+                            lt["function"]["description"] = _load_desc(lt["function"]["description"], pending)
+                            lt["function"]["parameters"]["properties"]["groups"]["items"]["enum"] = pending
+                            all_tools.append(lt)
                 if fn == "ask_user_question":
                     pass
                 continue
@@ -193,6 +222,8 @@ async def run_one(client, eps: Endpoints, variant: str, repo: str, sc: dict, sam
             "finals": finals, "artifacts": len(tools.artifacts), "memory": tools.memory,
             "todos": len(tools.todos), "batched_rounds": sum(1 for q in log["requests"] if q["tool_calls"] and len(q["tool_calls"]) > 1),
             "hit_cap": len(log["requests"]) >= MAX_ITERS,
+            "group_loads": loads,
+            "tools_shown_first": len(r["tools"]) + len(sc.get("extra_tools") or []),
         }
         ctx = {"ws": ws, "res": res, "calls": calls, "tools": tools, "messages": messages}
         try:
@@ -207,6 +238,16 @@ async def run_one(client, eps: Endpoints, variant: str, repo: str, sc: dict, sam
         print(f"{variant:10} {sc['id']:28} s{sample} score={res['score']:.2f} it={res['iters']:2} "
               f"tok1={res['prompt_tokens_first']} wall={res['wall']}s {notes[:90]}", flush=True)
         return res
+
+
+def _load_desc(desc: str, pending: list[str]) -> str:
+    """Keep only the still-held groups' lines in the load_tools description."""
+    out = []
+    for line in desc.splitlines():
+        if line.startswith("- ") and line[2:].split(":", 1)[0] not in pending:
+            continue
+        out.append(line)
+    return "\n".join(out)
 
 
 def _wants_reply(text: str, sc: dict) -> bool:

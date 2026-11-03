@@ -11,7 +11,8 @@ retained across turns). Harness: master `9a6c3fa9a`.
 - **opt2**: this branch, session model `surogate/Surogate3.7-35B-A3B`, which
   selects the `surogate` profile.
 
-43 scenarios x 3 samples per arm, run in the same lab environment. Scores are
+43 scenarios x 3 samples per arm, run in the same lab environment (the tool
+groups section below adds 4 more). Scores are
 deterministic checks (0-1). The paired difference is per scenario (mean of its
 samples), bootstrapped over scenarios.
 
@@ -78,6 +79,44 @@ Two findings from the iterations, both now in the profile:
   skill are untouched.
 - `compact_context`: no org UUID, model id, context-window or platform
   architecture lines.
+
+## On-demand tool groups (`tool_groups` in `profile.yaml`)
+
+Rarely needed tools are held back: their schemas are sent only after
+`load_tools` (whose description lists the groups, one line each) or a direct
+call to one of them. Held-back tools stay callable, so a skill that names
+`cron_create` still works. Measured with browser, scheduling, media, github,
+research and skill_authoring held back (`opt3`), against the same profile
+without groups (`opt2`), 47 scenarios x 3 (the 43 above plus 4 that need a
+group: a JavaScript-only helpdesk page, a booking form, GitHub issues, an
+image):
+
+| | opt2 | opt3 | change |
+|---|---|---|---|
+| Mean score | 0.990 | 0.979 | -0.011 (95% CI -0.029 to +0.001) |
+| Tool schemas shown at start | 45 tools, 41.2k chars | 20 tools, 22.1k chars | -46% |
+| Prompt tokens, first request | 13.1k | 7.9k | -40% |
+| Prompt tokens per task* | 92.0k | 66.8k | -27% |
+| Uncached prompt tokens per task* | 16.5k | 11.2k | -32% (master: 24.0k) |
+| Completion tokens per task* | 1,559 | 1,696 | +9% |
+| LLM calls per task* | 4.81 | 5.15 | +7% |
+
+\* without `h_xlsx_edit`, where two opt3 runs hit the 40-step cap chasing
+cached formula values with LibreOffice missing from the lab host (the files
+were correct in every run).
+
+- In the 126 runs that needed no group, none loaded one.
+- The browser, GitHub and scheduling tasks loaded the right group in every run
+  and scored like opt2. The helpdesk task spent about two extra calls
+  (`web_extract`, a search) before loading the browser.
+- With media held back, "generate a logo" was answered with a hand-drawn SVG
+  in 1 of 3 runs instead of `generate_image` (3 of 3 when shown). The shipped
+  profile therefore keeps `generate_image`/`generate_video` shown and holds back
+  browser, scheduling, github, research and skill_authoring (22 tools, 24.4k
+  chars shown at start). That final configuration was smoke-tested, not
+  re-measured.
+- Adding a group changes the tool list, so the engine re-reads the
+  conversation once after each load; the uncached figures above include it.
 
 ## Limits of this evidence
 
