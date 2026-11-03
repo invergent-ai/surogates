@@ -490,7 +490,11 @@ async def handle_followup_enroll(arguments: dict, **kwargs: Any) -> str:
         return f"Not enrolled: {exc}."
     missing = _enrol_missing(arguments)
     if missing:
-        return "Not enrolled: " + " ".join(missing)
+        return (
+            "Not enrolled: " + " ".join(missing)
+            + " Each call stands alone: call again with everything together, "
+            "what you already passed included."
+        )
     phase = str(arguments.get("phase") or "").strip() or None
     approximate = arguments.get("start_date_approximate") is True if start else None
     patient_name = str(arguments.get("patient_name") or "").strip() or None

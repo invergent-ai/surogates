@@ -661,6 +661,7 @@ async def test_enrol_without_a_date_or_a_name_says_what_to_pass(sf, patient, car
     assert result.startswith("Not enrolled: pass days_ago")
     assert "date_unknown: true" in result
     assert "pass person_name" in result and "name_unknown: true" in result
+    assert "everything together" in result
     assert await store.enrollments(sf, org_id=ORG, agent_id=AGENT, user_id=user_id) == []
     assert await _outreach(sf) == []
 
