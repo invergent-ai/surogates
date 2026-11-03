@@ -434,7 +434,10 @@ def _masked_match(fragment: str, phones: list[str]) -> bool:
 async def _people(sf: Any, org_id: uuid.UUID, agent_id: str, settings: Any) -> list[_Person]:
     """Everyone enrolled with this agent, never the team itself."""
     by_user: dict[uuid.UUID, list] = {}
-    for row in await followup_store.enrollments(sf, org_id=org_id, agent_id=agent_id):
+    for row in await followup_store.enrollments(
+        sf, org_id=org_id, agent_id=agent_id,
+        simulation_run_id=getattr(settings, "simulation_run_id", None),
+    ):
         if not followup_store.is_team_member(settings, row.user_id):
             by_user.setdefault(row.user_id, []).append(row)
     seen = await in_scope(sf, settings, set(by_user))
@@ -522,7 +525,10 @@ def _ago(at: datetime | None, now: datetime) -> str:
 async def _escalated_people(sf: Any, ctx: Any, settings: Any) -> list[_Person]:
     """Whoever has an open escalation without being enrolled: the team must
     be able to reach a stranger who asked for help."""
-    enrolled = {r.user_id for r in await followup_store.enrollments(sf, org_id=ctx.org_id, agent_id=ctx.agent_id)}
+    enrolled = {r.user_id for r in await followup_store.enrollments(
+        sf, org_id=ctx.org_id, agent_id=ctx.agent_id,
+        simulation_run_id=getattr(settings, "simulation_run_id", None),
+    )}
     ids = {
         e.user_id for e in await followup_store.open_escalations(sf, org_id=ctx.org_id, agent_id=ctx.agent_id)
         if e.user_id not in enrolled and not followup_store.is_team_member(settings, e.user_id)

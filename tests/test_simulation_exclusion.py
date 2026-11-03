@@ -60,6 +60,15 @@ async def test_enrollments_skip_simulation_users():
 
     await followup_store.enrollments(lambda: Capture(), org_id=uuid.uuid4(), agent_id="a1")
     assert "users.simulation_run_id IS NOT NULL" in seen[0]
+    await followup_store.enrollments(
+        lambda: Capture(), org_id=uuid.uuid4(), agent_id="a1", simulation_run_id=uuid.uuid4(),
+    )
+    assert "users.simulation_run_id IS NOT NULL" not in seen[1]
+    assert "users.simulation_run_id = " in seen[1]
+    await followup_store.enrollments(
+        lambda: Capture(), org_id=uuid.uuid4(), agent_id="a1", user_id=uuid.uuid4(),
+    )
+    assert "simulation_run_id" not in seen[2]
 
 
 @pytest.mark.asyncio

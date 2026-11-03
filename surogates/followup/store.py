@@ -171,12 +171,16 @@ async def enrollments(
     status: str | None = None,
     enrolled_by: str | None = None,
     payer_user_id: uuid.UUID | None = None,
+    simulation_run_id: uuid.UUID | None = None,
 ) -> list[FollowupEnrollmentRow]:
     """An agent's enrollments, narrowed by whichever filters are given.
 
     Never those of someone removed from the agent: their binding is
     tombstoned, and they are no longer anyone the agent follows.  A person
-    with no binding at all (an account named by hand) still counts.
+    with no binding at all (an account named by hand) still counts.  A
+    roster leaves out simulated people, or, given *simulation_run_id*, is
+    that run's people only; one person asked for by *user_id* is found
+    either way, or a run could never see whom it just enrolled.
     Ordered oldest first, which is the order a roster and a history read.
     """
     query = (
@@ -189,12 +193,17 @@ async def enrollments(
             AgentUser.user_id == FollowupEnrollmentRow.user_id,
             AgentUser.removed_at.isnot(None),
         ))
-        .where(~sa.exists().where(
+        .order_by(FollowupEnrollmentRow.created_at)
+    )
+    if user_id is None and simulation_run_id is None:
+        query = query.where(~sa.exists().where(
             User.id == FollowupEnrollmentRow.user_id,
             User.simulation_run_id.isnot(None),
         ))
-        .order_by(FollowupEnrollmentRow.created_at)
-    )
+    elif user_id is None:
+        query = query.where(FollowupEnrollmentRow.user_id.in_(
+            sa.select(User.id).where(User.simulation_run_id == simulation_run_id)
+        ))
     for column, value in (
         (FollowupEnrollmentRow.user_id, user_id),
         (FollowupEnrollmentRow.protocol, protocol),
