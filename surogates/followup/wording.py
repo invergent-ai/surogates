@@ -27,6 +27,7 @@ def all_default_texts() -> dict[str, str]:
         **outreach.DEFAULT_TEXTS,
         **person_link.DEFAULT_TEXTS,
         **team.ESCALATION_TEXTS,
+        **team.RELAY_TEXTS,
         **LIMIT_TEXTS,
         "welcome_text": team.WELCOME_TEXT,
         "missed_alert_text": DEFAULT_MISSED_TEXT,

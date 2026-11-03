@@ -46,6 +46,7 @@ from surogates.channels.platforms.telegram_interactive import (
     tool_call_digest,
 )
 from surogates.channels.text_split import split_text
+from surogates.simulation.ids import is_simulation_bot_token
 
 __all__ = [
     "TelegramPlatform",
@@ -333,9 +334,21 @@ def _parse(body: dict, *, bot_username: str) -> InboundMessage | None:
 # ---------------------------------------------------------------------------
 
 
+def _api_base(bot_token: str) -> str:
+    """Telegram, or the simulation world that owns a simulation bot.
+
+    A world is reached only for a simulation token and only on a deployment
+    that runs the simulation process.
+    """
+    simulation_url = os.environ.get("SUROGATES_SIMULATION_URL", "").rstrip("/")
+    if simulation_url and is_simulation_bot_token(bot_token):
+        return f"{simulation_url}/t"
+    return TELEGRAM_API_BASE
+
+
 def _bot_api_url(bot_token: str, method: str) -> str:
     """Return the full Telegram Bot API URL for *method*."""
-    return f"{TELEGRAM_API_BASE}/bot{bot_token}/{method}"
+    return f"{_api_base(bot_token)}/bot{bot_token}/{method}"
 
 
 def _extract_files(message: dict) -> list[InboundFileRef]:
@@ -819,7 +832,7 @@ class TelegramPlatform:
                 )
                 return None
             download_url = (
-                f"{TELEGRAM_API_BASE}/file/bot{bot_token}/{file_path}"
+                f"{_api_base(bot_token)}/file/bot{bot_token}/{file_path}"
             )
             resp = await self._http.get(download_url)
             if resp.status_code < 200 or resp.status_code >= 300:

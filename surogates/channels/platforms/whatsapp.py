@@ -1119,6 +1119,7 @@ class WhatsAppPlatform:
             media_id=url,
             max_bytes=max_bytes,
             api_version=(creds or {}).get("api_version") or DEFAULT_API_VERSION,
+            phone_number_id=(creds or {}).get("phone_number_id") or "",
         )
         return data
 

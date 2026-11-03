@@ -159,11 +159,16 @@ class Reach(NamedTuple):
 async def reachable(
     sf: Any, *, org_id: uuid.UUID, user_id: uuid.UUID, senders: dict[str, str],
     preferred: str | None = None, template: bool = False, now: datetime,
+    replying: bool = False,
 ) -> tuple[list[Reach], str | None]:
     """Every channel a message to *user_id* can go out on now, best first:
     *preferred*, then the one they last wrote on, then WhatsApp.  A channel
     whose window is closed counts only when *template* (an approved template
-    is chosen).  When none can, why, in words for the team."""
+    is chosen).  When none can, why, in words for the team.
+
+    *replying*: a person's message answers someone, so one who wrote within
+    the provider's window may be answered there without having granted
+    permission to be written to first."""
     async with sf() as db:
         found = (
             await db.execute(
@@ -182,6 +187,16 @@ async def reachable(
     granted = {
         p: i for p, i in identities.items() if followup_store.permission_status(i) == "granted"
     }
+    if replying:
+        for platform, identity in identities.items():
+            if platform in granted or not senders.get(platform):
+                continue
+            last = await followup_store.last_inbound(
+                sf, org_id=org_id, platform=platform,
+                platform_user_id=identity.platform_user_id, channel_identifier=senders[platform],
+            )
+            if window_open(last, now):
+                granted[platform] = identity
     if not granted:
         return [], f"has not given permission to be messaged on {channel_names(identities)}"
     with_sender = [p for p in granted if senders.get(p)]
@@ -195,7 +210,8 @@ async def reachable(
             sf, org_id=org_id, platform=platform,
             platform_user_id=granted[platform].platform_user_id, channel_identifier=senders[platform],
         )
-        if not can_write_first(platform, granted[platform], senders[platform], last):
+        answering = replying and window_open(last, now)
+        if not answering and not can_write_first(platform, granted[platform], senders[platform], last):
             why = why or f"has never written to the business on {channel_names([platform])}"
             continue
         closed = bool(caps.window_hours) and not window_open(last, now)
@@ -238,7 +254,7 @@ async def honour_stop(
     True when it withdrew."""
     if not is_stop(text):
         return False
-    settings = await followup_store.get_settings(sf, org_id=org_id, agent_id=agent_id)
+    settings = await followup_store.settings_for(sf, org_id=org_id, agent_id=agent_id, user_id=user_id)
     if followup_store.is_team_member(settings, user_id):
         return False
     await withdraw_consent(

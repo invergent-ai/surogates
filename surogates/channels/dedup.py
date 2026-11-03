@@ -35,7 +35,8 @@ class MessageDeduplicator:
         if not msg_id:
             return False
         now = time.time()
-        if msg_id in self._seen:
+        seen = self._seen.get(msg_id)
+        if seen is not None and now - seen < self._ttl:
             return True
         self._seen[msg_id] = now
         if len(self._seen) > self._max_size:

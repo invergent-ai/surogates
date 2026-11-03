@@ -207,7 +207,10 @@ async def _claimed_person(sf: Any, ctx: Context, settings: Any, arguments: dict)
     else by their exact name among the people followed; only ever to know
     whom to ask."""
     rows = [
-        r for r in await followup_store.enrollments(sf, org_id=ctx.org_id, agent_id=ctx.agent_id)
+        r for r in await followup_store.enrollments(
+            sf, org_id=ctx.org_id, agent_id=ctx.agent_id,
+            simulation_run_id=getattr(settings, "simulation_run_id", None),
+        )
         if not followup_store.is_team_member(settings, r.user_id)
     ]
     wa_id = _phone(arguments.get("person_phone"))

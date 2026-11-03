@@ -59,6 +59,7 @@ from surogates.followup.outreach import (
 from surogates.runtime.memory_io import read_user_memory
 from surogates.runtime.memory_protocol import memory_object_key
 from surogates.session.events import EventType
+from surogates.simulation.team import in_scope
 from surogates.session.interactive_input import fold_label
 from surogates.tools.registry import ToolSchema
 
@@ -66,7 +67,7 @@ logger = logging.getLogger(__name__)
 
 TEAM_TOOL_NAMES: frozenset[str] = frozenset({
     "team_overview", "team_message_person", "team_update_person",
-    "team_enroll_person", "team_escalation",
+    "team_enroll_person", "team_escalation", "team_tell_member",
 })
 
 NOT_TEAM = (
@@ -348,8 +349,9 @@ async def team_tool_exclusions(
 ) -> frozenset[str]:
     """The team tools, unless this session's user is on the team."""
     if programs_enabled and getattr(session, "user_id", None) is not None:
-        settings = await followup_store.get_settings(
+        settings = await followup_store.settings_for(
             session_factory, org_id=session.org_id, agent_id=session.agent_id,
+            user_id=session.user_id,
         )
         if followup_store.is_team_member(settings, session.user_id):
             return frozenset()
@@ -431,7 +433,10 @@ def _masked_match(fragment: str, phones: list[str]) -> bool:
 async def _people(sf: Any, org_id: uuid.UUID, agent_id: str, settings: Any) -> list[_Person]:
     """Everyone enrolled with this agent, never the team itself."""
     by_user: dict[uuid.UUID, list] = {}
-    for row in await followup_store.enrollments(sf, org_id=org_id, agent_id=agent_id):
+    for row in await followup_store.enrollments(
+        sf, org_id=org_id, agent_id=agent_id,
+        simulation_run_id=getattr(settings, "simulation_run_id", None),
+    ):
         if not followup_store.is_team_member(settings, row.user_id):
             by_user.setdefault(row.user_id, []).append(row)
     described = await describe_people(sf, org_id=org_id, agent_id=agent_id, rows_by_user=by_user)
@@ -517,11 +522,15 @@ def _ago(at: datetime | None, now: datetime) -> str:
 async def _escalated_people(sf: Any, ctx: Any, settings: Any) -> list[_Person]:
     """Whoever has an open escalation without being enrolled: the team must
     be able to reach a stranger who asked for help."""
-    enrolled = {r.user_id for r in await followup_store.enrollments(sf, org_id=ctx.org_id, agent_id=ctx.agent_id)}
+    enrolled = {r.user_id for r in await followup_store.enrollments(
+        sf, org_id=ctx.org_id, agent_id=ctx.agent_id,
+        simulation_run_id=getattr(settings, "simulation_run_id", None),
+    )}
     ids = {
         e.user_id for e in await followup_store.open_escalations(sf, org_id=ctx.org_id, agent_id=ctx.agent_id)
         if e.user_id not in enrolled and not followup_store.is_team_member(settings, e.user_id)
     }
+    ids = await in_scope(sf, settings, ids)
     described = await describe_people(sf, org_id=ctx.org_id, agent_id=ctx.agent_id, user_ids=ids)
     return [_Person(d) for d in described.values()]
 
@@ -1087,8 +1096,10 @@ async def handle_team_message_person(arguments: dict, **kwargs: Any) -> str:
 
     phone = person.contact
     call = f"Call them instead ({phone}); {PHONE_HINT}"
-    active = any(r.status == "active" for r in person.rows)
-    if not active and arguments.get("even_if_paused") is not True:
+    # Only a follow-up someone paused or ended asks first; a person who is
+    # in no follow-up is simply written to.
+    stopped = bool(person.rows) and not any(r.status == "active" for r in person.rows)
+    if stopped and arguments.get("even_if_paused") is not True:
         status = "; ".join(
             f"{r.protocol} {r.status}" + (f" ({r.status_reason})" if r.status_reason else "")
             for r in person.rows
@@ -1107,7 +1118,7 @@ async def handle_team_message_person(arguments: dict, **kwargs: Any) -> str:
     # through their contacts.
     found, why = await people.reachable(
         sf, org_id=ctx.org_id, user_id=person.user_id, senders=senders,
-        preferred=preferred, template=bool(template_name), now=now,
+        preferred=preferred, template=bool(template_name), now=now, replying=True,
     )
     recipient, via = person.user_id, ""
     if not found:
@@ -1679,6 +1690,65 @@ async def handle_team_escalation(arguments: dict, **kwargs: Any) -> str:
     )
 
 
+TEAM_TELL_MEMBER_SCHEMA = ToolSchema(
+    name="team_tell_member",
+    description=(
+        "Team only. Pass a team member's words to a colleague on the team "
+        "(\"tell the doctor to enrol Vasile\"): it reaches that colleague the "
+        "way alerts do, signed with who asked. Their answer comes back to you "
+        "in their own conversation; pass it on with this tool too. Only for "
+        "words a member asked you to pass on: it says they asked, so never use "
+        "it for your own alerts or updates, which escalate and the team's "
+        "notices carry."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "member": {"type": "string", "description": "The colleague's name, or part of it."},
+            "text": {"type": "string", "description": "What to tell them, in the asker's words. It goes out signed with the asker's name: do not sign it again."},
+        },
+        "required": ["member", "text"],
+    },
+)
+
+#: How a colleague's words reach them; ``followup_settings.texts`` words it
+#: in the business's language.
+RELAY_TEXTS = {"team_relay": "From {member}: {text}"}
+
+
+async def handle_team_tell_member(arguments: dict, **kwargs: Any) -> str:
+    sf = kwargs["session_factory"]
+    ctx, settings, refused = await _team(kwargs)
+    if refused:
+        return refused
+    wanted = fold_label(str(arguments.get("member") or ""))
+    text = str(arguments.get("text") or "").strip()
+    if not wanted or not text:
+        return "Nothing sent: name the colleague and say what to tell them."
+    others = [uuid.UUID(str(m)) for m in settings.alert_recipient_user_ids or []
+              if str(m) != str(ctx.user_id)]
+    names = await followup_store.display_names(sf, others)
+    folded = {u: fold_label(name) for u, name in names.items()}
+    matches = ([u for u, name in folded.items() if name == wanted]
+               or [u for u, name in folded.items() if wanted in name])
+    if len(matches) != 1:
+        team = ", ".join(sorted(n for n in names.values() if n)) or "nobody else"
+        return (f"Nothing sent: '{arguments.get('member')}' "
+                f"{'matches more than one' if matches else 'is not on the team'}. "
+                f"The rest of the team: {team}.")
+    [colleague] = matches
+    queued, why_not = await _tell_team(
+        sf, ctx, settings, kind="notice", only_user_id=colleague,
+        text=followup_store.wording(settings, "team_relay", member=_member(ctx), text=text[:1500]),
+        # One relay per call: a retried call is not sent twice, the same words
+        # said again later are.
+        dedupe_prefix=f"relay:{kwargs.get('tool_call_id') or secrets.token_hex(8)}",
+    )
+    if not queued:
+        return f"Nothing sent to {names[colleague]}: {why_not}."
+    return f"Sent to {names[colleague]}. Their answer comes back in their own conversation."
+
+
 def register(registry: Any) -> None:
     for name, schema, handler in (
         ("team_overview", TEAM_OVERVIEW_SCHEMA, handle_team_overview),
@@ -1687,6 +1757,7 @@ def register(registry: Any) -> None:
         ("team_update_person", TEAM_UPDATE_PERSON_SCHEMA,
          handle_team_update_person),
         ("team_escalation", TEAM_ESCALATION_SCHEMA, handle_team_escalation),
+        ("team_tell_member", TEAM_TELL_MEMBER_SCHEMA, handle_team_tell_member),
         ("team_enroll_person", TEAM_ENROLL_PERSON_SCHEMA,
          handle_team_enroll_person),
     ):

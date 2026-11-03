@@ -1,0 +1,125 @@
+"""Ops starts a run, writes as its person, reads the thread and ends it."""
+
+from __future__ import annotations
+
+import json
+import uuid
+
+import httpx
+import pytest
+import respx
+from fastapi import FastAPI
+from httpx import ASGITransport
+
+from surogates.simulation.api import router
+from tests.test_simulation_models import rsf  # noqa: F401
+from tests.test_simulation_store import FakeVault, make_org, provision_into
+
+TOKEN = "internal-token"
+
+
+class Settings:
+    class simulation:
+        url = "http://simulation:8004"
+        channels_url = "http://channels:8003"
+        internal_token = TOKEN
+
+
+async def _client(sf):
+    org_id = await make_org(sf)
+    app = FastAPI()
+    app.include_router(router)
+    app.state.session_factory, app.state.settings = sf, Settings
+    app.state.vault, app.state.provision = FakeVault(), provision_into(sf)
+    app.state.http = httpx.AsyncClient()
+    client = httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://simulation:8004",
+                               headers={"Authorization": f"Bearer {TOKEN}"})
+    return org_id, client
+
+
+async def _start(client, org_id):
+    r = await client.post("/internal/runs", json={
+        "org_id": str(org_id), "agent_id": "a1", "created_by": "u1", "person_name": "Ana",
+        "routing_config": {}, "flows": [{"id": "f1", "name": "intake", "json": {"screens": []}}],
+    })
+    assert r.status_code == 201
+    return r.json()
+
+
+@pytest.mark.asyncio
+async def test_run_lifecycle(rsf):  # noqa: F811
+    org_id, client = await _client(rsf)
+    run = await _start(client, org_id)
+    person = run["people"][0]
+    assert person["name"] == "Ana" and person["messages"] == [] and person["window_open"] is False
+    org = {"org_id": str(org_id)}
+
+    with respx.mock(assert_all_called=True) as mock:
+        hook = mock.post(f"http://channels:8003/whatsapp/{run['phone_number_id']}").mock(
+            return_value=httpx.Response(200),
+        )
+        r = await client.post(f"/internal/runs/{run['id']}/people/{person['id']}/messages",
+                              params=org, json={"text": "Bună, vreau o programare"})
+    assert r.status_code == 200 and r.json()["delivered"] is True
+    sent = hook.calls[0].request.content.decode()
+    assert "programare" in sent and person["address"] in sent
+
+    with respx.mock(assert_all_called=True) as mock:
+        hook = mock.post(f"http://channels:8003/whatsapp/{run['phone_number_id']}").mock(
+            return_value=httpx.Response(200),
+        )
+        await client.post(f"/internal/runs/{run['id']}/people/{person['id']}/messages",
+                          params=org, json={"quick_reply": {"text": "Confirm", "payload": "yes"}})
+    tapped = json.loads(hook.calls[0].request.content)["entry"][0]["changes"][0]["value"]["messages"][0]
+    assert tapped["type"] == "button" and tapped["button"] == {"text": "Confirm", "payload": "yes"}
+
+    with respx.mock(assert_all_called=True) as mock:
+        hook = mock.post(f"http://channels:8003/whatsapp/{run['phone_number_id']}").mock(
+            return_value=httpx.Response(200),
+        )
+        await client.post(f"/internal/runs/{run['id']}/people/{person['id']}/messages", params=org,
+                          json={"form_reply": {"flow_token": "intake:abc", "varsta": "54"}})
+    filled = json.loads(hook.calls[0].request.content)["entry"][0]["changes"][0]["value"]["messages"][0]
+    reply = filled["interactive"]["nfm_reply"]
+    assert filled["interactive"]["type"] == "nfm_reply"
+    assert json.loads(reply["response_json"]) == {"flow_token": "intake:abc", "varsta": "54"}
+
+    detail = (await client.get(f"/internal/runs/{run['id']}", params=org)).json()
+    message = detail["people"][0]["messages"][0]
+    assert message["direction"] == "in" and message["status"] == "delivered"
+    assert detail["people"][0]["window_open"] is True
+    assert detail["flows"][0]["name"] == "intake"
+
+    listed = (await client.get("/internal/runs", params={**org, "agent_id": "a1"})).json()
+    assert [r["id"] for r in listed] == [run["id"]]
+    assert listed[0]["messages"] == 3 and listed[0]["driver"] == "human"
+
+    review = {"verdict": "mixed", "summary": "Slow to answer", "findings": [
+        {"title": "Never said when", "state": "applied", "applied_at": "2026-11-02T10:00:00+00:00",
+         "proposal": {"target": "skill", "name": "echipa"}},
+        {"title": "Too long", "state": "dismissed", "proposal": None},
+    ]}
+    r = await client.put(f"/internal/runs/{run['id']}/review", params=org, json=review)
+    assert r.json()["review"] == review
+    listed = (await client.get("/internal/runs", params={**org, "agent_id": "a1"})).json()
+    assert listed[0]["verdict"] == "mixed"
+    assert listed[0]["changes"] == [{"title": "Never said when", "target": "skill", "name": "echipa",
+                                     "applied_at": "2026-11-02T10:00:00+00:00"}]
+    assert listed[0]["persona"] is None and listed[0]["ended_at"] is None
+
+    ended = (await client.post(f"/internal/runs/{run['id']}/end", params=org)).json()
+    assert ended["status"] == "ended"
+    r = await client.post(f"/internal/runs/{run['id']}/people/{person['id']}/messages",
+                          params=org, json={"text": "mai e cineva?"})
+    assert r.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_other_org_and_bad_token_are_refused(rsf):  # noqa: F811
+    org_id, client = await _client(rsf)
+    run = await _start(client, org_id)
+    r = await client.get(f"/internal/runs/{run['id']}", params={"org_id": str(uuid.uuid4())})
+    assert r.status_code == 404
+    r = await client.get("/internal/runs", params={"org_id": str(org_id), "agent_id": "a1"},
+                         headers={"Authorization": "Bearer wrong"})
+    assert r.status_code == 401

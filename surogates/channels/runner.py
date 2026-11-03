@@ -15,7 +15,9 @@ process and provides:
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
+import os
 import signal
 from typing import Any
 
@@ -570,7 +572,7 @@ async def run_channels(settings: Any, kind: str | None = None) -> None:
         base_url=settings.platform_api_url,
         token=settings.platform_api_token,
     )
-    cache = build_channel_routing_cache(settings=settings, platform_client=client)
+    cache = build_channel_routing_cache(settings=settings, platform_client=client, session_factory=sf)
     mate_cache = build_mate_settings_cache(settings=settings, platform_client=client)
 
     delivery_service = DeliveryService(session_factory=sf, redis_client=redis)
@@ -655,6 +657,7 @@ async def run_channels(settings: Any, kind: str | None = None) -> None:
     discord = next((p for p in enabled if p.kind == "discord"), None)
     if discord is not None:
         from surogates.channels.gateway import DiscordGatewaySupervisor
+        from surogates.simulation.store import running_routings
 
         supervisor = DiscordGatewaySupervisor(
             platform=discord,
@@ -662,6 +665,10 @@ async def run_channels(settings: Any, kind: str | None = None) -> None:
             vault=vault,
             redis=redis,
             ingest=app.state.channel_dispatcher.ingest_from_socket,
+            simulations=(
+                functools.partial(running_routings, sf, "discord")
+                if os.environ.get("SUROGATES_SIMULATION_URL") else None
+            ),
         )
         tasks.append(asyncio.create_task(supervisor.run(), name="discord-gateway"))
 

@@ -152,6 +152,16 @@ def cmd_mcp_proxy(args: argparse.Namespace) -> None:
     )
 
 
+def cmd_simulation(args: argparse.Namespace) -> None:
+    """Start the simulation worlds and their internal API."""
+    from surogates.config import load_settings
+    from surogates.simulation.app import run_simulation
+
+    settings = load_settings()
+    _configure_logging(settings.log_level)
+    asyncio.run(run_simulation(settings))
+
+
 def cmd_channels(args: argparse.Namespace) -> None:
     """Start the channel webhook service (inbound + delivery + reconciler)."""
     from surogates.channels.runner import run_channels
@@ -342,6 +352,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional platform kind to restrict delivery loops (e.g. 'slack')",
     )
 
+    sub.add_parser("simulation", help="Start the simulation worlds and their internal API")
+
     # surogate voice
     sub.add_parser("voice", help="Answer phone calls through LiveKit SIP")
 
@@ -374,6 +386,7 @@ COMMANDS = {
     "migrate": cmd_migrate,
     "doctor": cmd_doctor,
     "channels": cmd_channels,
+    "simulation": cmd_simulation,
     "voice": cmd_voice,
     "org-members": cmd_org_members,
 }

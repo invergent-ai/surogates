@@ -207,6 +207,11 @@ class User(Base):
     preferences: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, server_default="{}"
     )
+    # Set on the stand-in users a simulation run creates, so no reader of real
+    # people ever lists them.
+    simulation_run_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), nullable=True, index=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         nullable=False, server_default=func.now()
     )
@@ -2896,3 +2901,113 @@ class WebPushSubscription(Base):
     p256dh: Mapped[str] = mapped_column(Text, nullable=False)
     auth: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False, server_default=func.now())
+
+
+# ---------------------------------------------------------------------------
+# Simulation
+# ---------------------------------------------------------------------------
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+class SimulationRun(Base):
+    """One simulation: its world, the agent's account in it, and its status.
+
+    The account columns keep their WhatsApp names; on Telegram they hold the
+    bot's username, its token and its webhook secret.
+    """
+
+    __tablename__ = "simulation_runs"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    org_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("orgs.id"), nullable=False)
+    agent_id: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    created_by: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="running")
+    channel: Mapped[str] = mapped_column(Text, nullable=False, default="whatsapp")
+    phone_number_id: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    access_token: Mapped[str] = mapped_column(Text, nullable=False)
+    app_secret: Mapped[str] = mapped_column(Text, nullable=False)
+    #: The agent's own WhatsApp behaviour config, copied so the run behaves
+    #: like the real channel (identity policy, multi-session, ...).
+    routing_config: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    #: The agent's WhatsApp message templates as Meta lists them, so a
+    #: template the agent sends shows with its real header, body and buttons.
+    templates: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, default=list)
+    #: The agent's WhatsApp Flows as ``{id, name, json}``, so a form the
+    #: agent sends opens with its real screens.
+    flows: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, default=list)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False, default=_utcnow)
+    ended_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    #: The judge's review of the run and the fixes it proposed; ops writes it whole.
+    review: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONB, nullable=True)
+    #: ``copilot`` when the platform Copilot started it for the user; None from Studio.
+    via: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+
+class SimulationPerson(Base):
+    """Someone a run's user writes as."""
+
+    __tablename__ = "simulation_people"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("simulation_runs.id", ondelete="CASCADE"), nullable=False, index=True,
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    channel: Mapped[str] = mapped_column(Text, nullable=False)
+    #: The person's address on their channel, e.g. a WhatsApp wa_id.
+    address: Mapped[str] = mapped_column(Text, nullable=False)
+    user_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), nullable=True)
+    #: When the agent last showed "typing…" to this person; a send clears it.
+    agent_typing_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    #: Who the AI plays when it plays this person; none for a hand-typed one.
+    #: The team member this person stands in for; None for the run's customers.
+    stands_for: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), nullable=True)
+    #: What a team stand-in asks the agent on their own, writing first; None to only answer it.
+    task: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    persona: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    #: ``ai`` while the AI writes as them, ``human`` while the user does.
+    driver: Mapped[str] = mapped_column(Text, nullable=False, default="human", server_default="human")
+    #: ``talking`` until the AI stops: ``done``, ``gave_up``, ``no_reply`` or ``failed``.
+    ai_state: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    ai_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    #: When the AI last wrote or tapped: it waits for the agent after that.
+    ai_acted_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False, default=_utcnow)
+
+
+class SimulationMessage(Base):
+    """One message in a world, in Meta's own shape."""
+
+    __tablename__ = "simulation_messages"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("simulation_runs.id", ondelete="CASCADE"), nullable=False, index=True,
+    )
+    person_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("simulation_people.id", ondelete="CASCADE"), nullable=False,
+    )
+    #: ``in``: the person wrote it; ``out``: the agent sent it.
+    direction: Mapped[str] = mapped_column(Text, nullable=False)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    body: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    wamid: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False, default=_utcnow)
+
+
+class SimulationMedia(Base):
+    """A file uploaded into a world, by the agent or by the person."""
+
+    __tablename__ = "simulation_media"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("simulation_runs.id", ondelete="CASCADE"), nullable=False,
+    )
+    mime_type: Mapped[str] = mapped_column(Text, nullable=False)
+    data: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)

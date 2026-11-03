@@ -394,11 +394,14 @@ class PromptBuilder:
         if not parts:
             return ""
         guidance = "\n\n".join(parts)
-        if "ask_user_question" not in self._available_tools:
-            # A shared fragment's line about asking makes the model look for a
-            # tool it was not given (denied by policy, or nobody to answer).
+        # A shared fragment's line about a tool the agent was not given (denied
+        # by policy, or nobody to answer) sends the model looking for it.
+        missing = [m for tool, m in (("ask_user_question", "`ask_user_question`"),
+                                     ("terminal", "use terminal"))
+                   if tool not in self._available_tools]
+        if missing:
             guidance = "\n".join(
-                line for line in guidance.split("\n") if "`ask_user_question`" not in line
+                line for line in guidance.split("\n") if not any(m in line for m in missing)
             )
         return guidance
 

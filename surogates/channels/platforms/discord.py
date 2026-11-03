@@ -35,6 +35,7 @@ from surogates.channels.capabilities import ChannelCapabilities
 from surogates.channels.inbound import InboundFileRef, InboundMessage
 from surogates.channels.registry import ChannelDescriptor
 from surogates.channels.text_split import split_text
+from surogates.simulation.ids import is_simulation_discord_token
 
 __all__ = ["DISCORD_API_BASE", "DiscordPlatform", "open_dm", "parse"]
 
@@ -45,6 +46,14 @@ logger = logging.getLogger(__name__)
 DISCORD_API_BASE = (
     os.environ.get("SUROGATES_DISCORD_API_BASE") or "https://discord.com/api/v10"
 ).rstrip("/")
+
+def _api_base(token: str) -> str:
+    """Discord, or the simulation world that owns a simulation bot token."""
+    simulation_url = os.environ.get("SUROGATES_SIMULATION_URL", "").rstrip("/")
+    if simulation_url and is_simulation_discord_token(token):
+        return f"{simulation_url}/d/api/v10"
+    return DISCORD_API_BASE
+
 
 #: Message types a person writes: DEFAULT and REPLY.  Everything else (joins,
 #: pins, boosts, thread-created notices, …) is a system message.
@@ -192,7 +201,7 @@ async def _request(
     loop, so waiting out ``retry_after`` here would hold up every other
     channel's rows; the outbox retries it later.
     """
-    url = f"{DISCORD_API_BASE}{path}"
+    url = f"{_api_base(token)}{path}"
     try:
         resp = await http.request(method, url, headers=_headers(token), **kwargs)
     except httpx.HTTPError as exc:

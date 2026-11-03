@@ -22,7 +22,8 @@ applies_when: model matches MODELS_REQUIRING_DISCIPLINE
 NEVER answer these from memory or mental computation — ALWAYS use a tool:
 - Arithmetic, math, calculations → use terminal (e.g. python3 -c)
 - Hashes, encodings, checksums → use terminal (e.g. sha256sum, base64)
-- Current date → the **Current date** in your Context section is authoritative; do not run a tool to discover it. Clock time and timezone are NOT in your context → use terminal (e.g. date)
+- Current date → the **Current date** in your Context section is authoritative; do not run a tool to discover it.
+- Clock time and timezone are NOT in your context → use terminal (e.g. date)
 - System state: OS, CPU, memory, disk, ports, processes → use terminal
 - File contents, sizes, line counts → use read_file, search_files, or terminal
 - Git history, branches, diffs → use terminal

@@ -124,6 +124,8 @@ ABILITIES = (
 DESTINATION_RECEIVES = ("urgent", "attention", "missed_replies")
 #: The recipient of a message sent to a shared destination, not a person.
 NO_PERSON = uuid.UUID(int=0)
+#: Why a team message about a simulated person was never sent.
+SIMULATED = "Kept in the simulation: nobody real was told"
 #: Allowed ranges, inclusive, for the settings that time outreach.  The
 #: passes that act on them look back far enough to cover the maximum.
 SETTINGS_RANGES = {
@@ -169,12 +171,16 @@ async def enrollments(
     status: str | None = None,
     enrolled_by: str | None = None,
     payer_user_id: uuid.UUID | None = None,
+    simulation_run_id: uuid.UUID | None = None,
 ) -> list[FollowupEnrollmentRow]:
     """An agent's enrollments, narrowed by whichever filters are given.
 
     Never those of someone removed from the agent: their binding is
     tombstoned, and they are no longer anyone the agent follows.  A person
-    with no binding at all (an account named by hand) still counts.
+    with no binding at all (an account named by hand) still counts.  A
+    roster leaves out simulated people, or, given *simulation_run_id*, is
+    that run's people only; one person asked for by *user_id* is found
+    either way, or a run could never see whom it just enrolled.
     Ordered oldest first, which is the order a roster and a history read.
     """
     query = (
@@ -189,6 +195,15 @@ async def enrollments(
         ))
         .order_by(FollowupEnrollmentRow.created_at)
     )
+    if user_id is None and simulation_run_id is None:
+        query = query.where(~sa.exists().where(
+            User.id == FollowupEnrollmentRow.user_id,
+            User.simulation_run_id.isnot(None),
+        ))
+    elif user_id is None:
+        query = query.where(FollowupEnrollmentRow.user_id.in_(
+            sa.select(User.id).where(User.simulation_run_id == simulation_run_id)
+        ))
     for column, value in (
         (FollowupEnrollmentRow.user_id, user_id),
         (FollowupEnrollmentRow.protocol, protocol),
@@ -244,7 +259,7 @@ async def upsert_enrollment(
     """
     if enrolled_by not in ENROLLMENT_SOURCES:
         raise ValueError(f"enrolled_by must be one of {', '.join(ENROLLMENT_SOURCES)}")
-    settings = await get_settings(session_factory, org_id=org_id, agent_id=agent_id)
+    settings = await settings_for(session_factory, org_id=org_id, agent_id=agent_id, user_id=user_id)
     if is_team_member(settings, user_id):
         raise TeamMember("this person is on the team, not someone followed")
     protocol = protocol.strip()
@@ -457,7 +472,7 @@ async def covered_by_business(
     its journeys (active, paused or ended: someone whose follow-up ended can
     still write about an emergency), or a confirmed contact of someone who
     ever was."""
-    settings = await get_settings(session_factory, org_id=org_id, agent_id=agent_id)
+    settings = await settings_for(session_factory, org_id=org_id, agent_id=agent_id, user_id=user_id)
     if is_team_member(settings, user_id):
         return True
     if await enrollments(session_factory, org_id=org_id, agent_id=agent_id, user_id=user_id):
@@ -614,6 +629,19 @@ async def get_settings(
 ) -> FollowupSettingsRow | None:
     async with session_factory() as db:
         return await db.get(FollowupSettingsRow, (org_id, agent_id))
+
+
+async def settings_for(
+    session_factory: Any, *, org_id: uuid.UUID, agent_id: str, user_id: uuid.UUID | None,
+) -> Any:
+    """The settings as a conversation with *user_id* sees them: inside a
+    simulation, with the team swapped for the run's stand-ins."""
+    from surogates.simulation.team import run_settings
+
+    return await run_settings(
+        session_factory, await get_settings(session_factory, org_id=org_id, agent_id=agent_id),
+        user_id,
+    )
 
 
 def _normalised(field: str, value: Any) -> Any:
@@ -1134,13 +1162,22 @@ async def queue_outreach(
         )
         not_before = held[0] if held else None
     async with session_factory() as db:
+        # A message to the real team about a simulated person stays in the
+        # simulation: the run shows it, nobody real receives it.  One to the
+        # run's own stand-in goes out into the run.
+        runs = dict((await db.execute(
+            sa.select(User.id, User.simulation_run_id)
+            .where(User.id.in_({subject_user_id, user_id} - {None}))
+        )).all()) if subject_user_id is not None and subject_user_id != user_id else {}
+        simulated = runs.get(subject_user_id) is not None and runs.get(user_id) is None
         row = OutreachMessageRow(
             org_id=org_id, agent_id=agent_id, user_id=user_id,
             platform=platform, channel_identifier=channel_identifier,
             kind=kind, text=text, template_name=template_name or None,
             template_language=template_language or None,
             # Recorded, not sent, when nothing could carry it (*failed_reason*).
-            state="failed" if failed_reason else "queued", reason=failed_reason,
+            state="simulated" if simulated else "failed" if failed_reason else "queued",
+            reason=SIMULATED if simulated else failed_reason,
             subject_user_id=subject_user_id, created_by=created_by,
             dedupe_key=dedupe_key, severity=severity, alert_reason=alert_reason,
             destination=destination or None,
@@ -1640,7 +1677,9 @@ async def link_contact(
         raise ValueError("status must be confirmed or pending")
     if contact_user_id == person_user_id:
         raise ValueError("the person cannot be their own contact")
-    settings = await get_settings(session_factory, org_id=org_id, agent_id=agent_id)
+    settings = await settings_for(
+        session_factory, org_id=org_id, agent_id=agent_id, user_id=contact_user_id,
+    )
     if is_team_member(settings, contact_user_id):
         raise TeamMember("this person is on the team, not a contact")
     relation = (relation or "").strip()[:200] or None

@@ -661,6 +661,7 @@ async def test_enrol_without_a_date_or_a_name_says_what_to_pass(sf, patient, car
     assert result.startswith("Not enrolled: pass days_ago")
     assert "date_unknown: true" in result
     assert "pass person_name" in result and "name_unknown: true" in result
+    assert "everything together" in result
     assert await store.enrollments(sf, org_id=ORG, agent_id=AGENT, user_id=user_id) == []
     assert await _outreach(sf) == []
 
@@ -816,3 +817,18 @@ async def test_a_failed_change_tells_the_model_to_try_again(sf, patient, monkeyp
     assert result.startswith("Not done: followup_update failed")
     assert "call it again now" in result and "escalate" in result
     assert "column" not in result
+
+
+@pytest.mark.asyncio
+async def test_a_team_member_hears_up_front_what_they_may_not_do(sf, patient):
+    user_id, session_id = patient
+    await store.update_settings(
+        sf, org_id=ORG, agent_id=AGENT, escalation_service_account_id=None,
+        channel_identifier="pn1", alert_recipient_user_ids=[user_id],
+        alert_template_name=None, alert_template_language=None,
+        message_template_name=None, message_template_language=None,
+        team_permissions={user_id: {"can": ["see_people", "message_person"]}},
+    )
+    status = await followup.handle_followup_status({}, **_kw(sf, session_id))
+    assert "may not enrol people;" in status
+    assert "message people" not in status.split("may not", 1)[1]

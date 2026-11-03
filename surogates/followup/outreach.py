@@ -55,6 +55,7 @@ from surogates.channels.source import SessionSource, build_session_key
 from surogates.programs.opener import DmTarget, OpenerUndeliverable, dm_session, resolve_dm
 from surogates.session.events import OUTREACH_OPENER_MARKER, PLATFORM_NOTE, EventType
 from surogates.session.store import live_lease_token
+from surogates.simulation.team import run_settings
 
 logger = logging.getLogger(__name__)
 
@@ -164,11 +165,13 @@ async def busy_line_for(
     """The business's ``busy_safety_line`` and the running turn's lease token,
     when *user_id* writes mid-turn; ``None`` when it is unset, no turn runs,
     or they are on the team (nobody waits on the agent for them)."""
+    settings = await followup_store.get_settings(session_factory, org_id=org_id, agent_id=agent_id)
+    line = wording(settings, "busy_safety_line").strip() if settings is not None else ""
+    if not line or followup_store.is_team_member(
+        await run_settings(session_factory, settings, user_id), user_id,
+    ):
+        return None
     async with session_factory() as db:
-        settings = await db.get(FollowupSettingsRow, (org_id, agent_id))
-        line = wording(settings, "busy_safety_line").strip() if settings is not None else ""
-        if not line or followup_store.is_team_member(settings, user_id):
-            return None
         token = await live_lease_token(db, session_id)
     return (line, token) if token is not None else None
 

@@ -1431,3 +1431,38 @@ WHERE o.state IN ('queued', 'awaiting_reply')
 -- An agent-owned browser profile used, without being bound, on these channels.
 ALTER TABLE browser_profiles
     ADD COLUMN IF NOT EXISTS use_in_channels text[] NOT NULL DEFAULT '{}'::text[];
+
+-- The stand-in users a simulation run creates; readers of real people skip them.
+ALTER TABLE users
+    ADD COLUMN IF NOT EXISTS simulation_run_id uuid;
+CREATE INDEX IF NOT EXISTS ix_users_simulation_run_id ON users (simulation_run_id);
+
+-- When the agent last showed a simulation person "typing…".
+ALTER TABLE IF EXISTS simulation_people
+    ADD COLUMN IF NOT EXISTS agent_typing_at timestamptz;
+ALTER TABLE IF EXISTS simulation_runs
+    ADD COLUMN IF NOT EXISTS templates jsonb NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE IF EXISTS simulation_runs
+    ADD COLUMN IF NOT EXISTS flows jsonb NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE IF EXISTS simulation_runs
+    ADD COLUMN IF NOT EXISTS channel text NOT NULL DEFAULT 'whatsapp';
+
+-- A person the AI plays, and where it is in the conversation.
+ALTER TABLE IF EXISTS simulation_people
+    ADD COLUMN IF NOT EXISTS persona text,
+    ADD COLUMN IF NOT EXISTS driver text NOT NULL DEFAULT 'human',
+    ADD COLUMN IF NOT EXISTS ai_state text,
+    ADD COLUMN IF NOT EXISTS ai_note text,
+    ADD COLUMN IF NOT EXISTS ai_acted_at timestamptz;
+
+-- A simulation person standing in for one of the agent's team members.
+ALTER TABLE IF EXISTS simulation_people
+    ADD COLUMN IF NOT EXISTS stands_for uuid;
+
+-- How a finished simulation went, judged, and the fixes it proposed.
+ALTER TABLE IF EXISTS simulation_runs
+    ADD COLUMN IF NOT EXISTS review jsonb;
+
+-- Who started a simulation, and what a team stand-in asks the agent unprompted.
+ALTER TABLE IF EXISTS simulation_runs ADD COLUMN IF NOT EXISTS via text;
+ALTER TABLE IF EXISTS simulation_people ADD COLUMN IF NOT EXISTS task text;

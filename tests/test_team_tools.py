@@ -956,3 +956,65 @@ def test_every_preferred_channel_enum_names_each_text_channel_that_writes_first(
     text_channels = set(initiating_platforms()) - {"voice", "web", "api"}
     for schema in (followup_tools.FOLLOWUP_UPDATE_SCHEMA, team_tools.TEAM_UPDATE_PERSON_SCHEMA):
         assert set(schema.parameters["properties"]["preferred_channel"]["enum"]) == text_channels
+
+
+@pytest.mark.asyncio
+async def test_a_team_member_passes_words_to_one_colleague(sf, practice):
+    nurse, nurse_session = await _person(sf, "Ioana Marin", "40700000098", enrol=False)
+    await store.update_settings(
+        sf, org_id=ORG, agent_id=AGENT, alert_recipient_user_ids=[practice.doctor, nurse],
+    )
+    kw = _kw(sf, nurse_session)
+    out = await team.handle_team_tell_member(
+        {"member": "ionescu", "text": "Please enrol Vasile Cirstea."}, **kw,
+    )
+    assert out.startswith("Sent to Dr. Ionescu")
+    [row] = await _outreach(sf)
+    assert row.user_id == practice.doctor and row.kind == "notice"
+    assert row.text == "From Ioana Marin: Please enrol Vasile Cirstea."
+    again = await team.handle_team_tell_member(
+        {"member": "ionescu", "text": "Please enrol Vasile Cirstea."}, **kw, tool_call_id="call-2",
+    )
+    assert again.startswith("Sent to") and len(await _outreach(sf)) == 2
+
+
+    assert "is not on the team" in await team.handle_team_tell_member(
+        {"member": "Ion Popescu", "text": "Hi"}, **kw,
+    )
+    assert "is not on the team" in await team.handle_team_tell_member(
+        {"member": "Ioana", "text": "Note to self"}, **kw,
+    )
+    patient_kw = _kw(sf, practice.ion[1])
+    assert await team.handle_team_tell_member(
+        {"member": "Ionescu", "text": "Hi"}, **patient_kw,
+    ) == team.NOT_TEAM
+
+    ana, _ = await _person(sf, "Ana", "40700000097", enrol=False)
+    await _person(sf, "Ioana Ana Pop", "40700000096", enrol=False)
+    async with sf() as db:
+        ids = [practice.doctor, nurse, ana] + [u for u in (await db.execute(
+            sa.select(User.id).where(User.display_name == "Ioana Ana Pop"))).scalars()]
+    await store.update_settings(sf, org_id=ORG, agent_id=AGENT, alert_recipient_user_ids=ids)
+    assert (await team.handle_team_tell_member({"member": "Ana", "text": "Hi"}, **kw)).startswith("Sent to Ana")
+
+
+@pytest.mark.asyncio
+async def test_a_customer_who_just_wrote_in_can_be_answered_without_being_enrolled(sf, practice):
+    """The agent escalated a customer mid-conversation; the team member answers
+    them through it. Writing in is no permission to be written to later."""
+    stranger, _ = await _person(sf, "Maria Stan", "40700000842", enrol=False, permission=False)
+    await store.record_escalation(
+        sf, org_id=ORG, agent_id=AGENT, user_id=stranger, kind="alert", reason="Wants a refund",
+    )
+    kw = _kw(sf, practice.doctor_session)
+    ask = {"person": "Maria", "text": "Vă sun în 30 de minute."}
+    out = await team.handle_team_message_person(ask, **kw)
+    assert "permission" in out and await _outreach(sf) == []
+
+    await store.record_inbound(sf, org_id=ORG, platform="whatsapp",
+                               platform_user_id="40700000842", channel_identifier="pn1")
+    out = await _confirmed(team.handle_team_message_person, ask, kw)
+    assert out.startswith("Sent now:")
+    [row] = await _outreach(sf)
+    assert row.user_id == stranger and row.template_name is None
+

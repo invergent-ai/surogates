@@ -1639,7 +1639,7 @@ def register(registry: ToolRegistry) -> None:
             name="browser_press_key",
             description=(
                 "Press a single key or chord such as Enter, Escape, Tab, or "
-                "Control+a — multiple keys form one chord, not a sequence. To "
+                "Control+a; multiple keys form one chord, not a sequence. To "
                 "enter text, use browser_type."
             ),
             parameters=PRESS_KEY_SCHEMA,

@@ -114,6 +114,27 @@ class OpsDatabaseSettings(BaseSettings):
     pool_overflow: int = 2
 
 
+class SimulationSettings(BaseSettings):
+    """The ``surogates simulation`` process.
+
+    ``url`` is where the runtime's adapters reach the worlds; the WhatsApp
+    adapter reads it as ``SUROGATES_SIMULATION_URL``, and an empty one keeps
+    every number on Meta.  ``channels_url`` is where worlds post webhooks.
+    """
+    model_config = {"env_prefix": "SUROGATES_SIMULATION_"}
+
+    url: str = ""
+    port: int = 8004
+    channels_url: str = ""
+    internal_token: str = ""
+    #: Where Studio's browser reaches LiveKit for a voice simulation; empty is ``voice.livekit_url``.
+    livekit_public_url: str = ""
+    #: The model that plays people; empty ones fall back to ``llm.summary_*``.
+    model: str = ""
+    base_url: str = ""
+    api_key: str = ""
+
+
 class KBHubSettings(BaseSettings):
     """Connection to surogate-hub for fetching wiki page content.
 
@@ -945,6 +966,7 @@ class Settings(BaseSettings):
     vapid: VapidSettings = Field(default_factory=VapidSettings)
     office: OfficeSettings = Field(default_factory=OfficeSettings)
     keel: KeelSettings = Field(default_factory=KeelSettings)
+    simulation: SimulationSettings = Field(default_factory=SimulationSettings)
 
     # Tenant asset root.  Used by the per-session sandbox pods to mount
     # workspace volumes; the platform itself no longer reads filesystem

@@ -473,6 +473,29 @@ async def test_provisioning_failure_drops_instead_of_crashing():
 
 
 @pytest.mark.asyncio
+async def test_the_same_ts_from_another_tenants_app_is_not_a_duplicate():
+    """Telegram numbers updates per bot: update 1 to one tenant's bot and
+    update 1 to another's are two messages."""
+    pipeline = ChannelInboundPipeline()
+    for app in ("bot_a", "bot_b"):
+        result = await pipeline.handle(_make_msg(is_dm=True, ts="1"), routing=_make_routing(identifier=app),
+                                       config=_make_config(), deps=_make_deps())
+        assert result == InboundOutcome.PROCESSED
+
+
+def test_a_seen_message_is_forgotten_after_the_ttl(monkeypatch):
+    from surogates.channels import dedup
+
+    clock = [1000.0]
+    monkeypatch.setattr(dedup.time, "time", lambda: clock[0])
+    seen = dedup.MessageDeduplicator(ttl_seconds=300)
+    assert not seen.is_duplicate("1")
+    assert seen.is_duplicate("1")
+    clock[0] += 301
+    assert not seen.is_duplicate("1")
+
+
+@pytest.mark.asyncio
 async def test_f_dedup_drops_duplicate_ts():
     """(f) Identical ts → second call dropped immediately."""
     msg = _make_msg(is_dm=True, ts="7.0")
@@ -1576,3 +1599,16 @@ async def test_a_disclosure_the_channel_could_not_post_is_not_recorded_as_shown(
 
     [said] = [d for _, t, d in deps.session_store.events if t == EventType.USER_MESSAGE]
     assert disclosure_note("I am an AI.") not in build_user_message_dict(said)["content"]
+
+
+@pytest.mark.asyncio
+async def test_simulation_routing_nests_the_memory_boundary():
+    """A simulation run's conversation keeps memory inside the run and is hidden by ops."""
+    deps = _make_deps()
+    msg = _make_msg(is_dm=True, ts="95.0")
+    config = {**_make_config(require_mention=False), "simulation_run_id": "run-1"}
+
+    await ChannelInboundPipeline().handle(msg, routing=_make_routing(), config=config, deps=deps)
+
+    boundary = deps._sessions_created[-1]["config"]["memory_boundary"]
+    assert boundary.startswith("simulation:run-1:")
