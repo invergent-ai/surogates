@@ -1096,8 +1096,10 @@ async def handle_team_message_person(arguments: dict, **kwargs: Any) -> str:
 
     phone = person.contact
     call = f"Call them instead ({phone}); {PHONE_HINT}"
-    active = any(r.status == "active" for r in person.rows)
-    if not active and arguments.get("even_if_paused") is not True:
+    # Only a follow-up someone paused or ended asks first; a person who is
+    # in no follow-up is simply written to.
+    stopped = bool(person.rows) and not any(r.status == "active" for r in person.rows)
+    if stopped and arguments.get("even_if_paused") is not True:
         status = "; ".join(
             f"{r.protocol} {r.status}" + (f" ({r.status_reason})" if r.status_reason else "")
             for r in person.rows
@@ -1116,7 +1118,7 @@ async def handle_team_message_person(arguments: dict, **kwargs: Any) -> str:
     # through their contacts.
     found, why = await people.reachable(
         sf, org_id=ctx.org_id, user_id=person.user_id, senders=senders,
-        preferred=preferred, template=bool(template_name), now=now,
+        preferred=preferred, template=bool(template_name), now=now, replying=True,
     )
     recipient, via = person.user_id, ""
     if not found:

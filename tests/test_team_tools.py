@@ -996,3 +996,25 @@ async def test_a_team_member_passes_words_to_one_colleague(sf, practice):
             sa.select(User.id).where(User.display_name == "Ioana Ana Pop"))).scalars()]
     await store.update_settings(sf, org_id=ORG, agent_id=AGENT, alert_recipient_user_ids=ids)
     assert (await team.handle_team_tell_member({"member": "Ana", "text": "Hi"}, **kw)).startswith("Sent to Ana")
+
+
+@pytest.mark.asyncio
+async def test_a_customer_who_just_wrote_in_can_be_answered_without_being_enrolled(sf, practice):
+    """The agent escalated a customer mid-conversation; the team member answers
+    them through it. Writing in is no permission to be written to later."""
+    stranger, _ = await _person(sf, "Maria Stan", "40700000842", enrol=False, permission=False)
+    await store.record_escalation(
+        sf, org_id=ORG, agent_id=AGENT, user_id=stranger, kind="alert", reason="Wants a refund",
+    )
+    kw = _kw(sf, practice.doctor_session)
+    ask = {"person": "Maria", "text": "Vă sun în 30 de minute."}
+    out = await team.handle_team_message_person(ask, **kw)
+    assert "permission" in out and await _outreach(sf) == []
+
+    await store.record_inbound(sf, org_id=ORG, platform="whatsapp",
+                               platform_user_id="40700000842", channel_identifier="pn1")
+    out = await _confirmed(team.handle_team_message_person, ask, kw)
+    assert out.startswith("Sent now:")
+    [row] = await _outreach(sf)
+    assert row.user_id == stranger and row.template_name is None
+
