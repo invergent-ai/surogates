@@ -44,8 +44,8 @@ _TAPS = {
         'a reply button: {"button_reply": {"id", "title"}} from interactive.action.buttons[].reply; '
         'a list row: {"list_reply": {"id", "title"}} from interactive.action.sections[].rows[]; '
         'a template quick reply: {"quick_reply": {"text", "payload"}}; '
-        'a form (interactive.type "flow"): fill it in with {"form_reply": {<field name>: <answer>, ..., '
-        '"flow_token": <interactive.action.parameters.flow_token>}}, using the fields listed below'
+        'a form (interactive.type "flow") is not tapped: choose action "form" and put each '
+        'field\'s answer in "form", by the field names listed below'
     ),
     "telegram": 'an inline button: {"callback": {"message_id": <the message id>, "data": <its callback_data>}}',
     "slack": (
@@ -58,11 +58,13 @@ _TAPS = {
 class Move(BaseModel):
     """The person's next move."""
 
-    action: Literal["write", "tap", "done", "give_up"]
+    action: Literal["write", "tap", "form", "done", "give_up"]
     #: What they write, for ``write``.
     text: Optional[str] = None
     #: What they tap, for ``tap``, in the shape the instructions give.
     tap: Optional[dict[str, Any]] = None
+    #: For ``form``: each field's answer, by field name.
+    form: Optional[dict[str, Any]] = None
     #: For ``done`` and ``give_up``: why, in a short sentence.
     note: Optional[str] = None
 
@@ -100,6 +102,32 @@ def _forms(flows, thread) -> str:
     return "\n".join(lines)
 
 
+def _form_token(thread) -> str | None:
+    """The token of the last form the agent sent."""
+    for m in reversed(thread):
+        i = m.body.get("interactive", {}) if m.direction == "out" and isinstance(m.body, dict) else {}
+        if i.get("type") == "flow":
+            return i["action"]["parameters"].get("flow_token")
+    return None
+
+
+def _wrong_tap(thread, body: "PersonMessage") -> str | None:
+    """Why a WhatsApp tap matches nothing the agent sent, said so the model can fix it."""
+    if body.form_reply is not None:
+        filled = {k for k, v in body.form_reply.items() if k != "flow_token" and v not in (None, "")}
+        return None if filled else "the form was sent empty: fill in its fields, named below"
+    if not body.button_reply:
+        return None
+    sent = [m.body.get("interactive", {}) for m in thread
+            if m.direction == "out" and isinstance(m.body, dict)]
+    ids = {b.get("reply", {}).get("id") for i in sent for b in i.get("action", {}).get("buttons", [])}
+    if body.button_reply.get("id") in ids:
+        return None
+    if any(i.get("type") == "flow" for i in sent):
+        return 'that is a form, not a button: choose action "form" with each field\'s answer'
+    return f"no button has the id {body.button_reply.get('id')!r}; copy one from the agent's buttons"
+
+
 def _prompt(person, channel: str, thread, flows=None, refused: str | None = None) -> list[dict[str, str]]:
     taps = _TAPS.get(channel)
     forms = _forms(flows, thread) if channel == "whatsapp" else ""
@@ -120,7 +148,7 @@ def _prompt(person, channel: str, thread, flows=None, refused: str | None = None
            if taps else "You can only write text.")
         + (f"\n{forms}\nAn OptIn field is true or false; a date is YYYY-MM-DD." if forms else "")
         + (f"\nYour last move was refused ({refused}); make a different one." if refused else "")
-        + '\nAnswer with JSON: {"action": "write"|"tap"|"done"|"give_up", "text", "tap", "note"}.'
+        + '\nAnswer with JSON: {"action": "write"|"tap"|"form"|"done"|"give_up", "text", "tap", "form", "note"}.'
     )
     chat = "\n".join(lines) or "(Nothing yet: you write first.)"
     return [{"role": "system", "content": system},
@@ -206,8 +234,13 @@ class Actor:
         if move.action in ("done", "give_up"):
             state = "done" if move.action == "done" else "gave_up"
             return await self._stop(person, state, move.note or "")
-        body = (PersonMessage(**move.tap) if move.action == "tap" and move.tap
-                else PersonMessage(text=move.text))
+        tap = move.tap if move.action == "tap" else None
+        if move.action == "form" or (tap and "flow_token" in tap and "form_reply" not in tap):
+            tap = {"form_reply": {**(move.form or tap or {}), "flow_token": _form_token(thread)}}
+        body = PersonMessage(**tap) if tap else PersonMessage(text=move.text)
+        wrong = _wrong_tap(thread, body) if run.channel == "whatsapp" else None
+        if wrong:
+            raise RuntimeError(f"the move was refused: {wrong}")
         # Taken over while the model thought: the user writes now.
         current = next((p for p in await store.people(sf, run.id) if p.id == person.id), None)
         if current is None or current.driver != "ai":

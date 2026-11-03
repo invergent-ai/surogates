@@ -117,6 +117,21 @@ async def test_a_person_waits_while_the_agent_is_still_working(rsf, monkeypatch)
     assert stopped == ["no_reply"]
 
 
+def test_a_form_is_filled_in_not_tapped():
+    from surogates.simulation.api import PersonMessage
+
+    form = SimpleNamespace(direction="out", body={"interactive": {
+        "type": "flow", "action": {"parameters": {"flow_token": "inrolare:t1"}}}})
+    asked = SimpleNamespace(direction="out", body={"interactive": {
+        "type": "button", "action": {"buttons": [{"reply": {"id": "choice:0", "title": "Da"}}]}}})
+    thread = [asked, form]
+    assert actor._form_token(thread) == "inrolare:t1"
+    assert "form" in actor._wrong_tap(thread, PersonMessage(button_reply={"id": "flow", "title": "Open"}))
+    assert actor._wrong_tap(thread, PersonMessage(button_reply={"id": "choice:0", "title": "Da"})) is None
+    assert "empty" in actor._wrong_tap(thread, PersonMessage(form_reply={"flow_token": "inrolare:t1"}))
+    assert actor._wrong_tap(thread, PersonMessage(form_reply={"nume": "Ana", "flow_token": "x"})) is None
+
+
 @pytest.mark.asyncio
 async def test_the_ai_only_writes_on_chat_channels(rsf):  # noqa: F811
     org_id, client = await _client(rsf)
@@ -140,6 +155,6 @@ def test_a_sent_form_is_described_and_a_refusal_is_fed_back():
     system = actor._prompt(person, "whatsapp", [sent], [flow], "Write something")[0]["content"]
     assert "who (RadioButtonsGroup, Who, required, one of me / family)" in system
     assert "ok (OptIn, Agree)" in system
-    assert "form_reply" in system
+    assert "choose action \"form\"" in system
     assert "refused (Write something)" in system
     assert "Form" not in actor._prompt(person, "whatsapp", [], [flow])[0]["content"]
