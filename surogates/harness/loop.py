@@ -101,6 +101,12 @@ from surogates.harness.slash_skill import (
 from surogates.harness.subdirectory_hints import SubdirectoryHintTracker
 from surogates.harness.streaming_executor import StreamingToolExecutor
 from surogates.harness.structured_output import generate_structured, parse_json_object
+from surogates.harness.todo_reminder import (
+    TODO_REMINDER_AFTER,
+    inject_todo_reminder,
+    iterations_since_todo,
+    stale_todo_reminder,
+)
 from surogates.harness.tool_exec import (
     _open_local_copy,
     _parse_tool_args_for_guardrail,
@@ -2913,6 +2919,7 @@ class AgentHarness(
         thinking_prefill_retries = 0  # retries for thinking-only responses
         incomplete_scratchpad_retries = 0  # retries for unclosed REASONING_SCRATCHPAD
         empty_response_retries = 0  # retries for empty LLM responses (no content, no tools, no reasoning)
+        iters_since_todo = 0      # tool-calling iterations without a todo call
         unfinished_retries = 0    # nudges for a turn that trails off without acting
         deliverable_retries = 0   # nudges for a named file that was never written
         save_claim_retries = 0    # nudges for "noted it" with no memory call
@@ -4368,6 +4375,16 @@ class AgentHarness(
 
             # 7c. Budget pressure warning -- inject into the last tool result.
             tool_results = inject_budget_warning(tool_results, self._budget)
+
+            # 7c'. A task list left unchanged for several iterations while items
+            #      are still open is asked about, in the same place and the same
+            #      way: in memory, in the last tool result, never an event.
+            iters_since_todo = iterations_since_todo(iters_since_todo, tool_calls_raw or [])
+            if iters_since_todo >= TODO_REMINDER_AFTER:
+                iters_since_todo = 0
+                todo_reminder = await stale_todo_reminder(self._store, session.id)
+                if todo_reminder is not None:
+                    tool_results = inject_todo_reminder(tool_results, todo_reminder)
 
             # 7d. For vision-capable models, inject a native image block after tool
             #     results for any fetch_channel_file image result. Best-effort: any

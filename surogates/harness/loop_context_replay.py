@@ -25,6 +25,7 @@ from surogates.harness.loop_messages import (
 from surogates.office.mentions import mention_note
 from surogates.harness.loop_tool_recovery import collapse_repeated_tool_rounds
 from surogates.harness.sanitize import strip_budget_warnings
+from surogates.harness.todo_reminder import strip_todo_reminders
 from surogates.harness.tool_exec import _WORKSPACE_TOKEN
 from surogates.harness.loop_pending import _in_typed_order
 from surogates.keel.steps import is_keel_message
@@ -964,6 +965,7 @@ class ContextReplayMixin:
 
         # Strip stale budget warnings from replayed tool results.
         strip_budget_warnings(messages)
+        strip_todo_reminders(messages)
 
         # Repair histories poisoned by a prior identical-call loop:
         # providers reject conversations that repeat the same tool call
