@@ -1,0 +1,140 @@
+# Surogate profile: tool and parameter descriptions (descriptions only --
+# names, types, enums and required lists stay the registry's).
+# A tool missing here keeps its registry description. office_* tools are
+# deliberately absent: they are tuned already and keep their own text.
+
+terminal:
+  description: |
+    Run a shell command in your Linux workspace (files persist between calls). Use it for scripts, builds, tests, git, package installs, data processing (e.g. python3) and network fetches. For reading, searching, listing and editing files use read_file, search_files, list_files, patch and write_file instead.
+    Foreground commands return as soon as they finish; raise `timeout` (seconds) for long builds. background=true is only for servers or very long jobs (check them with the process tool; notify_on_complete=true reports when done). Interactive programs need pty=true. Pipe paging output (e.g. git log) to cat. Background processes may not survive between turns.
+  parameters:
+    command: The shell command to run.
+    timeout: Max seconds to wait (default 180); the call returns as soon as the command ends.
+    workdir: Working directory for this command (default the workspace).
+    background: Run in the background (servers, watchers, very long jobs); default false.
+    check_interval: |
+      Seconds between automatic progress reports for a background process (messaging channels only, min 30).
+    pty: Pseudo-terminal, for interactive CLI tools; default false.
+    notify_on_complete: 'With background=true: report automatically when the process finishes.'
+process:
+  description: |
+    Manage background processes started with terminal(background=true): list, poll (status + new output), log (full output), wait (block until done or timeout), kill, write (raw stdin), submit (stdin + Enter).
+read_file:
+  description: |
+    Read a file from the workspace, in pages of up to 2000 lines. Also parses .pdf, Word (.doc/.docx), Excel (.xls/.xlsx), PowerPoint (.ppt/.pptx), OpenDocument and .rtf into text, and describes images. Use it instead of cat or extracting documents yourself. If the result says truncated, continue from next_offset.
+write_file:
+  description: |
+    Create a file, or replace a file's whole content (parent folders are created). An existing file must have been read with read_file in this session before you overwrite it. For changes to part of a file use patch. Files the user wants to view in the chat (a chart, a one-page widget) go through create_artifact instead.
+patch:
+  description: |
+    Edit a file by replacing text: old_string must match exactly one place (whitespace differences are tolerated), or set replace_all=true. On a "not unique" error add surrounding context rather than retrying the same text. Returns a diff and runs a syntax check. Prefer this to rewriting whole files or sed/awk.
+  parameters:
+    old_string: |
+      Exact text to find (unique in the file unless replace_all=true); include enough surrounding lines to make it unique.
+search_files:
+  description: |
+    Search inside files with a regex (target='content', the default) or find files by name with a glob (target='files'). Faster than grep/find in terminal. Output modes for content search: content (matching lines with line numbers), files_only, count.
+  parameters:
+    output_mode: 'For content search: ''content'' (lines with numbers), ''files_only'' or ''count''.'
+list_files:
+  description: |
+    List the files in a directory (most recently modified first), optionally filtered by a glob pattern.
+todo:
+  description: |
+    Your task list for this session, shown to the user. Use it for work with 3 or more steps: write the plan (merge=false), then as each item finishes call again with merge=true to mark it completed and the next one in_progress (one at a time). Call with no arguments to read the list.
+memory:
+  description: |
+    Save durable facts to memory that is injected into future conversations. target='user' for who the user is and their preferences; target='memory' for environment facts, conventions and lessons. Actions: add (new entry), replace / remove (old_text = a short unique substring of the entry). Save preferences and corrections when you learn them; skip task progress, one-off details and things easy to look up again. Only a successful call saves anything.
+session_search:
+  description: |
+    Search past conversations with this user. Without a query: list recent sessions (titles, previews, times). With a query: summaries of matching sessions. Bare keywords are ANDed; join alternatives with OR (deploy OR deployed), quote exact phrases, exclude with a leading minus. Matching is exact-token, case-insensitive, no stemming. Use it when the user refers to earlier work ("last time", "as I mentioned"). In an ops console session results span every user of the agent; attribute each to its user_id.
+skill_view:
+  description: |
+    Load a skill's instructions (SKILL.md) and the list of its files. A skill's files are copied into the workspace and the result gives their folder in 'staged_at': run its scripts and read its templates from there with terminal/read_file. Pass file_path only to get one of its files inline.
+skills_list:
+  description: List the available skills (name and description), optionally for one category.
+skill_manage:
+  description: |
+    Create, change or delete skills (reusable procedures). Actions: create (full SKILL.md), patch (old_string -> new_string; preferred for fixes), edit (full rewrite), delete, write_file / remove_file (supporting files under references/, templates/, scripts/ or assets/). Create or delete only when the user asks, and confirm first. If a skill you followed was wrong or incomplete, patch it.
+  parameters:
+    content: |
+      Full SKILL.md (YAML frontmatter + body); for 'create' and 'edit' (read the skill first for 'edit').
+    category: Optional category folder for 'create'.
+    file_path: |
+      Supporting file under references/, templates/, scripts/ or assets/ (for write_file/remove_file; for patch, defaults to SKILL.md).
+ask_user_question:
+  description: |
+    Ask the user 1-5 questions and wait for the answers. Use only when you are blocked on something only the user can provide or decide and a wrong guess would waste the work; not for opinions you should give, decisions with an obvious default, or confirming what the user already specified. Each question has a prompt and optional choices (up to 4; the user can always type another answer). Asking pauses the session until the user replies; their answers arrive as the next message. If the result says cancelled, stop and wait for the user.
+  parameters:
+    message: |
+      Optional short text shown right before the questions, in the user's language (an acknowledgement or what you already found). Never your reasoning or plans.
+create_artifact:
+  description: |
+    Show content in a panel in the chat: kind 'chart' (Chart.js), 'table', 'markdown' (a standalone document), 'html' (self-contained page in a sandboxed iframe, no external resources) or 'svg'. Put the content in `spec` under the field for its kind: chart -> spec.chart_js (full Chart.js config), table -> spec.columns + spec.rows (rows are objects keyed by column), markdown -> spec.content, html -> spec.html, svg -> spec.svg.
+    To change an artifact, call again with its artifact_id and the complete new spec (a new version replaces it in place). Don't repeat a call that succeeded; one artifact per response unless asked. Make it finished: a chart titled with its finding, axes labelled with units, bar axes from zero; tables sorted by the column that matters; documents that lead with the conclusion. After it renders, reply with one line at most.
+web_search:
+  description: |
+    Search the web. Returns titles, URLs and short descriptions (5 by default; `limit` up to 20 for broad research). Read the pages you rely on with web_extract.
+web_extract:
+  description: |
+    Fetch up to 5 URLs and return their content as markdown (long pages are summarized to about 5000 characters). Works for PDF links too, but long PDFs are better downloaded with terminal and read with read_file. If a page fails, try the browser.
+vision_analyze:
+  description: |
+    Look at an image from a workspace path or HTTPS URL (PNG, JPEG, WEBP, GIF; not SVG) and answer a question about it. Not for images attached to the conversation: you already see those.
+generate_image:
+  description: |
+    Generate an image from a text prompt (optionally guided by input images) and save it in the workspace. Returns its path and real size, `delivery` (how it reaches the user: follow it; on messaging channels the image is sent only when you attach it) and `not_as_asked` when the model ignored a size, aspect ratio or transparency you asked for.
+generate_video:
+  description: |
+    Generate a video from a text prompt (optionally from a first-frame image) and save it in the workspace; takes minutes. The video is shown to the user automatically: just mention it, don't embed the path.
+delegate_task:
+  description: |
+    Hand self-contained sub-tasks to sub-agents, each in a fresh session: `goal` for one, `goals` for several in parallel. Give each the context it needs (it cannot see this conversation). Use it for large independent pieces of work, not for single lookups.
+  parameters:
+    goals: |
+      Several tasks to run in parallel: objects with their own goal and optional context, model, agent_type, role. Use goal or goals, not both.
+    agent_type: Optional pre-configured sub-agent type (its prompt, tools, model and limits).
+    role: |
+      'leaf' (default): the child cannot delegate further; 'orchestrator': it may delegate one more level.
+consult_expert:
+  description: |
+    Ask a specialist model listed under Available Experts to do one focused task in its domain; it returns its answer or deliverable.
+github:
+  description: |
+    GitHub REST API for the agent's configured repositories (no checkout). GET (default) reads issues, pull requests, files, commits, diffs and search; POST/PATCH/PUT/DELETE with a `body` writes (issues, comments, labels, PRs, files; never the repository itself; needs a token with write scope). Examples: open issues -> path='/repos/{owner}/{repo}/issues', params={'state':'open'}; a PR diff -> path='/repos/{owner}/{repo}/pulls/{n}', media_type='diff'; comment -> method='POST', path='/repos/{owner}/{repo}/issues/{n}/comments', body={'body':'...'}. For multi-file code changes and PRs prefer run_coding_agent.
+research_memory:
+  description: |
+    Evidence bank for deep research. add: store a source once (url, title, summary, short verbatim evidence quotes) and get its source_id (e.g. S3) to cite. retrieve: the sources most relevant to a query (use per report section). list: every source, for the References section.
+research_outline:
+  description: |
+    The living outline of a research report (markdown). set replaces it with your rewritten version; get returns it.
+browser_navigate:
+  description: |
+    Open a URL in your browser. Returns the final URL, the title and the page outline with @eN refs for browser_click / browser_type, so you can usually act directly. Large outlines are cut; browser_get_state with selector or interactive_only shows the rest.
+browser_get_state:
+  description: |
+    The current page as an outline with @eN refs (format='json' for the raw tree with coordinates). Scope large pages with `selector`.
+  parameters:
+    format: |
+      'markdown' (default): outline with '- role @eN "name"' lines; 'json': raw node tree with coordinates.
+    interactive_only: Only clickable/typeable elements, no page text.
+    max_depth: Drop elements nested deeper than this (prefer selector).
+    selector: CSS selector to limit the outline to one region, e.g. '#results'.
+browser_evaluate:
+  description: |
+    Run JavaScript in the page and return a JSON-serializable value (use `return`). Best for reading data in bulk (tables, select options, hidden values) in one call.
+browser_screenshot:
+  description: |
+    Save a PNG screenshot of the page in the workspace; open it with read_file to see it. annotate=true labels the cached refs.
+cron_create:
+  description: |
+    Schedule a prompt to run later, once or repeatedly, as a fresh session whose answer appears in this chat. Give exactly one of cron, interval, at, or times (with optional days), plus an IANA timezone; convert the user's words into these. The prompt must be self-contained (the run cannot see this conversation).
+    Where you can ask the user, the first call creates nothing: it returns what it would make. Ask the user to approve it (in their language: the cadence in plain words, timezone, next run, a one-line summary of the prompt, and that it repeats until cancelled), with the approving choice first, then call again with the same arguments. Never say a schedule exists unless a tool result shows it.
+cron_update:
+  description: |
+    Change a schedule's prompt, name, cadence (as in cron_create) or timezone. Confirm with the user first, as for cron_create; a scheduled run may change its own schedule without asking.
+cron_delete:
+  description: |
+    Cancel a schedule for good when the user asks (a run in progress stops). A scheduled run ends its own schedule this way, with a reason, when its prompt says it is done.
+cron_run_now:
+  description: Start an extra run of an active schedule now, only when the user asks for one.

@@ -299,6 +299,18 @@ MODEL_CATALOG: dict[str, ModelInfo] = {
         output_cost_per_1k=0.0,
         supports_vision=True,
     ),
+    # Surogate 3.7 by its own id, as llm.surogate.ai serves it (and as a
+    # deployment that talks to it directly names it). Native window 262,144
+    # (the served 1M is a YaRN extension); vision on. Open weights on our
+    # own GPUs, so no rate.
+    "surogate/surogate3.7-35b-a3b": ModelInfo(
+        id="surogate/surogate3.7-35b-a3b",
+        context_window=262_144,
+        max_output_tokens=32_768,
+        input_cost_per_1k=0.0,
+        output_cost_per_1k=0.0,
+        supports_vision=True,
+    ),
     # Pro is served by Claude Opus, whose window is 1M.
     "surogate-pro": ModelInfo(
         id="surogate-pro",
@@ -405,6 +417,7 @@ _ALIASES: dict[str, str] = {
     "gemini-3-flash": "google/gemini-3-flash-preview",
     "@preset/glm-5-2": "z-ai/glm-5.2",
     "@preset/qwen-3-8-max": "qwen/qwen3.8-max",
+    "surogate/Surogate3.7-35B-A3B": "surogate/surogate3.7-35b-a3b",
 }
 
 

@@ -147,6 +147,7 @@ from surogates.keel.steps import (
     sleeps_through_a_plain_message,
     step_contract_of,
 )
+from surogates.harness.prompt_profile import apply_tool_profile
 from surogates.harness.tool_schemas import (
     CRON_OWN_SCHEDULE_TOOLS,
     CRON_WRITE_TOOLS,
@@ -3082,6 +3083,12 @@ class AgentHarness(
         tool_schemas = filter_schemas_for_tenant(
             self._tools.get_schemas(names=tool_filter),
             has_agents=self._prompt.has_agents,
+        )
+        # The prompt's model profile also rewrites tool descriptions (only
+        # descriptions: names, types and required lists stay the registry's).
+        # Before the device/conversation notes below, which append to them.
+        tool_schemas = apply_tool_profile(
+            tool_schemas, getattr(self._prompt, "prompt_profile", None),
         )
         # Drop tools whose backing resource this agent does not have.
         # Schemas ship on every request, so an unusable one is paid for

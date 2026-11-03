@@ -5,6 +5,7 @@ version: 1.0.0
 author: Surogate Agent (adapted from obra/superpowers)
 license: MIT
 tags: [process, skills, meta]
+requires_tools: [skill_manage]
 ---
 
 # Writing Skills

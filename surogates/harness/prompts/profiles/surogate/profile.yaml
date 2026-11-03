@@ -1,0 +1,4 @@
+# Prompt profile for Surogate 3.x (35B-A3B, Qwen3.5-MoE family).
+# Selected by surogates.harness.prompt_profile; measured with the harness lab
+# (benchmarks/prompt_lab): see its README for the A/B behind every overlay here.
+compact_context: true
