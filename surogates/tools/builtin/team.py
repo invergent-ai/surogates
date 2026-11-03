@@ -439,8 +439,6 @@ async def _people(sf: Any, org_id: uuid.UUID, agent_id: str, settings: Any) -> l
     ):
         if not followup_store.is_team_member(settings, row.user_id):
             by_user.setdefault(row.user_id, []).append(row)
-    seen = await in_scope(sf, settings, set(by_user))
-    by_user = {u: rows for u, rows in by_user.items() if u in seen}
     described = await describe_people(sf, org_id=org_id, agent_id=agent_id, rows_by_user=by_user)
     out = [_Person(d) for d in described.values()]
     links = await followup_store.contacts(sf, org_id=org_id, agent_id=agent_id)
@@ -1724,11 +1722,8 @@ async def handle_team_tell_member(arguments: dict, **kwargs: Any) -> str:
         return "Nothing sent: name the colleague and say what to tell them."
     others = [uuid.UUID(str(m)) for m in settings.alert_recipient_user_ids or []
               if str(m) != str(ctx.user_id)]
-    async with sf() as db:
-        names = dict((await db.execute(
-            sa.select(User.id, User.display_name).where(User.id.in_(others))
-        )).all()) if others else {}
-    folded = {u: fold_label(name or "") for u, name in names.items()}
+    names = await followup_store.display_names(sf, others)
+    folded = {u: fold_label(name) for u, name in names.items()}
     matches = ([u for u, name in folded.items() if name == wanted]
                or [u for u, name in folded.items() if wanted in name])
     if len(matches) != 1:

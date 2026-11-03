@@ -193,12 +193,14 @@ async def test_the_agent_owes_an_answer_until_its_turn_ends(rsf):  # noqa: F811
         await db.commit()
     person = SimpleNamespace(user_id=user_id)
 
-    async def say(event_type):
+    async def say(event_type, **data):
         async with rsf() as db:
-            db.add(Event(session_id=session_id, type=event_type, data={}))
+            db.add(Event(session_id=session_id, type=event_type, data=data))
             await db.commit()
 
     assert not await store.agent_working(rsf, person)
+    await say("user.message", synthetic="outreach_opener")
+    assert not await store.agent_working(rsf, person)  # The business wrote first: nobody waits.
     await say("user.message")
     assert await store.agent_working(rsf, person)  # Not taken up yet: a disclosure is no answer.
     await say("inbox.input_required")

@@ -21,14 +21,25 @@ from surogates.db.models import SimulationPerson, SimulationRun, User
 from surogates.simulation.ids import new_wa_id
 
 
-class RunSettings:
+class InRun:
+    """The agent's settings as seen from inside a run: rosters and lookups
+    keep to the run's people.  Without stand-ins the team is unchanged, and
+    its alerts show in the run as "not sent"."""
+
+    def __init__(self, settings: Any, run_id: uuid.UUID) -> None:
+        self._settings = settings
+        self.simulation_run_id = run_id
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._settings, name)
+
+
+class RunSettings(InRun):
     """The agent's follow-up settings with its team swapped for a run's stand-ins."""
 
     def __init__(self, settings: Any, stand_ins: dict[str, str], sender: str,
-                 run_id: uuid.UUID | None = None) -> None:
-        self._settings = settings
-        self.simulation_run_id = run_id
-        self._swap = stand_ins
+                 run_id: uuid.UUID) -> None:
+        super().__init__(settings, run_id)
         self.alert_recipient_user_ids = list(stand_ins.values())
         self.team_permissions = {
             stand_ins[member]: entry
@@ -38,22 +49,6 @@ class RunSettings:
         self.team_destinations: list = []
         self.senders = {"whatsapp": sender}
         self.channel_identifier = sender
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._settings, name)
-
-
-class InRun:
-    """The agent's settings, unchanged, marked as seen from inside a run that
-    has no stand-ins: rosters and lookups then keep to the run's people, and
-    team alerts still reach the real team's names only as "not sent"."""
-
-    def __init__(self, settings: Any, run_id: uuid.UUID) -> None:
-        self._settings = settings
-        self.simulation_run_id = run_id
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._settings, name)
 
 
 def team_persona(name: str, permissions: dict[str, Any], task: str | None = None) -> str:

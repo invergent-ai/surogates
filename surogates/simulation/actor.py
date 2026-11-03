@@ -81,8 +81,8 @@ def _client(settings) -> tuple[AsyncOpenAI, str] | None:
 
 def _forms(flows, thread) -> str:
     """The fields of every WhatsApp Flow the agent sent, so the person can fill it in."""
-    sent = {str(m.body.get("interactive", {}).get("action", {}).get("parameters", {}).get("flow_id"))
-            for m in thread if m.direction == "out" and isinstance(m.body, dict)}
+    sent = {str(i.get("action", {}).get("parameters", {}).get("flow_id"))
+            for i in _sent_interactive(thread)}
     lines = []
     for flow in flows or []:
         if str(flow.get("id")) not in sent:
@@ -102,29 +102,36 @@ def _forms(flows, thread) -> str:
     return "\n".join(lines)
 
 
+def _sent_interactive(thread) -> list[dict]:
+    """The interactive part of every message the agent sent, oldest first."""
+    return [m.body.get("interactive", {}) for m in thread
+            if m.direction == "out" and isinstance(m.body, dict)]
+
+
 def _form_token(thread) -> str | None:
     """The token of the last form the agent sent."""
-    for m in reversed(thread):
-        i = m.body.get("interactive", {}) if m.direction == "out" and isinstance(m.body, dict) else {}
-        if i.get("type") == "flow":
-            return i.get("action", {}).get("parameters", {}).get("flow_token")
-    return None
+    forms = [i for i in _sent_interactive(thread) if i.get("type") == "flow"]
+    return forms[-1].get("action", {}).get("parameters", {}).get("flow_token") if forms else None
 
 
-def _wrong_tap(thread, body: "PersonMessage") -> str | None:
+_A_FORM = 'that is a form, not a button: choose action "form" with each field\'s answer'
+
+
+def _wrong_tap(thread, body: PersonMessage, tap: dict | None = None) -> str | None:
     """Why a WhatsApp tap matches nothing the agent sent, said so the model can fix it."""
+    if tap and "flow_token" in tap and "form_reply" not in tap:
+        return _A_FORM
     if body.form_reply is not None:
         filled = {k for k, v in body.form_reply.items() if k != "flow_token" and v not in (None, "")}
         return None if filled else "the form was sent empty: fill in its fields, named below"
     if not body.button_reply:
         return None
-    sent = [m.body.get("interactive", {}) for m in thread
-            if m.direction == "out" and isinstance(m.body, dict)]
+    sent = _sent_interactive(thread)
     ids = {b.get("reply", {}).get("id") for i in sent for b in i.get("action", {}).get("buttons", [])}
     if body.button_reply.get("id") in ids:
         return None
     if any(i.get("type") == "flow" for i in sent):
-        return 'that is a form, not a button: choose action "form" with each field\'s answer'
+        return _A_FORM
     return f"no button has the id {body.button_reply.get('id')!r}; copy one from the agent's buttons"
 
 
@@ -209,18 +216,16 @@ class Actor:
         if person.stands_for is not None and not person.task and not any(m.direction == "out" for m in thread):
             return  # The team answers the agent; only one given a task starts the conversation.
         waiting = _waiting(person, thread, now)
-        if waiting == "no_reply":
-            if now - person.ai_acted_at < PATIENCE and await store.agent_working(sf, person):
-                return
-            return await self._stop(person, "no_reply", "The agent didn't answer in time")
-        if waiting:
+        if waiting == "agent":
             return
-        # Something the platform sends on its own, a disclosure or a receipt,
-        # is not the agent's answer.
+        # While the agent owes an answer the person waits, up to PATIENCE: what
+        # the platform sends on its own, a disclosure or a receipt, is no answer.
         last_in = max((m.created_at for m in thread if m.direction == "in"), default=None)
         since = person.ai_acted_at or last_in or run.created_at
         if now - since < PATIENCE and await store.agent_working(sf, person):
             return
+        if waiting == "no_reply":
+            return await self._stop(person, "no_reply", "The agent didn't answer in time")
         if sum(m.direction == "in" for m in thread) >= MOVE_CAP:
             return await self._stop(person, "gave_up", f"{person.name} wrote {MOVE_CAP} times")
         client = _client(self.state.settings)
@@ -240,11 +245,12 @@ class Actor:
         if move.action in ("done", "give_up"):
             state = "done" if move.action == "done" else "gave_up"
             return await self._stop(person, state, move.note or "")
-        tap = move.tap if move.action == "tap" else None
-        if move.action == "form" or (tap and "flow_token" in tap and "form_reply" not in tap):
-            tap = {"form_reply": {**(move.form or move.tap or {}), "flow_token": _form_token(thread)}}
+        if move.action == "form":
+            tap = {"form_reply": {**(move.form or {}), "flow_token": _form_token(thread)}}
+        else:
+            tap = move.tap if move.action == "tap" else None
         body = PersonMessage(**tap) if tap else PersonMessage(text=move.text)
-        wrong = _wrong_tap(thread, body) if run.channel == "whatsapp" else None
+        wrong = _wrong_tap(thread, body, tap) if run.channel == "whatsapp" else None
         if wrong:
             raise RuntimeError(f"the move was refused: {wrong}")
         # Taken over while the model thought: the user writes now.

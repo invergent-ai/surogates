@@ -378,25 +378,24 @@ def is_typing(person: SimulationPerson, now: datetime) -> bool:
 async def agent_working(sf, person: SimulationPerson) -> bool:
     """Whether the agent owes *person* an answer: a turn is running in one of
     their conversations, or their last message has not been taken up yet."""
-    def latest(*types: str):
-        return (sa.select(sa.func.coalesce(sa.func.max(Event.id), 0))
-                .where(Event.session_id == Session.id, Event.type.in_(types))
-                .scalar_subquery())
+    def latest(*types: str, said: bool = False):
+        query = (sa.select(sa.func.coalesce(sa.func.max(Event.id), 0))
+                 .where(Event.session_id == Session.id, Event.type.in_(types)))
+        if said:  # An outreach opener is logged as a message too, but nobody said it.
+            query = query.where(Event.data["synthetic"].as_string().is_(None))
+        return query.scalar_subquery()
 
     async with sf() as db:
-        running = await db.scalar(
-            sa.select(SessionLease.session_id)
-            .join(Session, Session.id == SessionLease.session_id)
-            .where(Session.user_id == person.user_id, SessionLease.expires_at > sa.func.now())
-            .limit(1)
-        )
-        unanswered = await db.scalar(
-            sa.select(Session.id)
-            .where(Session.user_id == person.user_id)
-            .where(latest("user.message") > latest(*TURN_ENDS, "inbox.input_required"))
-            .limit(1)
-        )
-    return running is not None or unanswered is not None
+        return bool(await db.scalar(sa.select(
+            sa.exists().where(
+                SessionLease.session_id == Session.id, Session.user_id == person.user_id,
+                SessionLease.expires_at > sa.func.now(),
+            )
+            | sa.exists().where(
+                Session.user_id == person.user_id,
+                latest("user.message", said=True) > latest(*TURN_ENDS, "inbox.input_required"),
+            )
+        )))
 
 
 async def thread(sf, person_id: uuid.UUID) -> Sequence[SimulationMessage]:
