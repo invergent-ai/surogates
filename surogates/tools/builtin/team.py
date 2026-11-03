@@ -1705,7 +1705,7 @@ TEAM_TELL_MEMBER_SCHEMA = ToolSchema(
         "type": "object",
         "properties": {
             "member": {"type": "string", "description": "The colleague's name, or part of it."},
-            "text": {"type": "string", "description": "What to tell them, in the asker's words."},
+            "text": {"type": "string", "description": "What to tell them, in the asker's words. It goes out signed with the asker's name: do not sign it again."},
         },
         "required": ["member", "text"],
     },
@@ -1713,7 +1713,7 @@ TEAM_TELL_MEMBER_SCHEMA = ToolSchema(
 
 #: How a colleague's words reach them; ``followup_settings.texts`` words it
 #: in the business's language.
-RELAY_TEXTS = {"team_relay": "{member} asks you: {text}"}
+RELAY_TEXTS = {"team_relay": "From {member}: {text}"}
 
 
 async def handle_team_tell_member(arguments: dict, **kwargs: Any) -> str:

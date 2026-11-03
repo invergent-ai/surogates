@@ -971,7 +971,7 @@ async def test_a_team_member_passes_words_to_one_colleague(sf, practice):
     assert out.startswith("Sent to Dr. Ionescu")
     [row] = await _outreach(sf)
     assert row.user_id == practice.doctor and row.kind == "notice"
-    assert row.text == "Ioana Marin asks you: Please enrol Vasile Cirstea."
+    assert row.text == "From Ioana Marin: Please enrol Vasile Cirstea."
     again = await team.handle_team_tell_member(
         {"member": "ionescu", "text": "Please enrol Vasile Cirstea."}, **kw, tool_call_id="call-2",
     )
