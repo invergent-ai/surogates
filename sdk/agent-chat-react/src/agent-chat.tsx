@@ -8,6 +8,7 @@ import {
 } from "./components/browser/browser-pane";
 import { useBrowserPreview } from "./components/browser/use-browser-preview";
 import { ChatThread } from "./components/chat/chat-thread";
+import { NO_TOOL_LABELS, ToolLabelsProvider } from "./components/chat/tool-labels-context";
 import { WhiteboardSurface } from "./components/whiteboard/agent-whiteboard";
 import { SegmentedControl } from "@invergent/ui-sdk/segmented-control";
 import { TooltipProvider } from "@invergent/ui-sdk/tooltip";
@@ -24,6 +25,7 @@ import { useAgentChatRuntime } from "./runtime/use-agent-chat-runtime";
 import type {
   AgentChatAdapter,
   AgentChatMessage,
+  AgentChatToolLabels,
   AgentChatViewMode,
 } from "./types";
 import type { ChatComposerError } from "./components/chat/chat-composer";
@@ -181,6 +183,17 @@ export interface AgentChatProps {
    * where the browser is.
    */
   computerBrowser?: (browser: ComputerBrowser) => React.ReactNode;
+  /**
+   * The host's words for tools, by tool name: for the tools its own agents
+   * call, which the SDK would show by their raw names, or to put other words
+   * on one the SDK knows. See `AgentChatToolLabel`.
+   */
+  toolLabels?: AgentChatToolLabels;
+  /**
+   * The files a turn made, as cards under its last answer. Default true.
+   * When false, no turn lists its files; the Files fold still has them.
+   */
+  turnSummary?: boolean;
 }
 
 // CSS variable controlling the desktop right-stack width. Inlined as a style
@@ -234,6 +247,8 @@ export function AgentChat({
   firstMessage,
   onFirstMessageSent,
   computerBrowser,
+  toolLabels = NO_TOOL_LABELS,
+  turnSummary = true,
 }: AgentChatProps) {
   const [workspacePath, setWorkspacePath] = useState<string | null>(null);
   // What the drawer shows — separate from the tree selection above, because
@@ -326,6 +341,7 @@ export function AgentChat({
   const disabledReason = readOnly.reason;
   // TurnDownloads lists the files the just-completed turn delivered.
   // Suppress it on:
+  //   * a host's chat that turned it off (``turnSummary``).
   //   * sub-agent sessions (already gated below) -- nobody is reading
   //     the list in those, the parent's LLM polls the final result.
   //   * root sessions that orchestrate a deep-research workflow.  The
@@ -346,7 +362,8 @@ export function AgentChat({
     [runtime.messages],
   );
   const hideTurnSummary =
-    isSubAgentSession(runtime.session)
+    !turnSummary
+    || isSubAgentSession(runtime.session)
     || orchestratesDeepResearch
     || isBoardSession(runtime.session);
   const browserState = runtime.state.browser;
@@ -517,6 +534,7 @@ export function AgentChat({
         readOnly: readsOnly,
       }}
     >
+      <ToolLabelsProvider value={toolLabels}>
       <TooltipProvider>
         <section
           data-testid="agent-chat-layout"
@@ -721,6 +739,7 @@ export function AgentChat({
           )}
         </section>
       </TooltipProvider>
+      </ToolLabelsProvider>
     </AgentChatAdapterProvider>
   );
 }

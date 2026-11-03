@@ -8,6 +8,8 @@ import { CheckCircle2Icon, Loader2Icon, XCircleIcon } from "lucide-react";
 import { Collapsible, CollapsibleContent } from "@invergent/ui-sdk/collapsible";
 import { CollapsibleHeader } from "@invergent/ui-sdk/collapsible-header";
 import { formatArgs, shownArgs, truncate, effectiveStatus } from "./shared";
+import { cancelledToolLabel, extractToolDetail } from "../simple-labels";
+import { useToolLabels } from "../tool-labels-context";
 import type { ToolCallInfo } from "../../../types";
 
 const TOOL_LABELS: Record<string, string> = {
@@ -48,14 +50,18 @@ function StatusIcon({ tc }: { tc: ToolCallInfo }) {
 }
 
 export function DefaultToolBlock({ tc }: { tc: ToolCallInfo }) {
-  const summary = toolSummary(tc);
+  // A tool the host labelled reads in its words, as in the Simple view.
+  const labels = useToolLabels();
+  const labelled = Object.hasOwn(labels, tc.toolName);
+  const name = labelled ? cancelledToolLabel(tc.toolName, labels) : toolLabel(tc.toolName);
+  const summary = labelled ? (extractToolDetail(tc, labels) ?? "") : toolSummary(tc);
 
   return (
     <Collapsible className="overflow-hidden rounded-[10px] border border-foreground/[0.08]">
       <CollapsibleHeader variant="section" size="sm">
         <span className="flex min-w-0 items-center gap-2">
           <StatusIcon tc={tc} />
-          <span className="shrink-0">{toolLabel(tc.toolName)}</span>
+          <span className="shrink-0">{name}</span>
           {summary && (
             <span className="min-w-0 truncate text-xs font-normal text-muted-foreground/70">
               {summary}

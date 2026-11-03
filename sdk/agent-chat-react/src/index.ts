@@ -185,6 +185,8 @@ export type {
   AgentChatThreadProposal,
   AgentChatThreadRow,
   AgentChatToolCallInfo,
+  AgentChatToolLabel,
+  AgentChatToolLabels,
   AgentChatWorker,
   AgentChatWorkspaceEditor,
   AgentChatWorkspaceEntry,

@@ -238,6 +238,88 @@ afterEach(() => {
 });
 
 describe("AgentChat", () => {
+  async function renderChat(props: Partial<React.ComponentProps<typeof AgentChat>> = {}) {
+    const stream = new FakeEventStream();
+    const adapter = createAdapter(stream);
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () => {
+      root?.render(<AgentChat adapter={adapter} sessionId="s-1" {...props} />);
+      await Promise.resolve();
+    });
+    return stream;
+  }
+
+  /** A turn that asks a person, then answers with a file it wrote. */
+  function emitTurn(stream: FakeEventStream) {
+    const turn = { turn_id: "t1" };
+    stream.emit("user.message", 1, { content: "check the complaint" });
+    stream.emit("llm.response", 2, {
+      ...turn,
+      iteration_index: 0,
+      message: {
+        content: "",
+        tool_calls: [{
+          id: "tc1",
+          function: { name: "raise_hand", arguments: JSON.stringify({ question: "Is the fourth company part of it?" }) },
+        }],
+      },
+    });
+    stream.emit("tool.call", 3, {
+      ...turn,
+      tool_call_id: "tc1",
+      name: "raise_hand",
+      arguments: { question: "Is the fourth company part of it?" },
+    });
+    stream.emit("tool.result", 4, { ...turn, tool_call_id: "tc1", name: "raise_hand", content: "{}" });
+    stream.emit("llm.response", 5, { ...turn, iteration_index: 1, message: { content: "The note is ready." } });
+    stream.emit("turn.summary", 6, {
+      ...turn,
+      recap: "",
+      artifacts: [{ kind: "file", label: "out/note.docx", ref: "out/note.docx" }],
+    });
+    stream.emit("session.complete", 7, {});
+    stream.emit("stream.live", 0, {});
+  }
+
+  const RAISE_HAND = {
+    raise_hand: {
+      name: "Raise hand",
+      detail: (args: Record<string, unknown>) =>
+        typeof args.question === "string" ? args.question : null,
+    },
+  };
+
+  it("names a host's own tool in its words in the Simple view", async () => {
+    const stream = await renderChat({ viewModeToggleEnabled: false, toolLabels: RAISE_HAND });
+    act(() => emitTurn(stream));
+    expect(container!.textContent).toContain("Raise hand · Is the fourth company part of it?");
+    expect(container!.textContent).not.toContain("raise_hand");
+  });
+
+  it("names a host's own tool in its words in the Advanced view", async () => {
+    const stream = await renderChat({ toolLabels: RAISE_HAND });
+    act(() => emitTurn(stream));
+    expect(container!.textContent).toContain("Raise hand");
+    expect(container!.textContent).toContain("Is the fourth company part of it?");
+    expect(container!.textContent).not.toContain("Raise Hand");
+  });
+
+  it("lists the files a turn made under its answer", async () => {
+    const stream = await renderChat({ viewModeToggleEnabled: false });
+    act(() => emitTurn(stream));
+    expect(container!.textContent).toContain("The note is ready.");
+    expect(container!.textContent).toContain("Document · DOCX");
+  });
+
+  it("lists no files under a turn's answer when the host turns the turn summary off", async () => {
+    const stream = await renderChat({ viewModeToggleEnabled: false, turnSummary: false });
+    act(() => emitTurn(stream));
+    expect(container!.textContent).toContain("The note is ready.");
+    expect(container!.textContent).not.toContain("Document · DOCX");
+  });
+
   it("renders messages received from the runtime stream", async () => {
     const stream = new FakeEventStream();
     const adapter = createAdapter(stream);

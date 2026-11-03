@@ -82,6 +82,7 @@ import { stripAndParseNextAction } from "../../lib/next-action";
 import { ArtifactBlock } from "./artifacts/artifact-block";
 import { ErrorMessage } from "./error-message";
 import { TurnDownloads } from "./turn-downloads";
+import { useToolLabels } from "./tool-labels-context";
 import { ThreadCards } from "./thread-cards";
 import { cn } from "../../lib/utils";
 import { Alert, AlertAction, AlertDescription, AlertTitle } from "@invergent/ui-sdk/alert";
@@ -98,6 +99,7 @@ import type {
   AgentChatImageAttachment,
   AgentChatPendingAttachment,
   AgentChatResearchSource,
+  AgentChatToolLabels,
   AgentChatTurnArtifactRef,
   AgentChatViewMode,
   ChatMessage as ChatMessageType,
@@ -741,10 +743,11 @@ function OrphanSystemMarker({
 
 
 function CancelledToolRow({ tc }: { tc: ToolCallInfo }) {
+  const labels = useToolLabels();
   return (
     <div className="flex items-center gap-1.5 text-sm">
       <span className="font-semibold text-foreground/60">
-        {cancelledToolLabel(tc.toolName)}
+        {cancelledToolLabel(tc.toolName, labels)}
       </span>
       <span className="text-foreground/60/70">
         Cancelled
@@ -1170,10 +1173,12 @@ function hasInlineRunningIndicator(
 }
 
 /** A call still running, in the words its finished row will use. */
-function runningCallLabel(tc: ToolCallInfo): string {
-  if (tc.toolName === "skill_view") return `${skillViewLabel([tc])}…`;
-  const name = cancelledToolLabel(tc.toolName);
-  const detail = extractToolDetail(tc);
+function runningCallLabel(tc: ToolCallInfo, labels: AgentChatToolLabels): string {
+  if (tc.toolName === "skill_view" && !Object.hasOwn(labels, tc.toolName)) {
+    return `${skillViewLabel([tc])}…`;
+  }
+  const name = cancelledToolLabel(tc.toolName, labels);
+  const detail = extractToolDetail(tc, labels);
   return detail ? `Running ${name} · ${detail}…` : `Running ${name}…`;
 }
 
@@ -1182,7 +1187,7 @@ function runningCallLabel(tc: ToolCallInfo): string {
  * currently-running tools so the user sees "Running List Files…"
  * instead of a generic "Working…" when context is available.
  */
-function liveIterationLabel(message: ChatMessageType): string {
+function liveIterationLabel(message: ChatMessageType, labels: AgentChatToolLabels): string {
   // Only running tools that aren't hidden from Simple mode get
   // surfaced in the label — an internal list_files running on its
   // own should read as a quiet "Thinking…", not "Running List Files…".
@@ -1191,14 +1196,14 @@ function liveIterationLabel(message: ChatMessageType): string {
   );
   if (running.length === 0) return reasoningTokenLabel(message, true);
   // Same wording as the finished row, so it does not rename itself.
-  if (running.every((tc) => tc.toolName === "skill_view")) {
+  if (running.length === 1) return runningCallLabel(running[0]!, labels);
+  if (running.every((tc) => tc.toolName === "skill_view") && !Object.hasOwn(labels, "skill_view")) {
     return `${skillViewLabel(running)}…`;
   }
-  if (running.length === 1) return runningCallLabel(running[0]!);
   const firstName = running[0]!.toolName;
   const allSame = running.every((tc) => tc.toolName === firstName);
   if (allSame) {
-    return `Running ${cancelledToolLabel(firstName)} × ${running.length}…`;
+    return `Running ${cancelledToolLabel(firstName, labels)} × ${running.length}…`;
   }
   return `Running ${running.length} tools…`;
 }
@@ -1240,7 +1245,7 @@ interface Command {
  * it is one row opening onto every call. Without one, each call the user
  * sees is a row of its own — never a "Used 2 tools" bundle beside them.
  */
-function iterationCommands(message: ChatMessageType): Command[] {
+function iterationCommands(message: ChatMessageType, labels: AgentChatToolLabels): Command[] {
   const summary = message.iterationSummary?.summary;
   if (summary) {
     return [{
@@ -1252,17 +1257,17 @@ function iterationCommands(message: ChatMessageType): Command[] {
   }
   return visibleToolCalls(message).map((tc) => ({
     key: tc.id,
-    label: deriveSingleToolLabel(tc),
+    label: deriveSingleToolLabel(tc, labels),
     calls: callsWithOutput([tc]),
     message,
   }));
 }
 
 /** The running iteration's calls so far, a running one worded as running. */
-function liveCommands(message: ChatMessageType): Command[] {
+function liveCommands(message: ChatMessageType, labels: AgentChatToolLabels): Command[] {
   return visibleToolCalls(message).map((tc) => ({
     key: tc.id,
-    label: tc.status === "running" ? runningCallLabel(tc) : deriveSingleToolLabel(tc),
+    label: tc.status === "running" ? runningCallLabel(tc, labels) : deriveSingleToolLabel(tc, labels),
     calls: callsWithOutput([tc]),
     message,
   }));
@@ -1294,12 +1299,13 @@ function ToolCallOutput({ tc }: { tc: ToolCallInfo }) {
 
 /** What a command's calls returned, each named when there is more than one. */
 function CommandOutput({ calls }: { calls: ToolCallInfo[] }) {
+  const labels = useToolLabels();
   return (
     <div className="space-y-3">
       {calls.map((tc) => (
         <div key={tc.id} className="space-y-1.5">
           {calls.length > 1 && (
-            <p className="text-xs text-muted-foreground">{toolRowLabel(tc)}</p>
+            <p className="text-xs text-muted-foreground">{toolRowLabel(tc, labels)}</p>
           )}
           <ToolCallOutput tc={tc} />
         </div>
@@ -1415,11 +1421,12 @@ interface CommandGroupProps {
  * its own, a run of quick commands made it jump with every one.
  */
 function CommandGroup({ commands, live }: CommandGroupProps) {
+  const labels = useToolLabels();
   const [open, setOpen] = useState(false);
   // ponytail: createdAt is when this client saw the event, so a reload
   // mid-run restarts the clock; needs the event's own timestamp to fix.
   const elapsed = useElapsedSeconds(live ? (commands[0]?.message ?? live).createdAt : undefined);
-  const rows = live ? [...commands, ...liveCommands(live)] : commands;
+  const rows = live ? [...commands, ...liveCommands(live, labels)] : commands;
   return (
     <div className="space-y-1.5">
       <button
@@ -1432,7 +1439,7 @@ function CommandGroup({ commands, live }: CommandGroupProps) {
           <>
             <OrbShimmerLabel
               state={messageOrbState(live, SIMPLE_MODE_ORB_OPTIONS)}
-              label={liveIterationLabel(live)}
+              label={liveIterationLabel(live, labels)}
               className="min-w-0"
             />
             {elapsed !== null && (
@@ -1474,6 +1481,7 @@ export function IterationGroup({
   message,
   isActive = true,
 }: IterationGroupProps) {
+  const labels = useToolLabels();
   const kind = iterationKind(message, isActive);
   const askCall = (message.toolCalls ?? []).find(isAsk);
   if (kind === "ask" && askCall) {
@@ -1493,7 +1501,7 @@ export function IterationGroup({
     return (
       <OrbShimmerLabel
         state={messageOrbState(message, SIMPLE_MODE_ORB_OPTIONS)}
-        label={liveIterationLabel(message)}
+        label={liveIterationLabel(message, labels)}
         className="py-0.5"
       />
     );
@@ -1506,7 +1514,7 @@ export function IterationGroup({
       </p>
     );
   }
-  const commands = iterationCommands(message);
+  const commands = iterationCommands(message, labels);
   return commands.length === 1 ? (
     <CommandRow label={commands[0]!.label} calls={commands[0]!.calls} />
   ) : (
@@ -1626,6 +1634,7 @@ function SimpleAssistantGroup({
   /** Every reply whole, at the final answer's size, never cut to a narration line. */
   fullReplies?: boolean;
 }) {
+  const labels = useToolLabels();
   const assistantMessages = messages.filter((m) => m.role === "assistant");
   const tail = assistantMessages[assistantMessages.length - 1];
 
@@ -1663,7 +1672,7 @@ function SimpleAssistantGroup({
     // Keyed by its first iteration, so a run keeps its open state as the
     // running iteration finishes and its calls settle into rows.
     const key = (run[0]?.message ?? live)?.id;
-    if (live && (run.length > 0 || liveCommands(live).length > 0)) {
+    if (live && (run.length > 0 || liveCommands(live, labels).length > 0)) {
       rows.push(<CommandGroup key={key} commands={run} live={live} />);
     } else {
       if (run.length > 1) {
@@ -1749,7 +1758,7 @@ function SimpleAssistantGroup({
     const kind = iterationKind(message, isActive);
     if (kind === "none") continue;
     if (kind === "command") {
-      run.push(...iterationCommands(message));
+      run.push(...iterationCommands(message, labels));
       continue;
     }
     if (kind === "live") {

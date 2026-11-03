@@ -11,12 +11,13 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  cancelledToolLabel,
   deriveSingleToolLabel,
   extractToolDetail,
   skillViewLabel,
   toolRowLabel,
 } from "../src/components/chat/simple-labels";
-import type { ToolCallInfo } from "../src/types";
+import type { AgentChatToolLabels, ToolCallInfo } from "../src/types";
 
 function call(toolName: string, args: unknown): ToolCallInfo {
   return { id: "c1", toolName, args: JSON.stringify(args), status: "complete" };
@@ -192,5 +193,63 @@ describe("consult_expert", () => {
   it("reads as one short line in the finished row", () => {
     expect(toolRowLabel(consult)).toBe("Consulted deck-reviewer expert");
     expect(deriveSingleToolLabel(consult)).toBe("Expert · deck-reviewer");
+  });
+});
+
+describe("a host's own labels", () => {
+  // A host whose agents call tools the SDK has never heard of names them
+  // itself, and a name it gives wins over the SDK's own.
+  const labels: AgentChatToolLabels = {
+    raise_hand: {
+      name: "Raise hand",
+      detail: (args) => (typeof args.question === "string" ? args.question : null),
+    },
+    complete_step: { name: "Complete step" },
+    terminal: { name: "Shell", detail: (args) => String(args.command) },
+    broken: {
+      name: "Broken",
+      detail: () => {
+        throw new Error("the host's bug");
+      },
+    },
+    numeric: { name: "Numeric", detail: () => 7 as unknown as string },
+  };
+
+  it("names a tool by the host's name and the detail it picks out", () => {
+    const tc = call("raise_hand", { question: "Is the fourth company part of it?" });
+    expect(deriveSingleToolLabel(tc, labels)).toBe("Raise hand · Is the fourth company part of it?");
+    expect(toolRowLabel(tc, labels)).toBe("Raise hand · Is the fourth company part of it?");
+    expect(extractToolDetail(tc, labels)).toBe("Is the fourth company part of it?");
+    expect(cancelledToolLabel("raise_hand", labels)).toBe("Raise hand");
+  });
+
+  it("names a tool with no detail by its name alone", () => {
+    const tc = call("complete_step", { outcome: "approved" });
+    expect(deriveSingleToolLabel(tc, labels)).toBe("Complete step");
+    expect(toolRowLabel(tc, labels)).toBe("Complete step");
+  });
+
+  it("puts the host's words over the SDK's own", () => {
+    const tc = call("terminal", { command: "ls -la" });
+    expect(deriveSingleToolLabel(tc, labels)).toBe("Shell · ls -la");
+    expect(toolRowLabel(tc, labels)).toBe("Shell · ls -la");
+  });
+
+  it("asks for no detail before the arguments have streamed in whole", () => {
+    const tc: ToolCallInfo = { id: "c1", toolName: "raise_hand", args: '{"quest', status: "running" };
+    expect(deriveSingleToolLabel(tc, labels)).toBe("Raise hand");
+  });
+
+  it("falls back to the name when the host's detail throws or gives no text", () => {
+    expect(deriveSingleToolLabel(call("broken", {}), labels)).toBe("Broken");
+    expect(deriveSingleToolLabel(call("numeric", {}), labels)).toBe("Numeric");
+    expect(
+      deriveSingleToolLabel(call("raise_hand", { question: "" }), labels),
+    ).toBe("Raise hand");
+  });
+
+  it("takes no label from the object's prototype", () => {
+    expect(deriveSingleToolLabel(call("constructor", {}), {})).toBe("constructor");
+    expect(cancelledToolLabel("toString", {})).toBe("toString");
   });
 });

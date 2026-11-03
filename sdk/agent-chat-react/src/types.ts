@@ -218,6 +218,29 @@ export interface AgentChatToolCallInfo {
   cancelled?: boolean;
 }
 
+/**
+ * How a chat names one tool, given by the host: for the tools its own agents
+ * call, which the SDK has no words for, or to put other words on one it has.
+ *
+ * A call's row reads "name · detail" ("Raise hand · Is the fourth company
+ * part of it?"), or the name alone without a detail; a running call reads
+ * "Running name · detail…". The entry replaces the SDK's own words for that
+ * tool in both views.
+ */
+export interface AgentChatToolLabel {
+  /** What the tool is called, as a short noun phrase: "Raise hand". */
+  name: string;
+  /**
+   * The part of the call worth reading, from its arguments once they have
+   * streamed in whole: the question asked, the file written. Nothing, an
+   * empty string, or a throw shows the name alone.
+   */
+  detail?: (args: Record<string, unknown>) => string | null | undefined;
+}
+
+/** The host's tool labels, by tool name. */
+export type AgentChatToolLabels = Readonly<Record<string, AgentChatToolLabel>>;
+
 export interface AgentChatTokenUsage {
   inputTokens: number;
   outputTokens: number;

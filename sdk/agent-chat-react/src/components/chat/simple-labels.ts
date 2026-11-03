@@ -11,10 +11,13 @@
 // SIMPLE_MODE_HIDDEN_TOOLS currently filters out of the view too,
 // because that policy changes (``skill_view`` moved across it) and an
 // entry that was never exercised is an entry that was never right.
+//
+// A host's own tools take their words from its ``AgentChatToolLabels``,
+// and an entry there wins over the one here.
 
 import { formatMcpToolLabel } from "../../lib/format";
 import { parseArgs } from "./tools/shared";
-import type { ToolCallInfo } from "../../types";
+import type { AgentChatToolLabel, AgentChatToolLabels, ToolCallInfo } from "../../types";
 
 /**
  * A tool argument, only if the model actually sent a non-empty string.
@@ -29,7 +32,40 @@ function stringField(args: Record<string, unknown> | null, key: string): string 
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
-export function cancelledToolLabel(toolName: string): string {
+/**
+ * The host's label for a tool, never one the object's prototype carries: a
+ * tool named ``constructor`` has no label of the host's.
+ */
+function hostLabel(labels: AgentChatToolLabels, toolName: string): AgentChatToolLabel | null {
+  return Object.hasOwn(labels, toolName) ? (labels[toolName] ?? null) : null;
+}
+
+/**
+ * The host's detail for a call: only text, only once the arguments parse,
+ * and nothing when the host's function throws — the host's code runs inside
+ * the thread, which has no ErrorBoundary either.
+ */
+function hostDetail(label: AgentChatToolLabel, tc: ToolCallInfo): string | null {
+  if (!label.detail) return null;
+  const args = parseArgs<unknown>(tc.args);
+  if (!args || typeof args !== "object" || Array.isArray(args)) return null;
+  try {
+    const detail = label.detail(args as Record<string, unknown>);
+    return typeof detail === "string" && detail.length > 0 ? detail : null;
+  } catch {
+    return null;
+  }
+}
+
+/** A call's row in the host's words: "name · detail", or the name alone. */
+function hostRowLabel(label: AgentChatToolLabel, tc: ToolCallInfo): string {
+  const detail = hostDetail(label, tc);
+  return detail ? `${label.name} · ${detail}` : label.name;
+}
+
+export function cancelledToolLabel(toolName: string, labels: AgentChatToolLabels = {}): string {
+  const host = hostLabel(labels, toolName);
+  if (host) return host.name;
   const map: Record<string, string> = {
     terminal: "Command",
     execute_code: "Execute code",
@@ -74,7 +110,7 @@ export function cancelledToolLabel(toolName: string): string {
     office_read: "Read document",
     office_edit: "Edit document",
   };
-  if (map[toolName]) return map[toolName];
+  if (Object.hasOwn(map, toolName)) return map[toolName]!;
   // MCP tools arrive as `mcp__{server}__{tool}`; show a clean label rather
   // than the raw prefixed name (matches the Expert-mode MCP renderer).
   if (toolName.startsWith("mcp__")) return formatMcpToolLabel(toolName);
@@ -120,7 +156,9 @@ export function skillViewLabel(calls: ToolCallInfo[]): string {
  * detail entirely and use a generic verb instead; the full detail
  * still appears in the expanded body via toolRowLabel.
  */
-export function deriveSingleToolLabel(tc: ToolCallInfo): string {
+export function deriveSingleToolLabel(tc: ToolCallInfo, labels: AgentChatToolLabels = {}): string {
+  const host = hostLabel(labels, tc.toolName);
+  if (host) return hostRowLabel(host, tc);
   // A skill load names the skill, as its live shimmer does.
   if (tc.toolName === "skill_view") return skillViewLabel([tc]);
   const name = cancelledToolLabel(tc.toolName);
@@ -148,7 +186,9 @@ const _HEADER_GENERIC_VERB: Record<string, string> = {
  * arguments. Defensive against unparseable / partial JSON during
  * streaming.
  */
-export function extractToolDetail(tc: ToolCallInfo): string | null {
+export function extractToolDetail(tc: ToolCallInfo, labels: AgentChatToolLabels = {}): string | null {
+  const host = hostLabel(labels, tc.toolName);
+  if (host) return hostDetail(host, tc);
   const args = parseArgs<Record<string, unknown>>(tc.args);
   if (!args) return null;
   // Prefer the most-meaningful arg per tool family.
@@ -308,7 +348,9 @@ function kbPageName(path: string): string {
  * "Read the frontend-design skill"). Falls back to the human tool
  * name when we can't extract a useful detail from the args.
  */
-export function toolRowLabel(tc: ToolCallInfo): string {
+export function toolRowLabel(tc: ToolCallInfo, labels: AgentChatToolLabels = {}): string {
+  const host = hostLabel(labels, tc.toolName);
+  if (host) return hostRowLabel(host, tc);
   const detail = extractToolDetail(tc);
   switch (tc.toolName) {
     case "read_file":

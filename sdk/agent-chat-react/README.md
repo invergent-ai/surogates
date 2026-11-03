@@ -51,6 +51,34 @@ them off.
 Pass the source's reads as plain functions, as above: the adapter copies each method without its
 `this`, so a method that reads `this` fails there.
 
+## Tool labels
+
+A host whose agents call tools of its own names them with `toolLabels`, by tool name. The SDK
+shows a tool it has no words for by its raw name:
+
+```tsx
+const toolLabels: AgentChatToolLabels = {
+  raise_hand: {
+    name: "Raise hand",
+    detail: (args) => (typeof args.question === "string" ? args.question : null),
+  },
+  complete_step: { name: "Complete step" },
+};
+
+<AgentChat adapter={adapter} sessionId={sessionId} toolLabels={toolLabels} />;
+```
+
+A call's row reads `name · detail`, or the name alone when there is no `detail`, and a running
+call reads `Running name · detail…`. `detail` gets the call's arguments only once they have
+streamed in whole; nothing, an empty string or a throw shows the name alone. An entry for a tool
+the SDK knows replaces the SDK's words for it, in the Simple view and the Advanced one.
+
+## Turn summary
+
+Under a turn's last answer the chat lists the files the turn made, a card each. `turnSummary`
+defaults to true; with `turnSummary={false}` no turn lists its files, and the Files fold still has
+them.
+
 ## Documents
 
 `DocumentEditor` opens a document in the document server's editor with no chat session behind it: its `open(theme)` answers `{document_server_url, config, mentionable_users?}`, the editor config the host signed, and it opens again when `reopenKey` or the theme changes, not for a new `open` alone. A failure to open shows its message in an alert, or "The document could not be opened." when it has none; `notices` shows the host's own lines under that alert, above the editor. `loadDocsApi` loads the document server's `api.js` once per server.
