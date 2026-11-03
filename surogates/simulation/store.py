@@ -19,6 +19,8 @@ from surogates.channels.identity import ResolvedIdentity, get_or_create_channel_
 from surogates.channels.platforms.whatsapp_api import DEFAULT_API_VERSION
 from surogates.db.models import (
     OutreachMessageRow,
+    Session,
+    SessionLease,
     SimulationMedia,
     SimulationMessage,
     SimulationPerson,
@@ -369,6 +371,17 @@ async def set_person_typing(sf, person_id: uuid.UUID, typing: bool) -> None:
 def is_typing(person: SimulationPerson, now: datetime) -> bool:
     shown = _TYPING.get(person.channel, timedelta(seconds=5))
     return person.agent_typing_at is not None and now - person.agent_typing_at < shown
+
+
+async def agent_working(sf, person: SimulationPerson) -> bool:
+    """Whether a turn is running in one of *person*'s conversations right now."""
+    async with sf() as db:
+        return await db.scalar(
+            sa.select(SessionLease.session_id)
+            .join(Session, Session.id == SessionLease.session_id)
+            .where(Session.user_id == person.user_id, SessionLease.expires_at > sa.func.now())
+            .limit(1)
+        ) is not None
 
 
 async def thread(sf, person_id: uuid.UUID) -> Sequence[SimulationMessage]:

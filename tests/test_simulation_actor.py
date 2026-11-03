@@ -89,6 +89,35 @@ def test_silent_agent_ends_the_part():
 
 
 @pytest.mark.asyncio
+async def test_a_person_waits_while_the_agent_is_still_working(rsf, monkeypatch):  # noqa: F811
+    stopped = []
+    ai = actor.Actor(SimpleNamespace(session_factory=rsf, settings=Settings, http=None))
+
+    async def stop(person, state, note):
+        stopped.append(state)
+
+    async def thread(sf, person_id):
+        return []
+
+    monkeypatch.setattr(ai, "_stop", stop)
+    monkeypatch.setattr(store, "thread", thread)
+    now = datetime.now(timezone.utc)
+    run = SimpleNamespace(created_at=now)
+    person = SimpleNamespace(id=1, stands_for=None, task=None, agent_typing_at=None,
+                             ai_acted_at=now - timedelta(minutes=4))
+
+    async def working(sf, p):
+        return True
+
+    monkeypatch.setattr(store, "agent_working", working)
+    await ai._move(run, person)
+    assert stopped == []
+    person.ai_acted_at = now - timedelta(minutes=11)
+    await ai._move(run, person)
+    assert stopped == ["no_reply"]
+
+
+@pytest.mark.asyncio
 async def test_the_ai_only_writes_on_chat_channels(rsf):  # noqa: F811
     org_id, client = await _client(rsf)
     r = await client.post("/internal/runs", json={

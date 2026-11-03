@@ -28,8 +28,11 @@ logger = logging.getLogger(__name__)
 #: How long the agent's last message must sit before the person answers: an
 #: agent often sends a thought in several messages.
 QUIET = timedelta(seconds=4)
-#: The agent not answering for this long ends the person's part.
+#: The agent not answering for this long ends the person's part; while a turn
+#: of its is still running, a person waits up to PATIENCE, as they would
+#: watching it type.
 SILENCE = timedelta(minutes=3)
+PATIENCE = timedelta(minutes=10)
 #: How many moves a person makes before giving up, and how long a run may last.
 MOVE_CAP = 20
 RUN_CAP = timedelta(minutes=30)
@@ -179,7 +182,9 @@ class Actor:
             return  # The team answers the agent; only one given a task starts the conversation.
         waiting = _waiting(person, thread, now)
         if waiting == "no_reply":
-            return await self._stop(person, "no_reply", "The agent didn't answer for 3 minutes")
+            if now - person.ai_acted_at < PATIENCE and await store.agent_working(sf, person):
+                return
+            return await self._stop(person, "no_reply", "The agent didn't answer in time")
         if waiting:
             return
         if sum(m.direction == "in" for m in thread) >= MOVE_CAP:
