@@ -115,7 +115,10 @@ _SAVE_CLAIM_RE = re.compile(
     r"|\bmade a note\b"
     r"|\b(?:i've|i have|i'll|i will)\s+(?:remember|memori[sz]ed?)\b"
     r"|\b(?:saved|stored|added|wrote|written)\b[^.\n]{0,40}\b(?:to|in|into)\s+(?:my\s+)?memory\b"
-    r"|\bam\s+(?:notat|re[țţt]inut|memorat)\b"
+    # "am notat" alone, or of "this", claims remembering, as "noted it" does;
+    # "am notat că…" / "am notat comanda" reports what the agent recorded.
+    r"|\bam\s+notat(?=\s*[,.!]|\s*$|\s+(?:asta|acest\s+lucru)\b)"
+    r"|\bam\s+(?:re[țţt]inut|memorat)\b"
     r"|\b(?:voi|o\s+s[ăa])\s+(?:re[țţt]ine|[țţt]ine?\s+minte)\b"
     r"|\b(?:salvat|ad[ăa]ugat|stocat|notat)\b[^.\n]{0,40}\b[îi]n\s+memori[ea]\b",
     re.IGNORECASE,

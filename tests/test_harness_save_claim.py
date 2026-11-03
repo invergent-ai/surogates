@@ -41,6 +41,14 @@ def test_a_romanian_save_claim_is_flagged():
     assert unbacked_save_claim("Am notat, data viitoare îți răspund în română.", [_ASK])
     assert unbacked_save_claim("Perfect, o să țin minte asta.", [_ASK])
     assert unbacked_save_claim("Am salvat preferința în memorie.", [_ASK])
+    assert unbacked_save_claim("Am notat asta pentru data viitoare.", [_ASK])
+
+
+def test_a_romanian_report_of_what_was_recorded_is_no_save_claim():
+    """ "I noted that the deadline is Friday" reports a case, as "noted that"
+    does in English; nudging it made the agent correct itself to a customer."""
+    assert not unbacked_save_claim("Am notat clar că termenul de vineri e critic.", [_ASK])
+    assert not unbacked_save_claim("Am notat comanda CV-58321 pentru colegul de la depozit.", [_ASK])
 
 
 def test_a_successful_memory_call_this_turn_backs_the_claim():
