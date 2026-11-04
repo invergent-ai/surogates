@@ -114,12 +114,13 @@ Unknown frontmatter keys are logged as warnings so typos like `disallow_tools` (
 
 ## 2. Tenant Asset Layout
 
-Sub-agents merge from four layers, lowest → highest precedence:
+Sub-agents merge from these layers, lowest → highest precedence:
 
 | Layer | Location | Managed by | Editable via |
 |---|---|---|---|
 | Platform bundle | per-agent Hub bundle, `agents/<name>/AGENT.md` | Org admin (sub-agent attached on the parent agent) | Bundle republish |
-| User bucket | `tenant-{org_id}/users/{user_id}/agents/<name>/AGENT.md` | End user | `POST /v1/agents` and the Web UI |
+| Tenant bucket, org-shared | `tenant-{org_id}/shared/agents/<name>/AGENT.md` | Project admin | The ops Sub-agents page, or `POST /v1/agents` with an org-wide service account |
+| Tenant bucket, user | `tenant-{org_id}/users/{user_id}/agents/<name>/AGENT.md` | End user | `POST /v1/agents` and the Web UI |
 | Org DB overlay | `agents` table, `user_id IS NULL` | Org admin | SQL / admin tooling (no public REST endpoint) |
 | User DB overlay | `agents` table, `user_id = <uid>` | Org admin | SQL / admin tooling |
 

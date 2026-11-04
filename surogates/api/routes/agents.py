@@ -20,7 +20,6 @@ by admin tooling, not this public API.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any
 
@@ -38,14 +37,7 @@ from surogates.api.routes._shared import (
 from surogates.storage.tenant import TenantStorage
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import TenantContext
-from surogates.tools.loader import (
-    AGENT_SOURCE_ORG_DB,
-    AGENT_SOURCE_PLATFORM,
-    AGENT_SOURCE_USER_DB,
-    ResourceLoader,
-    _build_agent_def,
-    _parse_agent_frontmatter,
-)
+from surogates.tools.loader import ResourceLoader, _parse_agent_frontmatter
 
 logger = logging.getLogger(__name__)
 
@@ -182,90 +174,16 @@ def _validate_category(category: str | None) -> str | None:
 # ---------------------------------------------------------------------------
 
 
-async def _load_bucket_agents(ts: TenantStorage) -> list[Any]:
-    """Load sub-agents from the tenant bucket as :class:`AgentDef` objects.
-
-    The :class:`ResourceLoader` filesystem layer follows a path
-    convention (``{asset_root}/{org_id}/users/...``) that does not
-    align with :class:`TenantStorage`'s bucket layout
-    (``tenant-{org_id}/users/...``).  To make POST/GET symmetrical for
-    bucket-stored agents we list via :class:`TenantStorage` and parse
-    AGENT.md frontmatter directly, yielding fully-populated
-    :class:`AgentDef` instances with ``source="user"`` or ``"org"``.
-    """
-    entries = await ts.list_all_agents()
-    # Fetch AGENT.md contents in parallel.  For a tenant with N agents
-    # this collapses N sequential S3 GETs into a single round-trip
-    # window, which is the dominant cost on object-storage backends.
-    contents = await asyncio.gather(
-        *(ts.read_agent(e["key_prefix"]) for e in entries),
-        return_exceptions=True,
-    )
-    defs: list[Any] = []
-    for entry, content in zip(entries, contents):
-        if isinstance(content, BaseException):
-            if not isinstance(content, KeyError):
-                logger.warning(
-                    "Failed to read AGENT.md at %s", entry["key_prefix"],
-                    exc_info=content,
-                )
-            continue
-        try:
-            parsed = _parse_agent_frontmatter(content, entry["name"])
-            defs.append(_build_agent_def(parsed, entry["layer"]))
-        except Exception:
-            logger.warning(
-                "Failed to parse AGENT.md at %s", entry["key_prefix"],
-                exc_info=True,
-            )
-    return defs
-
-
 async def _merged_agent_catalog(
     request: Request, tenant: TenantContext,
 ) -> list[Any]:
-    """Merge platform-filesystem + DB + tenant-bucket sub-agent layers.
-
-    Precedence (lowest → highest): platform < bucket (user/org) < org_db
-    < user_db.  The loader handles platform + DB layers; bucket layers
-    are discovered via :class:`TenantStorage` to match the write path
-    used by POST/PUT/DELETE on this route.
-    """
-    loader = ResourceLoader()
+    """The tenant's sub-agents, as a session of this agent would resolve them."""
     session_factory = request.app.state.session_factory
     bundle = await resolve_agent_bundle(request)
     async with session_factory() as db_session:
-        # Platform + DB layers via the loader.  Pass db_session so the
-        # DB overlay layers are included; pass bundle so the per-
-        # tenant Hub bundle's ``agents/`` subtree contributes to
-        # Layer 1 alongside the on-disk built-ins.
-        loader_defs = await loader.load_agents(
+        return await ResourceLoader().load_agents(
             tenant, db_session=db_session, bundle=bundle,
         )
-
-    ts = _get_tenant_storage(request, tenant)
-    try:
-        bucket_defs = await _load_bucket_agents(ts)
-    except Exception:
-        logger.debug(
-            "No bucket-stored agents found for tenant %s",
-            tenant.org_id, exc_info=True,
-        )
-        bucket_defs = []
-
-    # Partition the loader defs by source.  Platform goes beneath the
-    # bucket layer; DB layers stay on top.
-    platform_defs = [d for d in loader_defs if d.source == AGENT_SOURCE_PLATFORM]
-    db_defs = [
-        d for d in loader_defs
-        if d.source in (AGENT_SOURCE_ORG_DB, AGENT_SOURCE_USER_DB)
-    ]
-
-    merged: dict[str, Any] = {}
-    for layer in (platform_defs, bucket_defs, db_defs):
-        for d in layer:
-            merged[d.name] = d
-    return list(merged.values())
 
 
 @router.get("/agents", response_model=AgentListResponse)
