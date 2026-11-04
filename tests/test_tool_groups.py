@@ -122,3 +122,21 @@ def test_browser_guidance_moves_into_the_group_when_held_back(monkeypatch):
     base = {"read_file", "skill_view", "browser_navigate", "browser_click"}
     assert "**Browser.**" in _prompt(base)
     assert "**Browser.**" not in _prompt(base | {LOAD_TOOLS})
+
+
+def test_a_tool_name_wrapped_in_template_markup_is_recovered():
+    from surogates.harness.message_utils import clean_tool_call_name
+    garbled = "mcp__eog_802b28\n\n<tool_call>\n<function=mcp__eog_802b2801bd__find_group_by_name"
+    assert clean_tool_call_name(garbled) == "mcp__eog_802b2801bd__find_group_by_name"
+    assert clean_tool_call_name(" read_file ") == "read_file"
+
+
+def test_an_unsendable_unknown_tool_name_is_neutralized_in_history():
+    from surogates.harness.message_utils import neutralize_unsendable_tool_names
+    calls = [{"id": "1", "function": {"name": "x" * 80, "arguments": "{}"}},
+             {"id": "2", "function": {"name": "bad name\n<tool_call>", "arguments": "{}"}},
+             {"id": "3", "function": {"name": "read_file", "arguments": "{}"}},
+             {"id": "4", "function": {"name": "y" * 80, "arguments": "{}"}}]
+    out = neutralize_unsendable_tool_names(calls, {"read_file", "y" * 80})
+    assert [c["function"]["name"] for c in out] == ["invalid_tool_name", "invalid_tool_name", "read_file", "y" * 80]
+    assert out[0]["id"] == "1" and calls[0]["function"]["name"] == "x" * 80  # input untouched

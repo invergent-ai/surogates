@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections.abc import Iterator
 from typing import Any
 
@@ -135,7 +136,7 @@ def _serialise_tool_calls(tool_calls: Any) -> list[dict[str, Any]]:
                 "id": getattr(tc, "id", ""),
                 "type": "function",
                 "function": {
-                    "name": getattr(tc.function, "name", ""),
+                    "name": clean_tool_call_name(getattr(tc.function, "name", "") or ""),
                     "arguments": getattr(tc.function, "arguments", ""),
                 },
             }
@@ -375,3 +376,41 @@ def leading_json_object(content: Any) -> dict | None:
     except (AttributeError, ValueError, RecursionError):
         return None
     return data if isinstance(data, dict) else None
+
+
+_TEMPLATE_FUNCTION_NAME = re.compile(r"<function=([A-Za-z0-9_.\-]+)")
+_SENDABLE_TOOL_NAME = re.compile(r"[A-Za-z0-9_.\-]{1,64}")
+
+
+def clean_tool_call_name(name: str) -> str:
+    """Recover a tool name the model wrapped in its own chat-template markup.
+
+    A model occasionally starts a call, then emits the template's call syntax
+    into the name (``"mcp__x\n\n<tool_call>\n<function=mcp__x__find_group"``).
+    The name it meant is the last ``<function=NAME``; a name without markup is
+    only stripped of surrounding whitespace.
+    """
+    if not name:
+        return name
+    found = _TEMPLATE_FUNCTION_NAME.findall(name)
+    return found[-1] if found else name.strip()
+
+
+def neutralize_unsendable_tool_names(tool_calls: list[dict[str, Any]], offered) -> list[dict[str, Any]]:
+    """Rename calls to unoffered tools whose name no provider would accept back.
+
+    OpenAI-compatible servers (ours included) refuse a history holding a
+    function name outside ``[A-Za-z0-9_.-]{1,64}`` -- every later request of
+    the session fails and the session crash-loops. Such a call already gets an
+    "unknown tool" result; only its name in the history changes. Offered
+    tools are never renamed.
+    """
+    out = []
+    for tc in tool_calls or []:
+        fn = tc.get("function") or {}
+        name = fn.get("name") or ""
+        if name in offered or _SENDABLE_TOOL_NAME.fullmatch(name):
+            out.append(tc)
+        else:
+            out.append({**tc, "function": {**fn, "name": "invalid_tool_name"}})
+    return out

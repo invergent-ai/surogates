@@ -70,6 +70,7 @@ from surogates.harness.message_utils import (
     content_as_text,
     extract_final_response,
     message_texts,
+    neutralize_unsendable_tool_names,
 )
 from surogates.harness.prompt_cache import SystemPromptCache, mark_prefix_cacheable
 from surogates.harness.rate_limit_guard import ProviderRateLimitGuard
@@ -4252,6 +4253,9 @@ class AgentHarness(
             # persisted message matches what executes on either path.
             tool_calls_raw = deduplicate_tool_calls(tool_calls_raw)
             tool_calls_raw = cap_delegate_calls(tool_calls_raw)
+            # A garbled name the model gave an unoffered call must not reach
+            # the history: the server would refuse every later request.
+            tool_calls_raw = neutralize_unsendable_tool_names(tool_calls_raw, offered_tools)
             assistant_message["tool_calls"] = tool_calls_raw
             event_id = await _persist_response()
 
