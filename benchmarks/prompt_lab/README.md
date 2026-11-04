@@ -6,16 +6,16 @@ the tool schemas and the skills index. It renders exactly what a checkout's
 scenarios through a Surogates-shaped agent loop against a live model, and
 scores the results with deterministic checks.
 
-It was built to tune the `surogate` prompt profile
-(`surogates/harness/prompts/profiles/surogate/`) for Surogate 3.7
-(35B-A3B). It is not a public benchmark: its job is to compare two
-checkouts (or a checkout with and without a profile) on the same tasks.
+It was built to tune the prompt for Surogate 3.7 (35B-A3B); the result,
+first shipped as the `surogate` prompt profile, is now the default prompt
+for every model. It is not a public benchmark: its job is to compare two
+checkouts on the same tasks.
 
 ## What is real and what is simulated
 
 | Real | Simulated |
 | --- | --- |
-| The checkout's system prompt (`PromptBuilder.build()`), tool schemas (`ToolRegistry.get_schemas()` + the profile's `apply_tool_profile`), skills index and `SKILL.md` bodies (served by `skill_view`, files staged into the workspace) | Web search/extract (scripted pages per scenario), KB search/read, memory, todo, `ask_user_question` (scripted answers), `create_artifact`, cron, scenario-specific MCP-style tools |
+| The checkout's system prompt (`PromptBuilder.build()`), tool schemas (`ToolRegistry.get_schemas()`; on older checkouts plus the profile's `apply_tool_profile`), skills index and `SKILL.md` bodies (served by `skill_view`, files staged into the workspace) | Web search/extract (scripted pages per scenario), KB search/read, memory, todo, `ask_user_question` (scripted answers), `create_artifact`, cron, scenario-specific MCP-style tools |
 | File tools and `terminal` act on a real per-run workspace (python, node, the office libraries if the host has them) | The sandbox: commands run on the host in the run's folder with a deny-list, not in a pod. LibreOffice, pandoc and poppler are only there if the host has them |
 | The model, its sampling defaults and its tool-call parser (whatever the endpoint serves) | The harness loop's extras (unfinished-turn nudges, todo reminders, context compression, streaming) |
 
@@ -56,12 +56,11 @@ python3 report.py runs/ab1 --vs base
 ```
 
 A variant is `name=<checkout>[@<session model id>][#nogroups]` (`#nogroups`
-renders the profile without its on-demand tool groups; with them the runner
+renders the checkout without its on-demand tool groups; with them the runner
 holds schemas back and releases them on `load_tools` or a direct call, as the
-harness loop does). The model id decides the
-prompt profile exactly as in production (`surogate/Surogate3.7-35B-A3B`
-selects `surogate`; the `surogate` tier sentinel selects nothing unless
-`SUROGATES_PROMPT_PROFILES=surogate=surogate` maps it). One engine is used per conversation, as
+harness loop does). On checkouts from before the prompt became the default,
+the model id selects the prompt profile as it did in production
+(`surogate/Surogate3.7-35B-A3B` selects `surogate`). One engine is used per conversation, as
 the load balancer's source persistence does, so prefix caching behaves as in
 production. `rescore.py` re-applies changed checks to finished runs without
 calling the model.
@@ -72,6 +71,6 @@ time, the share of runs that loaded a skill or asked the user, invalid tool
 calls and runs that hit the iteration cap; then per-scenario means and, with
 `--vs`, the paired difference with a bootstrap 95% CI over scenarios.
 
-## Results behind the `surogate` profile (2026-11-03)
+## Results behind the default prompt (2026-11-03)
 
 See `RESULTS.md`.

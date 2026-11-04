@@ -1,6 +1,6 @@
 ---
 name: executing-plans
-description: Use when you have a written implementation plan to execute inline in the current session with review checkpoints. Prefer subagent-driven-development when sub-agent dispatch is available.
+description: Carry out an existing written implementation plan step by step with checkpoints.
 version: 1.0.0
 author: Surogate Agent (adapted from obra/superpowers)
 license: MIT

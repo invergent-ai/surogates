@@ -1,6 +1,6 @@
 ---
 name: brainstorming
-description: "You MUST use this before any creative work — creating features, building components, drafting documents, designing workflows, or modifying behavior. Explores your human partner's intent, requirements, and design before any implementation begins."
+description: Agree the design of a large, open-ended build with the user before building it.
 version: 1.0.0
 author: Surogate Agent (adapted from obra/superpowers)
 license: MIT

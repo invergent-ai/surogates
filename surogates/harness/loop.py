@@ -148,7 +148,6 @@ from surogates.keel.steps import (
     sleeps_through_a_plain_message,
     step_contract_of,
 )
-from surogates.harness.prompt_profile import apply_tool_profile
 from surogates.harness.tool_groups import (
     defer_tool_groups,
     loaded_by,
@@ -3092,12 +3091,6 @@ class AgentHarness(
             self._tools.get_schemas(names=tool_filter),
             has_agents=self._prompt.has_agents,
         )
-        # The prompt's model profile also rewrites tool descriptions (only
-        # descriptions: names, types and required lists stay the registry's).
-        # Before the device/conversation notes below, which append to them.
-        tool_schemas = apply_tool_profile(
-            tool_schemas, getattr(self._prompt, "prompt_profile", None),
-        )
         # Drop tools whose backing resource this agent does not have.
         # Schemas ship on every request, so an unusable one is paid for
         # on every turn of every session.
@@ -3148,10 +3141,10 @@ class AgentHarness(
         )
         # The model may call only what it was sent.  The registry is the
         # worker's, so it also holds what this session's gates took away.
-        # A profile's on-demand tool groups: their schemas wait for
-        # load_tools (or a direct call), but their tools stay callable, so
-        # they count as offered. Without groups, load_tools is dropped here.
-        _tool_groups = tool_groups(getattr(self._prompt, "prompt_profile", None))
+        # On-demand tool groups: their schemas wait for load_tools (or a
+        # direct call), but their tools stay callable, so they count as
+        # offered.
+        _tool_groups = tool_groups()
         tool_schemas, deferred_tools = defer_tool_groups(
             tool_schemas, _tool_groups, loaded_in_history(messages, _tool_groups),
         )

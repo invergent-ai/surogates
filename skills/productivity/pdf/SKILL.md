@@ -1,6 +1,6 @@
 ---
 name: pdf
-description: "Use this skill to merge PDFs, split them apart, create new PDFs, add watermarks, encrypt or decrypt them, extract their tables or images, or OCR a scanned PDF to make it searchable. If the user asks to produce a .pdf file, use this skill."
+description: Create PDFs, or merge, split, watermark, encrypt/decrypt, extract tables/images from, or OCR existing ones.
 license: Proprietary. LICENSE.txt has complete terms
 ---
 

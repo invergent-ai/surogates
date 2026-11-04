@@ -859,16 +859,13 @@ def _tool_error(message: str) -> str:
 READ_FILE_SCHEMA = ToolSchema(
     name="read_file",
     description=(
-        "Read a file with pagination. Use this instead of cat/head/tail in "
-        "terminal. Handles plain text plus .pdf (via liteparse/mupdf), Word "
-        "(.doc/.docx/.docm), Excel (.xls/.xlsx/.xlsm), PowerPoint "
-        "(.ppt/.pptx/.pptm), OpenDocument (.odt/.ods/.odp), and .rtf — all "
-        "parsed to text natively — and image files (described by a vision "
-        "model). Do NOT pre-extract documents with subprocess tools or "
-        "pip-install pypdf/python-docx/openpyxl yourself; just call "
-        "read_file. Suggests similar filenames if not found. Long reads are "
-        "cut at a line boundary rather than rejected: when the response has "
-        "'truncated': true, resume from the returned 'next_offset'."
+        (
+            "Read a file from the workspace, in pages of up to 2000 lines. Also "
+            "parses .pdf, Word (.doc/.docx), Excel (.xls/.xlsx), PowerPoint "
+            "(.ppt/.pptx), OpenDocument and .rtf into text, and describes images. Use"
+            " it instead of cat or extracting documents yourself. If the result says "
+            "truncated, continue from next_offset."
+        )
     ),
     parameters={
         "type": "object",
@@ -897,22 +894,13 @@ READ_FILE_SCHEMA = ToolSchema(
 WRITE_FILE_SCHEMA = ToolSchema(
     name="write_file",
     description=(
-        "Write content to a file in the workspace, completely replacing "
-        "existing content. Use this instead of echo/cat heredoc in "
-        "terminal. Creates parent directories automatically. OVERWRITES "
-        "the entire file — use 'patch' for targeted edits.\n\n"
-        "Creating a new file needs no preparation. Overwriting a file that "
-        "already exists requires reading it first in this session — the "
-        "call is refused otherwise, because a blind overwrite discards "
-        "content you never saw.\n\n"
-        "Use `write_file` when the user is editing a project on disk — "
-        "adding to or modifying a codebase they will run, import, or "
-        "commit. If the user instead asks for a **standalone demo, "
-        "widget, single-file webpage, chart, diagram, or document** they "
-        "want to view and interact with in the chat (not on disk), call "
-        "`create_artifact` instead. Phrasing like 'single file' or 'one "
-        "HTML file' is NOT a signal to use `write_file` — a sandboxed "
-        "HTML artifact is also a single self-contained file."
+        (
+            "Create a file, or replace a file's whole content (parent folders are "
+            "created). An existing file must have been read with read_file in this "
+            "session before you overwrite it. For changes to part of a file use "
+            "patch. Files the user wants to view in the chat (a chart, a one-page "
+            "widget) go through create_artifact instead."
+        )
     ),
     parameters={
         "type": "object",
@@ -936,15 +924,13 @@ WRITE_FILE_SCHEMA = ToolSchema(
 PATCH_SCHEMA = ToolSchema(
     name="patch",
     description=(
-        "Targeted find-and-replace edits in files. Use this instead of sed/awk in "
-        "terminal. Whitespace and indentation differences won't break the match, "
-        "but old_string must identify exactly one place in the file. Returns a "
-        "unified diff. Auto-runs syntax checks after editing.\n\n"
-        "The edit FAILS if old_string is not unique. When that happens, add the "
-        "minimum extra context needed to disambiguate, or set replace_all=true to "
-        "change every instance — do not retry the same old_string unchanged.\n\n"
-        "Replace mode (default): find a unique string and replace it.\n"
-        "Patch mode: apply V4A multi-file patches for bulk changes."
+        (
+            "Edit a file by replacing text: old_string must match exactly one place "
+            "(whitespace differences are tolerated), or set replace_all=true. On a "
+            "\"not unique\" error add surrounding context rather than retrying the same"
+            " text. Returns a diff and runs a syntax check. Prefer this to rewriting "
+            "whole files or sed/awk."
+        )
     ),
     parameters={
         "type": "object",
@@ -965,9 +951,10 @@ PATCH_SCHEMA = ToolSchema(
             "old_string": {
                 "type": "string",
                 "description": (
-                    "Text to find in the file (required for 'replace' mode). "
-                    "Must be unique in the file unless replace_all=true. Include "
-                    "enough surrounding context to ensure uniqueness."
+                    (
+                        "Exact text to find (unique in the file unless replace_all=true); include"
+                        " enough surrounding lines to make it unique."
+                    )
                 ),
             },
             "new_string": {
@@ -1006,12 +993,12 @@ PATCH_SCHEMA = ToolSchema(
 SEARCH_FILES_SCHEMA = ToolSchema(
     name="search_files",
     description=(
-        "Search file contents or find files by name. Use this instead of "
-        "grep/rg/find/ls in terminal. Ripgrep-backed, faster than shell equivalents.\n\n"
-        "Content search (target='content'): Regex search inside files. Output modes: "
-        "full matches with line numbers, file paths only, or match counts.\n\n"
-        "File search (target='files'): Find files by glob pattern (e.g., '*.py', "
-        "'*config*'). Also use this instead of ls — results sorted by modification time."
+        (
+            "Search inside files with a regex (target='content', the default) or find"
+            " files by name with a glob (target='files'). Faster than grep/find in "
+            "terminal. Output modes for content search: content (matching lines with "
+            "line numbers), files_only, count."
+        )
     ),
     parameters={
         "type": "object",
@@ -1061,9 +1048,10 @@ SEARCH_FILES_SCHEMA = ToolSchema(
                 "type": "string",
                 "enum": ["content", "files_only", "count"],
                 "description": (
-                    "Output format for grep mode: 'content' shows matching lines "
-                    "with line numbers, 'files_only' lists file paths, 'count' "
-                    "shows match counts per file"
+                    (
+                        "For content search: 'content' (lines with numbers), 'files_only' or "
+                        "'count'."
+                    )
                 ),
                 "default": "content",
             },
@@ -1083,8 +1071,10 @@ SEARCH_FILES_SCHEMA = ToolSchema(
 LIST_FILES_SCHEMA = ToolSchema(
     name="list_files",
     description=(
-        "List directory contents. Equivalent to search_files with "
-        "target='files'. Returns files sorted by modification time."
+        (
+            "List the files in a directory (most recently modified first), optionally"
+            " filtered by a glob pattern."
+        )
     ),
     parameters={
         "type": "object",

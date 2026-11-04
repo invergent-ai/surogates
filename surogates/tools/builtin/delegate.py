@@ -105,10 +105,12 @@ _FILE_READ_TOOLS: frozenset[str] = frozenset({"read_file"})
 _DELEGATE_SCHEMA = ToolSchema(
     name="delegate_task",
     description=(
-        "Delegate one or more tasks to sub-agents that each run in their "
-        "own session. Pass `goal` for a single task or `goals` (array) "
-        "to fan out in parallel. Use this for complex sub-tasks that "
-        "benefit from a fresh context window."
+        (
+            "Hand self-contained sub-tasks to sub-agents, each in a fresh session: "
+            "`goal` for one, `goals` for several in parallel. Give each the context "
+            "it needs (it cannot see this conversation). Use it for large independent"
+            " pieces of work, not for single lookups."
+        )
     ),
     parameters={
         "type": "object",
@@ -123,10 +125,10 @@ _DELEGATE_SCHEMA = ToolSchema(
             "goals": {
                 "type": "array",
                 "description": (
-                    "List of tasks to delegate in parallel. Each item is "
-                    "an object with its own `goal` plus optional "
-                    "`context`, `model`, `agent_type`, and `role`. Use "
-                    "either `goal` or `goals`, not both."
+                    (
+                        "Several tasks to run in parallel: objects with their own goal and "
+                        "optional context, model, agent_type, role. Use goal or goals, not both."
+                    )
                 ),
                 "items": {
                     "type": "object",
@@ -155,20 +157,20 @@ _DELEGATE_SCHEMA = ToolSchema(
             "agent_type": {
                 "type": "string",
                 "description": (
-                    "Optional name of a pre-configured sub-agent type. "
-                    "Applies that type's system prompt, tool filter, "
-                    "model, and iteration cap to the child session. "
-                    "Explicit 'model' wins over the agent type's preset."
+                    (
+                        "Optional pre-configured sub-agent type (its prompt, tools, model and "
+                        "limits)."
+                    )
                 ),
             },
             "role": {
                 "type": "string",
                 "enum": ["leaf", "orchestrator"],
                 "description": (
-                    "Recursion role. 'leaf' (default) strips "
-                    "delegate_task from the child so it cannot spawn "
-                    "further children. 'orchestrator' keeps it, allowing "
-                    "one more level of delegation up to the depth limit."
+                    (
+                        "'leaf' (default): the child cannot delegate further; 'orchestrator': it "
+                        "may delegate one more level."
+                    )
                 ),
             },
         },

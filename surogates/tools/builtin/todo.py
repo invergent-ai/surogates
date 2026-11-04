@@ -118,22 +118,13 @@ def register(registry: ToolRegistry) -> None:
         schema=ToolSchema(
             name="todo",
             description=(
-                "Manage your task list for the current session. Use for complex tasks "
-                "with 3+ steps or when the user provides multiple tasks. "
-                "Call with no parameters to read the current list.\n\n"
-                "Writing:\n"
-                "- Provide 'todos' array to create/update items\n"
-                "- merge=false (default): replace the entire list with a fresh plan\n"
-                "- merge=true: update existing items by id, add any new ones\n\n"
-                "Each item: {id: string, content: string, "
-                "status: pending|in_progress|completed|cancelled}\n"
-                "List order is priority. Only ONE item in_progress at a time.\n"
-                "Keep the list current as you work, not at the end: the moment "
-                "an item is done, call todo with merge=true to mark it completed "
-                "and the next one in_progress. People watch this list to follow "
-                "your progress. If something fails, cancel it and add a revised "
-                "item.\n\n"
-                "Always returns the full current list."
+                (
+                    "Your task list for this session, shown to the user. Use it for work with"
+                    " 3 or more steps: write the plan (merge=false), then as each item "
+                    "finishes call again with merge=true to mark it completed and the next "
+                    "one in_progress (one at a time). Call with no arguments to read the "
+                    "list."
+                )
             ),
             parameters={
                 "type": "object",

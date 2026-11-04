@@ -31,9 +31,10 @@ logger = logging.getLogger(__name__)
 _EXPERT_SCHEMA = ToolSchema(
     name="consult_expert",
     description=(
-        "Consult a specialist model for a single domain question. The "
-        "expert answers and returns its deliverable. Use this when a "
-        "request falls within an available expert's specialty."
+        (
+            "Ask a specialist model listed under Available Experts to do one focused "
+            "task in its domain; it returns its answer or deliverable."
+        )
     ),
     parameters={
         "type": "object",

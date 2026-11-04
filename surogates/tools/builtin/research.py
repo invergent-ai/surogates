@@ -69,15 +69,12 @@ def _ok(payload: dict[str, Any]) -> str:
 _MEMORY_SCHEMA = ToolSchema(
     name="research_memory",
     description=(
-        "Curated evidence bank for deep research. Record each useful source "
-        "once with a concise summary and verbatim evidence quotes; the writer "
-        "later cites sources by their returned source_id (e.g. S3).\n\n"
-        "ACTIONS:\n"
-        "- add: store a source. Provide url, title, summary, and evidence "
-        "(short verbatim quotes). Returns a stable source_id.\n"
-        "- retrieve: get the sources most relevant to a query/section "
-        "(use this per report section while writing).\n"
-        "- list: return every source in order (use for the References section)."
+        (
+            "Evidence bank for deep research. add: store a source once (url, title, "
+            "summary, short verbatim evidence quotes) and get its source_id (e.g. S3)"
+            " to cite. retrieve: the sources most relevant to a query (use per report"
+            " section). list: every source, for the References section."
+        )
     ),
     parameters={
         "type": "object",
@@ -184,12 +181,10 @@ async def _research_memory_handler(
 _OUTLINE_SCHEMA = ToolSchema(
     name="research_outline",
     description=(
-        "The living research outline (a markdown document). As your research "
-        "evolves, rewrite the whole outline to reflect new structure and "
-        "open questions. Use markdown headings (## / ###) for sections.\n\n"
-        "ACTIONS:\n"
-        "- set: replace the outline with the provided markdown.\n"
-        "- get: return the current outline."
+        (
+            "The living outline of a research report (markdown). set replaces it with"
+            " your rewritten version; get returns it."
+        )
     ),
     parameters={
         "type": "object",

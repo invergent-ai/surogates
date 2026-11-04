@@ -57,7 +57,8 @@ _FRONTMATTER_FENCE = "---"
 REQUIRED_KEYS: tuple[str, ...] = (
     "guidance/memory",
     "guidance/session_search",
-    "guidance/skills",
+    "guidance/skills_index",
+    "guidance/kb_actions",
     "guidance/brainstorming_gate",
     "guidance/ask_user_question",
     "guidance/artifact",
@@ -74,7 +75,6 @@ REQUIRED_KEYS: tuple[str, ...] = (
     "guidance/case_session",
     "guidance/case_agent",
     "guidance/process_agent",
-    "guidance/execution_discipline",
     "guidance/working_principles",
     "identity/default_personality",
     "identity/workspace_rules",
@@ -106,35 +106,10 @@ class PromptLibrary:
     single process lifetime cost one disk hit per file.
     """
 
-    def __init__(self, root: Path | None = None, profile: str | None = None) -> None:
+    def __init__(self, root: Path | None = None) -> None:
         self._root: Path = root or PROMPTS_ROOT
         self._body_cache: dict[Path, str] = {}
         self._meta_cache: dict[Path, dict[str, Any]] = {}
-        # A model profile (see :mod:`surogates.harness.prompt_profile`):
-        # ``profiles/<profile>/<key>.md`` shadows ``<key>.md``.
-        self.profile: str | None = profile
-
-    def for_profile(self, profile: str | None) -> "PromptLibrary":
-        """A view of this library that resolves *profile*'s overlays first.
-
-        Shares the parsed-body caches, so a view costs nothing to make.
-        """
-        if profile == self.profile:
-            return self
-        view = PromptLibrary.__new__(PromptLibrary)
-        view._root = self._root
-        view._body_cache = self._body_cache
-        view._meta_cache = self._meta_cache
-        view.profile = profile
-        return view
-
-    def has(self, key: str) -> bool:
-        """Whether a fragment exists for *key* (overlay or base)."""
-        try:
-            self._resolve(key)
-        except PromptNotFoundError:
-            return False
-        return True
 
     # ------------------------------------------------------------------
     # Public API
@@ -170,10 +145,6 @@ class PromptLibrary:
         if not channel:
             return None
         path = self._root / "platforms" / f"{channel}.md"
-        if self.profile:
-            overlay = self._root / "profiles" / self.profile / "platforms" / f"{channel}.md"
-            if overlay.is_file():
-                path = overlay
         if not path.is_file():
             return None
         return self._load_body(path)
@@ -212,26 +183,13 @@ class PromptLibrary:
         if platforms_dir.is_dir():
             for path in sorted(platforms_dir.glob("*.md")):
                 self._load_body(path)
-        # Model-profile overlays are loaded only for their model, so a
-        # malformed one would otherwise surface on that model's first turn.
-        profiles_dir = self._root / "profiles"
-        if profiles_dir.is_dir():
-            for path in sorted(profiles_dir.rglob("*.md")):
-                self._load_body(path)
 
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
 
     def _resolve(self, key: str) -> Path:
-        """Map ``"guidance/memory"`` to an absolute ``.md`` path.
-
-        With a profile set, ``profiles/<profile>/<key>.md`` wins when present.
-        """
-        if self.profile:
-            overlay = self._root / "profiles" / self.profile / f"{key}.md"
-            if overlay.is_file():
-                return overlay
+        """Map ``"guidance/memory"`` to an absolute ``.md`` path."""
         path = self._root / f"{key}.md"
         if not path.is_file():
             raise PromptNotFoundError(

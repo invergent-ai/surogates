@@ -714,10 +714,11 @@ def register(registry: ToolRegistry) -> None:
         schema=ToolSchema(
             name="web_search",
             description=(
-                "Search the web for information on any topic. Returns "
-                "relevant results with titles, URLs, and descriptions. "
-                "Returns 5 results by default; pass `limit` (up to 20) to "
-                "widen the net for broad or open-ended research."
+                (
+                    "Search the web. Returns titles, URLs and short descriptions (5 by "
+                    "default; `limit` up to 20 for broad research). Read the pages you rely "
+                    "on with web_extract."
+                )
             ),
             parameters=WEB_SEARCH_SCHEMA_PARAMS,
         ),
@@ -731,13 +732,12 @@ def register(registry: ToolRegistry) -> None:
         schema=ToolSchema(
             name="web_extract",
             description=(
-                "Extract content from web page URLs. Returns page content in "
-                "markdown format. Also works with PDF URLs (arxiv papers, "
-                "documents, etc.) -- pass the PDF link directly and it converts "
-                "to markdown text. Pages under 5000 chars return full markdown; "
-                "larger pages are LLM-summarized and capped at ~5000 chars per "
-                "page. Pages over 2M chars are refused. If a URL fails or times "
-                "out, use the browser tool to access it instead."
+                (
+                    "Fetch up to 5 URLs and return their content as markdown (long pages are "
+                    "summarized to about 5000 characters). Works for PDF links too, but long "
+                    "PDFs are better downloaded with terminal and read with read_file. If a "
+                    "page fails, try the browser."
+                )
             ),
             parameters=WEB_EXTRACT_SCHEMA_PARAMS,
         ),

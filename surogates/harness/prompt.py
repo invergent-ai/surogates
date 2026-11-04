@@ -27,11 +27,6 @@ from surogates.devices.binding import device_of
 from surogates.harness.loop_context_replay import sanitize_sender_name
 from surogates.harness.model_metadata import get_model_info
 from surogates.harness.prompt_library import PromptLibrary, default_library
-from surogates.harness.prompt_profile import (
-    profile_settings,
-    resolve_prompt_profile,
-    skill_index_entry,
-)
 from surogates.runtime.context import SlashCommandConfig
 from surogates.tools.loader import AGENT_SOURCE_PLATFORM
 from surogates.tools.skill_visibility import fallback_hidden
@@ -49,23 +44,6 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Model routing constants (not prompt prose -- stays as Python config).
 # ---------------------------------------------------------------------------
-
-# Model name substrings that trigger the execution-discipline and
-# tool-use-enforcement fragments.  These models benefit from explicit
-# rules about verifying results, labelling assumptions, and executing
-# promised actions instead of narrating them.  Claude and DeepSeek are
-# *not* listed because they already do these things reliably; the prompt
-# budget is better spent elsewhere for them.
-#
-# When you wire a new model into the platform, add its identifier (or a
-# substring that matches it) here.  The failure mode of forgetting is
-# silent — the model loads with no execution-discipline guidance and
-# regresses on tasks like multi-source research, retry-on-empty, and
-# uncertainty labelling — so prefer to add eagerly.
-MODELS_REQUIRING_DISCIPLINE: tuple[str, ...] = (
-    "gpt", "codex", "gemini", "gemma", "grok", "moonshot", "kimi",
-    "surogate",
-)
 
 # Channels that render agent output as chat messages with native media
 # attachments but have NO artifact panel -- the create_artifact surface
@@ -205,16 +183,6 @@ class PromptBuilder:
         # primarily so tests can swap in a library backed by a temp
         # directory; production always uses the package-bundled default.
         self._prompts: PromptLibrary = prompt_library or default_library()
-        # Model profile: overlay fragments and tool descriptions measured
-        # for one model family (see prompt_profile).  Read back by the
-        # harness to apply the same profile to the tool schemas.
-        self.prompt_profile: str | None = resolve_prompt_profile(
-            self._get_model_id(),
-            org_config=self.tenant.org_config,
-            session_config=getattr(session, "config", None),
-        )
-        self._prompts = self._prompts.for_profile(self.prompt_profile)
-        self._profile_settings: dict[str, Any] = profile_settings(self.prompt_profile)
 
     def set_agent_def(self, agent_def: AgentDef | None) -> None:
         """Set or clear the active sub-agent type for the current session.
@@ -324,7 +292,6 @@ class PromptBuilder:
             "skill_view" in self._available_tools
             or "skill_manage" in self._available_tools
         ):
-            parts.append(self._prompts.get("guidance/skills"))
             # The brainstorming gate is a separate fragment so it carries its
             # own emphasis and can be disabled independently of the broader
             # skills guidance. It only matters when skill_view is available
@@ -409,18 +376,6 @@ class PromptBuilder:
                 on_a_process = is_process_agent_config(getattr(self._session, "config", None))
                 parts.append(self._prompts.get("guidance/process_agent" if on_a_process else "guidance/case_agent"))
 
-        # Execution discipline (verification, missing_context,
-        # execute-don't-narrate, etc.) applies to any response from a
-        # discipline-required model, regardless of whether tools are
-        # registered — the act-don't-narrate guidance is a no-op for
-        # tool-less sessions and not worth the extra gate.
-        model_lower = self._get_model_id().lower()
-        needs_discipline = self.prompt_profile is not None or any(
-            p in model_lower for p in MODELS_REQUIRING_DISCIPLINE
-        )
-        if needs_discipline:
-            parts.append(self._prompts.get("guidance/execution_discipline"))
-
         parts = [p for p in parts if p]
         if not parts:
             return ""
@@ -437,12 +392,12 @@ class PromptBuilder:
         return guidance
 
     def _held_back(self, tool: str) -> bool:
-        """Whether *tool* waits for load_tools in this session (a profile tool group)."""
+        """Whether *tool* waits for load_tools in this session (a tool group)."""
         if "load_tools" not in self._available_tools:
             return False
         from surogates.harness.tool_groups import group_of, tool_groups
 
-        return group_of(tool, tool_groups(self.prompt_profile)) is not None
+        return group_of(tool, tool_groups()) is not None
 
     def _working_principles_section(self) -> str:
         """Always-loaded working principles fragment.
@@ -746,13 +701,6 @@ class PromptBuilder:
                 requires_agents = []
 
             safe_desc = self._sanitise(desc, f"skill:{name}")
-            # A profile may re-aim or hide an index line (the skill itself
-            # is unchanged and stays loadable by name).
-            if skill_type != "expert":
-                profiled = skill_index_entry(self.prompt_profile, name, safe_desc)
-                if profiled is None:
-                    continue
-                safe_desc = profiled
 
             if skill_type == "expert":
                 continue
@@ -890,33 +838,19 @@ class PromptBuilder:
             )
 
         index = "<available_skills>\n" + "\n".join(index_lines) + "\n</available_skills>"
-        if "skill_view" in self._available_tools and self._prompts.has("guidance/skills_index"):
+        if "skill_view" in self._available_tools:
             return (
                 self._prompts.get("guidance/skills_index")
                 .replace("{management_hint}", management_hint.strip())
                 .replace("{index}", index)
                 .strip()
             )
-        if "skill_view" not in self._available_tools:
-            return (
-                "# Available Skills\n"
-                "## Skills\n"
-                "These skills are in this agent's library. You can't open them in "
-                "this session, so treat their names and descriptions as context only."
-                f"{management_hint}\n\n{index}"
-            )
         return (
             "# Available Skills\n"
-            "## Skills (mandatory)\n"
-            "Before replying, scan the skills below. If a skill matches or is "
-            "even partially relevant to your task, you MUST load it with "
-            "`skill_view(name)` and follow its instructions. Err on the side "
-            "of loading: skills contain specialized commands, workflows, "
-            "project conventions, and quality standards that may differ from "
-            "general-purpose knowledge."
-            f"{management_hint}\n\n{index}\n\n"
-            "Only proceed without loading a skill if genuinely none are relevant "
-            "to the task."
+            "## Skills\n"
+            "These skills are in this agent's library. You can't open them in "
+            "this session, so treat their names and descriptions as context only."
+            f"{management_hint}\n\n{index}"
         )
 
     @staticmethod
@@ -937,45 +871,21 @@ class PromptBuilder:
         # provider's implicit prefix cache on each new build.
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d UTC")
 
-        compact = bool(self._profile_settings.get("compact_context"))
         parts = [
             "# Context",
             f"- **Current date**: {today}",
         ]
-        # The org id and the platform's architecture are nothing a model can
-        # act on; a compact profile leaves them out.
-        if not compact:
-            parts.append(f"- **Organisation**: {self.tenant.org_id}")
+        # No org id, model id, context window or platform architecture:
+        # nothing a model can act on.
         speaker = self._speaker_line()
         if speaker:
             parts.append(speaker)
 
-        model_id = self._get_model_id()
-        model_info = get_model_info(model_id)
-        if compact:
-            if model_info is not None and model_info.supports_vision:
-                parts.append(
-                    "- **Vision**: you see images attached to messages directly "
-                    "(no vision_analyze needed for those)."
-                )
-        elif model_info is not None:
-            parts.append(f"- **Model**: {model_info.id}")
+        model_info = get_model_info(self._get_model_id())
+        if model_info is not None and model_info.supports_vision:
             parts.append(
-                f"- **Context window**: {model_info.context_window:,} tokens"
-            )
-            if model_info.supports_vision:
-                parts.append(
-                    "- **Vision**: supported — you can see images attached "
-                    "to user messages directly. Do not use vision_analyze "
-                    "for images already in the conversation."
-                )
-        else:
-            parts.append(f"- **Model**: {model_id}")
-
-        if not compact:
-            parts.append(
-                "- **Platform**: Surogates managed agent platform "
-                "(multi-tenant, K8s-native)"
+                "- **Vision**: you see images attached to messages directly "
+                "(no vision_analyze needed for those)."
             )
 
         # Workspace path — tells the LLM where it is and that it must
@@ -1196,10 +1106,8 @@ class PromptBuilder:
                     "read, and a sentence you cannot support from one must "
                     "be left out."
                 )
-            # A profile may add how the knowledge base governs actions, not
-            # just answers (guidance/kb_actions; no base fragment).
-            if self._prompts.has("guidance/kb_actions"):
-                lines.append(self._prompts.get("guidance/kb_actions"))
+            # The knowledge base governs actions, not just answers.
+            lines.append(self._prompts.get("guidance/kb_actions"))
             for kb in grounding:
                 lines.append("")
                 lines.extend(_render_kb(kb))

@@ -44,21 +44,14 @@ from surogates.tools.builtin.skill_validation import (
 SCHEMA = ToolSchema(
     name="skill_manage",
     description=(
-        "Manage skills (create, update, delete). Skills are your procedural "
-        "memory — reusable approaches for recurring task types. "
-        "New skills go to the user's skills directory; existing skills can be modified wherever they live.\n\n"
-        "Actions: create (full SKILL.md + optional category), "
-        "patch (old_string/new_string — preferred for fixes), "
-        "edit (full SKILL.md rewrite — major overhauls only), "
-        "delete, write_file, remove_file.\n\n"
-        "Create only when the user asks for a skill or asks you to keep a "
-        "procedure.\n"
-        "Update when: instructions stale/wrong, OS-specific failures, "
-        "missing steps or pitfalls found during use. "
-        "If you used a skill and hit issues not covered by it, patch it immediately.\n\n"
-        "Confirm with the user before creating or deleting.\n\n"
-        "Good skills: trigger conditions, numbered steps with exact commands, "
-        "pitfalls section, verification steps. Use skill_view() to see format examples."
+        (
+            "Create, change or delete skills (reusable procedures). Actions: create "
+            "(full SKILL.md), patch (old_string -> new_string; preferred for fixes), "
+            "edit (full rewrite), delete, write_file / remove_file (supporting files "
+            "under references/, templates/, scripts/ or assets/). Create or delete "
+            "only when the user asks, and confirm first. If a skill you followed was "
+            "wrong or incomplete, patch it."
+        )
     ),
     parameters={
         "type": "object",
@@ -78,9 +71,10 @@ SCHEMA = ToolSchema(
             "content": {
                 "type": "string",
                 "description": (
-                    "Full SKILL.md content (YAML frontmatter + markdown body). "
-                    "Required for 'create' and 'edit'. For 'edit', read the skill "
-                    "first with skill_view() and provide the complete updated text."
+                    (
+                        "Full SKILL.md (YAML frontmatter + body); for 'create' and 'edit' (read "
+                        "the skill first for 'edit')."
+                    )
                 ),
             },
             "old_string": {
@@ -105,18 +99,16 @@ SCHEMA = ToolSchema(
             "category": {
                 "type": "string",
                 "description": (
-                    "Optional category/domain for organizing the skill (e.g., 'devops', "
-                    "'data-science', 'mlops'). Creates a subdirectory grouping. "
-                    "Only used with 'create'."
+                    "Optional category folder for 'create'."
                 ),
             },
             "file_path": {
                 "type": "string",
                 "description": (
-                    "Path to a supporting file within the skill directory. "
-                    "For 'write_file'/'remove_file': required, must be under references/, "
-                    "templates/, scripts/, or assets/. "
-                    "For 'patch': optional, defaults to SKILL.md if omitted."
+                    (
+                        "Supporting file under references/, templates/, scripts/ or assets/ (for "
+                        "write_file/remove_file; for patch, defaults to SKILL.md)."
+                    )
                 ),
             },
             "file_content": {

@@ -1,6 +1,6 @@
 ---
 name: pdf-forms
-description: "Fill in a PDF form, annotate or redact a PDF, or add, remove or rotate its pages, when the office_edit tool is not available. Fills fillable and flat forms with the scripts FORMS.md walks through, puts notes and text on a page, blacks out words so they are gone from the file, and inserts, deletes and rotates pages with pypdf, qpdf or pdftk. Merging, splitting, creating, watermarking and encrypting PDFs are the pdf skill's."
+description: Fill PDF forms, annotate or redact a PDF, or add, remove or rotate pages.
 fallback_for_tools: [office_edit]
 license: Proprietary. LICENSE.txt has complete terms
 ---

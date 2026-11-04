@@ -1,6 +1,6 @@
 ---
 name: schedule
-description: "Create, change, pause or cancel a prompt that runs on a schedule, in whatever language the user asks. Use when the user says things like \"every weekday at 8:30\", \"în fiecare zi lucrătoare la 8:30\", \"each morning\", \"remind me at noon\", or wants to see, reschedule, edit, pause or stop a scheduled task."
+description: Create, change, pause or cancel a prompt that runs on a schedule ("every weekday at 8:30", "remind me at noon").
 ---
 
 You make the schedule yourself with `cron_create`, once the user has approved it. Never ask the user to type a command or a cron expression. Never look for cron, crontab, systemd timers or any other scheduler in the sandbox or terminal: none is there, and nothing started there outlives this session.

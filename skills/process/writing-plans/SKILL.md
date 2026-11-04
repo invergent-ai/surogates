@@ -1,6 +1,6 @@
 ---
 name: writing-plans
-description: Use when you have a spec or requirements for a multi-step task, before touching code or producing output. Turns a design into bite-sized, copy-pasteable tasks with exact paths and complete code.
+description: Turn an agreed spec for a large multi-step build into a step-by-step implementation plan.
 version: 2.0.0
 author: Surogate Agent (adapted from obra/superpowers)
 license: MIT

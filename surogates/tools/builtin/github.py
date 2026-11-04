@@ -140,23 +140,18 @@ def authorize_github_request(
 _SCHEMA = ToolSchema(
     name="github",
     description=(
-        "GitHub REST API for the agent's configured repositories, WITHOUT "
-        "checking out the repo. Read (GET, the default): issues, pull requests, "
-        "files, commits, diffs, search. Write (set 'method' to POST/PATCH/PUT/"
-        "DELETE with a 'body'): open/close/comment issues and PRs, add labels, "
-        "write files. Scoped to configured repos; writes act only on the repo's "
-        "sub-resources, never on the repository itself (no root delete/rename) "
-        "and need the connected token to carry write scope. Read examples: list "
-        "open issues → path='/repos/{owner}/{repo}/issues', params={'state':'open'}; "
-        "a PR's diff → path='/repos/{owner}/{repo}/pulls/{n}', media_type='diff'; a "
-        "file → path='/repos/{owner}/{repo}/contents/{filepath}'; search issues → "
-        "path='/search/issues', params={'q':'repo:{owner}/{repo} is:open label:bug'}. "
-        "Write examples: open an issue → method='POST', "
-        "path='/repos/{owner}/{repo}/issues', body={'title':'…','body':'…'}; comment "
-        "→ method='POST', path='/repos/{owner}/{repo}/issues/{n}/comments', "
-        "body={'body':'…'}; close → method='PATCH', "
-        "path='/repos/{owner}/{repo}/issues/{n}', body={'state':'closed'}. To make "
-        "code changes across many files and open a PR, prefer run_coding_agent."
+        (
+            "GitHub REST API for the agent's configured repositories (no checkout). "
+            "GET (default) reads issues, pull requests, files, commits, diffs and "
+            "search; POST/PATCH/PUT/DELETE with a `body` writes (issues, comments, "
+            "labels, PRs, files; never the repository itself; needs a token with "
+            "write scope). Examples: open issues -> "
+            "path='/repos/{owner}/{repo}/issues', params={'state':'open'}; a PR diff "
+            "-> path='/repos/{owner}/{repo}/pulls/{n}', media_type='diff'; comment ->"
+            " method='POST', path='/repos/{owner}/{repo}/issues/{n}/comments', "
+            "body={'body':'...'}. For multi-file code changes and PRs prefer "
+            "run_coding_agent."
+        )
     ),
     parameters={
         "type": "object",

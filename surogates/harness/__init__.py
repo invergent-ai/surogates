@@ -52,7 +52,6 @@ from surogates.harness.model_metadata import (
     parse_context_limit_from_error,
 )
 from surogates.harness.prompt import (
-    MODELS_REQUIRING_DISCIPLINE,
     PromptBuilder,
 )
 from surogates.harness.prompt_library import PromptLibrary, default_library
@@ -125,7 +124,6 @@ __all__ = [
     "LEGACY_SUMMARY_PREFIX",
     "IterationBudget",
     "MODEL_CATALOG",
-    "MODELS_REQUIRING_DISCIPLINE",
     "ModelInfo",
     "PromptBuilder",
     "PromptLibrary",
