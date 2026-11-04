@@ -94,7 +94,7 @@ const TAB_META: Record<
     Icon: LinkIcon,
   },
   accounts: {
-    label: "Connected accounts",
+    label: "Connected Accounts",
     blurb: "Outlook, OneDrive and other services it can use for you",
     Icon: PlugIcon,
   },
@@ -181,10 +181,10 @@ export function SettingsPage() {
   const channelsEnabled = (linkableChannels?.length ?? 0) > 0;
   // Devices only where the agent says it has local folders: an older one says nothing, and has no computers.
   const devicesEnabled = useAppStore((s) => s.desktopSessions) === true;
-  // Connected accounts only when the agent has services to connect: the same list the chat's
+  // Connected Accounts only when the agent has services to connect: the same list the chat's
   // "Connect your accounts" band shows. Like browser profiles, unknown fails open: the list comes
   // through the integrations service and takes a moment, and the band opens this tab directly, so
-  // only a loaded empty list (or one that cannot load) hides it.
+  // only a loaded empty list hides it. A failed load stays unknown, and the tab shows its error.
   const [accountsKnown, setAccountsKnown] = useState<boolean | null>(null);
   useEffect(() => {
     const pending = surogatesWebChatAdapter.listComposioConnections?.({});
@@ -198,7 +198,7 @@ export function SettingsPage() {
         if (live) setAccountsKnown(res.toolkits.length > 0);
       })
       .catch(() => {
-        if (live) setAccountsKnown(false);
+        // Unknown, not absent: keep the tab, whose list says what went wrong.
       });
     return () => {
       live = false;
@@ -302,16 +302,18 @@ export function SettingsPage() {
       selectTab("devices");
     }
   }, [asked, devicesEnabled]);
-  // The chat's "Connect your accounts" band opens Connected accounts.
+  // The chat's "Connect your accounts" band opens Connected Accounts.
   useEffect(() => {
     if (asked === "accounts" && accountsEnabled) {
       selectTab("accounts");
     }
   }, [asked, accountsEnabled]);
-  // Shown while unknown: if the agent turns out to have nothing to connect, leave the tab.
+  // Shown while unknown: if the agent turns out to have nothing to connect, leave the tab for
+  // the settings themselves (the index, on a phone).
   useEffect(() => {
     if (!accountsEnabled && tab === "accounts") {
       setTab("profile");
+      setSectionOpen(false);
     }
   }, [accountsEnabled, tab]);
 
@@ -352,7 +354,7 @@ export function SettingsPage() {
                 <TabsTrigger value="channels">Connected Channels</TabsTrigger>
               )}
               {accountsEnabled && (
-                <TabsTrigger value="accounts">Connected accounts</TabsTrigger>
+                <TabsTrigger value="accounts">Connected Accounts</TabsTrigger>
               )}
               <TabsTrigger value="plan">Plan &amp; Usage</TabsTrigger>
               {codingAgentsEnabled && (
@@ -459,7 +461,7 @@ export function SettingsPage() {
               <NotificationsSection />
             </TabsContent>
 
-            {/* ── Connected accounts ── */}
+            {/* ── Connected Accounts ── */}
             {accountsEnabled && (
               <TabsContent value="accounts">
                 <ConnectedAccountsTab />
