@@ -72,6 +72,33 @@ _SHARE_NOTE_SCHEMA = ToolSchema(
                                 "event_id}, or {kind:'artifact', session_id, "
                                 "artifact_id}. It must be in your group."
                             ),
+                            "properties": {
+                                "kind": {
+                                    "type": "string",
+                                    "enum": ["tool_result", "event", "artifact"],
+                                },
+                                "tool": {
+                                    "type": "string",
+                                    "description": "For kind tool_result: the tool's name.",
+                                },
+                                "contains": {
+                                    "type": "string",
+                                    "description": "For kind tool_result: text from its output.",
+                                },
+                                "session_id": {
+                                    "type": "string",
+                                    "description": "For kind event or artifact.",
+                                },
+                                "event_id": {
+                                    "type": "integer",
+                                    "description": "For kind event.",
+                                },
+                                "artifact_id": {
+                                    "type": "string",
+                                    "description": "For kind artifact.",
+                                },
+                            },
+                            "required": ["kind"],
                         },
                     },
                     "required": ["type", "content"],

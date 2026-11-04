@@ -153,6 +153,10 @@ def _sanitize_node(node: Any, path: str) -> Any:
 
     if out.get("type") == "object" and not isinstance(out.get("properties"), dict):
         out["properties"] = {}
+        # Some backends need the key, but alone it says "an object with no
+        # fields", and a model that takes the schema literally then sends {}
+        # however plainly the description asks for keys. Say it is free-form.
+        out.setdefault("additionalProperties", True)
 
     if out.get("type") == "object" and isinstance(out.get("required"), list):
         props = out.get("properties") or {}
