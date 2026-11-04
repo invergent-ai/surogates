@@ -40,6 +40,7 @@ the first 401.
 """
 from __future__ import annotations
 
+import hashlib
 from typing import Any
 
 import httpx
@@ -56,7 +57,10 @@ DEFAULT_FIREBASE_API_KEY = "AIzaSyBqlo4z-dugjDARIaXtNEsHtmbmashBzgs"
 
 
 def server_name(task_id: str) -> str:
-    return f"eog-{task_id}"[:120]
+    # Short and stable: the harness names tools mcp__<server>__<tool>, and
+    # OpenAI-compatible servers (ours included) refuse a function name over
+    # 64 characters -- a task id here is ~45 on its own.
+    return "eog-" + hashlib.sha1(task_id.encode()).hexdigest()[:10]
 
 
 class RegistrarError(RuntimeError):

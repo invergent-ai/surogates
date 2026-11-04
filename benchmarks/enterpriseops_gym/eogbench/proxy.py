@@ -46,10 +46,17 @@ def context_headers(context: dict, auth_config: dict | None = None) -> dict[str,
     return headers
 
 
+KNOWN_MCP_VERSIONS = frozenset({"2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"})
+
+
 def filtered_tools(payload: dict, allowed: frozenset[str]) -> dict:
     result = payload.get("result")
     if isinstance(result, dict) and isinstance(result.get("tools"), list):
-        return {**payload, "result": {**result, "tools": [tool for tool in result["tools"] if tool.get("name") in allowed]}}
+        # outputSchema dropped: these gyms declare one but answer with plain
+        # text content, which the MCP client (mcp>=1.10) refuses outright.
+        tools = [{k: v for k, v in tool.items() if k != "outputSchema"}
+                 for tool in result["tools"] if tool.get("name") in allowed]
+        return {**payload, "result": {**result, "tools": tools}}
     if "error" not in payload:
         raise ValueError("Invalid upstream tools/list response")
     return payload
@@ -133,7 +140,7 @@ class GymProxy:
                         content=body,
                         timeout=httpx.Timeout(300.0, connect=10.0),
                     ) as resp:
-                        if message and message.get("method") == "tools/list" and resp.is_success:
+                        if message and message.get("method") in ("tools/list", "initialize") and resp.is_success:
                             if "text/event-stream" in resp.headers.get("content-type", ""):
                                 # Collapse the request's SSE result to JSON,
                                 # which Streamable HTTP clients also accept.
@@ -149,10 +156,20 @@ class GymProxy:
                                             payload = event
                                             break
                                 if payload is None:
-                                    raise ValueError("Missing tools/list result")
+                                    raise ValueError("Missing tools/list or initialize result")
                             else:
                                 resp.read()
                                 payload = resp.json()
+                            if message.get("method") == "initialize":
+                                # The email gym answers with protocol version
+                                # 2025-09-22, which the MCP client rejects; the
+                                # session works on the version the client asked for.
+                                result = payload.get("result")
+                                asked = (message.get("params") or {}).get("protocolVersion")
+                                if isinstance(result, dict) and asked and result.get("protocolVersion") not in KNOWN_MCP_VERSIONS:
+                                    payload = {**payload, "result": {**result, "protocolVersion": asked}}
+                                self._json(payload, headers=resp.headers)
+                                return
                             self._json(filtered_tools(payload, allowed), headers=resp.headers)
                             return
                         self.send_response(resp.status_code)
