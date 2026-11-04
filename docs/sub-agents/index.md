@@ -94,6 +94,8 @@ Return findings grouped as Critical / Important / Minor.
 Include specific line numbers and suggested fixes.
 ```
 
+A coordinator sees a sub-agent's `description` and `tools`, and never its body. So the description is what it plans from: say what the sub-agent reads and what it produces, with paths when other tasks depend on them.
+
 Place it in one of the layered locations below, or create via the REST API / Web UI.
 
 ### Frontmatter Reference

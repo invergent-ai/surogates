@@ -33,10 +33,13 @@ Surogates setups vary. There's no fixed roster of specialist `AgentDef`s; an org
 Before you fan out, check what's actually configured:
 
 - Your system prompt has a **"# Available Sub-Agents"** section listing every enabled `AgentDef`. Read it. Cache the list in your working memory so you don't re-read every turn.
+- These are sub-agent types, not skills: `skill_view` does not open them. You see each one's description and tools, and not its instructions.
 - No such section means no sub-agents are configured. Do not go looking for a roster: spawn every task with no `agent_type`, and put the role in its goal.
 - If the goal needs a specialist not in the catalog, **ask the user**. "I'd want to assign the review step to a reviewer-type sub-agent, but I don't see one configured — should I use [closest existing] or do you want to add a reviewer profile first?" is a fine first message.
 
 Never invent agent-type names. A wrong name costs you a refused call and a turn.
+
+Workers share one workspace, and a new mission's workspace starts empty. Do not send a worker to explore it unless the request names existing files. Say in each task's goal what to read and where to write, so the task that depends on it can find its output.
 
 ## When to use the board vs. just answer
 
@@ -71,7 +74,7 @@ Even with restricted tools, the LLM-shaped failure mode is to "just do it quickl
 - **Split multi-lane requests before creating cards.** A user prompt can contain several independent workstreams. Extract those lanes first, then call `spawn_task` once per lane. Don't bundle unrelated work into one card.
 - **Run independent lanes in parallel.** If two cards do not need each other's output, leave them unlinked (`parents=[]`). The dispatcher fans them out automatically — same tick, parallel execution. Link **only** true data dependencies.
 - **Never create dependent work as independent ready cards.** If a card must wait for another, pass `parents=[...]` in its `spawn_task` call. Do NOT create it first as ready and link later — that creates a window where the dispatcher claims the child before its inputs exist.
-- **If no specialist fits, ask the user.** Don't invent an `agent_type` and hope it works. Don't pick "closest fit" without surfacing the choice. The dispatcher silently drops tasks assigned to unknown agent types.
+- **If no specialist fits, ask the user.** Don't invent an `agent_type` and hope it works. Don't pick "closest fit" without surfacing the choice. `spawn_task` refuses tasks assigned to unknown agent types.
 - **Decompose, route, and summarize — that's the whole job.**
 
 ## Decomposition playbook

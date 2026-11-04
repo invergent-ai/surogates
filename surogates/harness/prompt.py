@@ -108,6 +108,11 @@ _B64_SUSPICIOUS_KEYWORDS: frozenset[str] = frozenset({
 })
 
 
+def _or_list(items: list[str]) -> str:
+    """``a``, ``a or b``, ``a, b or c``."""
+    return " or ".join(filter(None, (", ".join(items[:-1]), items[-1])))
+
+
 class PromptBuilder:
     """Builds system prompts from tenant config, skills, memory, and platform settings."""
 
@@ -539,11 +544,18 @@ class PromptBuilder:
             self._available_agents_section_cache = ""
             return ""
 
+        spawn_tools = [
+            f"``{name}``" for name in ("spawn_task", "spawn_worker", "delegate_task")
+            if name in self._available_tools
+        ] or ["``spawn_task``", "``spawn_worker``", "``delegate_task``"]
         rendered = (
             "# Available Sub-Agents\n"
-            "Pass ``agent_type=<name>`` to ``spawn_worker`` or "
-            "``delegate_task`` to use one of these pre-configured sub-agent types. "
-            "Each sub-agent runs with its own system prompt, tool filter, and model.\n"
+            f"Pass ``agent_type=<name>`` to {_or_list(spawn_tools)} to use one of "
+            "these pre-configured sub-agent types. "
+            "Each sub-agent runs with its own system prompt, tool filter, and model. "
+            "These are not skills, so ``skill_view`` does not open them. You see "
+            "what is listed here and not their instructions, so say in each goal "
+            "what to read and where to write.\n"
             + "\n".join(lines)
         )
         self._available_agents_section_cache = rendered
