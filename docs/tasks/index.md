@@ -228,6 +228,8 @@ The judge does **not** run after every agent response. That would be expensive a
 1. A task the coordinator spawned (or any of its sub-tasks) reaches a terminal state — there's actual new evidence to grade. **This is the normal path.**
 2. The coordinator emits `[[mission-complete]]` on its own line — an explicit "look now" hint from the agent.
 
+Either way it waits for the workstream to settle. While a mission task is `running` or `ready`, or is `todo` with parents that can still finish, the judge holds off and no iteration is spent. A `todo` task under a failed, cancelled or `blocked` parent does not hold it back, because nothing will start that task without a decision.
+
 A 30-second rate limit per mission keeps a burst of completing tasks from triggering a flurry of judge calls.
 
 ### How to design a rubric the judge can answer

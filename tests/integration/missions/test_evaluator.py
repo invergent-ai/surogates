@@ -477,3 +477,153 @@ async def test_harness_transport_failure_does_not_consume_iteration_budget(
         assert any(e.data.get("result") == "transport_failed" for e in end)
     # Parse-failure counter is NOT incremented (transport != parse).
     assert m.evaluator_parse_failures == 0
+
+
+async def _fan_out(session_factory, org_id, session_id, mission_id):
+    """Two researchers feeding a writer, feeding a verifier."""
+    from surogates.db.models import TaskLink
+
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    async with session_factory() as db:
+        finished = Task(
+            org_id=org_id, parent_session_id=session_id, goal="research a",
+            status="done", completed_at=now, mission_id=mission_id,
+        )
+        running = Task(
+            org_id=org_id, parent_session_id=session_id, goal="research b",
+            status="running", mission_id=mission_id,
+        )
+        writer = Task(
+            org_id=org_id, parent_session_id=session_id, goal="write",
+            status="todo", mission_id=mission_id,
+        )
+        verifier = Task(
+            org_id=org_id, parent_session_id=session_id, goal="verify",
+            status="todo", mission_id=mission_id,
+        )
+        db.add_all([finished, running, writer, verifier])
+        await db.flush()
+        db.add_all([
+            TaskLink(parent_id=finished.id, child_id=writer.id),
+            TaskLink(parent_id=running.id, child_id=writer.id),
+            TaskLink(parent_id=writer.id, child_id=verifier.id),
+        ])
+        await db.commit()
+        return {
+            "finished": finished.id, "running": running.id,
+            "writer": writer.id, "verifier": verifier.id,
+        }
+
+
+async def _set_status(session_factory, task_id, status):
+    async with session_factory() as db:
+        task = await db.get(Task, task_id)
+        task.status = status
+        task.completed_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        await db.commit()
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_the_judge_waits_while_the_fan_out_is_running(
+    session_factory, session_store, org_id, user_id,
+):
+    """One researcher finishing is not a workstream to grade.
+
+    Grading here only says "not yet", and the same answer after the next
+    researcher reads as stagnation: a healthy mission ended ``blocked``.
+    """
+    from surogates.missions.evaluator import should_evaluate
+
+    sess = await session_store.create_session(
+        org_id=org_id, user_id=user_id, agent_id="a", channel="web",
+    )
+    store = MissionStore(session_factory)
+    mid = await store.create(
+        org_id=org_id, user_id=user_id, session_id=sess.id,
+        agent_id="a", description="d", rubric="r",
+    )
+    tasks = await _fan_out(session_factory, org_id, sess.id, mid)
+
+    decision = await should_evaluate(
+        mission_id=mid, coordinator_last_response="Waiting.",
+        session_factory=session_factory, mission_store=store,
+    )
+    assert (decision.should, decision.trigger) == (False, "tasks_in_flight")
+
+    # A claim does not jump the queue either: the verifier has not run.
+    claimed = await should_evaluate(
+        mission_id=mid, coordinator_last_response="Done.\n[[mission-complete]]",
+        session_factory=session_factory, mission_store=store,
+    )
+    assert (claimed.should, claimed.trigger) == (False, "tasks_in_flight")
+
+    # Research done, the writer not yet promoted by the tick: still waiting.
+    await _set_status(session_factory, tasks["running"], "done")
+    between = await should_evaluate(
+        mission_id=mid, coordinator_last_response="Waiting.",
+        session_factory=session_factory, mission_store=store,
+    )
+    assert between.trigger == "tasks_in_flight"
+
+    await _set_status(session_factory, tasks["writer"], "done")
+    await _set_status(session_factory, tasks["verifier"], "done")
+    settled = await should_evaluate(
+        mission_id=mid, coordinator_last_response="Waiting.",
+        session_factory=session_factory, mission_store=store,
+    )
+    assert (settled.should, settled.trigger) == (True, "task_terminal")
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_a_failed_task_lets_the_judge_look_at_the_stuck_graph(
+    session_factory, session_store, org_id, user_id,
+):
+    """Its children will never start, so waiting for them would hang forever."""
+    from surogates.missions.evaluator import should_evaluate
+
+    sess = await session_store.create_session(
+        org_id=org_id, user_id=user_id, agent_id="a", channel="web",
+    )
+    store = MissionStore(session_factory)
+    mid = await store.create(
+        org_id=org_id, user_id=user_id, session_id=sess.id,
+        agent_id="a", description="d", rubric="r",
+    )
+    tasks = await _fan_out(session_factory, org_id, sess.id, mid)
+
+    await _set_status(session_factory, tasks["running"], "failed")
+
+    decision = await should_evaluate(
+        mission_id=mid, coordinator_last_response="Waiting.",
+        session_factory=session_factory, mission_store=store,
+    )
+    assert (decision.should, decision.trigger) == (True, "task_terminal")
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_running_work_still_trips_the_budget(
+    session_factory, session_store, org_id, user_id,
+):
+    """Waiting for tasks must not let a mission spend past its allowance."""
+    from surogates.missions.evaluator import should_evaluate
+
+    sess = await session_store.create_session(
+        org_id=org_id, user_id=user_id, agent_id="a", channel="web",
+    )
+    store = MissionStore(session_factory)
+    mid = await store.create(
+        org_id=org_id, user_id=user_id, session_id=sess.id,
+        agent_id="a", description="d", rubric="r",
+    )
+    await _fan_out(session_factory, org_id, sess.id, mid)
+    await store.set_budget(mid, budget_tokens=10)
+    async with session_factory() as db:
+        row = await db.get(ORMSession, sess.id)
+        row.input_tokens = 100
+        await db.commit()
+
+    decision = await should_evaluate(
+        mission_id=mid, coordinator_last_response="Waiting.",
+        session_factory=session_factory, mission_store=store,
+    )
+    assert decision.trigger == "budget_exhausted"
