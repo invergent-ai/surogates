@@ -69,7 +69,7 @@ def split_fragment(text: str) -> tuple[str, str]:
 
 def read_seed(prompts_root: Path, fragment: str) -> tuple[str, str]:
     """Return ``(header, body)`` of the shipped *fragment* (e.g.
-    ``guidance/execution_discipline``)."""
+    ``guidance/working_principles``)."""
     path = Path(prompts_root) / f"{fragment}.md"
     if not path.exists():
         raise FileNotFoundError(f"no such fragment: {path}")

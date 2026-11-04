@@ -1,13 +1,9 @@
-# Prompt profile for Surogate 3.x (35B-A3B, Qwen3.5-MoE family).
-# Selected by surogates.harness.prompt_profile; measured with the harness lab
-# (benchmarks/prompt_lab): see its RESULTS.md for the A/B behind it.
-compact_context: true
-
 # On-demand tool groups (surogates.harness.tool_groups): schemas held back
 # until load_tools (or a direct call) brings the group in. Tools stay
 # callable throughout. `guide` is returned by load_tools.
 # generate_image/generate_video stay shown: held back, the model drew an SVG
-# for "generate a logo" in 1 of 3 runs instead of loading them (prompt_lab).
+# for "generate a logo" in 1 of 3 runs instead of loading them
+# (benchmarks/prompt_lab/RESULTS.md).
 tool_groups:
   - name: browser
     summary: a real web browser, for pages that need clicks, forms, logins or JavaScript, or that web_extract cannot read

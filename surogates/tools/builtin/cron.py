@@ -61,20 +61,19 @@ _ID = {"id": {"type": "string", "description": "The schedule id, from cron_list.
 _CRON_CREATE_SCHEMA = ToolSchema(
     name="cron_create",
     description=(
-        "Schedule a prompt to run later, once or on a cadence, as a fresh "
-        "session whose answer appears in this chat. Give exactly one of "
-        "cron, interval, at, or times (with days), plus an IANA timezone; "
-        "turn the user's words, in any language, into these. A /loop "
-        "message that reaches you is one the harness could not read: make "
-        "it with this. Where you can ask the user, nothing is made until "
-        "they approve it in this turn: until then this returns what it "
-        "would make, with its next run on the schedule's own clock. Ask "
-        "the user, in their language, giving the cadence in "
-        "plain words, the timezone, the next run, a one-line summary of "
-        "the prompt and that it runs until cancelled (once, for a one-off), "
-        "with the approving choice FIRST; then call again with the same "
-        "arguments. Never say a schedule exists or runs unless a tool result "
-        "shows it; cron_list shows what exists."
+        (
+            "Schedule a prompt to run later, once or repeatedly, as a fresh session "
+            "whose answer appears in this chat. Give exactly one of cron, interval, "
+            "at, or times (with optional days), plus an IANA timezone; convert the "
+            "user's words into these. The prompt must be self-contained (the run "
+            "cannot see this conversation).\n"
+            "Where you can ask the user, the first call creates nothing: it returns "
+            "what it would make. Ask the user to approve it (in their language: the "
+            "cadence in plain words, timezone, next run, a one-line summary of the "
+            "prompt, and that it repeats until cancelled), with the approving choice "
+            "first, then call again with the same arguments. Never say a schedule "
+            "exists unless a tool result shows it."
+        )
     ),
     parameters={
         "type": "object",
@@ -123,10 +122,11 @@ _CRON_GET_SCHEMA = ToolSchema(
 _CRON_UPDATE_SCHEMA = ToolSchema(
     name="cron_update",
     description=(
-        "Change a schedule's prompt, name, cadence or timezone. A new cadence "
-        "is given as in cron_create (one of cron, interval, at, times). "
-        "Confirm with the user first, as for cron_create. A scheduled run may "
-        "change only its own schedule, without asking."
+        (
+            "Change a schedule's prompt, name, cadence (as in cron_create) or "
+            "timezone. Confirm with the user first, as for cron_create; a scheduled "
+            "run may change its own schedule without asking."
+        )
     ),
     parameters={
         "type": "object",
@@ -154,15 +154,21 @@ _CRON_RESUME_SCHEMA = ToolSchema(
 
 _CRON_RUN_NOW_SCHEMA = ToolSchema(
     name="cron_run_now",
-    description="Start a run of an active schedule now, as well as its planned ones.",
+    description=(
+        "Start an extra run of an active schedule now, only when the user asks "
+        "for one."
+    ),
     parameters={"type": "object", "properties": dict(_ID), "required": ["id"]},
 )
 
 _CRON_DELETE_SCHEMA = ToolSchema(
     name="cron_delete",
     description=(
-        "Cancel a schedule for good, when the user asks to stop it. A run still going is stopped. "
-        "A scheduled run ends its own schedule this way, with a reason, when its prompt says it is done."
+        (
+            "Cancel a schedule for good when the user asks (a run in progress stops)."
+            " A scheduled run ends its own schedule this way, with a reason, when its"
+            " prompt says it is done."
+        )
     ),
     parameters={
         "type": "object",

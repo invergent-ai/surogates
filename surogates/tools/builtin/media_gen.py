@@ -179,14 +179,13 @@ async def _settle_media_budget(
 GENERATE_IMAGE_SCHEMA = ToolSchema(
     name="generate_image",
     description=(
-        "Generate an image from a text prompt and save it into the session "
-        "workspace. Optionally guide the generation with input images "
-        "(image-to-image), when the image model takes them. Returns the "
-        "workspace-relative path, the real width and height, `delivery` "
-        "(how the image reaches anyone from this conversation: follow it, "
-        "since on WhatsApp, Slack, Telegram and other messaging channels the "
-        "image is only sent when you attach it) and `not_as_asked` when the "
-        "model ignored a size, aspect ratio or transparency you asked for."
+        (
+            "Generate an image from a text prompt (optionally guided by input images)"
+            " and save it in the workspace. Returns its path and real size, "
+            "`delivery` (how it reaches the user: follow it; on messaging channels "
+            "the image is sent only when you attach it) and `not_as_asked` when the "
+            "model ignored a size, aspect ratio or transparency you asked for."
+        )
     ),
     parameters={
         "type": "object",
@@ -235,13 +234,11 @@ GENERATE_IMAGE_SCHEMA = ToolSchema(
 GENERATE_VIDEO_SCHEMA = ToolSchema(
     name="generate_video",
     description=(
-        "Generate a video from a text prompt and save it into the session "
-        "workspace. Rendering takes minutes; the call blocks until the video "
-        "is ready. Optionally animate from a first-frame image "
-        "(image-to-video). Returns the workspace-relative file path. The "
-        "video is automatically shown to the user as an inline artifact — "
-        "do NOT embed the path in your reply as markdown; just mention the "
-        "result."
+        (
+            "Generate a video from a text prompt (optionally from a first-frame "
+            "image) and save it in the workspace; takes minutes. The video is shown "
+            "to the user automatically: just mention it, don't embed the path."
+        )
     ),
     parameters={
         "type": "object",

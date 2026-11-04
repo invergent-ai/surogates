@@ -1,10 +1,10 @@
 """On-demand tool groups: schemas the model sees only once it asks for them.
 
-A prompt profile may declare ``tool_groups`` in its ``profile.yaml``: named
-sets of tools that are rarely needed (a browser, schedules, image
-generation, ...). Their schemas are held back from the request, and
-``load_tools`` -- whose description lists the held-back groups, one line
-each -- brings a group in from the model's next step on. Every request
+``tool_groups.yaml`` (next to this module) declares named sets of tools
+that are rarely needed (a browser, schedules, GitHub, ...). Their schemas
+are held back from the request, and ``load_tools`` -- whose description
+lists the held-back groups, one line each -- brings a group in from the
+model's next step on. Every request
 then carries the schemas a task actually uses instead of all of them.
 
 Held-back tools stay *callable*: a call to one (a skill's instructions may
@@ -21,14 +21,18 @@ the same session shows them again without another load.
 from __future__ import annotations
 
 import copy
+import functools
 import json
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
-from surogates.harness.prompt_profile import PROFILES_ROOT, profile_settings
+import yaml
 
 LOAD_TOOLS = "load_tools"
+
+GROUPS_FILE: Path = Path(__file__).parent / "tool_groups.yaml"
 
 
 @dataclass(frozen=True)
@@ -43,9 +47,11 @@ class ToolGroup:
         return tool in self.tools or any(tool.startswith(p) for p in self.prefixes)
 
 
-def tool_groups(profile: str | None) -> tuple[ToolGroup, ...]:
-    """The groups *profile* holds back (none without a profile)."""
-    raw = profile_settings(profile).get("tool_groups") or []
+@functools.lru_cache(maxsize=1)
+def tool_groups() -> tuple[ToolGroup, ...]:
+    """The groups held back until load_tools brings them in."""
+    data = yaml.safe_load(GROUPS_FILE.read_text(encoding="utf-8")) or {}
+    raw = data.get("tool_groups") or [] if isinstance(data, dict) else []
     return tuple(_group(g) for g in raw if isinstance(g, dict) and g.get("name"))
 
 
@@ -60,13 +66,8 @@ def _group(g: dict) -> ToolGroup:
 
 
 def all_tool_groups() -> dict[str, ToolGroup]:
-    """Every group any profile declares, by name (for the load_tools handler)."""
-    out: dict[str, ToolGroup] = {}
-    if PROFILES_ROOT.is_dir():
-        for d in sorted(p for p in PROFILES_ROOT.iterdir() if p.is_dir()):
-            for g in tool_groups(d.name):
-                out.setdefault(g.name, g)
-    return out
+    """Every group, by name (for the load_tools handler)."""
+    return {g.name: g for g in tool_groups()}
 
 
 def group_of(tool: str, groups: Sequence[ToolGroup]) -> ToolGroup | None:

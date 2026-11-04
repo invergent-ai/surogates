@@ -971,11 +971,11 @@ process_registry = ProcessRegistry()
 # ---------------------------------------------------------------------------
 
 PROCESS_TOOL_DESCRIPTION = (
-    "Manage background processes started with terminal(background=true). "
-    "Actions: 'list' (show all), 'poll' (check status + new output), "
-    "'log' (full output with pagination), 'wait' (block until done or "
-    "timeout), 'kill' (terminate), 'write' (send raw stdin data without "
-    "newline), 'submit' (send data + Enter, for answering prompts)."
+    (
+        "Manage background processes started with terminal(background=true): "
+        "list, poll (status + new output), log (full output), wait (block until "
+        "done or timeout), kill, write (raw stdin), submit (stdin + Enter)."
+    )
 )
 
 PROCESS_SCHEMA = {

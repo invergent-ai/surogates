@@ -68,10 +68,10 @@ def _parse_tags(tags_value: Any) -> list[str]:
 SKILLS_LIST_SCHEMA = ToolSchema(
     name="skills_list",
     description=(
-        "List available skills (name + description). Use skill_view(name) "
-        "to load full content. Experts are not skills and are not listed "
-        "here -- see \"Available Experts\" in your instructions and reach "
-        "one via consult_expert(expert, task)."
+        (
+            "List the available skills (name and description), optionally for one "
+            "category."
+        )
     ),
     parameters={
         "type": "object",
@@ -88,18 +88,13 @@ SKILLS_LIST_SCHEMA = ToolSchema(
 SKILL_VIEW_SCHEMA = ToolSchema(
     name="skill_view",
     description=(
-        "Skills allow for loading information about specific tasks and workflows, "
-        "as well as scripts and templates. Load a skill's full content or access "
-        "its linked files (references, templates, scripts, examples). First "
-        "call returns SKILL.md content plus a 'linked_files' dict showing "
-        "available references/templates/scripts/examples.\n\n"
-        "When a skill has supporting files, its entire tree is automatically "
-        "staged into the sandbox workspace and the response includes a "
-        "'staged_at' absolute path. Relative paths in SKILL.md (e.g. "
-        "'scripts/build.py', 'assets/template.pptx') resolve against that "
-        "directory — run scripts and read assets from there via the "
-        "terminal/file tools. You do NOT need to follow up with "
-        "skill_view(..., file_path=...) just to ferry bytes into the sandbox."
+        (
+            "Load a skill's instructions (SKILL.md) and the list of its files. A "
+            "skill's files are copied into the workspace and the result gives their "
+            "folder in 'staged_at': run its scripts and read its templates from there"
+            " with terminal/read_file. Pass file_path only to get one of its files "
+            "inline."
+        )
     ),
     parameters={
         "type": "object",

@@ -44,23 +44,19 @@ def test_skills_index_never_names_skill_view_without_it():
 def test_skills_index_unchanged_with_skill_view():
     text = _builder({"skill_view"})._skills_section()
     assert "`skill_view(name)`" in text
-    assert "Only proceed without loading a skill" in text
+    assert "<available_skills>" in text and "- pdf: Work with PDF files" in text
 
 
 def test_guidance_never_names_ask_user_question_without_it():
     tools = {"read_file", "web_search", "terminal"}
     assert "ask_user_question" not in _builder(tools)._tool_guidance_section()
-    assert "`ask_user_question` is never part of a batch" in _builder(
+    assert "ask with `ask_user_question`" in _builder(
         tools | {"ask_user_question"},
     )._tool_guidance_section()
 
 
-def test_guidance_never_sends_an_agent_without_a_terminal_to_one(monkeypatch):
-    builder = _builder({"read_file", "web_search"})
-    monkeypatch.setattr(builder, "_get_model_id", lambda: "gpt-5")
-    text = builder._tool_guidance_section()
-    assert "**Current date**" in text
-    assert "use terminal" not in text
-    with_terminal = _builder({"read_file", "web_search", "terminal"})
-    monkeypatch.setattr(with_terminal, "_get_model_id", lambda: "gpt-5")
-    assert "Clock time and timezone are NOT in your context → use terminal" in with_terminal._tool_guidance_section()
+def test_guidance_never_sends_an_agent_without_a_terminal_to_one():
+    text = _builder({"read_file", "web_search"})._tool_guidance_section()
+    assert "use terminal" not in text and "curl -L" not in text
+    with_terminal = _builder({"read_file", "web_search", "terminal"})._tool_guidance_section()
+    assert "use terminal to download" in with_terminal

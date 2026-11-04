@@ -1,6 +1,6 @@
 ---
 name: pdf-reading
-description: "Use this skill when read_file is not enough to read a PDF — it failed, timed out, or returned garbled or empty text, or the question is about figures, charts, layout, embedded images, attachments, or form-field values. Covers content inventory, text extraction, page rasterization for visual inspection, embedded image/attachment/table/form-field extraction, and choosing the right reading strategy for different document types (text-heavy, scanned, slide-decks, forms, data-heavy). Do NOT use this skill for PDF creation, merging, splitting, watermarking, or encryption — use the pdf skill instead — nor to fill, annotate, redact or rotate: office_edit where the chat has it, else the pdf-forms skill."
+description: Read a PDF when read_file fails or returns garbled text, or for figures, layout, images, attachments or form-field values.
 license: Proprietary. LICENSE.txt has complete terms
 ---
 

@@ -1,6 +1,6 @@
 ---
 name: consolidate-memory
-description: "Reflective pass over your memory — merge duplicates, fix stale facts, prune what no longer matters. Use when the user asks to clean up or review what you remember, or when memory has grown cluttered or contradictory."
+description: Clean up memory (merge duplicates, fix or remove stale entries) when the user asks.
 requires_tools:
   - memory
 ---

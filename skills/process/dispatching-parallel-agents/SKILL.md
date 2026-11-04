@@ -1,6 +1,6 @@
 ---
 name: dispatching-parallel-agents
-description: Use when facing 2+ independent tasks or investigations that can be worked on without shared state or sequential dependencies — fan out to specialized sub-agents with isolated context, then synthesize the results.
+description: Split 2+ independent investigations or tasks across sub-agents (delegate_task) and merge the results.
 version: 1.0.0
 author: Surogate Agent (adapted from obra/superpowers)
 license: MIT

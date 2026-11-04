@@ -8,7 +8,6 @@ from pathlib import Path
 from uuid import uuid4
 
 from surogates.harness.prompt import PromptBuilder
-from surogates.harness.prompt_profile import SUROGATE_PROFILE
 from surogates.harness.tool_groups import (
     LOAD_TOOLS,
     defer_tool_groups,
@@ -50,7 +49,7 @@ def test_load_tools_is_registered():
 
 
 def test_groups_are_held_back_and_listed_on_load_tools():
-    groups = tool_groups(SUROGATE_PROFILE)
+    groups = tool_groups()
     shown, deferred = defer_tool_groups(_schemas(), groups)
     names = _names(shown)
     assert not {n for n in names if n.startswith("browser_")}
@@ -70,12 +69,12 @@ def test_no_groups_or_no_load_tools_shows_everything_and_drops_load_tools():
     assert _names(shown) == _names(everything) - {LOAD_TOOLS}
     # An explicit allow-list without load_tools keeps every schema shown.
     without = _schemas([n for n in STUDIO if n != LOAD_TOOLS])
-    shown, deferred = defer_tool_groups(without, tool_groups(SUROGATE_PROFILE))
+    shown, deferred = defer_tool_groups(without, tool_groups())
     assert _names(shown) == _names(without) and not deferred.held
 
 
 def test_loaded_groups_stay_shown_and_load_tools_goes_when_nothing_is_left():
-    groups = tool_groups(SUROGATE_PROFILE)
+    groups = tool_groups()
     shown, deferred = defer_tool_groups(_schemas(), groups, loaded={"browser"})
     assert "browser_navigate" in _names(shown) and "browser" not in deferred.held
     released = deferred.take(list(deferred.held))
@@ -85,7 +84,7 @@ def test_loaded_groups_stay_shown_and_load_tools_goes_when_nothing_is_left():
 
 
 def test_loading_from_results_direct_calls_and_history():
-    groups = tool_groups(SUROGATE_PROFILE)
+    groups = tool_groups()
     calls = [{"id": "c1", "function": {"name": LOAD_TOOLS, "arguments": '{"groups":["browser"]}'}},
              {"id": "c2", "function": {"name": "cron_create", "arguments": "{}"}}]
     results = [{"role": "tool", "tool_call_id": "c1", "content": json.dumps({"success": True, "loaded": ["browser"]})},
@@ -117,8 +116,7 @@ def _prompt(tools: set[str]) -> str:
     return PromptBuilder(tenant, skills=skills, session=session, available_tools=tools).build()
 
 
-def test_browser_guidance_moves_into_the_group_when_held_back(monkeypatch):
-    monkeypatch.delenv("SUROGATES_PROMPT_PROFILES", raising=False)
+def test_browser_guidance_moves_into_the_group_when_held_back():
     base = {"read_file", "skill_view", "browser_navigate", "browser_click"}
     assert "**Browser.**" in _prompt(base)
     assert "**Browser.**" not in _prompt(base | {LOAD_TOOLS})

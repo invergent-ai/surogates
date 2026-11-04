@@ -46,13 +46,11 @@ _SUPPORTED_MIME_TYPES = frozenset({
 VISION_ANALYZE_SCHEMA = ToolSchema(
     name="vision_analyze",
     description=(
-        "Analyze an image from a workspace file path or HTTPS URL. "
-        "Do NOT use this tool for images the user attached to their message — "
-        "you can already see those directly. Only use this tool when you need "
-        "to fetch and analyze an image from a URL or a file in the workspace. "
-        "Supports raster formats only: PNG, JPEG, WEBP, and GIF. "
-        "SVG files cannot be analyzed — they are vector (text/XML) images, "
-        "not raster pixels; read them as text instead."
+        (
+            "Look at an image from a workspace path or HTTPS URL (PNG, JPEG, WEBP, "
+            "GIF; not SVG) and answer a question about it. Not for images attached to"
+            " the conversation: you already see those."
+        )
     ),
     parameters={
         "type": "object",

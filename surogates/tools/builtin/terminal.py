@@ -189,27 +189,19 @@ async def _truncate_output(output: str, wio: WorkspaceIO) -> str:
 # Tool description
 # ---------------------------------------------------------------------------
 
-TERMINAL_TOOL_DESCRIPTION = """Execute shell commands on a Linux environment. Filesystem usually persists between calls.
-
-Avoid this tool for reading, searching, listing, and editing files, unless the user explicitly asked for the shell command or you have established that the dedicated tool cannot do the job. Reach for the dedicated tool first:
-  cat/head/tail to read a file — use read_file.
-  grep/rg/find to search — use search_files.
-  ls to list a directory — use search_files(target='files').
-  sed/awk to edit a file — use patch.
-  echo/cat heredoc to create a file — use write_file.
-Reserve terminal for: builds, installs, git, processes, scripts, network, package managers, and anything that needs a shell.
-
-Foreground (default): Commands return INSTANTLY when done, even if the timeout is high. Set timeout=300 for long builds/scripts — you'll still get the result in seconds if it's fast. Prefer foreground for short commands.
-Background: Set background=true to get a session_id. Two patterns:
-  (1) Long-lived processes that never exit (servers, watchers).
-  (2) Long-running tasks with notify_on_complete=true — you can keep working on other things and the system auto-notifies you when the task finishes. Great for test suites, builds, deployments, or anything that takes more than a minute.
-Use process(action="poll") for progress checks, process(action="wait") to block until done.
-Working directory: Use 'workdir' for per-command cwd.
-PTY mode: Set pty=true for interactive CLI tools (Codex, Claude Code, Python REPL).
-
-Do NOT use vim/nano/interactive tools without pty=true — they hang without a pseudo-terminal. Pipe git output to cat if it might page.
-Important: cloud sandboxes may be cleaned up, idled out, or recreated between turns. Persistent filesystem means files can resume later; it does NOT guarantee a continuously running machine or surviving background processes. Use terminal sandboxes for task work, not durable hosting.
-"""
+TERMINAL_TOOL_DESCRIPTION = (
+    "Run a shell command in your Linux workspace (files persist between "
+    "calls). Use it for scripts, builds, tests, git, package installs, data "
+    "processing (e.g. python3) and network fetches. For reading, searching, "
+    "listing and editing files use read_file, search_files, list_files, patch"
+    " and write_file instead.\n"
+    "Foreground commands return as soon as they finish; raise `timeout` "
+    "(seconds) for long builds. background=true is only for servers or very "
+    "long jobs (check them with the process tool; notify_on_complete=true "
+    "reports when done). Interactive programs need pty=true. Pipe paging "
+    "output (e.g. git log) to cat. Background processes may not survive "
+    "between turns."
+)
 
 # Appended for a session on the user's computer (describe_for_device): its
 # guest refuses these writes with a bare "Operation not permitted".
@@ -242,60 +234,57 @@ TERMINAL_SCHEMA = {
     "properties": {
         "command": {
             "type": "string",
-            "description": "The command to execute on the VM",
+            "description": "The shell command to run.",
         },
         "background": {
             "type": "boolean",
             "description": (
-                "Run the command in the background. Two patterns: "
-                "(1) Long-lived processes that never exit (servers, watchers). "
-                "(2) Long-running tasks paired with notify_on_complete=true "
-                "-- you can keep working and get notified when the task finishes. "
-                "For short commands, prefer foreground with a generous timeout instead."
+                (
+                    "Run in the background (servers, watchers, very long jobs); default "
+                    "false."
+                )
             ),
             "default": False,
         },
         "timeout": {
             "type": "integer",
             "description": (
-                "Max seconds to wait (default: 180). Returns INSTANTLY when "
-                "command finishes -- set high for long tasks, you won't wait "
-                "unnecessarily."
+                (
+                    "Max seconds to wait (default 180); the call returns as soon as the "
+                    "command ends."
+                )
             ),
             "minimum": 1,
         },
         "workdir": {
             "type": "string",
             "description": (
-                "Working directory for this command (absolute path). "
-                "Defaults to the session working directory."
+                "Working directory for this command (default the workspace)."
             ),
         },
         "check_interval": {
             "type": "integer",
             "description": (
-                "Seconds between automatic status checks for background "
-                "processes (gateway/messaging only, minimum 30). When set, "
-                "the system proactively reports progress."
+                (
+                    "Seconds between automatic progress reports for a background process "
+                    "(messaging channels only, min 30)."
+                )
             ),
             "minimum": 30,
         },
         "pty": {
             "type": "boolean",
             "description": (
-                "Run in pseudo-terminal (PTY) mode for interactive CLI tools "
-                "like Codex, Claude Code, or Python REPL. Default: false."
+                "Pseudo-terminal, for interactive CLI tools; default false."
             ),
             "default": False,
         },
         "notify_on_complete": {
             "type": "boolean",
             "description": (
-                "When true (and background=true), you'll be automatically "
-                "notified when the process finishes -- no polling needed. "
-                "Use this for tasks that take a while (tests, builds, "
-                "deployments) so you can keep working on other things in "
-                "the meantime."
+                (
+                    "With background=true: report automatically when the process finishes."
+                )
             ),
             "default": False,
         },

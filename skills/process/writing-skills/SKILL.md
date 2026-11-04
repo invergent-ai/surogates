@@ -1,6 +1,6 @@
 ---
 name: writing-skills
-description: Use when creating new skills, editing existing skills, or verifying skills work before deployment. Applies Test-Driven Development to process documentation — watch agents fail without the skill, write the skill that addresses those failures, then close loopholes.
+description: Create or edit a skill (SKILL.md) when the user asks for one.
 version: 1.0.0
 author: Surogate Agent (adapted from obra/superpowers)
 license: MIT

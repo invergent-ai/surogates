@@ -111,7 +111,10 @@ def render(profile: str, model: str = "surogate", groups: bool = True) -> dict:
     held, catalog = {}, {}
     try:
         from surogates.harness.tool_groups import defer_tool_groups, tool_groups
-        tg = tool_groups(getattr(builder, "prompt_profile", None)) if groups else ()
+        try:
+            tg = tool_groups() if groups else ()
+        except TypeError:  # older checkouts: groups belonged to a prompt profile
+            tg = tool_groups(getattr(builder, "prompt_profile", None)) if groups else ()
         tools, deferred = defer_tool_groups(tools, tg)
         held = deferred.held
         catalog = {g.name: {"tools": list(g.tools), "prefixes": list(g.prefixes), "guide": g.guide} for g in tg}

@@ -37,7 +37,7 @@ from promptgepa.sets import derive
 REPO_ROOT = Path(__file__).resolve().parents[3]
 GAIA_RUNS = REPO_ROOT / "benchmarks" / "gaia" / "runs"
 RUNS_DIR = Path(__file__).resolve().parents[1] / "runs"
-DEFAULT_FRAGMENT = "guidance/execution_discipline"
+DEFAULT_FRAGMENT = "guidance/working_principles"
 DEFAULT_JUDGE_MODEL = "claude-sonnet-5"
 
 OBJECTIVE = """\

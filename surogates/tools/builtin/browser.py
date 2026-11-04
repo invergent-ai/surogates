@@ -385,36 +385,32 @@ GET_STATE_SCHEMA = {
             "enum": ["markdown", "json"],
             "default": "markdown",
             "description": (
-                "Output shape. 'markdown' (default) is a concise page outline: "
-                "headings for structure, '- role @eN \"name\"' lines for "
-                "clickable elements, plain lines for text. 'json' returns the "
-                "raw node tree with viewport coordinates — only needed when you "
-                "must click by coordinate rather than by ref."
+                (
+                    "'markdown' (default): outline with '- role @eN \"name\"' lines; 'json': "
+                    "raw node tree with coordinates."
+                )
             ),
         },
         "interactive_only": {
             "type": "boolean",
             "default": False,
             "description": (
-                "Return only clickable and typeable elements, dropping all page "
-                "text. Use when you know what you are looking for and only need "
-                "its ref."
+                "Only clickable/typeable elements, no page text."
             ),
         },
         "max_depth": {
             "type": "integer",
             "minimum": 0,
             "description": (
-                "Drop elements nested deeper than this in the DOM. Rarely "
-                "useful — prefer 'selector' to scope by region."
+                "Drop elements nested deeper than this (prefer selector)."
             ),
         },
         "selector": {
             "type": "string",
             "description": (
-                "CSS selector limiting the snapshot to one subtree, e.g. "
-                "'#search-results'. The best way to keep a large page under the "
-                "node cap."
+                (
+                    "CSS selector to limit the outline to one region, e.g. '#results'."
+                )
             ),
         },
     },
@@ -1561,13 +1557,12 @@ def register(registry: ToolRegistry) -> None:
         schema=ToolSchema(
             name="browser_navigate",
             description=(
-                "Navigate the agent's browser to a URL. Returns the final URL, "
-                "the page title, and a 'snapshot': the page outline with "
-                "'@eN' refs for browser_click and browser_type — the same "
-                "shape browser_get_state returns, so you can usually act on "
-                "the page directly without a second call. Large pages are cut "
-                "at a line boundary; browser_get_state with 'selector' or "
-                "'interactive_only' gets the rest."
+                (
+                    "Open a URL in your browser. Returns the final URL, the title and the "
+                    "page outline with @eN refs for browser_click / browser_type, so you can "
+                    "usually act directly. Large outlines are cut; browser_get_state with "
+                    "selector or interactive_only shows the rest."
+                )
             ),
             parameters=NAVIGATE_SCHEMA,
         ),
@@ -1578,9 +1573,10 @@ def register(registry: ToolRegistry) -> None:
         schema=ToolSchema(
             name="browser_get_state",
             description=(
-                "Return the current page as a markdown outline with @eN refs "
-                "for browser_click and browser_type. Pass format='json' for the "
-                "raw node tree with coordinates."
+                (
+                    "The current page as an outline with @eN refs (format='json' for the raw "
+                    "tree with coordinates). Scope large pages with `selector`."
+                )
             ),
             parameters=GET_STATE_SCHEMA,
         ),
@@ -1591,10 +1587,11 @@ def register(registry: ToolRegistry) -> None:
         schema=ToolSchema(
             name="browser_evaluate",
             description=(
-                "Run JavaScript in the page and return its value. Use this to "
-                "read structured page state — full tables, hidden input values, "
-                "every option of a select — in one call instead of many "
-                "get_state and scroll round trips."
+                (
+                    "Run JavaScript in the page and return a JSON-serializable value (use "
+                    "`return`). Best for reading data in bulk (tables, select options, hidden"
+                    " values) in one call."
+                )
             ),
             parameters=EVALUATE_SCHEMA,
         ),
@@ -1696,10 +1693,10 @@ def register(registry: ToolRegistry) -> None:
         schema=ToolSchema(
             name="browser_screenshot",
             description=(
-                "Capture a PNG screenshot and save it to the session workspace. "
-                "The screenshot is NOT displayed to you automatically — to see "
-                "its contents, call read_file with the returned path. "
-                "Use annotate=true to overlay numbered labels for cached refs."
+                (
+                    "Save a PNG screenshot of the page in the workspace; open it with "
+                    "read_file to see it. annotate=true labels the cached refs."
+                )
             ),
             parameters=SCREENSHOT_SCHEMA,
         ),

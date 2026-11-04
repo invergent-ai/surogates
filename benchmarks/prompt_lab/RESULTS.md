@@ -1,5 +1,10 @@
 # Results: the `surogate` prompt profile (2026-11-03)
 
+> Since 2026-11-04 this prompt is the default for every model: the profile's
+> fragments, tool descriptions, skill index lines and switches replaced the
+> base ones, and profile selection (`SUROGATES_PROMPT_PROFILES`, model ids)
+> was removed. The measurements below were taken while it was a profile.
+
 Model: `surogate/Surogate3.7-35B-A3B` (NVFP4, 4 engines x 2 GPUs, the engine's
 default sampling: temperature 1.0, top_p 0.95, top_k 20, thinking on, thinking
 retained across turns). Harness: master `9a6c3fa9a`.

@@ -122,39 +122,16 @@ DISMISSES_QUESTION = "dismisses_question"
 
 
 ASK_USER_QUESTION_DESCRIPTION = (
-    "Ask the user one or more questions and wait for their answers before "
-    "continuing.  Use this only when you are blocked on a decision that is "
-    "genuinely the user's to make — one you cannot settle from the "
-    "request, the files, or a sensible default.  Reserve it for decisions "
-    "where the answer changes what you do next, not for choices with a "
-    "conventional default or facts you can verify yourself; in those "
-    "cases pick the obvious option, say so, and carry on.  Asking "
-    "suspends the session until a human replies, so a needless question "
-    "is a stall, not a courtesy.\n\n"
-    "Each question is rendered as a tab in the chat "
-    "widget; the user picks an answer per question (or types an 'Other' "
-    "response) and submits the batch at once.\n\n"
-    "Each question has:\n"
-    "- ``prompt`` (required) -- the question text.\n"
-    "- ``choices`` (optional) -- up to 4 labeled options.  Each choice is "
-    "an object with ``label`` (short) and an optional ``description`` "
-    "(one-line rationale).  Omit to ask an open-ended question.\n"
-    "- ``allow_other`` (optional, default true) -- when true the widget "
-    "appends an 'Other' option with a text field.\n\n"
-    "Use when:\n"
-    "- Readings of the request differ enough to lead to materially "
-    "different work, and the files do not settle which one is meant.\n"
-    "- Only the user holds the information, and guessing wrong wastes "
-    "the work rather than merely re-doing a step.\n"
-    "- Several such decisions are open at once — collect them in one "
-    "round-trip rather than stalling repeatedly.\n\n"
-    "Do NOT use for simple yes/no confirmation of dangerous commands (the "
-    "terminal tool handles that).  If the user pauses the session "
-    "instead of answering, you will receive ``cancelled: true`` -- stop and "
-    "wait for further instructions.  If no answer comes in time, the turn ends "
-    "there with no more tool calls; the person's later reply arrives as a new "
-    "message (a task's worker is instead marked blocked until its parent "
-    "unblocks it)."
+    (
+        "Ask the user 1-5 questions and wait for the answers. Use only when you "
+        "are blocked on something only the user can provide or decide and a wrong"
+        " guess would waste the work; not for opinions you should give, decisions"
+        " with an obvious default, or confirming what the user already specified."
+        " Each question has a prompt and optional choices (up to 4; the user can "
+        "always type another answer). Asking pauses the session until the user "
+        "replies; their answers arrive as the next message. If the result says "
+        "cancelled, stop and wait for the user."
+    )
 )
 
 
@@ -225,10 +202,11 @@ ASK_USER_QUESTION_SCHEMA = {
         "message": {
             "type": "string",
             "description": (
-                "Optional: what you say to the person right before the "
-                "question, in their language (an acknowledgement, the "
-                "answer to what they just wrote).  Sent to them as is on "
-                "messaging apps.  Never your reasoning or plans."
+                (
+                    "Optional short text shown right before the questions, in the user's "
+                    "language (an acknowledgement or what you already found). Never your "
+                    "reasoning or plans."
+                )
             ),
         },
     },

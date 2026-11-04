@@ -813,35 +813,16 @@ async def session_search(
 SESSION_SEARCH_SCHEMA = ToolSchema(
     name="session_search",
     description=(
-        "Search your long-term memory of past conversations, or browse recent sessions. This is your recall -- "
-        "every past session is searchable, and this tool summarizes what happened.\n\n"
-        "TWO MODES:\n"
-        "1. Recent sessions (no query): Call with no arguments to see what was worked on recently. "
-        "Returns titles, previews, and timestamps. Zero LLM cost, instant. "
-        "Start here when the user asks what were we working on or what did we do recently.\n"
-        "2. Keyword search (with query): Search for specific topics across all past sessions. "
-        "Returns LLM-generated summaries of matching sessions.\n\n"
-        "USE THIS PROACTIVELY when:\n"
-        "- The user says 'we did this before', 'remember when', 'last time', 'as I mentioned'\n"
-        "- The user asks about a topic you worked on before but don't have in current context\n"
-        "- The user references a project, person, or concept that seems familiar but isn't in memory\n"
-        "- You want to check if you've solved a similar problem before\n"
-        "- The user asks 'what did we do about X?' or 'how did we fix Y?'\n\n"
-        "Don't hesitate to search when it is actually cross-session -- it's fast and cheap. "
-        "Better to search and confirm than to guess or ask the user to repeat themselves.\n\n"
-        "Search syntax: keywords joined with OR for broad recall (elevenlabs OR baseten OR funding), "
-        "quoted phrases for an exact sequence (\"docker networking\"), and a leading minus to exclude "
-        "a term (python -java). Bare keywords are ANDed, so use OR when a session only needs to "
-        "mention some of your terms.\n\n"
-        "Matching is exact-token and case-insensitive, with no stemming or wildcards: 'deploy' will "
-        "not find 'deployed' and 'deploy*' is not a prefix search. OR the word forms you care about "
-        "(deploy OR deployed OR deployment). This is deliberate — one shared index serves every "
-        "language the platform runs in, so no language's suffix rules are applied to another's.\n\n"
-        "Searches user messages, assistant replies, tool results, and per-turn recaps. "
-        "Returns summaries of the top matching sessions.\n\n"
-        "In an ops console session, results span EVERY user of this agent and each result carries "
-        "a user_id — attribute those conversations to that user, never to yourself or the person "
-        "you are talking to."
+        (
+            "Search past conversations with this user. Without a query: list recent "
+            "sessions (titles, previews, times). With a query: summaries of matching "
+            "sessions. Bare keywords are ANDed; join alternatives with OR (deploy OR "
+            "deployed), quote exact phrases, exclude with a leading minus. Matching "
+            "is exact-token, case-insensitive, no stemming. Use it when the user "
+            "refers to earlier work (\"last time\", \"as I mentioned\"). In an ops "
+            "console session results span every user of the agent; attribute each to "
+            "its user_id."
+        )
     ),
     parameters={
         "type": "object",
