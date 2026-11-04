@@ -182,23 +182,29 @@ export function SettingsPage() {
   // Devices only where the agent says it has local folders: an older one says nothing, and has no computers.
   const devicesEnabled = useAppStore((s) => s.desktopSessions) === true;
   // Connected accounts only when the agent has services to connect: the same list the chat's
-  // "Connect your accounts" band shows. Hidden until it has loaded, and when it cannot load.
-  const [accountsEnabled, setAccountsEnabled] = useState(false);
+  // "Connect your accounts" band shows. Like browser profiles, unknown fails open: the list comes
+  // through the integrations service and takes a moment, and the band opens this tab directly, so
+  // only a loaded empty list (or one that cannot load) hides it.
+  const [accountsKnown, setAccountsKnown] = useState<boolean | null>(null);
   useEffect(() => {
     const pending = surogatesWebChatAdapter.listComposioConnections?.({});
-    if (!pending) return;
+    if (!pending) {
+      setAccountsKnown(false);
+      return;
+    }
     let live = true;
     pending
       .then((res) => {
-        if (live) setAccountsEnabled(res.toolkits.length > 0);
+        if (live) setAccountsKnown(res.toolkits.length > 0);
       })
       .catch(() => {
-        if (live) setAccountsEnabled(false);
+        if (live) setAccountsKnown(false);
       });
     return () => {
       live = false;
     };
   }, []);
+  const accountsEnabled = accountsKnown !== false;
 
   // Load sidebar + capability data.
   useEffect(() => {
@@ -302,6 +308,12 @@ export function SettingsPage() {
       selectTab("accounts");
     }
   }, [asked, accountsEnabled]);
+  // Shown while unknown: if the agent turns out to have nothing to connect, leave the tab.
+  useEffect(() => {
+    if (!accountsEnabled && tab === "accounts") {
+      setTab("profile");
+    }
+  }, [accountsEnabled, tab]);
 
   const handleUnlink = useCallback(async () => {
     if (!unlinkTarget) return;
