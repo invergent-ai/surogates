@@ -118,6 +118,69 @@ were correct in every run).
 - Adding a group changes the tool list, so the engine re-reads the
   conversation once after each load; the uncached figures above include it.
 
+## Real harness: DABstep and EnterpriseOps-Gym (2026-11-03/04)
+
+The lab above calls the model directly. To check that the profile holds up in
+the product, two full runtimes (api, worker, mcp-proxy, docker sandboxes, ops
+server and LLM proxy) ran side by side against the same 4 engines: **master**
+(`9a6c3fa9a`) and **branch** (this PR). Both used the engine's default
+sampling (temperature 1.0, top_p 0.95, top_k 20, thinking on). Both
+benchmarks score deterministically: DABstep against its answer key,
+EnterpriseOps-Gym (oracle tool mode, 7 domains) with its SQL checks on the
+final database state. No LLM judge.
+
+Master ran first and was frozen: 310 DABstep tasks and 426 EnterpriseOps-Gym
+tasks that completed (EnterpriseOps-Gym: 2 samples, scored as their mean).
+The branch ran each task once. Pairs are per task; 95% CIs bootstrapped over
+tasks.
+
+| | n | master | branch | change (95% CI) | input tokens/task | output tokens/task |
+|---|---|---|---|---|---|---|
+| DABstep | 191 | 0.466 | **0.696** | **+0.230** (+0.152 to +0.314) | 747k -> 554k (-26%) | 17.3k -> 15.8k (-8%) |
+| EnterpriseOps-Gym | 191 | 0.327 | 0.351 | +0.024 (-0.026 to +0.073) | 340k -> 225k (-34%) | 9.8k -> 9.5k (-2%) |
+| Pooled | 382 | | | **+0.127** (+0.079 to +0.175) | | |
+
+EnterpriseOps-Gym by domain (tasks, master -> branch): calendar 31,
+0.13 -> 0.16; csm 25, 0.34 -> 0.36; drive 32, 0.50 -> 0.50; email 9,
+0.67 -> 0.67; hr 43, 0.34 -> 0.37; itsm 29, 0.36 -> 0.45; teams 22,
+0.14 -> 0.09.
+
+- **Coverage.** The branch run was stopped when the engine box was needed
+  elsewhere: DABstep 211 of 310 tasks, EnterpriseOps-Gym 197 of 426.
+  Sessions that timed out (DABstep 9, EnterpriseOps-Gym 5) are left out, not
+  re-run; master's tasks that timed out twice are left out too.
+- **DABstep** mixes two profile wordings: 102 tasks ran with the first one
+  (+0.284, +0.167 to +0.392), 89 with the final one (+0.169, +0.056 to
+  +0.281). The final wording only adds the EnterpriseOps-Gym fix below.
+- **What the first wording got wrong.** On EnterpriseOps-Gym it scored -0.039
+  (-0.111 to +0.033, n=90) against master. The profile told the model to run
+  `date`, so it called `terminal`, which these gym-tools-only agents lack,
+  and it guessed MCP resources, prompts and URIs (in 48% of tasks, master
+  26%). The date line went (Context has the date), and
+  `guidance/working_principles` now asks for tools used as documented,
+  without guessing undocumented interfaces.
+- **What did not help.** A further sentence ("use exact values verbatim; read
+  back what you changed before reporting done") cost EnterpriseOps-Gym about
+  0.05 against the final wording (0.292 -> 0.247 on 89 paired tasks): fewer
+  writes per task (4.6 -> 3.9), more runs with no write at all (5% -> 12%),
+  and no fewer paraphrased values. It is not in this PR.
+- **Why EnterpriseOps-Gym barely moves.** In a sample of failed runs, the
+  model had all it needed in the prompt (the task's policy text included).
+  It missed a policy trap (reopened a closed case on a phone call), used an
+  unstated convention wrongly (notification type, who is the caller of a
+  call), skipped a step of a long task, picked the wrong record, or read a
+  value literally where the task meant otherwise, and the other way round.
+  These are judgment errors no prompt rule fixes; leaderboard figures for
+  the strongest models are around 50% on this benchmark.
+- **The tool-name fix** (`message_utils.clean_tool_call_name`,
+  `neutralize_unsendable_tool_names`) comes from these runs: in a few
+  EnterpriseOps-Gym sessions the model wrote its template's call markup into
+  a tool name, and the replayed name made every later request fail until
+  the session timed out.
+- **The worker fix** (build the prompt with the wake's model id) also comes
+  from these runs: on a session's first wake the row has no model yet, so
+  the profile was never selected in the real runtime.
+
 ## Limits of this evidence
 
 - 3 samples per scenario; 43 scenarios; deterministic checks written for these
