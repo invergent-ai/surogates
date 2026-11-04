@@ -9,10 +9,10 @@ from __future__ import annotations
 
 import re
 from dataclasses import asdict, dataclass
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel
+from pydantic import AfterValidator, BaseModel
 
 from surogates.harness.structured_output import parse_json_object
 
@@ -51,14 +51,34 @@ EVALUATOR_SYSTEM_PROMPT = (
 )
 
 
+def has_reason(text: str) -> bool:
+    """Whether a verdict's explanation says anything.
+
+    ``""`` and ``"..."`` are a model filling in the form, not a judgment.
+    """
+    # ponytail: catches wordless reasons only; "N/A" still passes, add a word floor if one appears.
+    return any(ch.isalnum() for ch in text)
+
+
+def _require_reason(text: str) -> str:
+    if not has_reason(text):
+        raise ValueError("a verdict must say why")
+    return text
+
+
+VerdictReason = Annotated[str, AfterValidator(_require_reason)]
+
+
 class OutcomeVerdict(BaseModel):
     """The shape the evaluator must return.
 
     The reasons come first: guided decoding emits keys in declaration order,
-    so a leading ``result`` would be decided before any reasoning.
+    so a leading ``result`` would be decided before any reasoning. The
+    explanation has no default: left optional, ``{"result": "satisfied"}``
+    satisfies a strict schema.
     """
 
-    explanation: str = ""
+    explanation: VerdictReason
     feedback: str = ""
     result: Literal["satisfied", "needs_revision", "blocked", "failed"]
 
@@ -276,7 +296,14 @@ def parse_outcome_evaluation(raw: str) -> OutcomeEvaluation:
     result = str(data.get("result") or "needs_revision").strip()
     if result not in {"satisfied", "needs_revision", "blocked", "failed"}:
         result = "needs_revision"
-    explanation = str(data.get("explanation") or "no explanation provided").strip()
+    explanation = str(data.get("explanation") or "").strip()
+    if not has_reason(explanation):
+        return OutcomeEvaluation(
+            result="needs_revision",
+            explanation="evaluator gave no reason for its verdict",
+            feedback="Continue working toward the outcome.",
+            parse_failed=True,
+        )
     feedback = str(data.get("feedback") or explanation).strip()
     return OutcomeEvaluation(
         result=result,

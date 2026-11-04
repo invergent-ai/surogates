@@ -267,7 +267,7 @@ If the coordinator decides the rubric genuinely can't be met (contradictory crit
 - **Resume** turns the evaluator back on and wakes the coordinator so any pending continuations get processed.
 - **Cancel** terminates the mission. Without `--cascade`, currently-running tasks finish (their results are no longer graded). With `--cascade`, every running worker session for this mission gets an interrupt — use this when you've decided the whole direction is wrong.
 
-If the judge fails to return parseable output three times in a row, the mission auto-pauses with reason `evaluator parse failure` so you can investigate; a single recoverable failure doesn't pause anything.
+If the judge fails to return parseable output three times in a row, the mission auto-pauses with reason `evaluator parse failure` so you can investigate; a single recoverable failure doesn't pause anything. A verdict with no explanation counts as a failure, so a judge can't pass a mission without saying why.
 
 ### Where to watch a mission run
 

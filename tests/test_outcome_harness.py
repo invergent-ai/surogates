@@ -868,3 +868,129 @@ async def test_evaluator_falls_back_to_a_free_form_answer(
     assert evaluation.result == "satisfied"
     assert evaluation.parse_failed is False
     assert llm.chat.completions.create.call_args.kwargs["max_tokens"] == EVALUATOR_MAX_TOKENS
+
+
+NO_REASON_VERDICTS = [
+    '{"explanation":"...","feedback":"...","result":"satisfied"}',
+    '{"explanation":"","feedback":"","result":"satisfied"}',
+    '{"result":"satisfied"}',
+]
+
+
+@pytest.mark.parametrize("raw", NO_REASON_VERDICTS)
+def test_a_verdict_without_a_reason_does_not_count(raw: str) -> None:
+    from surogates.harness.outcomes import parse_outcome_evaluation
+
+    evaluation = parse_outcome_evaluation(raw)
+
+    assert evaluation.result == "needs_revision"
+    assert evaluation.parse_failed is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raw", NO_REASON_VERDICTS)
+async def test_structured_generation_refuses_a_verdict_without_a_reason(raw: str) -> None:
+    """So the evaluator moves on to its free-form attempt."""
+    from surogates.harness.outcomes import OutcomeVerdict
+    from surogates.harness.structured_output import _try_openai_json_mode
+
+    llm = AsyncMock()
+    llm.chat.completions.create.return_value = MagicMock(
+        choices=[MagicMock(message=MagicMock(content=raw))],
+    )
+
+    verdict = await _try_openai_json_mode(
+        llm_client=llm,
+        model="m",
+        messages=[{"role": "user", "content": "judge this"}],
+        output_model=OutcomeVerdict,
+        max_tokens=100,
+        temperature=0,
+    )
+
+    assert verdict is None
+
+
+@pytest.mark.asyncio
+async def test_goal_with_no_reason_from_any_attempt_keeps_working(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from surogates.harness import loop_outcome_commands
+    from surogates.harness.outcomes import OutcomeState
+
+    async def fake_generate(**_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(loop_outcome_commands, "generate_structured", fake_generate)
+    llm = AsyncMock()
+    llm.chat.completions.create.return_value = MagicMock(choices=[MagicMock(
+        message=MagicMock(content=NO_REASON_VERDICTS[0]),
+    )])
+    harness = _make_harness(FakeStore(), llm_client=llm)
+
+    evaluation = await harness._evaluate_outcome(
+        state=OutcomeState.from_config(_active_outcome_config()),
+        latest_response="The report.",
+        model="m",
+    )
+
+    assert evaluation.result == "needs_revision"
+    assert evaluation.parse_failed is True
+
+
+def test_verdict_reasons_come_before_the_result() -> None:
+    from surogates.harness.loop_mission_evaluator import _MissionVerdict
+    from surogates.harness.outcomes import OutcomeVerdict
+
+    for model in (OutcomeVerdict, _MissionVerdict):
+        schema = model.model_json_schema()
+        keys = list(schema["properties"])
+        assert keys.index("explanation") < keys.index("result")
+        assert "explanation" in schema["required"]
+
+
+@pytest.mark.asyncio
+async def test_mission_judge_retries_free_form_when_the_verdict_has_no_reason() -> None:
+    from surogates.harness.loop_mission_evaluator import _build_mission_judge
+
+    async def no_usable_verdict(**_kwargs: Any) -> None:
+        return None
+
+    llm = AsyncMock()
+    llm.chat.completions.create.return_value = MagicMock(choices=[MagicMock(
+        message=MagicMock(
+            content='{"explanation":"Every link opened","result":"satisfied"}',
+            reasoning_content=None,
+        ),
+    )])
+    judge = _build_mission_judge(
+        llm_client=llm, eval_model="m", structured_generator=no_usable_verdict,
+    )
+
+    verdict = await judge("system", "user")
+
+    assert verdict["result"] == "satisfied"
+    assert verdict["explanation"] == "Every link opened"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raw", NO_REASON_VERDICTS)
+async def test_mission_judge_with_no_reason_is_a_parse_failure(raw: str) -> None:
+    from surogates.harness.loop_mission_evaluator import (
+        MissionJudgeParseError,
+        _build_mission_judge,
+    )
+
+    async def no_usable_verdict(**_kwargs: Any) -> None:
+        return None
+
+    llm = AsyncMock()
+    llm.chat.completions.create.return_value = MagicMock(choices=[MagicMock(
+        message=MagicMock(content=raw, reasoning_content=None),
+    )])
+    judge = _build_mission_judge(
+        llm_client=llm, eval_model="m", structured_generator=no_usable_verdict,
+    )
+
+    with pytest.raises(MissionJudgeParseError):
+        await judge("system", "user")

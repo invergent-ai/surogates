@@ -185,9 +185,9 @@ _SYSTEM_PROMPT = dedent("""\
 
     Respond with a single JSON object, no prose around it:
 
-        {"result": "satisfied" | "needs_revision" | "blocked" | "failed",
-         "explanation": "<1-3 sentences>",
-         "feedback": "<actionable feedback for the coordinator if needs_revision; empty otherwise>"}
+        {"explanation": "<1-3 sentences>",
+         "feedback": "<actionable feedback for the coordinator if needs_revision; empty otherwise>",
+         "result": "satisfied" | "needs_revision" | "blocked" | "failed"}
 
     Verdict guidance:
     - "satisfied": evidence backs rubric completion.
