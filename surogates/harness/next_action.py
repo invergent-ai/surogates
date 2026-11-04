@@ -6,7 +6,7 @@ parser that consumed it were removed).  This stripper is retained as a
 purely defensive outbound filter: replayed history from older sessions
 and the occasional unprompted emission can still carry the block, which
 is harness/UI metadata rather than user-facing content.  The web chat UI
-strips it client-side (``sdk/agent-chat-react/src/lib/next-action.ts``)
+strips it client-side (``packages/agent-chat-react/src/lib/next-action.ts`` in invergent-ai/ui-kit)
 and messaging channels (Telegram, Slack, Teams, ...) deliver raw text,
 so the session store strips it server-side before enqueueing channel
 deliveries.
