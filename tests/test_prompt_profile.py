@@ -203,3 +203,15 @@ def test_the_profile_leaves_the_office_tools_and_skill_alone():
     skills = yaml.safe_load((PROFILES_ROOT / SUROGATE_PROFILE / "skills.yaml").read_text())
     assert not [t for t in tools if t.startswith("office")]
     assert "office" not in skills
+
+
+def test_the_workers_model_id_selects_the_profile_on_a_first_wake(monkeypatch):
+    # A new session's row has no model yet: the worker records it while building the prompt.
+    monkeypatch.delenv("SUROGATES_PROMPT_PROFILES", raising=False)
+    now = datetime.now(timezone.utc)
+    session = Session(id=uuid4(), user_id=uuid4(), org_id=uuid4(), agent_id="a", channel="api", status="active",
+                      model=None, config={}, created_at=now, updated_at=now)
+    tenant = TenantContext(org_id=session.org_id, user_id=session.user_id, org_config={}, user_preferences={},
+                           permissions=frozenset(), asset_root="/tmp/test")
+    assert PromptBuilder(tenant, session=session).prompt_profile is None
+    assert PromptBuilder(tenant, session=session, model_id=OUR_MODEL).prompt_profile == SUROGATE_PROFILE

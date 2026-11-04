@@ -127,8 +127,14 @@ class PromptBuilder:
         slash_commands: SlashCommandConfig | None = None,
         brainstorming_gate: bool = True,
         speaker: tuple[str, str] | None = None,
+        model_id: str | None = None,
     ) -> None:
         self.tenant = tenant
+        # The model this wake runs on, as the worker resolved it.  A new
+        # session's row has no model yet (the worker records it while
+        # building this prompt), so ``session.model`` alone would fall back
+        # to the org default on every first wake.
+        self._model_id: str | None = model_id
         # (display name, email) of the signed-in person on the other side of
         # a one-to-one session, so the agent never asks who it is talking to.
         self._speaker: tuple[str, str] | None = speaker
@@ -260,7 +266,9 @@ class PromptBuilder:
     # ------------------------------------------------------------------
 
     def _get_model_id(self) -> str:
-        """Get the model ID from session or org config."""
+        """Get the model ID: the worker's, else the session's, else org config."""
+        if self._model_id:
+            return self._model_id
         model = getattr(self._session, "model", None) if self._session is not None else None
         if model:
             return model
