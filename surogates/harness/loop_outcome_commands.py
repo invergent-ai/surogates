@@ -16,13 +16,16 @@ from surogates.harness.loop_mission_evaluator import (
 )
 from surogates.harness.outcomes import (
     DEFAULT_MAX_ITERATIONS,
+    EVALUATOR_MAX_TOKENS,
     OutcomeState,
+    OutcomeVerdict,
     apply_evaluation,
     build_evaluator_messages,
     parse_goal_command,
     parse_outcome_evaluation,
     start_outcome,
 )
+from surogates.harness.structured_output import generate_structured
 from surogates.session.events import EventType
 
 logger = logging.getLogger(__name__)
@@ -938,11 +941,31 @@ class OutcomeCommandMixin:
             ),
         )
         try:
+            verdict = await generate_structured(
+                llm_client=self._llm,
+                model=eval_model,
+                messages=messages,
+                output_model=OutcomeVerdict,
+                max_tokens=EVALUATOR_MAX_TOKENS,
+                temperature=0,
+            )
+        except Exception as exc:
+            logger.debug(
+                "Outcome evaluator structured generation failed for %s: %r",
+                state.id,
+                exc,
+            )
+            verdict = None
+        if verdict is not None:
+            return parse_outcome_evaluation(verdict.model_dump_json())
+
+        # A provider that cannot constrain its output still answers free-form.
+        try:
             response = await self._llm.chat.completions.create(
                 model=eval_model,
                 messages=messages,
                 temperature=0,
-                max_tokens=500,
+                max_tokens=EVALUATOR_MAX_TOKENS,
             )
             raw = self._extract_chat_message_content(response)
         except Exception as exc:

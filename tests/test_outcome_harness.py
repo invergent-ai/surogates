@@ -795,3 +795,76 @@ async def test_auto_research_starts_on_a_repo_the_workspace_has(
     await harness._handle_auto_research_command(session, _auto_research_create("/workspace/rule"), _lease(session.id))
 
     assert len(created) == 1 and created[0]["cmd"].repo == "/workspace/rule"
+
+
+@pytest.mark.asyncio
+async def test_evaluator_verdict_comes_from_structured_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The feedback reaches the agent, and the model gets room to think."""
+    from surogates.harness import loop_outcome_commands
+    from surogates.harness.outcomes import (
+        EVALUATOR_MAX_TOKENS,
+        OutcomeState,
+        OutcomeVerdict,
+    )
+
+    seen: dict[str, Any] = {}
+
+    async def fake_generate(**kwargs: Any) -> OutcomeVerdict:
+        seen.update(kwargs)
+        return OutcomeVerdict(
+            explanation="No links on any item",
+            feedback="Add a link to every item",
+            result="needs_revision",
+        )
+
+    monkeypatch.setattr(loop_outcome_commands, "generate_structured", fake_generate)
+    llm = AsyncMock()
+    harness = _make_harness(FakeStore(), llm_client=llm)
+
+    evaluation = await harness._evaluate_outcome(
+        state=OutcomeState.from_config(_active_outcome_config()),
+        latest_response="The report.",
+        model="m",
+    )
+
+    assert evaluation.result == "needs_revision"
+    assert evaluation.feedback == "Add a link to every item"
+    assert evaluation.parse_failed is False
+    assert seen["output_model"] is OutcomeVerdict
+    assert seen["max_tokens"] == EVALUATOR_MAX_TOKENS
+    llm.chat.completions.create.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("structured", ["none", "raises"])
+async def test_evaluator_falls_back_to_a_free_form_answer(
+    monkeypatch: pytest.MonkeyPatch,
+    structured: str,
+) -> None:
+    from surogates.harness import loop_outcome_commands
+    from surogates.harness.outcomes import EVALUATOR_MAX_TOKENS, OutcomeState
+
+    async def fake_generate(**_kwargs: Any) -> None:
+        if structured == "raises":
+            raise RuntimeError("provider refused the schema")
+
+    monkeypatch.setattr(loop_outcome_commands, "generate_structured", fake_generate)
+    llm = AsyncMock()
+    llm.chat.completions.create.return_value = MagicMock(choices=[MagicMock(
+        message=MagicMock(
+            content='{"explanation":"Met","feedback":"","result":"satisfied"}',
+        ),
+    )])
+    harness = _make_harness(FakeStore(), llm_client=llm)
+
+    evaluation = await harness._evaluate_outcome(
+        state=OutcomeState.from_config(_active_outcome_config()),
+        latest_response="The report.",
+        model="m",
+    )
+
+    assert evaluation.result == "satisfied"
+    assert evaluation.parse_failed is False
+    assert llm.chat.completions.create.call_args.kwargs["max_tokens"] == EVALUATOR_MAX_TOKENS
