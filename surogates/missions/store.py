@@ -17,6 +17,7 @@ from surogates.db.models import (
     Mission as MissionRow,
     Session as ORMSession,
     Task,
+    TaskLink,
 )
 from surogates.missions.models import Mission, MissionStatus
 
@@ -28,6 +29,34 @@ _ACTIVE_OR_PAUSED: tuple[str, ...] = ("active", "paused")
 
 
 STAGNANT_EVALUATION_LIMIT = 3
+
+
+def any_task_in_flight(
+    statuses: dict[UUID, str], parents: dict[UUID, set[UUID]],
+) -> bool:
+    """True while one of these tasks will still finish with no one acting.
+
+    ``ready`` and ``running`` are moving. A ``todo`` task moves once every
+    parent is ``done``, so it only counts while each parent is done or moving
+    itself: a failed or cancelled parent never releases its children, and a
+    ``blocked`` one waits on a person. Those children could otherwise hold the
+    judge back for good, on work nothing is going to start.
+    """
+    moving = {
+        task for task, status in statuses.items()
+        if status in ("todo", "ready", "running")
+    }
+    while True:
+        stuck = {
+            task for task in moving
+            if statuses[task] == "todo" and any(
+                parent not in moving and statuses.get(parent) != "done"
+                for parent in parents.get(task, ())
+            )
+        }
+        if not stuck:
+            return bool(moving)
+        moving -= stuck
 
 
 class MissionStoreError(Exception):
@@ -314,6 +343,34 @@ class MissionStore:
                 .where(MissionRow.id == mission_id)
             )).scalar_one_or_none()
         return bool(count is not None and count >= STAGNANT_EVALUATION_LIMIT)
+
+    async def has_tasks_in_flight(self, mission_id: UUID) -> bool:
+        """True while this mission has work that will finish by itself.
+
+        Statuses and links are read in one snapshot. A task finishing just
+        after it can only make this answer stale towards "wait", and that task
+        re-enqueues the coordinator, whose next turn asks again.
+        """
+        async with self._sf() as db:
+            statuses: dict[UUID, str] = {
+                task: status for task, status in (await db.execute(
+                    select(Task.id, Task.status)
+                    .where(Task.mission_id == mission_id)
+                )).all()
+            }
+            waiting = [t for t, status in statuses.items() if status == "todo"]
+            parents: dict[UUID, set[UUID]] = {}
+            if waiting:
+                links = (await db.execute(
+                    select(TaskLink.child_id, TaskLink.parent_id, Task.status)
+                    .join(Task, Task.id == TaskLink.parent_id)
+                    .where(TaskLink.child_id.in_(waiting))
+                )).all()
+                for child, parent, status in links:
+                    parents.setdefault(child, set()).add(parent)
+                    statuses.setdefault(parent, status)
+        return any_task_in_flight(statuses, parents)
+
     async def tokens_spent(self, mission_id: UUID) -> int:
         """Total tokens billed to *mission_id*.
 

@@ -191,3 +191,28 @@ async def test_the_coordinator_is_told_why_it_woke(
     ]
     assert len(synthetic) == 1
     assert "mission" in synthetic[0].data["content"].lower()
+
+
+async def test_a_coordinator_waiting_on_its_tasks_is_not_idle(
+    session_factory, session_store, org_id, user_id,
+):
+    """The judge holds off while tasks run, so no evaluation resets the count:
+    nudging here would block a mission whose tasks simply take a while."""
+    from surogates.db.models import Task
+
+    store, mid, sess = await _mission(session_factory, session_store, org_id, user_id)
+    async with session_factory() as db:
+        db.add(Task(
+            org_id=org_id, parent_session_id=sess.id, goal="long research",
+            status="running", mission_id=mid,
+        ))
+        await db.commit()
+    await _idle(session_factory, mid)
+
+    await nudge_idle_missions(
+        session_factory=session_factory, session_store=session_store,
+        redis=AsyncMock(), idle_seconds=60,
+    )
+
+    assert await _nudges_for(session_store, sess.id) == 0
+    assert (await store.get(mid)).status == "active"

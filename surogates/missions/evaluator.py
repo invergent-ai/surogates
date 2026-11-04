@@ -41,7 +41,7 @@ class EvaluationDecision:
     """Result of :func:`should_evaluate`."""
 
     should: bool
-    trigger: str  # "task_terminal" | "completion_claim" | "rate_limited" | "no_trigger"
+    trigger: str  # "task_terminal" | "completion_claim" | "rate_limited" | "tasks_in_flight" | "no_trigger"
 
 
 def response_claims_completion(response: str | None) -> bool:
@@ -100,15 +100,22 @@ async def should_evaluate(
     Order:
     1. If the mission was evaluated within ``rate_limit_seconds``: skip
        (returns ``rate_limited``).
-    2. If a mission-linked task reached a terminal state after
+    2. If a mission task will still finish by itself: skip (returns
+       ``tasks_in_flight``). A rubric is graded on a settled workstream.
+       Grading mid fan-out only ever says "not yet", and the same answer
+       after the next sibling finishes reads as stagnation and ends a
+       healthy mission as ``blocked``.
+    3. If a mission-linked task reached a terminal state after
        ``last_evaluation_at``: fire with trigger ``task_terminal``.
-    3. If the coordinator's last response contains the completion
+    4. If the coordinator's last response contains the completion
        marker: fire with trigger ``completion_claim``.
-    4. Otherwise: skip (``no_trigger``).
+    5. Otherwise: skip (``no_trigger``).
 
     The rate-limit check runs first so the cheapest negative path is
     fast (single SELECT on the mission row); only when the limit is
-    clear do we run the more expensive task-table lookup.
+    clear do we run the more expensive task-table lookup. The budget check
+    stays ahead of the in-flight gate, so running work can still pause a
+    mission that has spent its allowance.
     """
     if await mission_store.recently_evaluated(
         mission_id, window_seconds=rate_limit_seconds,
@@ -127,6 +134,9 @@ async def should_evaluate(
         return EvaluationDecision(should=False, trigger="budget_exhausted"
                                   if mission.paused_reason == "budget_exhausted"
                                   else "not_active")
+
+    if await mission_store.has_tasks_in_flight(mission_id):
+        return EvaluationDecision(should=False, trigger="tasks_in_flight")
 
     # Use ``last_evaluation_at`` when present, else fall back to the
     # mission's ``created_at``. This prevents the first evaluator pass

@@ -504,6 +504,10 @@ async def nudge_idle_missions(
         try:
             if await session_store.has_live_lease(sid):
                 continue
+            # A coordinator waiting on its tasks is not idle: the judge holds
+            # off while they run, so no evaluation would reset the nudge count.
+            if await store.has_tasks_in_flight(mid):
+                continue
 
             since = last_eval or created
             nudges = await session_store.count_synthetic_since(
