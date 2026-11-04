@@ -27,14 +27,15 @@ What you do NOT have (intentionally, in a well-configured orchestrator profile):
 
 ## Step 0 — Discover the available sub-agent roster
 
-Surogates setups vary. There's no fixed roster of specialist `AgentDef`s; an org might have a single agent type, or a curated team (`researcher`, `writer`, `reviewer`, `backend-eng`), or anything in between. **A `spawn_task` assigned to an unknown `agent_type` produces a task that sits forever** — the dispatcher can't promote it because the agent_def can't be resolved.
+Surogates setups vary. There's no fixed roster of specialist `AgentDef`s; an org might have a single agent type, or a curated team (`researcher`, `writer`, `reviewer`, `backend-eng`), or anything in between. **A `spawn_task` assigned to an unknown `agent_type` is refused**, and no task is made.
 
 Before you fan out, check what's actually configured:
 
 - Your system prompt has a **"# Available Sub-Agents"** section listing every enabled `AgentDef`. Read it. Cache the list in your working memory so you don't re-read every turn.
+- No such section means no sub-agents are configured. Do not go looking for a roster: spawn every task with no `agent_type`, and put the role in its goal.
 - If the goal needs a specialist not in the catalog, **ask the user**. "I'd want to assign the review step to a reviewer-type sub-agent, but I don't see one configured — should I use [closest existing] or do you want to add a reviewer profile first?" is a fine first message.
 
-Never invent agent-type names. The cost of a wrong name is silent failure (the task never runs).
+Never invent agent-type names. A wrong name costs you a refused call and a turn.
 
 ## When to use the board vs. just answer
 
@@ -171,7 +172,7 @@ In plain prose, tell the user what you queued and how to follow it:
 
 ## Pitfalls
 
-**Inventing agent-type names that don't exist.** The dispatcher silently drops the task. Always assign from your Step 0 discovery; ask the user if unsure.
+**Inventing agent-type names that don't exist.** The call is refused. Always assign from your Step 0 discovery; ask the user if unsure.
 
 **Bundling independent lanes into one task.** If the user asks for two independent outcomes, create two tasks. Example: "fix blockers and check model variants" is not one engineer task; it's a fixer card and a researcher card, optionally gated by a reviewer.
 
