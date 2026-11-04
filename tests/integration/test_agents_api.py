@@ -52,7 +52,15 @@ async def app(session_factory, redis_client, pg_url, redis_url, tmp_path_factory
     application.state.credential_vault = CredentialVault(
         session_factory, Fernet.generate_key(),
     )
-    return application
+    # The app's lifespan does this in production; these tests do not run it.
+    from surogates.tools.loader import ResourceLoader
+
+    previous = ResourceLoader._agent_storage
+    ResourceLoader.use_agent_storage(
+        application.state.storage, application.state.settings.storage.bucket,
+    )
+    yield application
+    ResourceLoader._agent_storage = previous
 
 
 @pytest_asyncio.fixture(loop_scope="session")

@@ -20,6 +20,7 @@ from surogates.session.store import SessionStore
 from surogates.storage.backend import create_backend
 from surogates.browser.profiles import BrowserProfileStore
 from surogates.tenant.credentials import CredentialVault
+from surogates.tools.loader import ResourceLoader
 from surogates.workstreams.undo import acts_ended
 
 logger = logging.getLogger(__name__)
@@ -144,6 +145,7 @@ async def runtime_app_state(app: FastAPI, *, name: str) -> AsyncIterator[None]:
     )
     app.state.audit_store = AuditStore(app.state.session_factory)
     app.state.storage = create_backend(settings)
+    ResourceLoader.use_agent_storage(app.state.storage, settings.storage.bucket)
 
     app.state.credential_vault = _build_vault(
         settings.encryption_key,

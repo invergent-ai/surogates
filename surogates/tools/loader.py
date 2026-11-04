@@ -203,9 +203,25 @@ class ResourceLoader:
     """Loads skills and sub-agent definitions from the per-agent bundle,
     tenant asset roots, and the surogates DB."""
 
+    #: Where the tenant bucket's sub-agents are read from, as
+    #: ``(backend, bucket)``. Set once at process start, read only after that.
+    _agent_storage: tuple[Any, str] | None = None
+
     def __init__(self) -> None:
-        # Stateless — kept as a class for namespacing and DI in tests.
+        # Holds nothing per instance — kept as a class for namespacing and DI
+        # in tests.
         pass
+
+    @classmethod
+    def use_agent_storage(cls, backend: Any, bucket: str) -> None:
+        """Read the tenant bucket's sub-agents through *backend* from now on.
+
+        Saving a sub-agent writes it to the bucket, and every path that needs
+        one (the wake, the spawn tools, the task tick) builds its own loader.
+        A process states the location once at startup instead of threading it
+        through each of them; a process that never does sees no bucket layer.
+        """
+        cls._agent_storage = (backend, bucket)
 
     @classmethod
     def from_settings(cls, settings: Any | None) -> "ResourceLoader":
@@ -375,9 +391,11 @@ class ResourceLoader:
         Layer precedence (lowest → highest):
 
         1. Platform bundle (``agents/`` prefix in the per-agent bundle)
-        2. User bucket files (``tenant-{org}/users/{user}/agents/``)
-        3. Org-wide DB rows (``agents`` table, ``user_id IS NULL``)
-        4. User-specific DB rows (``agents`` table, ``user_id = ?``)
+        2. User files on disk (``{asset_root}/{org}/users/{user}/agents/``)
+        3. Tenant bucket (``shared/agents/`` and ``users/{user}/agents/``),
+           where saving a sub-agent puts it
+        4. Org-wide DB rows (``agents`` table, ``user_id IS NULL``)
+        5. User-specific DB rows (``agents`` table, ``user_id = ?``)
 
         Org admin overrides (DB layers) are final -- end users cannot
         override them via bucket files.
@@ -403,21 +421,24 @@ class ResourceLoader:
             user_agents_dir, AGENT_SOURCE_USER,
         )
 
+        # Layer 3: tenant bucket
+        bucket = await self._load_agents_from_bucket(tenant)
+
         if db_session is not None:
-            # Layer 3: org-wide DB entries
+            # Layer 4: org-wide DB entries
             org_db = await self._load_agents_from_db(
                 db_session, tenant.org_id, user_id=None,
                 source=AGENT_SOURCE_ORG_DB,
             )
-            # Layer 4: user-specific DB entries
+            # Layer 5: user-specific DB entries
             user_db = await self._load_agents_from_db(
                 db_session, tenant.org_id, tenant.user_id,
                 source=AGENT_SOURCE_USER_DB,
             )
-            return self._merge(platform, user_files, org_db, user_db)
+            return self._merge(platform, user_files, bucket, org_db, user_db)
 
         # Fallback for the tests / paths that don't pass a session.
-        return self._merge(platform, user_files)
+        return self._merge(platform, user_files, bucket)
 
     # ------------------------------------------------------------------
     # Skills parsing
@@ -606,6 +627,57 @@ class ResourceLoader:
             except Exception:
                 logger.exception(
                     "Failed to parse bundle agent at %s", path,
+                )
+        return agents
+
+    async def _load_agents_from_bucket(self, tenant: Any) -> list[AgentDef]:
+        """Read sub-agents saved to the tenant bucket, across both its layers.
+
+        A storage failure costs this layer and nothing else: the bundle and DB
+        layers still load, and the next wake reads the bucket again.
+        """
+        if self._agent_storage is None:
+            return []
+        from surogates.storage.tenant import TenantStorage
+
+        backend, bucket = self._agent_storage
+        storage = TenantStorage(
+            backend=backend,
+            org_id=tenant.org_id,
+            user_id=tenant.user_id,
+            bucket=bucket,
+        )
+        # ponytail: up to two LISTs per wake, no cache. Add a short TTL if the
+        # bucket shows up in wake latency on the voice path.
+        try:
+            entries = await storage.list_all_agents()
+            contents = await asyncio.gather(
+                *(storage.read_agent(e["key_prefix"]) for e in entries),
+                return_exceptions=True,
+            )
+        except Exception:
+            logger.warning(
+                "Could not read bucket sub-agents for tenant %s",
+                tenant.org_id, exc_info=True,
+            )
+            return []
+
+        agents: list[AgentDef] = []
+        for entry, content in zip(entries, contents):
+            if isinstance(content, BaseException):
+                if not isinstance(content, KeyError):
+                    logger.warning(
+                        "Failed to read AGENT.md at %s", entry["key_prefix"],
+                        exc_info=content,
+                    )
+                continue
+            try:
+                parsed = _parse_agent_frontmatter(content, entry["name"])
+                agents.append(_build_agent_def(parsed, entry["layer"]))
+            except Exception:
+                logger.warning(
+                    "Failed to parse AGENT.md at %s", entry["key_prefix"],
+                    exc_info=True,
                 )
         return agents
 

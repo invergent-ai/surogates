@@ -1419,6 +1419,7 @@ async def run_worker(settings: Settings) -> None:
     from surogates.storage.backend import create_backend
 
     storage_backend = create_backend(settings)
+    ResourceLoader.use_agent_storage(storage_backend, settings.storage.bucket)
 
     # 4a. Sandbox pool -- one sandbox per session, lazily provisioned.
     if settings.sandbox.backend == "kubernetes":
