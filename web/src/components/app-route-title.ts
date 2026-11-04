@@ -15,7 +15,6 @@ const SECTIONS: readonly (readonly [string, string])[] = [
   ["/missions", "Missions"],
   ["/skills", "Skills"],
   ["/agents", "Agents"],
-  ["/integrations", "Integrations"],
   ["/link", "Link a channel"],
   ["/settings", "Settings"],
   ["/coding-agents", "Coding agents"],

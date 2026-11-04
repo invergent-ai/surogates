@@ -16,8 +16,9 @@ export const Route = createRoute({
   getParentRoute: () => rootRoute,
   path: "/settings",
   beforeLoad: () => requireAuth(),
-  // The section to open: Devices, from the "computer added" notice.
-  validateSearch: (search: Record<string, unknown>): { tab?: "devices" } =>
-    search.tab === "devices" ? { tab: "devices" } : {},
+  // The section to open: Devices, from the "computer added" notice; Connected Accounts, from the
+  // chat's "Connect your accounts" band.
+  validateSearch: (search: Record<string, unknown>): { tab?: "devices" | "accounts" } =>
+    search.tab === "devices" || search.tab === "accounts" ? { tab: search.tab } : {},
   component: SettingsPage,
 });
