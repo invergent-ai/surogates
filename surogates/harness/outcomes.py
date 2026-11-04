@@ -9,14 +9,20 @@ from __future__ import annotations
 
 import re
 from dataclasses import asdict, dataclass
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
+
+from pydantic import BaseModel
 
 from surogates.harness.structured_output import parse_json_object
 
 DEFAULT_MAX_ITERATIONS = 20
 MAX_MAX_ITERATIONS = 20
 DEFAULT_EVALUATOR_RESPONSE_MAX_CHARS = 16384
+# Reasoning models spend this budget on thinking before they answer. At 500 a
+# verdict could come back cut off, or empty, and the next attempt then ran with
+# no feedback.
+EVALUATOR_MAX_TOKENS = 2000
 DEFAULT_OUTCOME_RUBRIC = (
     "Satisfied when the assistant's latest response shows the requested "
     "work is complete and presents the final deliverable."
@@ -27,8 +33,8 @@ _RUBRIC_RE = re.compile(r"\n\s*(?:rubric|criteria)\s*:\s*\n", re.IGNORECASE)
 EVALUATOR_SYSTEM_PROMPT = (
     "You are a strict outcome evaluator for an agent harness. Evaluate the "
     "assistant's latest response against the user's outcome and rubric. Use "
-    "a separate, critical perspective. Return only JSON with keys: result, "
-    "explanation, feedback.\n\n"
+    "a separate, critical perspective. Return only JSON with keys: "
+    "explanation, feedback, result.\n\n"
     "result must be one of: satisfied, needs_revision, blocked, failed.\n"
     "- satisfied: the response provides concrete evidence that every rubric "
     "criterion is met. Evidence means a file-contents excerpt, an output "
@@ -43,6 +49,18 @@ EVALUATOR_SYSTEM_PROMPT = (
     "- failed: the outcome and rubric contradict each other, or the "
     "response cannot be evaluated."
 )
+
+
+class OutcomeVerdict(BaseModel):
+    """The shape the evaluator must return.
+
+    The reasons come first: guided decoding emits keys in declaration order,
+    so a leading ``result`` would be decided before any reasoning.
+    """
+
+    explanation: str = ""
+    feedback: str = ""
+    result: Literal["satisfied", "needs_revision", "blocked", "failed"]
 
 
 @dataclass(frozen=True)
@@ -228,8 +246,8 @@ def build_evaluator_messages(
         f"Rubric:\n{state.rubric}\n\n"
         f"Assistant latest response:\n{(latest_response or '')[:limit]}\n\n"
         "Return JSON exactly like:\n"
-        '{"result":"satisfied|needs_revision|blocked|failed",'
-        '"explanation":"one sentence","feedback":"revision guidance"}'
+        '{"explanation":"one sentence","feedback":"revision guidance",'
+        '"result":"satisfied|needs_revision|blocked|failed"}'
     )
     return [
         {"role": "system", "content": EVALUATOR_SYSTEM_PROMPT},
