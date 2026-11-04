@@ -11,6 +11,7 @@ import {
   LaptopIcon,
   LinkIcon,
   Loader2Icon,
+  PlugIcon,
   type LucideIcon,
   SaveIcon,
   TrashIcon,
@@ -20,6 +21,7 @@ import { toast } from "sonner";
 import { CodingAgentsPanel } from "@invergent/agent-chat-react";
 import { surogatesWebChatAdapter } from "@/features/chat";
 import { BrowserProfilesTab } from "./browser-profiles-tab";
+import { ConnectedAccountsTab } from "./connected-accounts-tab";
 import { DevicesTab } from "./devices-tab";
 import { PlanUsageTab } from "./plan-usage-tab";
 import { NotificationsSection } from "./notifications-section";
@@ -71,6 +73,7 @@ const PLATFORM_LABELS: Record<string, string> = {
 type TabId =
   | "profile"
   | "channels"
+  | "accounts"
   | "plan"
   | "coding-agents"
   | "browser-profiles"
@@ -89,6 +92,11 @@ const TAB_META: Record<
     label: "Connected Channels",
     blurb: "Slack or Telegram accounts linked to you",
     Icon: LinkIcon,
+  },
+  accounts: {
+    label: "Connected accounts",
+    blurb: "Outlook, OneDrive and other services it can use for you",
+    Icon: PlugIcon,
   },
   plan: {
     label: "Plan & Usage",
@@ -173,6 +181,24 @@ export function SettingsPage() {
   const channelsEnabled = (linkableChannels?.length ?? 0) > 0;
   // Devices only where the agent says it has local folders: an older one says nothing, and has no computers.
   const devicesEnabled = useAppStore((s) => s.desktopSessions) === true;
+  // Connected accounts only when the agent has services to connect: the same list the chat's
+  // "Connect your accounts" band shows. Hidden until it has loaded, and when it cannot load.
+  const [accountsEnabled, setAccountsEnabled] = useState(false);
+  useEffect(() => {
+    const pending = surogatesWebChatAdapter.listComposioConnections?.({});
+    if (!pending) return;
+    let live = true;
+    pending
+      .then((res) => {
+        if (live) setAccountsEnabled(res.toolkits.length > 0);
+      })
+      .catch(() => {
+        if (live) setAccountsEnabled(false);
+      });
+    return () => {
+      live = false;
+    };
+  }, []);
 
   // Load sidebar + capability data.
   useEffect(() => {
@@ -193,6 +219,7 @@ export function SettingsPage() {
   const availableTabs: TabId[] = [
     "profile",
     ...(channelsEnabled ? (["channels"] as const) : []),
+    ...(accountsEnabled ? (["accounts"] as const) : []),
     "plan",
     ...(codingAgentsEnabled ? (["coding-agents"] as const) : []),
     ...(browserProfilesEnabled ? (["browser-profiles"] as const) : []),
@@ -269,6 +296,12 @@ export function SettingsPage() {
       selectTab("devices");
     }
   }, [asked, devicesEnabled]);
+  // The chat's "Connect your accounts" band opens Connected accounts.
+  useEffect(() => {
+    if (asked === "accounts" && accountsEnabled) {
+      selectTab("accounts");
+    }
+  }, [asked, accountsEnabled]);
 
   const handleUnlink = useCallback(async () => {
     if (!unlinkTarget) return;
@@ -305,6 +338,9 @@ export function SettingsPage() {
               <TabsTrigger value="profile">Profile</TabsTrigger>
               {channelsEnabled && (
                 <TabsTrigger value="channels">Connected Channels</TabsTrigger>
+              )}
+              {accountsEnabled && (
+                <TabsTrigger value="accounts">Connected accounts</TabsTrigger>
               )}
               <TabsTrigger value="plan">Plan &amp; Usage</TabsTrigger>
               {codingAgentsEnabled && (
@@ -410,6 +446,13 @@ export function SettingsPage() {
               )}
               <NotificationsSection />
             </TabsContent>
+
+            {/* ── Connected accounts ── */}
+            {accountsEnabled && (
+              <TabsContent value="accounts">
+                <ConnectedAccountsTab />
+              </TabsContent>
+            )}
 
             {/* ── Connected Channels ── */}
             {channelsEnabled && (

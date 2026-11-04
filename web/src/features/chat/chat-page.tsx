@@ -398,7 +398,8 @@ export function ChatPage() {
               onSessionChange={handleSessionChange}
               disabled={sessionDeclined}
               onMessagesChange={setChatMessages}
-              onOpenIntegrations={() => void navigate({ to: "/integrations" })}
+              onOpenIntegrations={() => void navigate({ to: "/settings", search: { tab: "accounts" } })}
+              integrationsHideHint="Hide. You can connect accounts any time in Settings › Connected accounts."
               browserProfileId={browserProfileId}
               onSelectBrowserProfile={setBrowserProfileId}
               firstMessage={given}
