@@ -101,7 +101,7 @@ Goal runs are normal session activity plus a few goal-specific events:
 | `span.outcome_evaluation_end` | The evaluator returned `satisfied`, `needs_revision`, `blocked`, or `failed` |
 | `outcome.continuation` | Surogates queued another attempt |
 | `user.message` with `synthetic: outcome_continuation` | The next model-visible continuation prompt |
-| `outcome.paused` | The goal was paused by the user or by evaluator parse failures |
+| `outcome.paused` | The goal was paused by the user or by evaluator parse failures. A verdict with no explanation counts as one |
 | `outcome.cleared` | The goal state was removed |
 
 The harness cursor stops before synthetic continuation messages so they remain

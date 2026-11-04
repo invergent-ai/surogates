@@ -9,6 +9,7 @@ from uuid import UUID
 from pydantic import BaseModel
 
 from surogates.harness.message_utils import message_texts
+from surogates.harness.outcomes import EVALUATOR_MAX_TOKENS, VerdictReason
 from surogates.harness.structured_output import generate_structured, parse_json_object
 from surogates.session.events import EventType
 
@@ -251,11 +252,15 @@ class _MissionVerdict(BaseModel):
     recorded event, not from here. Both default empty so a judge response
     written before this existed still validates. See
     docs/superpowers/specs/2026-08-11-mission-objective-refinement-design.md.
+
+    The reasons come before ``result`` because guided decoding emits keys in
+    declaration order, and ``explanation`` is required because a strict schema
+    otherwise accepts ``{"result": "satisfied"}``.
     """
 
-    result: Literal["satisfied", "needs_revision", "blocked", "failed"]
-    explanation: str = ""
+    explanation: VerdictReason
     feedback: str = ""
+    result: Literal["satisfied", "needs_revision", "blocked", "failed"]
     proposed_rubric: str = ""
     refinement_evidence: str = ""
 
@@ -300,7 +305,7 @@ def _build_mission_judge(
                 model=eval_model,
                 messages=messages,
                 output_model=_MissionVerdict,
-                max_tokens=600,
+                max_tokens=EVALUATOR_MAX_TOKENS,
                 temperature=0,
             )
         except Exception as exc:
@@ -318,7 +323,7 @@ def _build_mission_judge(
             model=eval_model,
             messages=messages,
             temperature=0.0,
-            max_tokens=600,
+            max_tokens=EVALUATOR_MAX_TOKENS,
         )
         try:
             message = resp.choices[0].message
