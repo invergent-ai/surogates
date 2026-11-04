@@ -5,7 +5,7 @@
 @import "tw-shimmer";
 @import "@invergent/ui-sdk/theme.css";
 @plugin "@toolwind/corner-shape";
-@source "../../sdk/agent-chat-react/src";
+@source "../node_modules/@invergent/agent-chat-react/dist/*.js";
 
 @theme inline {
   --animate-fade-up: fade-up 0.5s ease both;
