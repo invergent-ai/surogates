@@ -215,3 +215,13 @@ def test_the_workers_model_id_selects_the_profile_on_a_first_wake(monkeypatch):
                            permissions=frozenset(), asset_root="/tmp/test")
     assert PromptBuilder(tenant, session=session).prompt_profile is None
     assert PromptBuilder(tenant, session=session, model_id=OUR_MODEL).prompt_profile == SUROGATE_PROFILE
+
+
+def test_the_profile_names_no_tool_the_session_lacks(monkeypatch):
+    # A lean agent (gym tools only) tried terminal because the prompt told it to run `date`.
+    monkeypatch.delenv("SUROGATES_PROMPT_PROFILES", raising=False)
+    lean = _builder(OUR_MODEL, tools={"memory", "todo", "web_search", "web_extract"}).build()
+    assert "`date`" not in lean
+    assert "use terminal" not in lean and "curl -L" not in lean
+    full = _builder(OUR_MODEL, tools={"terminal", "web_search", "web_extract", "read_file"}).build()
+    assert "use terminal to download" in full
