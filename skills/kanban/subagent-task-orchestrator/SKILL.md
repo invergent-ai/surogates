@@ -3,6 +3,7 @@ name: subagent-task-orchestrator
 description: "Decomposition playbook and anti-temptation rules for an orchestrator agent that routes work through the Surogates subagent task layer. Pair this skill with an AgentDef whose tool filter strips the implementation tools (terminal, file, web, code) — that's how 'don't do the work yourself' is enforced structurally, not just behaviorally."
 version: 1.0.0
 license: MIT
+requires_tools: [spawn_task]
 ---
 
 # Subagent Task Orchestrator — Decomposition Playbook

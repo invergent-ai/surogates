@@ -23,6 +23,7 @@ from urllib.parse import urlparse
 import httpx
 
 from surogates.harness.message_utils import (
+    clean_tool_call_name,
     content_as_text,
     message_to_dict,
     reconstruct_message_from_deltas,
@@ -1566,6 +1567,7 @@ async def call_llm_streaming_inner(
                         for prev_slot in sorted(tool_calls_acc):
                             if prev_slot < idx and prev_slot not in _notified_slots:
                                 prev_entry = tool_calls_acc[prev_slot]
+                                prev_entry["function"]["name"] = clean_tool_call_name(prev_entry["function"]["name"])
                                 if prev_entry["function"]["name"]:
                                     _notified_slots.add(prev_slot)
                                     on_tool_call_complete(prev_entry)
@@ -1628,9 +1630,13 @@ async def call_llm_streaming_inner(
         for slot in sorted(tool_calls_acc):
             if slot not in _notified_slots:
                 entry = tool_calls_acc[slot]
+                entry["function"]["name"] = clean_tool_call_name(entry["function"]["name"])
                 if entry["function"]["name"]:
                     _notified_slots.add(slot)
                     on_tool_call_complete(entry)
+
+    for entry in tool_calls_acc.values():
+        entry["function"]["name"] = clean_tool_call_name(entry["function"]["name"])
 
     # Reconstruct the complete assistant message.
     assistant_message = reconstruct_message_from_deltas(

@@ -2162,6 +2162,7 @@ async def run_worker(settings: Settings) -> None:
 
         prompt_builder = PromptBuilder(
             tenant,
+            model_id=model_id,
             skills=available_skills,
             memory_manager=memory_manager,
             session=session,

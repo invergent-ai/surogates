@@ -86,6 +86,8 @@ include = ["surogates*"]
 surogates = [
     "web/dist/**/*",
     "harness/prompts/**/*.md",
+    # A model profile's tool/skill descriptions and switches (prompt_profile).
+    "harness/prompts/profiles/**/*.yaml",
     "security/*.yaml",
     # The snapshot's page half, which the cloud's browser client runs and the
     # desktop app ships too (surogates.devices.browser's snapshot@1).

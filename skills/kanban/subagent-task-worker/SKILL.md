@@ -3,6 +3,7 @@ name: subagent-task-worker
 description: "Pitfalls, examples, and edge cases for workers executing a Surogates subagent task. Loaded automatically when the dispatcher spawns a session bound to a Task (Session.task_id is set)."
 version: 1.0.0
 license: MIT
+requires_tools: [worker_complete]
 ---
 
 # Subagent Task Worker — Pitfalls and Examples
