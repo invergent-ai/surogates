@@ -21,7 +21,7 @@ import { LOCK_WAIT_MS } from "../src/hosts/folder-record.js";
 import { FOLDER_UNAVAILABLE, type FromHost, type HostStart, type NetworkAnswer, type NetworkAsk, type ToHost } from "../src/hosts/messages.js";
 import {
   APP_DIRS, type BoundFolder, CANCELLED, folderBusy, forkHost, type Guard, HOST_STOPPED, type HostProcess, LAND_WAIT_MS, NODE, NOT_BOUND, nothingToLand, QUIT_STEP_MS,
-  type Recovery, RETIRE_STEP_MS, START_TIMEOUT_MS, STEP_MS, stillCutShort, type ThreadCopies, ToolHosts, type ToolHostsOptions,
+  type Recovery, RETIRE_STEP_MS, START_TIMEOUT_MS, STEP_MS, stillCutShort, type ThreadCopies, ToolHosts, type ToolHostsOptions, WAITED_TOO_LONG,
 } from "../src/hosts/tool-hosts.js";
 import { asItLies } from "./as-it-lies.js";
 
@@ -251,15 +251,32 @@ describe("ToolHosts", { timeout: 30_000 }, () => {
     const busy = new AbortController();
     const first = executor.run(slowSearch(), busy.signal);
     await until(() => sleeping() === 1, 20_000);
-    expect(await executor.run(op("resolve", { path: "" }, ROOT_B), signal())).toMatchObject({
-      error: { type: "unavailable", message: expect.stringMatching(/another chat on this computer/) },
-    });
+    // The second chat waits for the folder while the first's host is on it.
+    const second = executor.run(op("resolve", { path: "" }, ROOT_B), signal());
     busy.abort();
     expect(await first).toEqual(CANCELLED);
-    // Half a second with nothing to do, and the first chat's host lets the folder go.
-    await until(() => exits >= 2, 10_000);
-    expect(await executor.run(op("resolve", { path: "" }, ROOT_B), signal())).toMatchObject({ ok: expect.any(String) });
+    // Half a second with nothing to do, and the first chat's host lets the folder go: the second goes on.
+    expect(await second).toEqual({ ok: folders[ROOT_A] });
+    expect(exits).toBe(1);
   }, 40_000);
+
+  it("has a second chat wait for the folder a first chat's real host holds, past the lock's own wait, and go on once the first chat's turn has ended [slow]", async () => {
+    folders[ROOT_B] = folders[ROOT_A] ?? "";
+    const ended: Record<string, () => void> = {};
+    const executor = toolHosts({ following: (root, turnEnded) => ((ended[root] = turnEnded), () => {}) });
+    const busy = new AbortController();
+    const first = executor.run(slowSearch(), busy.signal);
+    await until(() => sleeping() === 1, 20_000);
+    let answered: Outcome | undefined;
+    const second = executor.run(op("resolve", { path: "" }, ROOT_B), signal()).then((outcome) => (answered = outcome));
+    await new Promise((done) => setTimeout(done, LOCK_WAIT_MS + 2_000));
+    expect(answered).toBeUndefined();
+    busy.abort();
+    expect(await first).toEqual(CANCELLED);
+    ended[ROOT_A]?.();
+    await until(() => answered !== undefined, 10_000);
+    expect(await second).toEqual({ ok: folders[ROOT_A] });
+  }, 60_000);
 });
 
 // A host that does what the test tells it to, so the paths a real host takes only
@@ -906,6 +923,136 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
     expect(executor.folderInUse(identity.dev, identity.ino)).toBe(true);
   });
 
+  // Whether *work* is still unsettled once *ms* have passed.
+  const pendingAfter = async (work: Promise<unknown>, ms: number) => {
+    let settled = false;
+    void work.then(() => void (settled = true));
+    await new Promise((done) => setTimeout(done, ms));
+    return !settled;
+  };
+  const resolveOf = (root: string) => op("resolve", { path: "" }, root);
+
+  it("has a second chat's operation wait for the folder while the first chat's host is on it, and run once that one has gone", async () => {
+    folders[ROOT_B] = folders[ROOT_A] ?? "";
+    const { follows, following } = followed();
+    const executor = toolHosts({ idleMs: 60_000, following, spawnHost: fakeSpawn(answering) });
+    expect(await executor.run(resolve(), signal())).toMatchObject({ ok: expect.any(String) });
+    const second = executor.run(resolveOf(ROOT_B), signal());
+    expect(await pendingAfter(second, 300)).toBe(true);
+    expect(fakes).toHaveLength(1);
+    follows[0]?.turnEnded();
+    expect(await second).toMatchObject({ ok: expect.any(String) });
+    expect([fakes.length, sent(0, "stop"), sent(1, "op")]).toEqual([2, 1, 1]);
+  });
+
+  it("joins every operation of the waiting chat to its one wait", async () => {
+    folders[ROOT_B] = folders[ROOT_A] ?? "";
+    const { follows, following } = followed();
+    const executor = toolHosts({ idleMs: 60_000, following, spawnHost: fakeSpawn(answering) });
+    await executor.run(resolve(), signal());
+    const waits = [executor.run(resolveOf(ROOT_B), signal()), executor.run(op("stat", { key: "/x" }, ROOT_B), signal())];
+    expect(await pendingAfter(Promise.race(waits), 100)).toBe(true);
+    follows[0]?.turnEnded();
+    expect(await Promise.all(waits)).toEqual([{ ok: expect.any(String) }, { ok: expect.any(String) }]);
+    expect([fakes.length, sent(1, "op")]).toEqual([2, 2]);
+  });
+
+  it("stops waiting after the folder wait's limit, saying why in words the agent can pass on", async () => {
+    folders[ROOT_B] = folders[ROOT_A] ?? "";
+    const executor = toolHosts({ idleMs: 60_000, folderWaitMs: 200, spawnHost: fakeSpawn(answering) });
+    await executor.run(resolve(), signal());
+    expect(await executor.run(resolveOf(ROOT_B), signal())).toEqual(WAITED_TOO_LONG);
+    expect(WAITED_TOO_LONG).toEqual({
+      error: {
+        type: "busy",
+        message: "Another chat on this computer has been working in this folder for more than 10 minutes, so this chat stopped waiting. Try again once it is done, or start a new chat in a new folder.",
+      },
+    });
+    expect(fakes).toHaveLength(1);
+  });
+
+  it("answers a waiting operation cancelled at once, and spawns nothing for it", async () => {
+    folders[ROOT_B] = folders[ROOT_A] ?? "";
+    const { follows, following } = followed();
+    const executor = toolHosts({ idleMs: 60_000, following, spawnHost: fakeSpawn(answering) });
+    await executor.run(resolve(), signal());
+    const controller = new AbortController();
+    const waiting = executor.run(resolveOf(ROOT_B), controller.signal);
+    expect(await pendingAfter(waiting, 100)).toBe(true);
+    controller.abort();
+    expect(await waiting).toEqual(CANCELLED);
+    follows[0]?.turnEnded();
+    await until(() => sent(0, "stop") === 1, 1_000);
+    await new Promise((done) => setTimeout(done, 100));
+    expect(fakes).toHaveLength(1);
+  });
+
+  it("ends every wait at the quit, spawning nothing after", async () => {
+    folders[ROOT_B] = folders[ROOT_A] ?? "";
+    const executor = toolHosts({ idleMs: 60_000, spawnHost: fakeSpawn(answering) });
+    await executor.run(resolve(), signal());
+    const waiting = executor.run(resolveOf(ROOT_B), signal());
+    expect(await pendingAfter(waiting, 100)).toBe(true);
+    await executor.stop();
+    expect(await waiting).toEqual({ error: { type: "unavailable", message: "This computer could not open the folder's sandbox: the app is quitting" } });
+    await new Promise((done) => setTimeout(done, 100));
+    expect(fakes).toHaveLength(1);
+  });
+
+  it("never has a chat wait on its own host, one still going included", async () => {
+    const { follows, following } = followed();
+    let exited = 0;
+    // Answers each operation a moment after it is sent, and exits a while after it is stopped.
+    const slowly = (host: FakeHost, message: ToHost) => {
+      if (message.type === "start") host.say({ type: "ready", processes: [] });
+      if (message.type === "op") setTimeout(() => host.say({ type: "result", id: message.id, outcome: { ok: message.id } }), 50);
+      if (message.type === "stop") setTimeout(() => (exited += 1, host.exit()), 200);
+    };
+    const executor = toolHosts({ idleMs: 60_000, following, spawnHost: fakeSpawn(slowly) });
+    expect(await Promise.all([executor.run(resolve(), signal()), executor.run(resolve(), signal())])).toEqual([
+      { ok: expect.any(String) }, { ok: expect.any(String) },
+    ]);
+    expect(fakes).toHaveLength(1);
+    follows[0]?.turnEnded();
+    await until(() => sent(0, "stop") === 1, 1_000);
+    expect(await executor.run(resolve(), signal())).toMatchObject({ ok: expect.any(String) });
+    expect([fakes.length, exited]).toEqual([2, 0]);
+  });
+
+  it("leaves the folder to the next chat where the host of the one whose turn came could not be made", async () => {
+    folders[ROOT_B] = folders[ROOT_A] ?? "";
+    const { follows, following } = followed();
+    const spawn = fakeSpawn(answering);
+    let calls = 0;
+    const executor = toolHosts({ idleMs: 60_000, following, spawnHost: () => {
+      calls += 1;
+      if (calls === 2) throw new Error("no host to be had");
+      return spawn();
+    } });
+    await executor.run(resolve(), signal());
+    const waiting = executor.run(resolveOf(ROOT_B), signal());
+    expect(await pendingAfter(waiting, 100)).toBe(true);
+    follows[0]?.turnEnded();
+    expect(await waiting).toEqual({ error: { type: "unavailable", message: "This computer could not open the folder's sandbox: no host to be had" } });
+    expect(await executor.run(resolveOf(ROOT_B), signal())).toMatchObject({ ok: expect.any(String) });
+    expect(calls).toBe(3);
+  });
+
+  it("keeps today's short wait behind a holder that is no chat of this app's", async () => {
+    folders[ROOT_B] = folders[ROOT_A] ?? "";
+    const busy = "another chat on this computer is working in this folder; this one can use it once that one is done";
+    // As host.ts says it once its wait for the folder's lock ran out, and goes.
+    const executor = toolHosts({ spawnHost: fakeSpawn((host, message) => {
+      if (message.type !== "start") return;
+      host.say({ type: "failed", message: busy, busy: true });
+      host.exit();
+    }) });
+    const refused = { error: { type: "unavailable", message: `This computer could not open the folder's sandbox: ${busy}` } };
+    expect(await executor.run(resolveOf(ROOT_B), signal())).toEqual(refused);
+    expect(await executor.run(resolveOf(ROOT_B), signal())).toEqual(refused);
+    expect(fakes).toHaveLength(2);
+  });
+
   it("waits, when the app quits, for a host that is stopping because it had nothing to do", async () => {
     const slowStop = (host: FakeHost, message: ToHost) => {
       if (message.type === "start") host.say({ type: "ready", processes: [] });
@@ -1452,6 +1599,17 @@ describe("a root bound to a thread's copy of a folder", { timeout: 5_000 }, () =
     expect(await executor.land(landing("forget", { saga: "hold:42", applied: [] }, ROOT_A, "land:42:release:7"), signal())).toMatchObject({ ok: expect.any(String) });
     await until(() => gone === 2);
     expect(fakes.map((host) => host.count("stop"))).toEqual([1, 1]);
+  });
+
+  it("puts no chat in the queue behind a thread's landing", async () => {
+    const executor = threads({
+      bindingOf: (root) => (root === ROOT_A || root === ROOT_B ? { folder: folder(), ...identities.get(folder())!, ...(root === ROOT_A ? { history: root } : {}) } : undefined),
+    });
+    expect(await executor.land(landing("revisions", { paths: [] }), signal())).toMatchObject({ ok: expect.any(String) });
+    // The landing's host holds the folder; the chat's host starts at once, and lets the folder go as soon as it can.
+    expect(await executor.run(op("resolve", { path: "" }, ROOT_B), signal())).toMatchObject({ ok: expect.any(String) });
+    expect(fakes).toHaveLength(2);
+    expect(await executor.run(op("resolve", { path: "" }, ROOT_B), signal())).toMatchObject({ ok: expect.any(String) });
   });
 
   it("answers a landing busy, by the folder's name, where another held the folder for as long as it waits, and a chat's host as ever", async () => {
