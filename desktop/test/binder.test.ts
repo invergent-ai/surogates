@@ -184,7 +184,10 @@ describe("preparing a new chat's folder", () => {
     journal.bindings.add({ root: OTHER, nonce: "n".repeat(16), folder: notes, dev: 1, ino: 1, boot: BOOT_ID, mode: "free", boundAt: 1 });
     const user = new User([], [null]);
     expect(await binder(user).prepareFolder("new", WINDOW, never())).toBeNull();
-    expect(existsSync(user.sheets[0]?.folder ?? "")).toBe(false);
+    expect(user.sheets).toHaveLength(1);
+    const made = user.sheets[0]?.folder ?? "";
+    expect(made).toMatch(/Surogate\/Research-assistant\/\d{4}-\d{2}-\d{2}$/);
+    expect(existsSync(made)).toBe(false);
   });
 
   it("removes the new folder again when the user cancels, or takes another", async () => {
