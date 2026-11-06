@@ -170,6 +170,23 @@ describe("preparing a new chat's folder", () => {
     expect((await binder(second).prepareFolder("last", WINDOW, never()))?.folder).toBe(`${made} 2`);
   });
 
+  it("offers a new folder of its own for a new chat even when a last folder is bound", async () => {
+    journal.bindings.add({ root: OTHER, nonce: "n".repeat(16), folder: notes, dev: 1, ino: 1, boot: BOOT_ID, mode: "free", boundAt: 1 });
+    const user = new User([], [{ mode: "free" }]);
+    const ready = await binder(user).prepareFolder("new", WINDOW, never());
+    const made = user.sheets[0]?.folder ?? "";
+    expect(made).toMatch(/Surogate\/Research-assistant\/\d{4}-\d{2}-\d{2}$/);
+    expect(user.dialogs).toEqual([]);
+    expect(ready?.folder).toBe(made);
+  });
+
+  it("removes the new folder made for new when the user cancels", async () => {
+    journal.bindings.add({ root: OTHER, nonce: "n".repeat(16), folder: notes, dev: 1, ino: 1, boot: BOOT_ID, mode: "free", boundAt: 1 });
+    const user = new User([], [null]);
+    expect(await binder(user).prepareFolder("new", WINDOW, never())).toBeNull();
+    expect(existsSync(user.sheets[0]?.folder ?? "")).toBe(false);
+  });
+
   it("removes the new folder again when the user cancels, or takes another", async () => {
     const cancelling = new User([], [null]);
     expect(await binder(cancelling).prepareFolder("last", WINDOW, never())).toBeNull();

@@ -220,19 +220,19 @@ export class Binder implements Executor {
   }
 
   /**
-   * The folder for a new chat, as the user confirms it in the sheet: the last one
-   * bound, if it can still be used, else a new one under ~/Surogate/<agent>; or one
-   * from the folder dialog. Null when the user cancels. Every new chat asks, the last
+   * The folder for a new chat, as the user confirms it in the sheet: a new one under
+   * ~/Surogate/<agent> for "new"; for "last", the last one bound if it can still be used,
+   * else a new one; or one from the folder dialog for "pick". Null when the user cancels. Every new chat asks, the last
    * folder too, so a server cannot bind a chat to a folder the user did not see.
    */
   async prepareFolder(
-    choice: "last" | "pick", window: string, signal: AbortSignal, thread: ThreadLabel | null = null,
+    choice: "new" | "last" | "pick", window: string, signal: AbortSignal, thread: ThreadLabel | null = null,
   ): Promise<Prepared | null> {
     const { guards } = this.options;
     const last = this.options.bindings.last()?.folder;
     const usable = choice === "last" && last !== undefined && (await this.answers(last)) && checkFolder(last, guards).ok ? last : null;
     // Made for this chat, and gone again unless the user takes it, even when the sheet fails.
-    const made = usable === null && choice === "last" && !signal.aborted ? newFolder(guards, this.options.agent) : null;
+    const made = usable === null && choice !== "pick" && !signal.aborted ? newFolder(guards, this.options.agent) : null;
     let prepared: Prepared | null = null;
     try {
       prepared = await this.confirm(usable ?? made, last ?? guestPathOf(guards.home), window, signal, thread, null);

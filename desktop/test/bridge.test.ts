@@ -161,7 +161,7 @@ describe("the bridge", () => {
   });
 
   it.each([
-    ["prepareFolder", ["new"], "Not a folder choice"],
+    ["prepareFolder", ["other"], "Not a folder choice"],
     ["prepareFolder", ["last", "Check the totals"], "Not a project's thread"],
     ["prepareFolder", ["last", { project: "Q3 report", thread: 42 }], "Not a project's thread"],
     ["prepareFolder", ["last", { project: "", thread: "Check the totals" }], "Not a project's thread"],
@@ -195,6 +195,8 @@ describe("the bridge", () => {
     const handlers = bridgeHandlers(ORIGIN, made);
     await handlers.prepareFolder!(TOP, "7", "last", { project: "Q3 report", thread: "Check the totals", folder: "/etc" });
     expect(made.prepareFolder).toHaveBeenCalledWith("last", "7", { project: "Q3 report", thread: "Check the totals" });
+    await handlers.prepareFolder!(TOP, "7", "new", null);
+    expect(made.prepareFolder).toHaveBeenLastCalledWith("new", "7", null);
     await handlers.prepareFolder!(TOP, "7", "pick", null);
     expect(made.prepareFolder).toHaveBeenLastCalledWith("pick", "7", null);
   });

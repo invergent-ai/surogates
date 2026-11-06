@@ -124,6 +124,7 @@ if (origin !== undefined && window.top === window && location.origin === origin)
   });
   contextBridge.exposeInMainWorld("surogateDesktop", {
     version: 1,
+    offersNewFolder: true,
     getDevice: call("getDevice"),
     webSignIn: call("webSignIn"),
     signOut: call("signOut"),

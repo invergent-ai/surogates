@@ -4,7 +4,7 @@
 // its shape. What the page sends is copied field by field. No call answers an approval.
 
 import type {
-  DesktopAccount, DesktopAppearance, DesktopBinding, DesktopDeviceState, DesktopPreparedFolder, DesktopThreadLabel,
+  DesktopAccount, DesktopAppearance, DesktopBinding, DesktopDeviceState, DesktopFolderChoice, DesktopPreparedFolder, DesktopThreadLabel,
 } from "../../../web/src/lib/desktop-bridge-contract.js";
 import { sameOrigin } from "./window-policy.js";
 
@@ -18,7 +18,7 @@ export interface BridgeCalls {
   getDevice(): DesktopDeviceState;
   webSignIn(): Promise<{ code: string } | null>;
   signOut(): Promise<void>;
-  prepareFolder(choice: "last" | "pick", window: string, thread: DesktopThreadLabel | null): Promise<DesktopPreparedFolder | null>;
+  prepareFolder(choice: DesktopFolderChoice, window: string, thread: DesktopThreadLabel | null): Promise<DesktopPreparedFolder | null>;
   bindSession(sessionId: string, token: string, window: string): Promise<void>;
   // A copy of the folder its user chose for a project made here, for a thread of it: no sheet asks again.
   prepareThreadFolder(masterSessionId: string, window: string): Promise<DesktopPreparedFolder>;
@@ -98,7 +98,7 @@ export function bridgeHandlers(origin: string, calls: BridgeCalls): Record<strin
     webSignIn: checked(() => calls.webSignIn()),
     signOut: checked(() => calls.signOut()),
     prepareFolder: checked((window, choice, thread) => {
-      if (choice !== "last" && choice !== "pick") throw new Error("Not a folder choice");
+      if (choice !== "new" && choice !== "last" && choice !== "pick") throw new Error("Not a folder choice");
       const label = threadOf(thread);
       return alone("folder", window, () => calls.prepareFolder(choice, window, label));
     }),
