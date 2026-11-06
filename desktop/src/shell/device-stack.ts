@@ -197,6 +197,7 @@ function deviceOn(journal: OperationJournal, options: DeviceStackOptions, made: 
     agent: options.agent,
     hosts: counted,
     keepsCopies,
+    inUse: (dev, ino) => tools.folderInUse?.(dev, ino) === true,
     refusal: (operation) => tools.refusal?.(operation) ?? null,
     retired: (root) => tools.retired?.(root),
     address: tools.address?.bind(tools),

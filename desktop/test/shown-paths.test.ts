@@ -13,7 +13,7 @@ import { importedOn } from "./platforms.js";
 const SHOP = "/mnt/c/Users/Ana/Documents/shop";
 const WINDOWS_SHOP = "C:\\Users\\Ana\\Documents\\shop";
 const chat: ChatLabel = { agent: "Research assistant", root: "r1", calling: "r1", folder: SHOP };
-const sheet: FolderSheet = { agent: "Research assistant", folder: SHOP, mode: "ask", links: null, refusal: null, thread: null, project: null };
+const sheet: FolderSheet = { agent: "Research assistant", folder: SHOP, mode: "ask", links: null, refusal: null, thread: null, project: null, busy: false };
 const change: ApprovalRequest = { kind: "change", chat, action: "write", path: `${SHOP}/src/app.py`, bytes: 3, preview: { text: "x=1", cut: false } };
 const outside: ApprovalRequest = { ...change, path: "/mnt/d/elsewhere/notes.txt" };
 const command: ApprovalRequest = { kind: "command", chat, command: "ls", workdir: `${SHOP}/src`, background: false };

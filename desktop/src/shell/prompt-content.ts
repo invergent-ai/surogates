@@ -78,6 +78,9 @@ const PROJECT_COPIES = "Each of the project's threads works in a copy of this fo
 const plain = (label: string, value: string): PromptDetail => ({ label, value, code: false, keep: "" });
 const tall = (value: string) => 26 + Math.ceil(value.length / 45) * 19;
 
+// What a chat's sheet says of a folder another chat works in.
+const BUSY = "Another chat on this computer is working in this folder. The two chats will take turns: this chat waits while the other one is answering.";
+
 /** The folder sheet: the folder, its mode, and what the user should know; or why it cannot be used. */
 export function folderSheet(sheet: FolderSheet): PromptContent {
   const name = named(sheet.folder);
@@ -112,14 +115,16 @@ export function folderSheet(sheet: FolderSheet): PromptContent {
     title: `Work in ${name}?`,
     lead: `${sheet.agent} will read and change the files in this folder, and run commands there. It works in the cloud: the files it reads and what its commands print are sent to it, and can stay in the conversation.`,
     details,
-    notes: [...(sheet.links ? [linked(sheet.links)] : []), ...forProject],
+    notes: [...(sheet.busy ? [BUSY] : []), ...(sheet.links ? [linked(sheet.links)] : []), ...forProject],
     choice: { ...MODES, value: sheet.mode },
-    buttons: [button("cancel", "Cancel"), button("change", "Change…"), button("accept", "Use this folder", true)],
+    buttons: sheet.busy
+      ? [button("cancel", "Cancel"), button("new", "New folder"), button("change", "Browse…"), button("accept", "Use this folder", true)]
+      : [button("cancel", "Cancel"), button("change", "Change…"), button("accept", "Use this folder", true)],
     // On Cancel, as every prompt starts on the button that changes nothing: a Return of a person who was typing
     // elsewhere binds no folder. The mode is theirs to pick, and Use this folder theirs to walk to.
     focus: "cancel",
     cancel: "cancel",
-    height: (sheet.links ? 550 : 490) + forProject.length * 60 + room,
+    height: (sheet.links ? 550 : 490) + (forProject.length + (sheet.busy ? 1 : 0)) * 60 + room,
   };
 }
 
