@@ -669,7 +669,7 @@ class DeviceOperations:
                 return waiter.result()
             # Still running, or the computer is away: the turn need not hold the worker meanwhile.
             async with turn_waiting(resumable=True):
-                return await self._wait_watching(waiter, request)
+                return await self._wait_watching(waiter, request, operation_id)
         except asyncio.CancelledError:
             # Stopped, not handed to another worker: nothing will ask for it
             # again, so it must not run when the computer comes back.  Found by
@@ -684,14 +684,24 @@ class DeviceOperations:
                 # Its subscription is closed before this call returns.
                 await asyncio.gather(waiter, return_exceptions=True)
 
-    async def _wait_watching(self, waiter: asyncio.Future, request: OperationRequest) -> dict[str, Any]:
-        """Await *waiter*, telling the session's viewers whenever its computer is away."""
+    async def _wait_watching(
+        self, waiter: asyncio.Future, request: OperationRequest, operation_id: UUID,
+    ) -> dict[str, Any]:
+        """Await *waiter*, telling the session's viewers whenever its computer is away or holds the operation for its folder."""
         if self._notice is None:
             return await waiter
         presence = DevicePresence(self._redis)
         away = False
+        folder = False
         try:
             while True:
+                held = await self._folder_held(operation_id)
+                if held is True and not folder:
+                    folder = True
+                    await self._notice.folder_held(request)
+                elif held is False and folder:
+                    folder = False
+                    await self._notice.folder_free(request)
                 online = await self._online(presence, request.device_id)
                 if online is False and not away:
                     away = True
@@ -705,11 +715,20 @@ class DeviceOperations:
         finally:
             if away:
                 await self._notice.back(request, announce=not turn_detached())
+            if folder:
+                await self._notice.folder_free(request, announce=not turn_detached())
 
     async def _online(self, presence: DevicePresence, device_id: UUID) -> bool | None:
         """Whether a link holds the device: None when Redis cannot tell."""
         try:
             return device_id in await self._within_redis_patience(presence.online([device_id]))
+        except Exception:
+            return None
+
+    async def _folder_held(self, operation_id: UUID) -> bool | None:
+        """Whether the app says the operation waits for its folder: None when Redis cannot tell."""
+        try:
+            return await self._within_redis_patience(self._redis.get(waiting_key(operation_id))) is not None
         except Exception:
             return None
 

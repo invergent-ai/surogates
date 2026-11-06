@@ -10,6 +10,11 @@ of its folder, which can take minutes: ``device.waiting`` says so with the
 reason ``copying`` and the ``folder``, until the copy's making ends.  The
 computer going away meanwhile is said as ever, and once it is back the
 copy's making is said again.
+
+An operation the computer holds back until another chat is done with the
+same folder is said with the reason ``folder``.  It comes before ``copying``,
+and the computer going away is said over it and the folder wait said again
+once it is back.
 """
 
 from __future__ import annotations
@@ -31,6 +36,8 @@ logger = logging.getLogger(__name__)
 
 # Calling session -> how many of its operations wait on an absent computer.
 _away: Counter[UUID] = Counter()
+# Calling session -> how many of its operations wait for another chat's folder.
+_folder: Counter[UUID] = Counter()
 # Calling session -> what its viewers are told while its thread's first copy is being made.
 _copying: dict[UUID, dict[str, Any]] = {}
 
@@ -60,11 +67,35 @@ class DeviceWaitNotice:
         if _away[request.calling_session_id] <= 0:
             del _away[request.calling_session_id]
             if announce:
-                making = _copying.get(request.calling_session_id)
-                await self._emit(request.calling_session_id, *(
-                    (EventType.DEVICE_WAITING, making) if making is not None
-                    else (EventType.DEVICE_RESUMED, {"device_id": str(request.device_id)})
-                ))
+                await self._emit(request.calling_session_id, *await self._standing(request))
+
+    async def folder_held(self, request: OperationRequest) -> None:
+        """One more of the session's operations waits for another chat's folder."""
+        _folder[request.calling_session_id] += 1
+        if _folder[request.calling_session_id] == 1 and not _away.get(request.calling_session_id):
+            await self._emit(request.calling_session_id, *await self._standing(request))
+
+    async def folder_free(self, request: OperationRequest, *, announce: bool = True) -> None:
+        """One of the session's operations no longer waits for another chat's folder."""
+        _folder[request.calling_session_id] -= 1
+        if _folder[request.calling_session_id] <= 0:
+            del _folder[request.calling_session_id]
+            if announce and not _away.get(request.calling_session_id):
+                await self._emit(request.calling_session_id, *await self._standing(request))
+
+    async def _standing(self, request: OperationRequest) -> tuple[EventType, dict[str, Any]]:
+        """What the session's viewers are to be told when its computer is there: the wait still on, else that it ended."""
+        session_id = request.calling_session_id
+        if _folder.get(session_id):
+            return EventType.DEVICE_WAITING, {
+                "device_id": str(request.device_id),
+                "device_name": await self._name(request.device_id),
+                "reason": "folder",
+            }
+        making = _copying.get(session_id)
+        if making is not None:
+            return EventType.DEVICE_WAITING, making
+        return EventType.DEVICE_RESUMED, {"device_id": str(request.device_id)}
 
     async def copying(self, session_id: UUID, device_id: UUID, folder: str) -> None:
         """*session_id*'s turn waits while its computer makes the thread's first copy of *folder*."""
