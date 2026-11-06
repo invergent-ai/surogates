@@ -155,25 +155,38 @@ test("starts each new chat on a new folder of its own where the desktop offers o
     cancelPrepared: async () => {},
   });
   const withMenu = await opened(bridge(true));
-  await withMenu.act(() => withMenu.page.device.resolve(LOCAL));
-  await withMenu.change(ready);
-  assert.equal(withMenu.page.place.choice, "new");
-  assert.equal(withMenu.page.place.menu, true);
-  await withMenu.act(() => withMenu.page.place.onChoice("pick"));
-  assert.equal(withMenu.page.place.choice, "pick");
-  await withMenu.act(() => withMenu.page.navigate({ to: "/chat/$sessionId", params: { sessionId: "s-1" } }));
-  await withMenu.act(() => withMenu.page.navigate({ to: "/chat", params: {} }));
-  assert.equal(withMenu.page.place.choice, "new");
-  await withMenu.act(() => withMenu.page.chat.adapter.createSession({}));
-  assert.deepEqual(asked, ["new"]);
-  await withMenu.unmount();
+  try {
+    await withMenu.act(() => withMenu.page.device.resolve(LOCAL));
+    await withMenu.change(ready);
+    assert.equal(withMenu.page.place.choice, "new");
+    assert.equal(withMenu.page.place.menu, true);
+    await withMenu.act(() => withMenu.page.place.onChoice("pick"));
+    assert.equal(withMenu.page.place.choice, "pick");
+    await withMenu.act(() => withMenu.page.navigate({ to: "/chat/$sessionId", params: { sessionId: "s-1" } }));
+    await withMenu.act(() => withMenu.page.navigate({ to: "/chat", params: {} }));
+    assert.equal(withMenu.page.place.choice, "new");
+    await withMenu.act(() => withMenu.page.chat.adapter.createSession({}));
+    assert.deepEqual(asked, ["new"]);
+  } finally {
+    await withMenu.unmount();
+  }
 
   const without = await opened(bridge(false));
-  await without.act(() => without.page.device.resolve(LOCAL));
-  await without.change(ready);
-  assert.equal(without.page.place.choice, "last");
-  assert.equal(without.page.place.menu, false);
-  await without.unmount();
+  try {
+    await without.act(() => without.page.device.resolve(LOCAL));
+    await without.change(ready);
+    assert.equal(without.page.place.choice, "last");
+    assert.equal(without.page.place.menu, false);
+    await without.act(() => without.page.place.onChoice("pick"));
+    assert.equal(without.page.place.choice, "pick");
+    await without.act(() => without.page.navigate({ to: "/chat/$sessionId", params: { sessionId: "s-1" } }));
+    await without.act(() => without.page.navigate({ to: "/chat", params: {} }));
+    assert.equal(without.page.place.choice, "last");
+    await without.act(() => without.page.chat.adapter.createSession({}));
+    assert.deepEqual(asked, ["new", "last"]);
+  } finally {
+    await without.unmount();
+  }
 });
 
 // What the web client's own read of the transparency setting answers once the agent refuses it: its

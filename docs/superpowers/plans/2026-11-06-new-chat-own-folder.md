@@ -24,7 +24,7 @@
 - [x] Task 10: The worker says `device.waiting` with reason `folder`
 - [x] Task 11: The chat SDK shows the folder wait (ui-kit repo)
 - [x] Task 12: The page's folder choice, and older desktops
-- [ ] Task 13: The folder menu under the composer
+- [x] Task 13: The folder menu under the composer
 - [ ] Task 14: The web takes the SDK that shows the folder wait
 
 ## Global Constraints

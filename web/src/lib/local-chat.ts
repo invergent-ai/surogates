@@ -67,8 +67,18 @@ export const FOLDER_CHOICES: ReadonlyArray<{
   hint: string;
   shown: string;
 }> = [
-  { value: "new", label: "A new folder", hint: "Made for this chat", shown: "a new folder" },
-  { value: "last", label: "The last folder", hint: "Where your last chat worked", shown: "the last folder" },
+  {
+    value: "new",
+    label: "A new folder",
+    hint: "Made for this chat",
+    shown: "a new folder",
+  },
+  {
+    value: "last",
+    label: "The last folder",
+    hint: "Where your last chat worked",
+    shown: "the last folder",
+  },
   {
     value: "pick",
     label: "Choose a folder…",
@@ -80,8 +90,9 @@ export const FOLDER_CHOICES: ReadonlyArray<{
 /**
  * Where a new chat works, as the line under its composer says it. *device* is the desktop's,
  * null in a browser. *menu* is whether the desktop offers a new folder: the folder is then chosen
- * from a menu after "Works in", and without it the line says it in a sentence. The folder itself is shown only in the desktop's own sheet: the page
- * learns no path of this computer before its user confirms one.
+ * from a menu after "Works in", and without it the line says it in a sentence. The folder itself
+ * is shown only in the desktop's own sheet: the page learns no path of this computer before its
+ * user confirms one.
  */
 export function newChatPlace(
   device: DesktopDeviceState | null,
