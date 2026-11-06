@@ -156,7 +156,11 @@ export function ChatPage() {
   const [folderChoice, setFolderChoice] =
     useState<DesktopFolderChoice>(firstChoice);
   useEffect(() => {
-    setFolderChoice(firstChoice);
+    // A desktop with the menu starts each new chat on a new folder; on one without, the choice made
+    // stays across the chats opened, as it always did there.
+    if (menu) {
+      setFolderChoice("new");
+    }
     const desktop = getDesktop();
     if (!desktop) {
       return;

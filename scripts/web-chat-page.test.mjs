@@ -144,7 +144,7 @@ async function opened(bridge = {}) {
 
 const LOCAL = { device: { deviceId: "d-1", name: "Laptop" }, localFolders: true };
 
-test("starts each new chat on a new folder of its own where the desktop offers one, and on the last folder where it does not", async () => {
+test("starts each new chat on a new folder of its own where the desktop offers one, and keeps the choice made across chats where it does not", async () => {
   const ready = { sessionsLoading: false, multiSession: true, desktopSessions: true };
   const asked = [];
   const prepared = { folder: "/f", nonce: "n", token: "t" };
@@ -181,9 +181,10 @@ test("starts each new chat on a new folder of its own where the desktop offers o
     assert.equal(without.page.place.choice, "pick");
     await without.act(() => without.page.navigate({ to: "/chat/$sessionId", params: { sessionId: "s-1" } }));
     await without.act(() => without.page.navigate({ to: "/chat", params: {} }));
-    assert.equal(without.page.place.choice, "last");
+    // As such a desktop's page always did: the choice made stays across the chats opened.
+    assert.equal(without.page.place.choice, "pick");
     await without.act(() => without.page.chat.adapter.createSession({}));
-    assert.deepEqual(asked, ["new", "last"]);
+    assert.deepEqual(asked, ["new", "pick"]);
   } finally {
     await without.unmount();
   }
