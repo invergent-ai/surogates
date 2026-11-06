@@ -20,7 +20,7 @@
 - [x] Task 6: A chat waits for another chat's folder, up to 10 minutes
 - [x] Task 7: Several waiting chats get the folder in the order they asked
 - [x] Task 8: The desktop tells the server an operation waits for the folder
-- [ ] Task 9: The server's link takes `op_waiting`
+- [x] Task 9: The server's link takes `op_waiting`
 - [ ] Task 10: The worker says `device.waiting` with reason `folder`
 - [ ] Task 11: The chat SDK shows the folder wait (ui-kit repo)
 - [ ] Task 12: The page's folder choice, and older desktops

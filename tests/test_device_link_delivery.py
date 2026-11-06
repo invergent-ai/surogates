@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from surogates.devices.link import _Link
+from surogates.devices.link import CLOSE_PROTOCOL, _Close, _Link
 from surogates.devices.operations import OpenOperation
 
 ROOT = uuid.UUID("00000000-0000-4000-8000-000000000001")
@@ -35,9 +35,13 @@ class FakeOperations:
         self.delay = delay
         self.statuses: list[str] = []
         self.closed: set[uuid.UUID] = set()  # by a cancellation or a revocation
+        self.waits: list[tuple[uuid.UUID, str | None]] = []
 
     async def closed_among(self, device_id, operation_ids):
         return [i for i in operation_ids if i in self.closed]
+
+    async def waiting(self, operation_id, reason):
+        self.waits.append((operation_id, reason))
 
     async def pending(self, device_id, generation, *, exclude=frozenset(), limit=100):
         # The query reads the journal first and the caller sees the answer
@@ -126,3 +130,36 @@ async def test_a_cancelled_operation_is_told_to_the_app_once_and_leaves_the_deli
 
     assert [f for f in socket.sent if f["type"] == "cancel"] == [{"type": "cancel", "id": str(first.id)}]
     assert link._delivered == {second.id}
+
+
+def waiting(operation_id, reason) -> dict:
+    return {"type": "op_waiting", "id": str(operation_id), "reason": reason}
+
+
+async def test_an_operation_waiting_for_its_folder_is_recorded_while_it_waits_and_forgotten_after():
+    op = open_operation(1)
+    operations = FakeOperations(op)
+    link, _ = make_link(operations)
+    await link.deliver()
+    await link.waiting(waiting(op.id, "folder"))
+    await link.waiting(waiting(op.id, None))
+    assert operations.waits == [(op.id, "folder"), (op.id, None)]
+
+
+async def test_a_wait_for_an_operation_not_delivered_on_this_link_changes_nothing():
+    op = open_operation(1)
+    operations = FakeOperations(op)
+    link, _ = make_link(operations)
+    await link.waiting(waiting(op.id, "folder"))
+    await link.waiting(waiting(uuid.uuid4(), None))
+    assert operations.waits == []
+
+
+@pytest.mark.parametrize("frame_id, reason", [("nope", "folder"), (None, None), ("delivered", "offline"), ("delivered", 3)])
+async def test_a_malformed_wait_closes_the_link_as_a_protocol_error(frame_id, reason):
+    op = open_operation(1)
+    link, _ = make_link(FakeOperations(op))
+    await link.deliver()
+    with pytest.raises(_Close) as closed:
+        await link.waiting({"type": "op_waiting", "id": str(op.id) if frame_id == "delivered" else frame_id, "reason": reason})
+    assert closed.value.code == CLOSE_PROTOCOL

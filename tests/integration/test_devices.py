@@ -46,6 +46,8 @@ from surogates.devices.operations import (
     OperationConflict,
     OperationRequest,
     operation_channel,
+    waiting_key,
+    FOLDER_WAIT_KEY_S,
 )
 from surogates.devices.presence import DevicePresence, PRESENCE_TTL_S, presence_key
 from surogates.devices.sandbox import INTERRUPTED, INTERRUPTED_IN_BROWSER
@@ -548,6 +550,7 @@ async def test_a_connected_device_is_online_until_it_leaves(api, link_url):
             "user_id": str(api.user_id),
             "name": "Flavius's ThinkPad",
             "heartbeat_s": 15,
+            "waits": True,
         }
         assert await online(api) is True
         await send(ws, {"type": "ping"})
@@ -3742,3 +3745,15 @@ async def test_a_prompt_waits_no_longer_than_its_bound_on_a_computer_that_does_n
     session = await SessionStore(session_factory).get_session(rig.root)
     prompt = await asyncio.wait_for(Prompting(session_factory, redis_client)._build_system_prompt(session), 3.0)
     assert prompt == "prompt with None"
+
+
+async def test_the_folder_wait_key_holds_the_reason_until_it_is_cleared(redis_client):
+    operations = DeviceOperations(None, redis_client)
+    operation_id = uuid.uuid4()
+
+    await operations.waiting(operation_id, "folder")
+    assert await redis_client.get(waiting_key(operation_id)) == b"folder"
+    assert FOLDER_WAIT_KEY_S - 5 < await redis_client.ttl(waiting_key(operation_id)) <= FOLDER_WAIT_KEY_S
+
+    await operations.waiting(operation_id, None)
+    assert await redis_client.get(waiting_key(operation_id)) is None

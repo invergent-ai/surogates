@@ -207,6 +207,14 @@ def operation_channel(operation_id: UUID) -> str:
     return f"surogates:device_operation:{operation_id}"
 
 
+FOLDER_WAIT_KEY_S = 15 * 60
+
+
+def waiting_key(operation_id: UUID) -> str:
+    """Where the app's word that an operation waits for its folder is kept."""
+    return f"{operation_channel(operation_id)}:waiting"
+
+
 def _database_unavailable(exc: Exception) -> bool:
     """Whether *exc* is the database being briefly out of reach, not a bug or a refusal.
 
@@ -612,6 +620,17 @@ class DeviceOperations:
         self._redis = redis
         self._recheck_interval_s = recheck_interval_s
         self._notice = notice
+
+    async def waiting(self, operation_id: UUID, reason: str | None) -> None:
+        """Record that the app holds an operation back for *reason*, or that it no longer does.
+
+        The key expires, so a wait the app never takes back (it went away)
+        does not show for ever.
+        """
+        if reason is None:
+            await self._redis.delete(waiting_key(operation_id))
+        else:
+            await self._redis.set(waiting_key(operation_id), reason, ex=FOLDER_WAIT_KEY_S)
 
     # -- the worker's side -----------------------------------------------
 
