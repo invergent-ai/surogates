@@ -3043,6 +3043,52 @@ async def test_two_operations_of_a_session_waiting_for_its_folder_say_so_once(
     assert await device_wait_events(session_factory, rig.root) == [folder_waiting_for(rig), resumed_from(rig)]
 
 
+async def test_ending_the_folder_wait_and_the_computers_absence_together_says_only_that_it_is_over(
+    laptop_rig, session_factory, redis_client, monkeypatch,
+):
+    monkeypatch.setattr(operations_module, "WAIT_GRACE_S", 0.1)
+    rig = laptop_rig
+    presence = DevicePresence(redis_client)
+    await presence.claim(rig.device_id, "holder")
+    ops = noticing_journal(session_factory, redis_client)
+    request = request_for(rig.device_id, rig.root)
+    waiting = asyncio.create_task(ops.run(request))
+    op = await operation_of(ops, rig, request)
+    await ops.waiting(op.id, "folder")
+
+    async def events_are(expected) -> bool:
+        return await device_wait_events(session_factory, rig.root) == expected
+
+    await eventually(lambda: events_are([folder_waiting_for(rig)]))
+    await presence.release(rig.device_id, "holder")
+    await eventually(lambda: events_are([folder_waiting_for(rig), waiting_for(rig)]))
+    waiting.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiting
+    assert await device_wait_events(session_factory, rig.root) == [
+        folder_waiting_for(rig), waiting_for(rig), resumed_from(rig),
+    ]
+
+
+async def test_an_operation_is_open_for_its_own_device_only_and_its_wait_can_be_forgotten(
+    laptop_rig, session_factory, redis_client, monkeypatch,
+):
+    monkeypatch.setattr(operations_module, "WAIT_GRACE_S", 0.1)
+    rig = laptop_rig
+    ops = DeviceOperations(session_factory, redis_client)
+    request = request_for(rig.device_id, rig.root)
+    waiting = asyncio.create_task(ops.run(request))
+    op = await operation_of(ops, rig, request)
+    assert await ops.is_open(rig.device_id, op.id)
+    assert not await ops.is_open(uuid.uuid4(), op.id)
+    await ops.waiting(op.id, "folder")
+    await ops.forget_waits([op.id])
+    assert await redis_client.get(operations_module.waiting_key(op.id)) is None
+    waiting.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiting
+
+
 async def test_a_stopped_wait_says_the_computer_is_no_longer_awaited(
     laptop_rig, session_factory, redis_client, monkeypatch,
 ):

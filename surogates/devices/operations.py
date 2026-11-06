@@ -632,6 +632,22 @@ class DeviceOperations:
         else:
             await self._redis.set(waiting_key(operation_id), reason, ex=FOLDER_WAIT_KEY_S)
 
+    async def forget_waits(self, operation_ids: Collection[UUID]) -> None:
+        """Drop the recorded folder waits of these operations."""
+        if operation_ids:
+            await self._redis.delete(*(waiting_key(i) for i in operation_ids))
+
+    async def is_open(self, device_id: UUID, operation_id: UUID) -> bool:
+        """Whether *operation_id* is an operation of the device that is not finished."""
+        async with self._sf() as db:
+            return (await db.execute(
+                select(DeviceOperation.id).where(
+                    DeviceOperation.id == operation_id,
+                    DeviceOperation.device_id == device_id,
+                    DeviceOperation.completed_at.is_(None),
+                )
+            )).first() is not None
+
     # -- the worker's side -----------------------------------------------
 
     async def run(self, request: OperationRequest, *, keep_open: bool = False) -> dict[str, Any]:
@@ -695,14 +711,15 @@ class DeviceOperations:
         folder = False
         try:
             while True:
-                held = await self._folder_held(operation_id)
+                held, online = await asyncio.gather(
+                    self._folder_held(operation_id), self._online(presence, request.device_id),
+                )
                 if held is True and not folder:
                     folder = True
                     await self._notice.folder_held(request)
                 elif held is False and folder:
                     folder = False
                     await self._notice.folder_free(request)
-                online = await self._online(presence, request.device_id)
                 if online is False and not away:
                     away = True
                     await self._notice.away(request)
@@ -713,10 +730,11 @@ class DeviceOperations:
                 if done:
                     return waiter.result()
         finally:
-            if away:
-                await self._notice.back(request, announce=not turn_detached())
+            # The folder wait first: ending both together while away says nothing of the folder.
             if folder:
                 await self._notice.folder_free(request, announce=not turn_detached())
+            if away:
+                await self._notice.back(request, announce=not turn_detached())
 
     async def _online(self, presence: DevicePresence, device_id: UUID) -> bool | None:
         """Whether a link holds the device: None when Redis cannot tell."""

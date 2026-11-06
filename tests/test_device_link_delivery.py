@@ -36,12 +36,19 @@ class FakeOperations:
         self.statuses: list[str] = []
         self.closed: set[uuid.UUID] = set()  # by a cancellation or a revocation
         self.waits: list[tuple[uuid.UUID, str | None]] = []
+        self.forgotten: set[uuid.UUID] = set()
 
     async def closed_among(self, device_id, operation_ids):
         return [i for i in operation_ids if i in self.closed]
 
     async def waiting(self, operation_id, reason):
         self.waits.append((operation_id, reason))
+
+    async def is_open(self, device_id, operation_id):
+        return any(op.id == operation_id for op in self.open)
+
+    async def forget_waits(self, operation_ids):
+        self.forgotten = set(operation_ids)
 
     async def pending(self, device_id, generation, *, exclude=frozenset(), limit=100):
         # The query reads the journal first and the caller sees the answer
@@ -146,11 +153,11 @@ async def test_an_operation_waiting_for_its_folder_is_recorded_while_it_waits_an
     assert operations.waits == [(op.id, "folder"), (op.id, None)]
 
 
-async def test_a_wait_for_an_operation_not_delivered_on_this_link_changes_nothing():
+async def test_a_wait_for_an_operation_not_open_for_this_device_changes_nothing():
     op = open_operation(1)
     operations = FakeOperations(op)
     link, _ = make_link(operations)
-    await link.waiting(waiting(op.id, "folder"))
+    await link.waiting(waiting(uuid.uuid4(), "folder"))
     await link.waiting(waiting(uuid.uuid4(), None))
     assert operations.waits == []
 
@@ -166,6 +173,24 @@ async def test_a_wait_that_cannot_be_recorded_leaves_the_link_open():
     link, _ = make_link(operations)
     await link.deliver()
     await link.waiting(waiting(op.id, "folder"))
+
+
+async def test_a_wait_before_redelivery_is_taken_for_an_open_operation_of_this_device():
+    op = open_operation(1)
+    operations = FakeOperations(op)
+    link, _ = make_link(operations)  # nothing delivered on this link yet
+    await link.waiting(waiting(op.id, "folder"))
+    await link.waiting(waiting(uuid.uuid4(), "folder"))  # not open for this device
+    assert operations.waits == [(op.id, "folder")]
+
+
+async def test_a_link_that_ends_forgets_the_waits_it_recorded():
+    op = open_operation(1)
+    operations = FakeOperations(op)
+    link, _ = make_link(operations)
+    await link.waiting(waiting(op.id, "folder"))
+    await link.forget_waits()
+    assert operations.forgotten == {op.id}
 
 
 @pytest.mark.parametrize("frame_id, reason", [("nope", "folder"), (None, None), ("delivered", "offline"), ("delivered", 3)])

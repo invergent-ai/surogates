@@ -297,6 +297,8 @@ class _Link:
         self._operations = operations
         self._send_lock = asyncio.Lock()
         self._delivered: set[UUID] = set()
+        # Operations whose folder wait this link recorded: forgotten when it ends.
+        self._waited: set[UUID] = set()
         self._delivery_wanted = asyncio.Event()
         self._incoming: _Incoming | None = None
         # Writes whose data goes after their op, in order, each with when its op
@@ -590,15 +592,29 @@ class _Link:
         reason = frame.get("reason")
         if reason not in ("folder", None):
             raise _Close(CLOSE_PROTOCOL, "malformed op_waiting")
-        # After a reconnect the app may speak of an operation this link never
-        # delivered, or one already finished: nothing to record, and no fault.
-        if operation_id not in self._delivered:
-            return
+        # After a reconnect the app speaks of operations a link before this one
+        # delivered: they count while they are still open for this device.  Any
+        # other id, a finished operation or another device's, is nothing to
+        # record, and no fault.
         try:
+            if operation_id not in self._delivered and not await _bounded(
+                self._operations.is_open(self._device.id, operation_id),
+            ):
+                return
+            self._waited.add(operation_id)
             await _bounded(self._operations.waiting(operation_id, reason))
         except Exception:
             # The notice is a courtesy; Redis being away must not end the link.
             logger.warning("device %s could not record that operation %s waits", self._device.id, operation_id, exc_info=True)
+
+    async def forget_waits(self) -> None:
+        """The link ended: what it was told about waits no longer holds, the app being gone."""
+        if not self._waited:
+            return
+        try:
+            await _bounded(self._operations.forget_waits(self._waited))
+        except Exception:
+            logger.warning("device %s could not forget its operations' waits", self._device.id, exc_info=True)
 
     def closed(self, code: int, reason: str) -> None:
         """The connection ends with this close: so does a transfer under way."""
@@ -691,6 +707,7 @@ async def serve_device_link(
         with contextlib.suppress(Exception):
             await websocket.close(code=1011, reason="server error")
     finally:
+        await link.forget_waits()
         if claimed:
             with contextlib.suppress(Exception):
                 await _bounded(presence.release(device.id, holder))
