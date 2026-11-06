@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { reconnectDelayMs } from "../src/link/backoff.js";
-import { chunkAck, chunkFrame, hello, opResult, parseServerFrame, ProtocolError, transferOf } from "../src/link/protocol.js";
+import { chunkAck, chunkFrame, hello, opResult, opWaiting, parseServerFrame, ProtocolError, transferOf } from "../src/link/protocol.js";
 
 const welcome = {
   type: "welcome", protocol: 1, device_id: "d", org_id: "o", agent_id: "a", user_id: "u",
@@ -25,8 +25,18 @@ describe("server frames", () => {
     const frame = parseServerFrame(JSON.stringify(welcome));
     expect(frame).toEqual({
       type: "welcome",
-      welcome: { deviceId: "d", orgId: "o", agentId: "a", userId: "u", name: "Laptop", heartbeatS: 15 },
+      welcome: { deviceId: "d", orgId: "o", agentId: "a", userId: "u", name: "Laptop", heartbeatS: 15, waits: false },
     });
+  });
+
+  it("reads whether a welcome says the server takes op_waiting", () => {
+    const waits = (value: unknown) => (parseServerFrame(JSON.stringify({ ...welcome, waits: value })) as { welcome: { waits: boolean } }).welcome.waits;
+    expect([waits(true), waits(false), waits("yes")]).toEqual([true, false, false]);
+  });
+
+  it("builds the frame that tells an operation waits for its folder, or no longer does", () => {
+    expect(opWaiting("x", "folder")).toEqual({ type: "op_waiting", id: "x", reason: "folder" });
+    expect(opWaiting("x", null)).toEqual({ type: "op_waiting", id: "x", reason: null });
   });
 
   it("reads an operation", () => {

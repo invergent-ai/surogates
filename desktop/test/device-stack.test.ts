@@ -48,6 +48,8 @@ class Tools implements ToolLayer {
   readonly probed: Array<[string, number]> = [];
   // Whether a project's thread is given a copy of its folder to work in here.
   copies = false;
+  // How the stack was told an operation waits for its folder.
+  waiting: (operationId: string, reason: "folder" | null) => void = () => {};
 
   constructor(private readonly base: string, private readonly order: string[]) {}
 
@@ -146,7 +148,8 @@ async function start(overrides: Partial<DeviceStackOptions> = {}) {
     token: "surg_dev_test",
     agent: "agent.example.com",
     identity: IDENTITY,
-    tools: (bindings, network, changed) => {
+    tools: (bindings, network, changed, waiting) => {
+      tools.waiting = waiting;
       tools.bindings = bindings;
       tools.network = network;
       tools.changed = changed;
@@ -192,6 +195,39 @@ describe("one agent's device", () => {
       expect(server.hellos.map((hello) => hello.copies)).toEqual([copies ? true : undefined]);
     },
   );
+
+  it("tells a server that takes waits which operation waits for the folder, and again after it reconnects", async () => {
+    server = new FakeLinkServer({ waits: true });
+    await start();
+    await server.until(() => statuses.includes("connected"));
+    const waitingFrames = () => server.received.filter((frame) => frame.type === "op_waiting");
+    tools.waiting("w-1", "folder");
+    tools.waiting("w-2", "folder");
+    tools.waiting("w-2", null);
+    await server.until(() => waitingFrames().length === 3);
+    expect(waitingFrames()).toEqual([
+      { type: "op_waiting", id: "w-1", reason: "folder" },
+      { type: "op_waiting", id: "w-2", reason: "folder" },
+      { type: "op_waiting", id: "w-2", reason: null },
+    ]);
+    server.drop();
+    await server.until(() => server.hellos.length === 2);
+    await server.until(() => waitingFrames().length === 4);
+    expect(waitingFrames().slice(3)).toEqual([{ type: "op_waiting", id: "w-1", reason: "folder" }]);
+  });
+
+  it("tells a server whose welcome says nothing of waits nothing", async () => {
+    await start();
+    await server.until(() => statuses.includes("connected"));
+    tools.waiting("w-1", "folder");
+    tools.waiting("w-1", null);
+    tools.waiting("w-3", "folder");
+    server.drop();
+    await server.until(() => server.hellos.length === 2);
+    await new Promise((done) => setTimeout(done, 100));
+    expect(server.received.filter((frame) => frame.type === "op_waiting")).toEqual([]);
+    expect(server.closes.every((code) => code !== 1002 && code !== 4400)).toBe(true);
+  });
 
   it("runs a bound chat's operations on its tools, through the binder", async () => {
     const device = await start();

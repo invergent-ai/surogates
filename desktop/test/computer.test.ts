@@ -8,7 +8,7 @@ import type { DeviceStack } from "../src/shell/device-stack.js";
 
 const AGENT: Agent = { origin: "https://agent.example.com", agentId: "a", name: "agent.example.com", desktopSessions: true, multiSession: true, consoleUrl: null };
 const TOKEN = `surg_dev_${"t".repeat(44)}`;
-const WELCOME: Welcome = { deviceId: "d", orgId: "o", agentId: "a", userId: "u", name: "ThinkPad", heartbeatS: 15 };
+const WELCOME: Welcome = { deviceId: "d", orgId: "o", agentId: "a", userId: "u", name: "ThinkPad", heartbeatS: 15, waits: false };
 
 // The agent as the app's session meets it, and a device that starts, or not.
 function rig(answer: { status: number; body: unknown } = { status: 201, body: { id: "d", name: "ThinkPad", token: TOKEN } }) {

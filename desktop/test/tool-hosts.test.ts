@@ -958,6 +958,41 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
     expect([fakes.length, sent(1, "op")]).toEqual([2, 2]);
   });
 
+  it("tells when each operation starts and stops waiting for the folder, and nothing for one that never waited", async () => {
+    folders[ROOT_B] = folders[ROOT_A] ?? "";
+    const { follows, following } = followed();
+    const told: Array<[string, string | null]> = [];
+    const executor = toolHosts({ idleMs: 60_000, following, spawnHost: fakeSpawn(answering), waiting: (id, reason) => told.push([id, reason]) });
+    await executor.run(resolve(), signal());
+    expect(told).toEqual([]);
+    const first = resolveOf(ROOT_B);
+    const second = op("stat", { key: "/x" }, ROOT_B);
+    const waits = [executor.run(first, signal()), executor.run(second, signal())];
+    expect(await pendingAfter(Promise.race(waits), 100)).toBe(true);
+    expect(told).toEqual([[first.id, "folder"], [second.id, "folder"]]);
+    follows[0]?.turnEnded();
+    await Promise.all(waits);
+    expect(told.slice(2)).toEqual([[first.id, null], [second.id, null]]);
+  });
+
+  it("tells an operation stopped waiting after the limit and after a cancel", async () => {
+    folders[ROOT_B] = folders[ROOT_A] ?? "";
+    const told: Array<[string, string | null]> = [];
+    const executor = toolHosts({ idleMs: 60_000, folderWaitMs: 300, spawnHost: fakeSpawn(answering), waiting: (id, reason) => told.push([id, reason]) });
+    await executor.run(resolve(), signal());
+    const limited = resolveOf(ROOT_B);
+    expect(await executor.run(limited, signal())).toEqual(WAITED_TOO_LONG);
+    expect(told).toEqual([[limited.id, "folder"], [limited.id, null]]);
+    told.length = 0;
+    const controller = new AbortController();
+    const cancelled = resolveOf(ROOT_B);
+    const waiting = executor.run(cancelled, controller.signal);
+    expect(await pendingAfter(waiting, 50)).toBe(true);
+    controller.abort();
+    expect(await waiting).toEqual(CANCELLED);
+    expect(told).toEqual([[cancelled.id, "folder"], [cancelled.id, null]]);
+  });
+
   it("stops waiting after the folder wait's limit, saying why in words the agent can pass on", async () => {
     folders[ROOT_B] = folders[ROOT_A] ?? "";
     const executor = toolHosts({ idleMs: 60_000, folderWaitMs: 200, spawnHost: fakeSpawn(answering) });

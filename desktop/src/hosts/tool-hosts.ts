@@ -294,6 +294,9 @@ export interface ToolHostsOptions {
   bindingOf(rootSessionId: string): BoundFolder | undefined;
   // Without it, a root bound to a copy has nowhere to work, and every operation of it is refused.
   copies?: ThreadCopies;
+  // Told "folder" when an operation starts waiting for the folder another chat's host holds, and null when it stops,
+  // whatever came of it.
+  waiting?(operationId: string, reason: "folder" | null): void;
   network?: NetworkApprovals; // without it, every destination off the package hosts is refused
   dataDir: string;
   // The app's own cache folder, <cache home>/surogate, by the cache home the app itself uses: no
@@ -365,7 +368,7 @@ export class ToolHosts implements Executor {
 
   async run(operation: Operation, signal: AbortSignal): Promise<Outcome> {
     if (operation.kind === "bind") return NOT_BOUND;
-    const host = await this.hostOf(operation.sessionId, signal);
+    const host = await this.hostOf(operation.sessionId, signal, operation.id);
     return host instanceof Host ? host.run(operation, signal) : host;
   }
 
@@ -378,7 +381,7 @@ export class ToolHosts implements Executor {
     operation: Operation, signal: AbortSignal, guard: Guard,
     inner: (works: Works, signal: AbortSignal, ended: ProcessHandle[]) => Promise<Outcome>,
   ): Promise<Outcome> {
-    const host = await this.hostOf(operation.sessionId, signal);
+    const host = await this.hostOf(operation.sessionId, signal, operation.id);
     if (!(host instanceof Host)) return host;
     return host.guarded(operation, signal, guard, (aborted, ended) => inner(host.works, aborted, ended));
   }
@@ -660,7 +663,7 @@ export class ToolHosts implements Executor {
 
   // The host of *root*, started if it has none: on its chat's folder, or, for a thread, on its copy,
   // opened first. Or why it has none: a thread never works in its folder for want of its copy.
-  private async hostOf(root: string, signal: AbortSignal): Promise<Host | Outcome> {
+  private async hostOf(root: string, signal: AbortSignal, operationId: string): Promise<Host | Outcome> {
     if (this.stopping) return QUITTING;
     const binding = SESSION_ID.test(root) ? this.options.bindingOf(root) : undefined;
     if (!binding) return FOLDER_UNAVAILABLE;
@@ -689,7 +692,12 @@ export class ToolHosts implements Executor {
       // own, one still going too, is never waited for.
       const key = `${binding.dev}-${binding.ino}`;
       if (this.queued.has(root) || this.chatOn(binding, root) || (this.queues.get(key)?.length ?? 0) > 0) {
-        return this.once(this.queued, root, signal, (wanted) => this.inTurn(root, binding, key, wanted, before));
+        this.options.waiting?.(operationId, "folder");
+        try {
+          return await this.once(this.queued, root, signal, (wanted) => this.inTurn(root, binding, key, wanted, before));
+        } finally {
+          this.options.waiting?.(operationId, null);
+        }
       }
       return this.chatHostFor(root, binding, before);
     }

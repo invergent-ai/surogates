@@ -13,6 +13,8 @@ export interface FakeLinkServerOptions {
   welcome?: boolean;
   // false: never answer a ping. Default true.
   pong?: boolean;
+  // true: the welcome says the server takes op_waiting frames.
+  waits?: boolean;
 }
 
 export class FakeLinkServer {
@@ -55,7 +57,7 @@ export class FakeLinkServer {
         if (frame.type === "hello") {
           this.hellos.push(frame);
           if (this.options.welcome !== false) {
-            socket.send(JSON.stringify({ type: "welcome", protocol: 1, ...this.identity, heartbeat_s: this.options.heartbeatS ?? 15 }));
+            socket.send(JSON.stringify({ type: "welcome", protocol: 1, ...this.identity, heartbeat_s: this.options.heartbeatS ?? 15, ...(this.options.waits ? { waits: true } : {}) }));
             for (const behind of this.behindWelcome) socket.send(JSON.stringify(behind));
           }
         } else if (frame.type === "ping" && this.options.pong !== false) {

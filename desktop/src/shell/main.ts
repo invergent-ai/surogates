@@ -986,9 +986,9 @@ function startStack(agent: Agent, credential: LiveCredential): Promise<DeviceSta
     identity: { deviceId: credential.deviceId, orgId: credential.orgId, agentId: credential.agentId, userId: credential.userId },
     // The tool layer under the binder: the file kinds in the root's file host, the process kinds in the
     // VM, and the browser's kinds in this identity's browser host, with the browser Settings chose.
-    tools: (bindings, network, changed) => new Browsing({
+    tools: (bindings, network, changed, waiting) => new Browsing({
       tools: appTools({
-        bindingOf: (bound) => bindings.get(bound), network, dataDir: root, cacheDir: places.cache, env, vm: vmFor(), changed,
+        bindingOf: (bound) => bindings.get(bound), network, dataDir: root, cacheDir: places.cache, env, vm: vmFor(), changed, waiting,
         // A thread's history is made in the name of the account signed in on this device.
         user: credential.userId,
         // The sidebar says while a thread's copy of its folder is being made: its first step waits for it.

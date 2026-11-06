@@ -11,7 +11,7 @@ import type { Welcome } from "../src/link/protocol.js";
 import type { Executor } from "../src/operations/runner.js";
 import { FakeLinkServer } from "./fake-server.js";
 
-const WELCOME: Welcome = { deviceId: "d", orgId: "o", agentId: "a", userId: "u", name: "Laptop", heartbeatS: 15 };
+const WELCOME: Welcome = { deviceId: "d", orgId: "o", agentId: "a", userId: "u", name: "Laptop", heartbeatS: 15, waits: false };
 const nothing: Executor = { run: () => Promise.resolve({ ok: null }) };
 
 let dir: string;
