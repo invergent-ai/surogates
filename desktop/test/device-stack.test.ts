@@ -216,6 +216,23 @@ describe("one agent's device", () => {
     expect(waitingFrames().slice(3)).toEqual([{ type: "op_waiting", id: "w-1", reason: "folder" }]);
   });
 
+  it("tells a link whose server no longer takes waits nothing, though the link before it took them", async () => {
+    server = new FakeLinkServer({ waits: true });
+    await start();
+    await server.until(() => statuses.includes("connected"));
+    const waitingFrames = () => server.received.filter((frame) => frame.type === "op_waiting");
+    tools.waiting("w-1", "folder");
+    await server.until(() => waitingFrames().length === 1);
+    server.waits = false;
+    server.drop();
+    await server.until(() => server.hellos.length === 2);
+    await server.until(() => statuses.filter((status) => status === "connected").length === 2);
+    tools.waiting("w-2", "folder");
+    tools.waiting("w-1", null);
+    await new Promise((done) => setTimeout(done, 100));
+    expect(waitingFrames()).toEqual([{ type: "op_waiting", id: "w-1", reason: "folder" }]);
+  });
+
   it("tells a server whose welcome says nothing of waits nothing", async () => {
     await start();
     await server.until(() => statuses.includes("connected"));

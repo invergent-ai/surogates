@@ -1067,14 +1067,17 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
     expect([fakes.length, sent(0, "stop")]).toEqual([1, 0]);
   });
 
-  it("ends every wait at the quit, spawning nothing after", async () => {
+  it("ends every wait at the quit, telling it stopped waiting, spawning nothing after", async () => {
     folders[ROOT_B] = folders[ROOT_A] ?? "";
-    const executor = toolHosts({ idleMs: 60_000, spawnHost: fakeSpawn(answering) });
+    const told: Array<[string, string | null]> = [];
+    const executor = toolHosts({ idleMs: 60_000, spawnHost: fakeSpawn(answering), waiting: (id, reason) => told.push([id, reason]) });
     await executor.run(resolve(), signal());
-    const waiting = executor.run(resolveOf(ROOT_B), signal());
+    const waited = resolveOf(ROOT_B);
+    const waiting = executor.run(waited, signal());
     expect(await pendingAfter(waiting, 100)).toBe(true);
     await executor.stop();
     expect(await waiting).toEqual({ error: { type: "unavailable", message: "This computer could not open the folder's sandbox: the app is quitting" } });
+    expect(told).toEqual([[waited.id, "folder"], [waited.id, null]]);
     await new Promise((done) => setTimeout(done, 100));
     expect(fakes).toHaveLength(1);
   });
