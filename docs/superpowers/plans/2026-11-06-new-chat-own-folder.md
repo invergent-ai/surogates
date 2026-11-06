@@ -13,7 +13,7 @@
 ## Todo
 
 - [x] Task 1: The binder offers a new folder for `new`, and the bridge accepts it
-- [ ] Task 2: The tool hosts know which chat's host is on a folder
+- [x] Task 2: The tool hosts know which chat's host is on a folder
 - [ ] Task 3: The sheet warns about a folder in use, with New folder and Browse…
 - [ ] Task 4: A chat's host lets its folder go at its turn's end
 - [ ] Task 5: The app follows each chat host's turns

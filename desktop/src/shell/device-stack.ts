@@ -39,6 +39,8 @@ export interface ToolLayer extends Executor {
   retired?(root: string): void;
   // Whether a project's thread is given a copy of its folder to work in: without, the binder binds it to none.
   keepsCopies?(): boolean;
+  // Whether a chat's host is on the folder of this identity, by its device and inode: another chat works there.
+  folderInUse?(dev: number, ino: number): boolean;
   // The address of the page a calling session's next browser operation acts in, for its prompt; for an
   // upload, of the frame of the file input its page asked for, *of* being the upload's operation, by its id; or
   // why that upload can be given to nothing. *root*: the chat that asks, which is told of no other chat's session.

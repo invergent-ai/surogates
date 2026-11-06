@@ -780,6 +780,29 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
     expect(sent(0, "handles")).toBe(0);
   });
 
+  it("says a folder is in use while a chat's host is on it, in its idle tail too, and not once it has gone", async () => {
+    folders[ROOT_B] = folders[ROOT_A] ?? "";
+    const { dev, ino } = identities.get(folders[ROOT_A] ?? "")!;
+    const executor = toolHosts({ idleMs: 50, spawnHost: fakeSpawn(answering) });
+    expect(executor.folderInUse(dev, ino)).toBe(false);
+    expect(await executor.run(resolve(), signal())).toMatchObject({ ok: expect.any(String) });
+    // Answered, and in its idle tail: still on the folder.
+    expect(executor.folderInUse(dev, ino)).toBe(true);
+    await until(() => sent(0, "stop") === 1, 1_000);
+    await until(() => !executor.folderInUse(dev, ino), 1_000);
+    expect(executor.folderInUse(dev, ino + 1)).toBe(false);
+  });
+
+  it("knows a folder in use by its identity, whatever path names it", async () => {
+    const identity = identities.get(folders[ROOT_A] ?? "")!;
+    const executor = toolHosts({
+      bindingOf: (root) => (root === ROOT_B ? { folder: join(base, "another-name-of-a"), ...identity } : undefined),
+      spawnHost: fakeSpawn(answering),
+    });
+    expect(await executor.run(op("resolve", { path: "" }, ROOT_B), signal())).toMatchObject({ ok: expect.any(String) });
+    expect(executor.folderInUse(identity.dev, identity.ino)).toBe(true);
+  });
+
   it("waits, when the app quits, for a host that is stopping because it had nothing to do", async () => {
     const slowStop = (host: FakeHost, message: ToHost) => {
       if (message.type === "start") host.say({ type: "ready", processes: [] });
@@ -936,6 +959,15 @@ describe("a root bound to a thread's copy of a folder", { timeout: 5_000 }, () =
     expect(fakes[0]?.sent[0]).toMatchObject({ type: "start", folder: folder(), expect: identities.get(folder()) });
     expect(fakes[0]?.sent[0]).not.toHaveProperty("at");
     expect(threads().keepsCopies()).toBe(true);
+  });
+
+  it("counts no thread's host on its copy as a chat in the folder", async () => {
+    const executor = threads();
+    expect(await executor.run(op("resolve", { path: "" }), signal())).toMatchObject({ ok: expect.any(String) });
+    expect(fakes).toHaveLength(1);
+    const { dev, ino } = identities.get(folder())!;
+    const copy = copyOf(ROOT_A).folder;
+    expect([executor.folderInUse(dev, ino), executor.folderInUse(copy.dev, copy.ino)]).toEqual([false, false]);
   });
 
   it("starts one host for a root's operations that come together, asking for its copy once, and answers a cancel while the copy is made", async () => {

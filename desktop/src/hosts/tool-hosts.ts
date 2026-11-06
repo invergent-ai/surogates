@@ -321,6 +321,8 @@ export class ToolHosts implements Executor {
   private readonly landing = new Map<string, Starting>();
   // The root of each host on a thread's copy, until it exits.
   private readonly onCopies = new Map<Host, string>();
+  // The root of each chat's own host on its folder, until it exits: none of a thread's copy, a landing or a put-back.
+  private readonly chats = new Map<Host, string>();
   // A deleted thread's binding, by its root, while the landing's host it kept is there: the landing's steps still reach it.
   private readonly deleted = new Map<string, BoundFolder>();
   // How often each thread's root was told its copy is not vouched for: told while its copy was being opened, the copy
@@ -542,6 +544,22 @@ export class ToolHosts implements Executor {
     return on.length > 0 ? "chat" : "earlier";
   }
 
+  /**
+   * Whether a chat's host is on the folder of this identity: starting, working, or in its idle tail, until it exits. A
+   * thread's host on its copy, a landing's and a put-back's are no chat in the folder.
+   */
+  folderInUse(dev: number, ino: number): boolean {
+    return this.chatOn({ dev, ino }, "");
+  }
+
+  // Whether a live chat's host of a root other than *except* is on *folder*, by its identity, never its path.
+  private chatOn(folder: { dev: number; ino: number }, except: string): boolean {
+    for (const [host, root] of this.chats) {
+      if (root !== except && host.works.folder.dev === folder.dev && host.works.folder.ino === folder.ino) return true;
+    }
+    return false;
+  }
+
   /** What landings cut short came to in each folder whose landings keep anything, as this computer last put them back. */
   recoveries(): Recovery[] {
     return [...this.found.values()];
@@ -645,7 +663,7 @@ export class ToolHosts implements Executor {
         const started = this.hosts.get(root);
         if (started) return started;
       }
-      return this.hostFor(root, { folder: { path: binding.folder, dev: binding.dev, ino: binding.ino, boot: binding.boot } }, before);
+      return this.chatHostFor(root, binding, before);
     }
     const { copies } = this.options;
     if (!copies) return NO_COPIES;
@@ -786,6 +804,13 @@ export class ToolHosts implements Executor {
     return host;
   }
 
+  // A chat's own host for *root*, on the folder *binding* names: the only place one is made, counted a chat's until it exits.
+  private chatHostFor(root: string, binding: BoundFolder, before?: Promise<void>): Host {
+    const host = this.hostFor(root, { folder: { path: binding.folder, dev: binding.dev, ino: binding.ino, boot: binding.boot } }, before);
+    this.chats.set(host, root);
+    return host;
+  }
+
   private hostFor(root: string, works: Works, before?: Promise<void>): Host {
     const { network } = this.options;
     const ask = (asked: NetworkAsk, signal: AbortSignal): Promise<NetworkAnswer> =>
@@ -839,6 +864,7 @@ export class ToolHosts implements Executor {
     this.live.add(host);
     void host.exited.then(() => {
       this.live.delete(host);
+      this.chats.delete(host);
       this.options.changed?.();
       this.wentFrom(host);
     });
