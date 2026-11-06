@@ -222,10 +222,10 @@ export class Binder implements Executor {
   }
 
   /**
-   * The folder for a new chat, as the user confirms it in the sheet: a new one under
-   * ~/Surogate/<agent> for "new"; for "last", the last one bound if it can still be used,
-   * else a new one; or one from the folder dialog for "pick". Null when the user cancels. Every new chat asks, the last
-   * folder too, so a server cannot bind a chat to a folder the user did not see.
+   * The folder for a new chat, as the user confirms it in the sheet: a new one under ~/Surogate/<agent> for "new";
+   * for "last", the last one bound if it can still be used, else a new one; or one from the folder dialog for "pick".
+   * Null when the user cancels. Every new chat asks, the last folder too, so a server cannot bind a chat to a folder
+   * the user did not see.
    */
   async prepareFolder(
     choice: "new" | "last" | "pick", window: string, signal: AbortSignal, thread: ThreadLabel | null = null,
@@ -233,8 +233,8 @@ export class Binder implements Executor {
     const { guards } = this.options;
     const last = this.options.bindings.last()?.folder;
     const usable = choice === "last" && last !== undefined && (await this.answers(last)) && checkFolder(last, guards).ok ? last : null;
-    // Made for this chat, and gone again unless the user takes it, even when the sheet fails.
-    // Every one made, here and at New folder on the sheet.
+    // Every folder made for this chat, here and at New folder on the sheet: gone again unless the user takes it, even
+    // when the sheet fails.
     const made: string[] = [];
     const first = usable === null && choice !== "pick" && !signal.aborted ? newFolder(guards, this.options.agent) : null;
     if (first !== null) made.push(first);

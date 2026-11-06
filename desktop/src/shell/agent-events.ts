@@ -36,7 +36,7 @@ const parsed = (data: string): Record<string, unknown> | null => {
 };
 
 /** Follow the stream at *path()* until the returned stop is called: *onEvent* hears each event, through every reconnection. */
-export function follow(options: FollowOptions, path: () => string, onEvent: (event: ServerEvent) => void): () => void {
+export function follow(options: Omit<FollowOptions, "agentId">, path: () => string, onEvent: (event: ServerEvent) => void): () => void {
   const stopped = new AbortController();
   void (async () => {
     let attempt = 0;
@@ -132,7 +132,7 @@ const GONE: ReadonlySet<unknown> = new Set(["archived", "session_not_found"]);
  * included, whenever its stream closes. Only a chat archived or gone ends it, short of stop. Until
  * *started*, it has heard nothing of the chat: a turn that ends meanwhile it never tells.
  */
-export function followTurns(options: FollowOptions & { sessionId: string; onTurnEnd(): void }): { stop(): void; started(): boolean } {
+export function followTurns(options: Omit<FollowOptions, "agentId"> & { sessionId: string; onTurnEnd(): void }): { stop(): void; started(): boolean } {
   let after = -1;
   // A chat the agent does not have as its stream opens, deleted or another organisation's, is gone too.
   const api: Api = async (path, init) => {

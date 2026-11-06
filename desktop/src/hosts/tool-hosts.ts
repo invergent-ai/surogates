@@ -39,6 +39,7 @@ import { LOCK_WAIT_MS } from "./folder-record.js";
 import {
   FOLDER_UNAVAILABLE, type FromHost, type HostStart, type NetworkAnswer, type NetworkAsk, type ToHost,
 } from "./messages.js";
+import { isOf } from "./start.js";
 
 // The same from src/hosts and from dist/hosts.
 const PACKAGE = fileURLToPath(new URL("../..", import.meta.url));
@@ -345,7 +346,7 @@ export class ToolHosts implements Executor {
   private readonly queued = new Map<string, Starting>();
   // The chats' waits for each folder, by its identity, in the order they began: each a record of its own, saying whether
   // anything still waits for it.
-  private readonly queues = new Map<string, Array<{ wanted: () => boolean }>>();
+  private readonly queues = new Map<string, Array<() => boolean>>();
   // Settled each time something a wait looks at may have changed, and made anew.
   private wake = Promise.withResolvers<void>();
   // A deleted thread's binding, by its root, while the landing's host it kept is there: the landing's steps still reach it.
@@ -579,10 +580,14 @@ export class ToolHosts implements Executor {
 
   // Whether a live chat's host of a root other than *except* is on *folder*, by its identity, never its path.
   private chatOn(folder: { dev: number; ino: number }, except: string): boolean {
+    return !this.chatsOn(folder, except).next().done;
+  }
+
+  // The live chats' hosts of roots other than *except* on *folder*, by its identity.
+  private *chatsOn(folder: { dev: number; ino: number }, except: string): Generator<Host> {
     for (const [host, root] of this.chats) {
-      if (root !== except && host.works.folder.dev === folder.dev && host.works.folder.ino === folder.ino) return true;
+      if (root !== except && host.works.folder.dev === folder.dev && host.works.folder.ino === folder.ino) yield host;
     }
-    return false;
   }
 
   /** What landings cut short came to in each folder whose landings keep anything, as this computer last put them back. */
@@ -691,16 +696,14 @@ export class ToolHosts implements Executor {
       }
       // Another chat's host on the folder, or chats already waiting for it: this one waits its turn. A host of the root's
       // own, one still going too, is never waited for.
-      const key = `${binding.dev}-${binding.ino}`;
+      const key = isOf(binding);
       if (this.queued.has(root) || this.chatOn(binding, root) || (this.queues.get(key)?.length ?? 0) > 0) {
         this.options.waiting?.(operationId, "folder");
         try {
           const turn = this.once(this.queued, root, signal, (wanted) => this.inTurn(root, binding, key, wanted, before));
           // Once the wait is counted: a chat whose turn already ended there, with nothing of it running and no process
           // of it alive, lets the folder go at once.
-          for (const [host, of] of this.chats) {
-            if (of !== root && host.works.folder.dev === binding.dev && host.works.folder.ino === binding.ino) host.waitedFor();
-          }
+          if (!signal.aborted) for (const host of this.chatsOn(binding, root)) host.waitedFor();
           return await turn;
         } finally {
           this.options.waiting?.(operationId, null);
@@ -748,27 +751,30 @@ export class ToolHosts implements Executor {
   // other chat's host is on it; for FOLDER_WAIT_MS at most. Or why it has none: the app is quitting, nothing waits for it
   // any more, or it waited too long.
   private async inTurn(root: string, binding: BoundFolder, key: string, wanted: () => boolean, before?: Promise<void>): Promise<Host | Outcome> {
-    const turn = { wanted };
     const queue = this.queues.get(key) ?? [];
     this.queues.set(key, queue);
-    queue.push(turn);
-    const deadline = Date.now() + (this.options.folderWaitMs ?? FOLDER_WAIT_MS);
-    // Begun only where it cannot go yet, so it waits first; and wanted is never asked before once has its record. However
-    // it ends, it leaves the queue, and the waits behind it look again.
+    queue.push(wanted);
+    let late = false;
+    let timer: NodeJS.Timeout | undefined;
+    const deadline = new Promise<void>((resolve) => {
+      timer = setTimeout(() => {
+        late = true;
+        resolve();
+      }, this.options.folderWaitMs ?? FOLDER_WAIT_MS).unref();
+    });
+    // It waits first, as it began only where it could not go yet. However it ends, it leaves the queue and the waits
+    // behind it look again.
     try {
       for (;;) {
-        let timer: NodeJS.Timeout | undefined;
-        await Promise.race([this.wake.promise, new Promise<void>((resolve) => {
-          timer = setTimeout(resolve, deadline - Date.now()).unref();
-        })]);
-        clearTimeout(timer);
+        await Promise.race([this.wake.promise, deadline]);
         if (this.stopping) return QUITTING;
         if (!wanted()) return STOPPED_STARTING;
-        if (queue[0] === turn && !this.chatOn(binding, root)) return this.chatHostFor(root, binding, before);
-        if (Date.now() >= deadline) return WAITED_TOO_LONG;
+        if (queue[0] === wanted && !this.chatOn(binding, root)) return this.chatHostFor(root, binding, before);
+        if (late) return WAITED_TOO_LONG;
       }
     } finally {
-      queue.splice(queue.indexOf(turn), 1);
+      clearTimeout(timer);
+      queue.splice(queue.indexOf(wanted), 1);
       if (queue.length === 0 && this.queues.get(key) === queue) this.queues.delete(key);
       this.nudge();
     }
@@ -885,13 +891,11 @@ export class ToolHosts implements Executor {
 
   // A chat's own host for *root*, on the folder *binding* names: the only place one is made, counted a chat's until it exits.
   private chatHostFor(root: string, binding: BoundFolder, before?: Promise<void>): Host {
-    const host = this.hostFor(root, { folder: { path: binding.folder, dev: binding.dev, ino: binding.ino, boot: binding.boot } }, before);
+    const key = isOf(binding);
+    const othersWait = () => this.queues.get(key)?.some((wanted) => wanted()) ?? false;
+    const host = this.hostFor(root, { folder: { path: binding.folder, dev: binding.dev, ino: binding.ino, boot: binding.boot } }, before, othersWait);
     this.chats.set(host, root);
-    const key = `${binding.dev}-${binding.ino}`;
-    host.othersWait = () => this.queues.get(key)?.some((turn) => turn.wanted()) ?? false;
-    // At a turn's end the chat lets its folder go once nothing of it runs where another chat waits for it, so that one
-    // need not wait out its idle time; with none waiting it keeps the folder for its idle time. One with a background
-    // process alive keeps the folder, and the next turn's first operation takes it back.
+    // At a turn's end the chat lets its folder go to a waiting chat once nothing of it runs and no process of it lives.
     const unfollow = this.options.following?.(root, () => {
       if (this.hosts.get(root) === host) host.endTurn();
     });
@@ -899,7 +903,7 @@ export class ToolHosts implements Executor {
     return host;
   }
 
-  private hostFor(root: string, works: Works, before?: Promise<void>): Host {
+  private hostFor(root: string, works: Works, before?: Promise<void>, othersWait?: () => boolean): Host {
     const { network } = this.options;
     const ask = (asked: NetworkAsk, signal: AbortSignal): Promise<NetworkAnswer> =>
       network ? network.askNetwork(root, asked, signal) : Promise.resolve("deny");
@@ -911,6 +915,7 @@ export class ToolHosts implements Executor {
       ask,
       () => this.options.release?.(root) ?? Promise.resolve(),
       before,
+      othersWait,
     );
     this.hosts.set(root, host);
     this.keep(host);
@@ -1163,8 +1168,6 @@ class Host {
   // nothing of it runs and another chat waits for its folder (othersWait). Unlike a landing's yielding, the next turn's
   // first operation, or a process, takes it back.
   private turnEnded = false;
-  // Whether another chat waits for its folder: a chat's own host is told by its hosts.
-  othersWait: () => boolean = () => false;
 
   constructor(
     private readonly process: HostProcess,
@@ -1179,6 +1182,8 @@ class Host {
     // Settled once the guest has let go of what it shared of the root's for a host before this one: its root's
     // commands run only after, or one could run in what that host held.
     private readonly before: Promise<void> = Promise.resolve(),
+    // Whether another chat waits for its folder: a chat's own host is told by its hosts.
+    private readonly othersWait: () => boolean = () => false,
   ) {
     this.recovers = start.recovery !== undefined;
     this.lands = start.landing !== undefined || this.recovers;

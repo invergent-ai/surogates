@@ -266,7 +266,7 @@ describe("a chat's turns, followed", () => {
       return agent.api(path, init);
     };
     let ended = 0;
-    const { stop } = followTurns({ api, agentId: "a", onError: () => {}, delayMs: () => 0, sessionId: "chat-1", onTurnEnd: () => ended++ });
+    const { stop } = followTurns({ api, onError: () => {}, delayMs: () => 0, sessionId: "chat-1", onTurnEnd: () => ended++ });
     await until(() => agent.streams.length === 1);
     agent.streams[0]!.send("id: 3\r\nevent: session.complete\r\ndata: {}\r\n\r\n");
     await until(() => ended === 1);

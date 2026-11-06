@@ -39,7 +39,7 @@ import { type FromManager, MANAGER, type ManagerProcess, REPO_IMAGE, type ToMana
 import { type Delivery, ImageDelivery, imageArch, installBase, readManifest } from "../vm/image.js";
 import type { Boot } from "../vm/manager.js";
 import { openAbout } from "./about.js";
-import { BURST, Burst, followChat, followTurns, followInbox, type InboxItem, titleOf } from "./agent-events.js";
+import { BURST, Burst, followChat, followInbox, followTurns, type InboxItem, titleOf } from "./agent-events.js";
 import { type Agent, AgentStore, connectAgent, describeAgent, type Get, linksFor, linkUrl, partitionFor, readAgent } from "./agents.js";
 import { AppearanceStore, Theme } from "./appearance.js";
 import { nameTheApp, quitAsked } from "./app-identity.js";
@@ -1000,7 +1000,7 @@ function startStack(agent: Agent, credential: LiveCredential): Promise<DeviceSta
           const session = signedIn;
           if (!session) return () => {};
           return followTurns({
-            api: (path, init) => session.api(path, init), agentId: agents.get()?.agentId ?? "", onError: report,
+            api: (path, init) => session.api(path, init), onError: report,
             sessionId: chatId, onTurnEnd: turnEnded,
           }).stop;
         },

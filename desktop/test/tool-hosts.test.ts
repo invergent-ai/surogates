@@ -946,7 +946,6 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
   });
 
   it("says a folder is in use while a chat's host is on it, in its idle tail too, and not once it has gone", async () => {
-    folders[ROOT_B] = folders[ROOT_A] ?? "";
     const { dev, ino } = identities.get(folders[ROOT_A] ?? "")!;
     const executor = toolHosts({ idleMs: 50, spawnHost: fakeSpawn(answering) });
     expect(executor.folderInUse(dev, ino)).toBe(false);
