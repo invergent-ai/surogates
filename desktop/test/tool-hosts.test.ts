@@ -853,27 +853,76 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
     follows[0]?.turnEnded();
     await new Promise((done) => setTimeout(done, 400));
     expect(sent(0, "stop")).toBe(0);
-    // The turn's end is not held over to the processes' end: the idle time runs from there.
+    // No chat waits: the idle time runs from the processes' end.
     executor.processes(ROOT_A, { handles: [], live: 0 });
     await new Promise((done) => setTimeout(done, 100));
     expect(sent(0, "stop")).toBe(0);
     await until(() => sent(0, "stop") === 1, 1_000);
   });
 
-  it("lets the folder go to a waiting chat once an operation still running at the turn's end has been answered", async () => {
+  it("ignores a turn's end that comes while an operation of the chat runs, and lets the folder go to a waiting chat at the next", async () => {
     folders[ROOT_B] = folders[ROOT_A] ?? "";
     const { follows, following } = followed();
     const executor = toolHosts({ idleMs: 60_000, following, spawnHost: fakeSpawn(readyOnly) });
     const running = executor.run(resolve(), signal());
     await until(() => sent(0, "op") === 1);
-    void executor.run(resolveOf(ROOT_B), signal());
+    const second = executor.run(resolveOf(ROOT_B), signal());
+    // A turn's end told again, as a stream that came back replays it, while the next turn's operation runs.
     follows[0]?.turnEnded();
-    await new Promise((done) => setTimeout(done, 100));
-    expect(sent(0, "stop")).toBe(0);
     const id = fakes[0]?.sent.find((message) => message.type === "op")?.id ?? "";
     fakes[0]?.say({ type: "result", id, outcome: { ok: id } });
     expect(await running).toEqual({ ok: id });
+    expect(await pendingAfter(second, 200)).toBe(true);
+    expect(sent(0, "stop")).toBe(0);
+    follows[0]?.turnEnded();
     await until(() => sent(0, "stop") === 1, 1_000);
+  });
+
+  it("lets the folder go to a waiting chat once a background process alive at the turn's end has ended", async () => {
+    folders[ROOT_B] = folders[ROOT_A] ?? "";
+    const { follows, following } = followed();
+    const executor = toolHosts({ idleMs: 60_000, following, spawnHost: fakeSpawn(answering) });
+    await executor.run(resolve(), signal());
+    const handle = { id: "proc_000000000001", command: "sleep 9", cwd: "/", task_id: null, started_at: Date.now() / 1000 };
+    executor.processes(ROOT_A, { handles: [handle], live: 1 });
+    follows[0]?.turnEnded();
+    const second = executor.run(resolveOf(ROOT_B), signal());
+    expect(await pendingAfter(second, 200)).toBe(true);
+    executor.processes(ROOT_A, { handles: [{ ...handle, ended: { exit_code: 0, output: "", note: null } }], live: 0 });
+    expect(await second).toMatchObject({ ok: expect.any(String) });
+    expect([fakes.length, sent(0, "stop")]).toEqual([2, 1]);
+  });
+
+  it("keeps the folder from a waiting chat where a background process started after the turn's end, until the idle time", async () => {
+    folders[ROOT_B] = folders[ROOT_A] ?? "";
+    const { follows, following } = followed();
+    const executor = toolHosts({ idleMs: 60_000, following, spawnHost: fakeSpawn(answering) });
+    await executor.run(resolve(), signal());
+    const first = { id: "proc_000000000001", command: "sleep 9", cwd: "/", task_id: null, started_at: Date.now() / 1000 };
+    const later = { ...first, id: "proc_000000000002" };
+    executor.processes(ROOT_A, { handles: [first], live: 1 });
+    follows[0]?.turnEnded();
+    const second = executor.run(resolveOf(ROOT_B), signal());
+    executor.processes(ROOT_A, { handles: [first, later], live: 2 });
+    const ended = { ended: { exit_code: 0, output: "", note: null } };
+    executor.processes(ROOT_A, { handles: [{ ...first, ...ended }, { ...later, ...ended }], live: 0 });
+    expect(await pendingAfter(second, 200)).toBe(true);
+    expect(sent(0, "stop")).toBe(0);
+  });
+
+  it("has a waiting chat whose folder was chosen again meanwhile work in the folder chosen, not wait on the one it left", async () => {
+    folders[ROOT_B] = folders[ROOT_A] ?? "";
+    const { follows, following } = followed();
+    const executor = toolHosts({ idleMs: 60_000, following, spawnHost: fakeSpawn(answering) });
+    await executor.run(resolve(), signal());
+    const second = executor.run(resolveOf(ROOT_B), signal());
+    expect(await pendingAfter(second, 100)).toBe(true);
+    folders[ROOT_B] = join(base, "b");
+    // The first chat's turn ends: the second, given the folder, finds its own chosen again, and works there.
+    follows[0]?.turnEnded();
+    expect(await second).toMatchObject({ ok: expect.any(String) });
+    expect(fakes).toHaveLength(2);
+    expect(fakes[1]?.sent[0]).toMatchObject({ type: "start", folder: join(base, "b"), expect: identities.get(join(base, "b")) });
   });
 
   it("keeps the folder through the next turn's operations once one began after a turn's end, and lets it go to a waiting chat at that turn's end", async () => {

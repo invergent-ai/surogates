@@ -123,6 +123,9 @@ const madeAgain = (at: string): Outcome => unavailable(`the copy of ${at} this t
 const NOT_BEGUN = unavailable("the host of this landing was stopping, so this step of it was not begun. Ask again");
 // What waited for a host that stopped, or was never made, before it was ready.
 const STOPPED_STARTING = unavailable("its tool host stopped while it was starting");
+// What a wait for a chat's folder comes to where the chat's folder was chosen again meanwhile: never an answer, as each
+// operation that waited asks again for the folder named now.
+const REBOUND = unavailable("its chat's folder was chosen again while it waited");
 // A landing's host asked for itself while its landing's last step runs alone: asked again once it has ended.
 const ENDING_ALONE = "the landing in this folder is ending a step it runs alone";
 const BUSY_ALONE: Outcome = { error: { type: "busy", message: ENDING_ALONE } };
@@ -669,14 +672,15 @@ export class ToolHosts implements Executor {
 
   // The host of *root*, started if it has none: on its chat's folder, or, for a thread, on its copy,
   // opened first. Or why it has none: a thread never works in its folder for want of its copy.
-  private async hostOf(root: string, signal: AbortSignal, operationId: string): Promise<Host | Outcome> {
+  // *gone*: what the guest lets go of a host of the root before this one, where a wait for its folder left that folder.
+  private async hostOf(root: string, signal: AbortSignal, operationId: string, gone?: Promise<void>): Promise<Host | Outcome> {
     if (this.stopping) return QUITTING;
     const binding = SESSION_ID.test(root) ? this.options.bindingOf(root) : undefined;
     if (!binding) return FOLDER_UNAVAILABLE;
     const known = this.hosts.get(root);
     // A chat's host holds the folder its binding names. One a project's coordinator had before its user chose the
     // project's folder again goes, and the next starts on the folder named now once the guest has let the old one go.
-    let before: Promise<void> | undefined;
+    let before = gone;
     if (known && binding.history === undefined && !sameFolder(known.works.folder, binding)) {
       known.finish();
       before = known.letGo();
@@ -699,15 +703,19 @@ export class ToolHosts implements Executor {
       const key = isOf(binding);
       if (this.queued.has(root) || this.chatOn(binding, root) || (this.queues.get(key)?.length ?? 0) > 0) {
         this.options.waiting?.(operationId, "folder");
+        let turn: Host | Outcome;
         try {
-          const turn = this.once(this.queued, root, signal, (wanted) => this.inTurn(root, binding, key, wanted, before));
+          const waited = this.once(this.queued, root, signal, (wanted) => this.inTurn(root, binding, key, wanted, before));
           // Once the wait is counted: a chat whose turn already ended there, with nothing of it running and no process
           // of it alive, lets the folder go at once.
           if (!signal.aborted) for (const host of this.chatsOn(binding, root)) host.waitedFor();
-          return await turn;
+          turn = await waited;
         } finally {
           this.options.waiting?.(operationId, null);
         }
+        // The chat's folder was chosen again while it waited: it goes where its binding names now, waiting there too
+        // where it must.
+        return turn === REBOUND ? this.hostOf(root, signal, operationId, before) : turn;
       }
       return this.chatHostFor(root, binding, before);
     }
@@ -763,12 +771,15 @@ export class ToolHosts implements Executor {
       }, this.options.folderWaitMs ?? FOLDER_WAIT_MS).unref();
     });
     // It waits first, as it began only where it could not go yet. However it ends, it leaves the queue and the waits
-    // behind it look again.
+    // behind it look again. Each time it looks, the root's binding is read again: one naming another folder now has it
+    // leave this folder's queue.
     try {
       for (;;) {
         await Promise.race([this.wake.promise, deadline]);
         if (this.stopping) return QUITTING;
         if (!wanted()) return STOPPED_STARTING;
+        const now = this.options.bindingOf(root);
+        if (!now || now.history !== undefined || !sameFolder({ ...binding, path: binding.folder }, now)) return REBOUND;
         if (queue[0] === wanted && !this.chatOn(binding, root)) return this.chatHostFor(root, binding, before);
         if (late) return WAITED_TOO_LONG;
       }
@@ -1164,10 +1175,12 @@ class Host {
   private putBackOk = false;
   // A landing waits for this host's folder: it lets it go as soon as nothing of it runs, not idleMs after.
   private yielding = false;
-  // Its chat's turn ended, and since then no operation of it began and no process of its root lived: it goes once
-  // nothing of it runs and another chat waits for its folder (othersWait). Unlike a landing's yielding, the next turn's
-  // first operation, or a process, takes it back.
+  // Its chat's turn ended, and since then no operation of it began and no process of its root started: it goes once
+  // nothing of it runs, no process lives, and another chat waits for its folder (othersWait). Unlike a landing's
+  // yielding, the next turn's first operation, or a process started after, takes it back. The processes it knew of
+  // at the turn's end, by their ids: those keep the folder only until they end.
   private turnEnded = false;
+  private endedWith = new Set<string>();
 
   constructor(
     private readonly process: HostProcess,
@@ -1305,10 +1318,15 @@ class Host {
     this.idle();
   }
 
-  /** Its chat's turn ended: it lets the folder go to a waiting chat once nothing of it runs, unless a process of its root lives. */
+  /**
+   * Its chat's turn ended: it lets the folder go to a waiting chat once nothing of it runs and the processes of its root
+   * alive now have ended. Told while an operation of it runs, the end is an earlier turn's, told again as a stream that
+   * came back replays it, and is not heeded: the idle time lets go of a turn that did end with one running.
+   */
   endTurn(): void {
-    if (this.lives) return;
+    if (this.running > 0) return;
     this.turnEnded = true;
+    this.endedWith = new Set(this.handles.map((handle) => handle.id));
     this.idle();
   }
 
@@ -1350,7 +1368,7 @@ class Host {
     if (!this.readied) return;
     this.handles = "gone" in change ? lostWith(this.handles) : change.handles;
     this.live = "gone" in change ? 0 : change.live;
-    if (this.live > 0) this.turnEnded = false;
+    if (this.handles.some((handle) => !this.endedWith.has(handle.id))) this.turnEnded = false;
     this.send({ type: "handles", handles: this.handles, live: this.live });
     this.idle();
   }
