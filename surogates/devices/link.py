@@ -607,6 +607,11 @@ class _Link:
             # The notice is a courtesy; Redis being away must not end the link.
             logger.warning("device %s could not record that operation %s waits", self._device.id, operation_id, exc_info=True)
 
+    @property
+    def waits(self) -> bool:
+        """Whether the link recorded that any operation waits."""
+        return bool(self._waited)
+
     async def forget_waits(self) -> None:
         """The link ended: what it was told about waits no longer holds, the app being gone."""
         if not self._waited:
@@ -711,8 +716,9 @@ async def serve_device_link(
         # waits to that one, which the app told them again.
         held = False
         if claimed:
-            with contextlib.suppress(Exception):
-                held = await _bounded(presence.holds(device.id, holder))
+            if link.waits:
+                with contextlib.suppress(Exception):
+                    held = await _bounded(presence.holds(device.id, holder))
             with contextlib.suppress(Exception):
                 await _bounded(presence.release(device.id, holder))
         if held:
