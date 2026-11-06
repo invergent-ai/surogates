@@ -26,7 +26,7 @@ const STUBS = {
     export const useParams = () => useSyncExternalStore(page().subscribe, () => page().params);
     export const useNavigate = () => page().navigate;`,
   "@/api/transparency": "export const getTransparencyConfig = () => globalThis.chatPage.transparency.promise;",
-  "@invergent/agent-chat-react": "export function AgentChat(props) { globalThis.chatPage.chat = props; return props.composerFooter ?? null; }",
+  "@invergent/agent-chat-react": "export function AgentChat(props) { globalThis.chatPage.chat = props; return props.composerHeader ?? null; }",
   "@/components/transparency-banner": "export function TransparencyBanner(props) { globalThis.chatPage.banner = props; return null; }",
   "@/components/app-shell": "export const AppShell = ({ children }) => children;",
   "@/components/navbar": "export const SessionSidebar = () => null;",

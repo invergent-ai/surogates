@@ -431,7 +431,7 @@ export function ChatPage() {
                     )
                   : undefined
               }
-              composerFooter={
+              composerHeader={
                 !sessionId && place.text ? (
                   <NewChatPlace
                     place={{ local: place.local, text: place.text }}
