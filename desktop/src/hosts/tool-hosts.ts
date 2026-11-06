@@ -748,7 +748,7 @@ export class ToolHosts implements Executor {
         })]);
         clearTimeout(timer);
         if (this.stopping) return QUITTING;
-        if (!wanted()) return CANCELLED;
+        if (!wanted()) return STOPPED_STARTING;
         if (queue[0] === turn && !this.chatOn(binding, root)) return this.chatHostFor(root, binding, before);
         if (Date.now() >= deadline) return WAITED_TOO_LONG;
       }

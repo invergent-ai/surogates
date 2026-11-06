@@ -999,6 +999,18 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
     expect(fakes).toHaveLength(1);
   });
 
+  it("answers every wait that this computer's access ending ends as stopped while starting, spawning nothing after", async () => {
+    folders[ROOT_B] = folders[ROOT_A] ?? "";
+    const executor = toolHosts({ idleMs: 60_000, spawnHost: fakeSpawn(answering) });
+    await executor.run(resolve(), signal());
+    const waiting = executor.run(resolveOf(ROOT_B), signal());
+    expect(await pendingAfter(waiting, 100)).toBe(true);
+    await executor.end();
+    expect(await waiting).toEqual({ error: { type: "unavailable", message: "This computer could not open the folder's sandbox: its tool host stopped while it was starting" } });
+    await new Promise((done) => setTimeout(done, 100));
+    expect(fakes).toHaveLength(1);
+  });
+
   it("never has a chat wait on its own host, one still going included", async () => {
     const { follows, following } = followed();
     let exited = 0;
