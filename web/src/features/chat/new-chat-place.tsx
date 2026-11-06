@@ -51,6 +51,7 @@ export function NewChatPlace({
             <DropdownMenuTrigger asChild>
               <button
                 type="button"
+                aria-label={`${place.text} ${chosen?.shown ?? ""}`.trim()}
                 className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 font-medium text-foreground hover:bg-muted"
               >
                 <ChosenIcon className="size-3.5" aria-hidden="true" />

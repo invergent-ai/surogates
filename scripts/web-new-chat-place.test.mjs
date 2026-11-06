@@ -71,6 +71,8 @@ test("shows a new folder as chosen, with its icon", async () => {
   const view = await drawn({ place: LOCAL, choice: "new", menu: true, onChoice: () => {} });
   try {
     assert.match(trigger(view.container).textContent, /^a new folder$/);
+    // Named for a screen reader with what it says beside it.
+    assert.equal(trigger(view.container).getAttribute("aria-label"), "Works in a new folder");
     assert.ok(trigger(view.container).querySelector("svg.lucide-folder-plus"));
     assert.ok(view.container.textContent.includes(NOTE));
   } finally {
@@ -96,6 +98,7 @@ test("lists the three kinds of folder with their hints, the chosen one checked, 
     assert.deepEqual(chosen, ["last"]);
     await view.draw({ place: LOCAL, choice: "last", menu: true, onChoice: () => {} });
     assert.match(trigger(view.container).textContent, /^the last folder$/);
+    assert.equal(trigger(view.container).getAttribute("aria-label"), "Works in the last folder");
     assert.ok(trigger(view.container).querySelector("svg.lucide-history"));
   } finally {
     await view.unmount();
