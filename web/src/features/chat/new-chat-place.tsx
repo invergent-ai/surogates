@@ -42,7 +42,8 @@ export function NewChatPlace({
   const chosen = FOLDER_CHOICES.find((c) => c.value === choice);
   const ChosenIcon = CHOICE_ICONS[choice];
   return (
-    <p className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 px-1 text-xs text-muted-foreground">
+    // Above the composer, inset to line up with the accounts band's text below it (its px-5 plus border and pl-4).
+    <p className="mb-2 flex flex-wrap items-center gap-x-2 gap-y-1 pr-5 pl-9 text-xs text-muted-foreground">
       <Icon className="size-3.5 shrink-0" aria-hidden="true" />
       <span>{place.text}</span>
       {place.local && menu && (
