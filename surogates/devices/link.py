@@ -297,7 +297,8 @@ class _Link:
         self._operations = operations
         self._send_lock = asyncio.Lock()
         self._delivered: set[UUID] = set()
-        # Operations whose folder wait this link recorded: forgotten when it ends.
+        # Operations whose folder wait this link recorded and that still wait:
+        # forgotten when it ends.  One whose wait ended, or that ended, leaves.
         self._waited: set[UUID] = set()
         self._delivery_wanted = asyncio.Event()
         self._incoming: _Incoming | None = None
@@ -376,6 +377,7 @@ class _Link:
     def forget(self, operation_id: UUID) -> None:
         """Stop tracking an operation as sent and unanswered, and stop sending its data."""
         self._delivered.discard(operation_id)
+        self._waited.discard(operation_id)
         self._heard.set()
 
     async def transfers(self) -> None:
@@ -601,8 +603,13 @@ class _Link:
                 self._operations.is_open(self._device.id, operation_id),
             ):
                 return
-            self._waited.add(operation_id)
+            # A wait's end leaves the set once it is recorded: until then the
+            # link's end forgets it.
+            if reason is not None:
+                self._waited.add(operation_id)
             await _bounded(self._operations.waiting(operation_id, reason))
+            if reason is None:
+                self._waited.discard(operation_id)
         except Exception:
             # The notice is a courtesy; Redis being away must not end the link.
             logger.warning("device %s could not record that operation %s waits", self._device.id, operation_id, exc_info=True)

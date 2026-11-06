@@ -212,6 +212,45 @@ async def test_a_link_that_ends_forgets_the_waits_it_recorded():
     assert operations.forgotten == {op.id}
 
 
+async def test_a_link_that_ends_forgets_only_the_waits_still_open():
+    ended, answered, waits = open_operation(1), open_operation(2), open_operation(3)
+    operations = FakeOperations(ended, answered, waits)
+    link, _ = make_link(operations)
+    await link.deliver()
+    for op in (ended, answered, waits):
+        await link.waiting(waiting(op.id, "folder"))
+    await link.waiting(waiting(ended.id, None))
+    link.forget(answered.id)
+    await link.forget_waits()
+    assert operations.forgotten == {waits.id}
+
+
+async def test_a_link_whose_every_wait_ended_has_no_waits_to_forget():
+    op = open_operation(1)
+    operations = FakeOperations(op)
+    link, _ = make_link(operations)
+    await link.waiting(waiting(op.id, "folder"))
+    await link.waiting(waiting(op.id, None))
+    assert not link.waits
+
+
+async def test_a_wait_whose_end_cannot_be_recorded_is_still_forgotten_when_the_link_ends():
+    op = open_operation(1)
+    operations = FakeOperations(op)
+    link, _ = make_link(operations)
+    await link.waiting(waiting(op.id, "folder"))
+    recorded = operations.waiting
+
+    async def refuse(operation_id, reason):
+        raise ConnectionError("redis is away")
+
+    operations.waiting = refuse
+    await link.waiting(waiting(op.id, None))
+    operations.waiting = recorded
+    await link.forget_waits()
+    assert operations.forgotten == {op.id}
+
+
 @pytest.mark.parametrize("frame_id, reason", [("nope", "folder"), (None, None), ("delivered", "offline"), ("delivered", 3)])
 async def test_a_malformed_wait_closes_the_link_as_a_protocol_error(frame_id, reason):
     op = open_operation(1)
