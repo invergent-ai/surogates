@@ -274,6 +274,35 @@ describe("a chat's turns, followed", () => {
     expect(paths).toEqual([expect.stringMatching(/^\/api\/v1\/sessions\/chat-1\/events\?/)]);
     expect(agent.streams[0]!.signal.aborted).toBe(true);
   });
+
+  it("stops by itself, telling nothing more and opening no stream again, once the sign-in it was started under has ended", async () => {
+    const agent = new FakeAgent();
+    let ended = 0;
+    let signedIn = true;
+    followTurns({ api: agent.api, onError: () => {}, delayMs: () => 0, sessionId: "chat-1", onTurnEnd: () => ended++, live: () => signedIn });
+    await until(() => agent.streams.length === 1);
+    signedIn = false;
+    agent.streams[0]!.send("id: 3\r\nevent: session.complete\r\ndata: {}\r\n\r\n");
+    await until(() => agent.streams[0]!.signal.aborted);
+    await new Promise((done) => setTimeout(done, 50));
+    expect([ended, agent.streams.length]).toEqual([0, 1]);
+  });
+
+  it("asks nothing of the agent with a sign-in that ended while its stream was down", async () => {
+    const agent = new FakeAgent();
+    let signedIn = true;
+    const paths: string[] = [];
+    const api: Api = (path, init) => {
+      paths.push(path);
+      return agent.api(path, init);
+    };
+    followTurns({ api, onError: () => {}, delayMs: () => 0, sessionId: "chat-1", onTurnEnd: () => {}, live: () => signedIn });
+    await until(() => agent.streams.length === 1);
+    signedIn = false;
+    agent.streams[0]!.end();
+    await new Promise((done) => setTimeout(done, 50));
+    expect(paths).toHaveLength(1);
+  });
 });
 
 describe("a burst of inbox items", () => {

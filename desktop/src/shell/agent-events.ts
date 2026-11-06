@@ -132,15 +132,26 @@ const GONE: ReadonlySet<unknown> = new Set(["archived", "session_not_found"]);
  * included, whenever its stream closes. Only a chat archived or gone ends it, short of stop. Until
  * *started*, it has heard nothing of the chat: a turn that ends meanwhile it never tells.
  */
-export function followTurns(options: Omit<FollowOptions, "agentId"> & { sessionId: string; onTurnEnd(): void }): { stop(): void; started(): boolean } {
+export function followTurns(
+  options: Omit<FollowOptions, "agentId"> & { sessionId: string; onTurnEnd(): void; live?(): boolean },
+): { stop(): void; started(): boolean } {
   let after = -1;
+  // Followed only while *live* says so, as the sign-in it was started under: once that has ended it stops, and
+  // neither asks the agent nor tells a turn's end again.
+  const ended = (): boolean => {
+    const over = options.live?.() === false;
+    if (over) stop();
+    return over;
+  };
   // A chat the agent does not have as its stream opens, deleted or another organisation's, is gone too.
   const api: Api = async (path, init) => {
+    if (ended()) throw new Error("the sign-in this chat's turns were followed under has ended");
     const response = await options.api(path, init);
     if (response.status === 404) stop();
     return response;
   };
   const stop = follow({ ...options, api }, () => `/api/v1/sessions/${options.sessionId}/events?after=${after}&watch=1`, (event) => {
+    if (ended()) return;
     if (event.id !== null && /^\d+$/.test(event.id)) after = Number(event.id);
     if (event.type === "session.complete") options.onTurnEnd();
     else if (event.type === "session.done" && GONE.has(parsed(event.data)?.reason)) stop();

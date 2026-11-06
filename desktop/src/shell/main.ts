@@ -993,15 +993,15 @@ function startStack(agent: Agent, credential: LiveCredential): Promise<DeviceSta
         user: credential.userId,
         // The sidebar says while a thread's copy of its folder is being made: its first step waits for it.
         making: (event) => copying.heard(event),
-        // A chat host hears the end of its chat's turns on the app's sign-in at that moment; with nobody
-        // signed in the idle time lets the folder go. A turn's end missed before the stream opened leaves
-        // that idle time to let it go too.
+        // A chat host hears the end of its chat's turns on the app's sign-in at that moment, until that sign-in
+        // ends; with nobody signed in the idle time lets the folder go. A turn's end missed before the stream
+        // opened leaves that idle time to let it go too.
         following: (chatId, turnEnded) => {
           const session = signedIn;
           if (!session) return () => {};
           return followTurns({
             api: (path, init) => session.api(path, init), onError: report,
-            sessionId: chatId, onTurnEnd: turnEnded,
+            sessionId: chatId, onTurnEnd: turnEnded, live: () => signedIn === session,
           }).stop;
         },
       }),
