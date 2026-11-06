@@ -816,6 +816,45 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
     await until(() => sent(0, "stop") === 1, 1_000);
   });
 
+  it("keeps the folder through the next turn's operations once one began after a turn's end, and lets it go at that turn's end", async () => {
+    const { follows, following } = followed();
+    const executor = toolHosts({ idleMs: 60_000, following, spawnHost: fakeSpawn(readyOnly) });
+    const ops = () => fakes[0]?.sent.flatMap((message) => (message.type === "op" ? [message.id] : [])) ?? [];
+    const answer = (id: string) => fakes[0]?.say({ type: "result", id, outcome: { ok: id } });
+    const first = executor.run(resolve(), signal());
+    await until(() => ops().length === 1);
+    follows[0]?.turnEnded();
+    const second = executor.run(op("stat", { key: "/x" }), signal());
+    await until(() => ops().length === 2);
+    const [one, two] = ops() as [string, string];
+    answer(one);
+    expect(await first).toEqual({ ok: one });
+    expect(sent(0, "stop")).toBe(0);
+    answer(two);
+    expect(await second).toEqual({ ok: two });
+    // Answered with no turn's end since: only the idle time lets it go.
+    await new Promise((done) => setTimeout(done, 100));
+    expect(sent(0, "stop")).toBe(0);
+    follows[0]?.turnEnded();
+    await until(() => sent(0, "stop") === 1, 1_000);
+  });
+
+  it("goes the idle time after a background process started after a turn's end has ended, not at once", async () => {
+    const { follows, following } = followed();
+    const executor = toolHosts({ idleMs: 200, following, spawnHost: fakeSpawn(readyOnly) });
+    const running = executor.run(resolve(), signal());
+    await until(() => sent(0, "op") === 1);
+    follows[0]?.turnEnded();
+    executor.processes(ROOT_A, { handles: [], live: 1 });
+    const id = fakes[0]?.sent.find((message) => message.type === "op")?.id ?? "";
+    fakes[0]?.say({ type: "result", id, outcome: { ok: id } });
+    expect(await running).toEqual({ ok: id });
+    executor.processes(ROOT_A, { handles: [], live: 0 });
+    await new Promise((done) => setTimeout(done, 100));
+    expect(sent(0, "stop")).toBe(0);
+    await until(() => sent(0, "stop") === 1, 1_000);
+  });
+
   it("stops following a chat's turns once its host has gone, and a turn's end then touches no newer host", async () => {
     const { follows, following } = followed();
     const executor = toolHosts({ idleMs: 60_000, following, spawnHost: fakeSpawn(answering) });

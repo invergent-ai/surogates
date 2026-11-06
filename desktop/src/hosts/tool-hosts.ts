@@ -812,9 +812,9 @@ export class ToolHosts implements Executor {
     const host = this.hostFor(root, { folder: { path: binding.folder, dev: binding.dev, ino: binding.ino, boot: binding.boot } }, before);
     this.chats.set(host, root);
     // At a turn's end the chat lets its folder go once nothing of it runs, so another chat there need not wait out its
-    // idle time. One with a background process alive keeps the folder, and goes its idle time after they end.
+    // idle time. One with a background process alive keeps the folder, and the next turn's first operation takes it back.
     const unfollow = this.options.following?.(root, () => {
-      if (this.hosts.get(root) === host && !host.lives) host.yieldFolder();
+      if (this.hosts.get(root) === host) host.endTurn();
     });
     if (unfollow) void host.exited.then(unfollow);
     return host;
@@ -1079,6 +1079,9 @@ class Host {
   private putBackOk = false;
   // A landing waits for this host's folder: it lets it go as soon as nothing of it runs, not idleMs after.
   private yielding = false;
+  // Its chat's turn ended, and since then no operation of it began and no process of its root lived: it goes once
+  // nothing of it runs. Unlike a landing's yielding, the next turn's first operation, or a process, takes it back.
+  private turnEnded = false;
 
   constructor(
     private readonly process: HostProcess,
@@ -1214,6 +1217,13 @@ class Host {
     this.idle();
   }
 
+  /** Its chat's turn ended: it lets the folder go once nothing of it runs, unless a process of its root lives. */
+  endTurn(): void {
+    if (this.lives) return;
+    this.turnEnded = true;
+    this.idle();
+  }
+
   /**
    * *inner* while this host holds the folder, so the folder is not let go mid-way.
    * With *guard*: the hook guard's refusal first; "around" then, whatever the outcome,
@@ -1247,6 +1257,7 @@ class Host {
     if (!this.readied) return;
     this.handles = "gone" in change ? lostWith(this.handles) : change.handles;
     this.live = "gone" in change ? 0 : change.live;
+    if (this.live > 0) this.turnEnded = false;
     this.send({ type: "handles", handles: this.handles, live: this.live });
     this.idle();
   }
@@ -1264,6 +1275,7 @@ class Host {
   // Counted while it runs: a host with work is never idle.
   private async busy(work: () => Promise<Outcome>): Promise<Outcome> {
     this.running += 1;
+    this.turnEnded = false;
     clearTimeout(this.idleTimer);
     try {
       return this.answered(await work());
@@ -1297,7 +1309,7 @@ class Host {
     // No command or process of the root is left, so no connection waits on its prompts.
     this.prompts.abort();
     this.prompts = new AbortController();
-    if (this.yielding) {
+    if (this.yielding || this.turnEnded) {
       this.finish();
       return;
     }
