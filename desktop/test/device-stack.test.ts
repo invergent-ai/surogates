@@ -216,6 +216,38 @@ describe("one agent's device", () => {
     expect(waitingFrames().slice(3)).toEqual([{ type: "op_waiting", id: "w-1", reason: "folder" }]);
   });
 
+  it("tells the server a wait it was told of ended while the link was down, once the next link is welcomed", async () => {
+    server = new FakeLinkServer({ waits: true });
+    await start();
+    await server.until(() => statuses.includes("connected"));
+    const waitingFrames = () => server.received.filter((frame) => frame.type === "op_waiting");
+    tools.waiting("w-1", "folder");
+    tools.waiting("w-2", "folder");
+    await server.until(() => waitingFrames().length === 2);
+    const connected = statuses.length;
+    server.refusing = true;
+    server.drop();
+    await server.until(() => statuses.slice(connected).some((status) => status !== "connected"));
+    // Ended while no link is open: one never told, and one the server was told of.
+    tools.waiting("w-3", "folder");
+    tools.waiting("w-3", null);
+    tools.waiting("w-1", null);
+    server.refusing = false;
+    await server.until(() => server.hellos.length === 2);
+    await server.until(() => waitingFrames().length === 4);
+    await new Promise((done) => setTimeout(done, 100));
+    expect(waitingFrames().slice(2)).toEqual([
+      { type: "op_waiting", id: "w-1", reason: null },
+      { type: "op_waiting", id: "w-2", reason: "folder" },
+    ]);
+    // Told once: a link after that one is told only what still waits.
+    server.drop();
+    await server.until(() => server.hellos.length === 3);
+    await server.until(() => waitingFrames().length === 5);
+    await new Promise((done) => setTimeout(done, 100));
+    expect(waitingFrames().slice(4)).toEqual([{ type: "op_waiting", id: "w-2", reason: "folder" }]);
+  });
+
   it("tells a link whose server no longer takes waits nothing, though the link before it took them", async () => {
     server = new FakeLinkServer({ waits: true });
     await start();

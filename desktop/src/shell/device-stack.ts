@@ -166,12 +166,20 @@ function deviceOn(journal: OperationJournal, options: DeviceStackOptions, made: 
     if (now !== told) options.onWorking?.((told = now));
   };
   // The operations waiting for their folder now, and whether the server of the link now open said it takes the news.
+  // The operations a server was told wait, until it is told they stopped: one that stopped while no link took it is
+  // told so on the next that does, or the server would show it waiting while it runs.
   const waiting = new Map<string, "folder">();
+  const known = new Set<string>();
   let serverWaits = false;
+  const sendWaiting = (id: string, reason: "folder" | null): void => {
+    if (!serverWaits || !link.send(opWaiting(id, reason))) return;
+    if (reason === null) known.delete(id);
+    else known.add(id);
+  };
   const waitingTold = (id: string, reason: "folder" | null): void => {
     if (reason === null) waiting.delete(id);
     else waiting.set(id, reason);
-    if (serverWaits) link.send(opWaiting(id, reason));
+    sendWaiting(id, reason);
   };
   const tools = options.tools(journal.bindings, network, tell, waitingTold);
   made.tools = tools;
@@ -244,7 +252,8 @@ function deviceOn(journal: OperationJournal, options: DeviceStackOptions, made: 
         );
       }
       serverWaits = welcome.waits;
-      if (serverWaits) for (const [id, reason] of waiting) link.send(opWaiting(id, reason));
+      for (const id of known) if (!waiting.has(id)) sendWaiting(id, null);
+      for (const [id, reason] of waiting) sendWaiting(id, reason);
     },
   });
   link.start();
