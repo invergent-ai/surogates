@@ -795,13 +795,53 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
     return { follows, following };
   };
 
-  it("lets a chat's folder go as soon as its turn ends, not its idle time after", async () => {
+  it("keeps a chat's folder past its turn's end while no other chat waits for it, and goes its idle time after", async () => {
     const { follows, following } = followed();
-    const executor = toolHosts({ idleMs: 60_000, following, spawnHost: fakeSpawn(answering) });
+    const executor = toolHosts({ idleMs: 400, following, spawnHost: fakeSpawn(answering) });
     expect(await executor.run(resolve(), signal())).toMatchObject({ ok: expect.any(String) });
     expect(follows.map((follow) => follow.root)).toEqual([ROOT_A]);
     follows[0]?.turnEnded();
+    await new Promise((done) => setTimeout(done, 200));
+    expect(sent(0, "stop")).toBe(0);
     await until(() => sent(0, "stop") === 1, 1_000);
+  });
+
+  it("lets the folder go at once when another chat comes to wait for it after the turn ended, and that chat gets it", async () => {
+    folders[ROOT_B] = folders[ROOT_A] ?? "";
+    const { follows, following } = followed();
+    const executor = toolHosts({ idleMs: 60_000, following, spawnHost: fakeSpawn(answering) });
+    await executor.run(resolve(), signal());
+    follows[0]?.turnEnded();
+    await new Promise((done) => setTimeout(done, 100));
+    expect(sent(0, "stop")).toBe(0);
+    expect(await executor.run(resolveOf(ROOT_B), signal())).toMatchObject({ ok: expect.any(String) });
+    expect([fakes.length, sent(0, "stop"), sent(1, "op")]).toEqual([2, 1, 1]);
+  });
+
+  it("keeps the folder from a chat that comes to wait after the turn ended once an operation began since", async () => {
+    folders[ROOT_B] = folders[ROOT_A] ?? "";
+    const { follows, following } = followed();
+    const executor = toolHosts({ idleMs: 60_000, following, spawnHost: fakeSpawn(answering) });
+    await executor.run(resolve(), signal());
+    follows[0]?.turnEnded();
+    // The next turn began: its answer is under way, though nothing of it runs this moment.
+    await executor.run(resolve(), signal());
+    const second = executor.run(resolveOf(ROOT_B), signal());
+    expect(await pendingAfter(second, 200)).toBe(true);
+    expect(sent(0, "stop")).toBe(0);
+    follows[0]?.turnEnded();
+    expect(await second).toMatchObject({ ok: expect.any(String) });
+  });
+
+  it("keeps the folder from a chat that comes to wait after the turn ended while a background process of the chat lives", async () => {
+    folders[ROOT_B] = folders[ROOT_A] ?? "";
+    const { follows, following } = followed();
+    const executor = toolHosts({ idleMs: 60_000, folderWaitMs: 300, following, spawnHost: fakeSpawn(answering) });
+    await executor.run(resolve(), signal());
+    executor.processes(ROOT_A, { handles: [], live: 1 });
+    follows[0]?.turnEnded();
+    expect(await executor.run(resolveOf(ROOT_B), signal())).toEqual(WAITED_TOO_LONG);
+    expect([fakes.length, sent(0, "stop")]).toEqual([1, 0]);
   });
 
   it("keeps the folder past a turn's end while a background process of the chat lives, then goes after the idle time", async () => {
@@ -820,11 +860,13 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
     await until(() => sent(0, "stop") === 1, 1_000);
   });
 
-  it("lets the folder go once an operation still running at the turn's end has been answered", async () => {
+  it("lets the folder go to a waiting chat once an operation still running at the turn's end has been answered", async () => {
+    folders[ROOT_B] = folders[ROOT_A] ?? "";
     const { follows, following } = followed();
     const executor = toolHosts({ idleMs: 60_000, following, spawnHost: fakeSpawn(readyOnly) });
     const running = executor.run(resolve(), signal());
     await until(() => sent(0, "op") === 1);
+    void executor.run(resolveOf(ROOT_B), signal());
     follows[0]?.turnEnded();
     await new Promise((done) => setTimeout(done, 100));
     expect(sent(0, "stop")).toBe(0);
@@ -834,13 +876,15 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
     await until(() => sent(0, "stop") === 1, 1_000);
   });
 
-  it("keeps the folder through the next turn's operations once one began after a turn's end, and lets it go at that turn's end", async () => {
+  it("keeps the folder through the next turn's operations once one began after a turn's end, and lets it go to a waiting chat at that turn's end", async () => {
+    folders[ROOT_B] = folders[ROOT_A] ?? "";
     const { follows, following } = followed();
     const executor = toolHosts({ idleMs: 60_000, following, spawnHost: fakeSpawn(readyOnly) });
     const ops = () => fakes[0]?.sent.flatMap((message) => (message.type === "op" ? [message.id] : [])) ?? [];
     const answer = (id: string) => fakes[0]?.say({ type: "result", id, outcome: { ok: id } });
     const first = executor.run(resolve(), signal());
     await until(() => ops().length === 1);
+    void executor.run(resolveOf(ROOT_B), signal());
     follows[0]?.turnEnded();
     const second = executor.run(op("stat", { key: "/x" }), signal());
     await until(() => ops().length === 2);
@@ -1017,10 +1061,10 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
     expect(await pendingAfter(waiting, 100)).toBe(true);
     controller.abort();
     expect(await waiting).toEqual(CANCELLED);
+    // No chat waits any more: the first keeps the folder past its turn's end.
     follows[0]?.turnEnded();
-    await until(() => sent(0, "stop") === 1, 1_000);
     await new Promise((done) => setTimeout(done, 100));
-    expect(fakes).toHaveLength(1);
+    expect([fakes.length, sent(0, "stop")]).toEqual([1, 0]);
   });
 
   it("ends every wait at the quit, spawning nothing after", async () => {
@@ -1048,7 +1092,6 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
   });
 
   it("never has a chat wait on its own host, one still going included", async () => {
-    const { follows, following } = followed();
     let exited = 0;
     // Answers each operation a moment after it is sent, and exits a while after it is stopped.
     const slowly = (host: FakeHost, message: ToHost) => {
@@ -1056,12 +1099,11 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
       if (message.type === "op") setTimeout(() => host.say({ type: "result", id: message.id, outcome: { ok: message.id } }), 50);
       if (message.type === "stop") setTimeout(() => (exited += 1, host.exit()), 200);
     };
-    const executor = toolHosts({ idleMs: 60_000, following, spawnHost: fakeSpawn(slowly) });
+    const executor = toolHosts({ idleMs: 100, spawnHost: fakeSpawn(slowly) });
     expect(await Promise.all([executor.run(resolve(), signal()), executor.run(resolve(), signal())])).toEqual([
       { ok: expect.any(String) }, { ok: expect.any(String) },
     ]);
     expect(fakes).toHaveLength(1);
-    follows[0]?.turnEnded();
     await until(() => sent(0, "stop") === 1, 1_000);
     expect(await executor.run(resolve(), signal())).toMatchObject({ ok: expect.any(String) });
     expect([fakes.length, exited]).toEqual([2, 0]);

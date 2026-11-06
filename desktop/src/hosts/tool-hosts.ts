@@ -343,8 +343,9 @@ export class ToolHosts implements Executor {
   // A chat's wait for the folder another chat's host is on, by its root: the root's operations that come meanwhile wait
   // for that one.
   private readonly queued = new Map<string, Starting>();
-  // The chats' waits for each folder, by its identity, in the order they began: each a token of its own.
-  private readonly queues = new Map<string, symbol[]>();
+  // The chats' waits for each folder, by its identity, in the order they began: each a record of its own, saying whether
+  // anything still waits for it.
+  private readonly queues = new Map<string, Array<{ wanted: () => boolean }>>();
   // Settled each time something a wait looks at may have changed, and made anew.
   private wake = Promise.withResolvers<void>();
   // A deleted thread's binding, by its root, while the landing's host it kept is there: the landing's steps still reach it.
@@ -694,7 +695,13 @@ export class ToolHosts implements Executor {
       if (this.queued.has(root) || this.chatOn(binding, root) || (this.queues.get(key)?.length ?? 0) > 0) {
         this.options.waiting?.(operationId, "folder");
         try {
-          return await this.once(this.queued, root, signal, (wanted) => this.inTurn(root, binding, key, wanted, before));
+          const turn = this.once(this.queued, root, signal, (wanted) => this.inTurn(root, binding, key, wanted, before));
+          // Once the wait is counted: a chat whose turn already ended there, with nothing of it running and no process
+          // of it alive, lets the folder go at once.
+          for (const [host, of] of this.chats) {
+            if (of !== root && host.works.folder.dev === binding.dev && host.works.folder.ino === binding.ino) host.waitedFor();
+          }
+          return await turn;
         } finally {
           this.options.waiting?.(operationId, null);
         }
@@ -741,7 +748,7 @@ export class ToolHosts implements Executor {
   // other chat's host is on it; for FOLDER_WAIT_MS at most. Or why it has none: the app is quitting, nothing waits for it
   // any more, or it waited too long.
   private async inTurn(root: string, binding: BoundFolder, key: string, wanted: () => boolean, before?: Promise<void>): Promise<Host | Outcome> {
-    const turn = Symbol(root);
+    const turn = { wanted };
     const queue = this.queues.get(key) ?? [];
     this.queues.set(key, queue);
     queue.push(turn);
@@ -880,8 +887,11 @@ export class ToolHosts implements Executor {
   private chatHostFor(root: string, binding: BoundFolder, before?: Promise<void>): Host {
     const host = this.hostFor(root, { folder: { path: binding.folder, dev: binding.dev, ino: binding.ino, boot: binding.boot } }, before);
     this.chats.set(host, root);
-    // At a turn's end the chat lets its folder go once nothing of it runs, so another chat there need not wait out its
-    // idle time. One with a background process alive keeps the folder, and the next turn's first operation takes it back.
+    const key = `${binding.dev}-${binding.ino}`;
+    host.othersWait = () => this.queues.get(key)?.some((turn) => turn.wanted()) ?? false;
+    // At a turn's end the chat lets its folder go once nothing of it runs where another chat waits for it, so that one
+    // need not wait out its idle time; with none waiting it keeps the folder for its idle time. One with a background
+    // process alive keeps the folder, and the next turn's first operation takes it back.
     const unfollow = this.options.following?.(root, () => {
       if (this.hosts.get(root) === host) host.endTurn();
     });
@@ -1150,8 +1160,11 @@ class Host {
   // A landing waits for this host's folder: it lets it go as soon as nothing of it runs, not idleMs after.
   private yielding = false;
   // Its chat's turn ended, and since then no operation of it began and no process of its root lived: it goes once
-  // nothing of it runs. Unlike a landing's yielding, the next turn's first operation, or a process, takes it back.
+  // nothing of it runs and another chat waits for its folder (othersWait). Unlike a landing's yielding, the next turn's
+  // first operation, or a process, takes it back.
   private turnEnded = false;
+  // Whether another chat waits for its folder: a chat's own host is told by its hosts.
+  othersWait: () => boolean = () => false;
 
   constructor(
     private readonly process: HostProcess,
@@ -1287,11 +1300,16 @@ class Host {
     this.idle();
   }
 
-  /** Its chat's turn ended: it lets the folder go once nothing of it runs, unless a process of its root lives. */
+  /** Its chat's turn ended: it lets the folder go to a waiting chat once nothing of it runs, unless a process of its root lives. */
   endTurn(): void {
     if (this.lives) return;
     this.turnEnded = true;
     this.idle();
+  }
+
+  /** Another chat came to wait for its folder: it goes at once where its turn ended and nothing of it runs. */
+  waitedFor(): void {
+    if (this.turnEnded) this.idle();
   }
 
   /**
@@ -1379,7 +1397,7 @@ class Host {
     // No command or process of the root is left, so no connection waits on its prompts.
     this.prompts.abort();
     this.prompts = new AbortController();
-    if (this.yielding || this.turnEnded) {
+    if (this.yielding || (this.turnEnded && this.othersWait())) {
       this.finish();
       return;
     }
