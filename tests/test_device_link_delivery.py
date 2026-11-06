@@ -31,12 +31,16 @@ class FakeOperations:
     """The journal's calls the link makes, over a list of open operations."""
 
     def __init__(self, *operations: OpenOperation, delay: float = 0.0) -> None:
+        # The device the open operations are of: the link's, which make_link names.
+        self.device_id: uuid.UUID | None = None
         self.open = list(operations)
         self.delay = delay
         self.statuses: list[str] = []
         self.closed: set[uuid.UUID] = set()  # by a cancellation or a revocation
         self.waits: list[tuple[uuid.UUID, str | None]] = []
         self.forgotten: set[uuid.UUID] = set()
+        # Open operations of other devices, by their ids, with their device's.
+        self.elsewhere: dict[uuid.UUID, uuid.UUID] = {}
 
     async def closed_among(self, device_id, operation_ids):
         return [i for i in operation_ids if i in self.closed]
@@ -45,7 +49,9 @@ class FakeOperations:
         self.waits.append((operation_id, reason))
 
     async def is_open(self, device_id, operation_id):
-        return any(op.id == operation_id for op in self.open)
+        if device_id == self.device_id:
+            return any(op.id == operation_id for op in self.open)
+        return self.elsewhere.get(operation_id) == device_id
 
     async def forget_waits(self, operation_ids):
         self.forgotten = set(operation_ids)
@@ -82,9 +88,11 @@ class FakePresence:
 
 def make_link(operations: FakeOperations) -> tuple[_Link, FakeSocket]:
     socket = FakeSocket()
+    device = SimpleNamespace(id=uuid.uuid4(), credential_generation=1)
+    operations.device_id = device.id
     link = _Link(
         socket,
-        device=SimpleNamespace(id=uuid.uuid4(), credential_generation=1),
+        device=device,
         holder="holder",
         presence=FakePresence(),
         operations=operations,
@@ -181,6 +189,17 @@ async def test_a_wait_before_redelivery_is_taken_for_an_open_operation_of_this_d
     link, _ = make_link(operations)  # nothing delivered on this link yet
     await link.waiting(waiting(op.id, "folder"))
     await link.waiting(waiting(uuid.uuid4(), "folder"))  # not open for this device
+    assert operations.waits == [(op.id, "folder")]
+
+
+async def test_a_wait_for_another_devices_open_operation_changes_nothing():
+    op = open_operation(1)
+    operations = FakeOperations(op)
+    elsewhere = open_operation(2)
+    operations.elsewhere[elsewhere.id] = uuid.uuid4()
+    link, _ = make_link(operations)
+    await link.waiting(waiting(elsewhere.id, "folder"))
+    await link.waiting(waiting(op.id, "folder"))
     assert operations.waits == [(op.id, "folder")]
 
 
