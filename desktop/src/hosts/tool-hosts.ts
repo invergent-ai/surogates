@@ -306,6 +306,9 @@ export interface ToolHostsOptions {
   changed?(): void;
   // Told as what a landing cut short in a folder is being put back, and as that ends, with what it came to.
   recovered?(recovery: Recovery): void;
+  // Asked once for each chat's own host as it is made: *turnEnded* is called each time a turn of the chat ends, and the
+  // stop it gives once that host has exited.
+  following?(root: string, turnEnded: () => void): () => void;
 }
 
 export class ToolHosts implements Executor {
@@ -808,6 +811,12 @@ export class ToolHosts implements Executor {
   private chatHostFor(root: string, binding: BoundFolder, before?: Promise<void>): Host {
     const host = this.hostFor(root, { folder: { path: binding.folder, dev: binding.dev, ino: binding.ino, boot: binding.boot } }, before);
     this.chats.set(host, root);
+    // At a turn's end the chat lets its folder go once nothing of it runs, so another chat there need not wait out its
+    // idle time. One with a background process alive keeps the folder, and goes its idle time after they end.
+    const unfollow = this.options.following?.(root, () => {
+      if (this.hosts.get(root) === host && !host.lives) host.yieldFolder();
+    });
+    if (unfollow) void host.exited.then(unfollow);
     return host;
   }
 

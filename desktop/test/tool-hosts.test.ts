@@ -766,6 +766,70 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
     await until(() => sent(0, "stop") === 1, 1_000);
   });
 
+  // A stand-in for following each chat's turns: each host's following, as it was asked, and how often it was stopped.
+  const followed = () => {
+    const follows: Array<{ root: string; turnEnded: () => void; stopped: number }> = [];
+    const following = (root: string, turnEnded: () => void) => {
+      const follow = { root, turnEnded, stopped: 0 };
+      follows.push(follow);
+      return () => void (follow.stopped += 1);
+    };
+    return { follows, following };
+  };
+
+  it("lets a chat's folder go as soon as its turn ends, not its idle time after", async () => {
+    const { follows, following } = followed();
+    const executor = toolHosts({ idleMs: 60_000, following, spawnHost: fakeSpawn(answering) });
+    expect(await executor.run(resolve(), signal())).toMatchObject({ ok: expect.any(String) });
+    expect(follows.map((follow) => follow.root)).toEqual([ROOT_A]);
+    follows[0]?.turnEnded();
+    await until(() => sent(0, "stop") === 1, 1_000);
+  });
+
+  it("keeps the folder past a turn's end while a background process of the chat lives, then goes after the idle time", async () => {
+    const { follows, following } = followed();
+    const executor = toolHosts({ idleMs: 200, following, spawnHost: fakeSpawn(answering) });
+    await executor.run(resolve(), signal());
+    executor.processes(ROOT_A, { handles: [], live: 1 });
+    expect(follows).toHaveLength(1);
+    follows[0]?.turnEnded();
+    await new Promise((done) => setTimeout(done, 400));
+    expect(sent(0, "stop")).toBe(0);
+    // The turn's end is not held over to the processes' end: the idle time runs from there.
+    executor.processes(ROOT_A, { handles: [], live: 0 });
+    await new Promise((done) => setTimeout(done, 100));
+    expect(sent(0, "stop")).toBe(0);
+    await until(() => sent(0, "stop") === 1, 1_000);
+  });
+
+  it("lets the folder go once an operation still running at the turn's end has been answered", async () => {
+    const { follows, following } = followed();
+    const executor = toolHosts({ idleMs: 60_000, following, spawnHost: fakeSpawn(readyOnly) });
+    const running = executor.run(resolve(), signal());
+    await until(() => sent(0, "op") === 1);
+    follows[0]?.turnEnded();
+    await new Promise((done) => setTimeout(done, 100));
+    expect(sent(0, "stop")).toBe(0);
+    const id = fakes[0]?.sent.find((message) => message.type === "op")?.id ?? "";
+    fakes[0]?.say({ type: "result", id, outcome: { ok: id } });
+    expect(await running).toEqual({ ok: id });
+    await until(() => sent(0, "stop") === 1, 1_000);
+  });
+
+  it("stops following a chat's turns once its host has gone, and a turn's end then touches no newer host", async () => {
+    const { follows, following } = followed();
+    const executor = toolHosts({ idleMs: 60_000, following, spawnHost: fakeSpawn(answering) });
+    await executor.run(resolve(), signal());
+    expect(follows[0]?.stopped).toBe(0);
+    fakes[0]?.exit();
+    await until(() => follows[0]?.stopped === 1);
+    expect(await executor.run(resolve(), signal())).toMatchObject({ ok: expect.any(String) });
+    expect(fakes).toHaveLength(2);
+    follows[0]?.turnEnded();
+    await new Promise((done) => setTimeout(done, 100));
+    expect([sent(1, "stop"), follows[0]?.stopped, follows[1]?.stopped]).toEqual([0, 1, 0]);
+  });
+
   it("stops a host that has had nothing to do once it is ready, whatever it heard of its root's processes elsewhere before", async () => {
     const executor = toolHosts({ idleMs: 50, spawnHost: fakeSpawn((host, message) => {
       onStop(host, message);
@@ -886,6 +950,14 @@ describe("a root bound to a thread's copy of a folder", { timeout: 5_000 }, () =
     answer = handed;
     // The app's data, where a folder's landings keep what they replace.
     mkdirSync(join(base, "data"));
+  });
+
+  it("follows no thread's host on its copy", async () => {
+    const asked: string[] = [];
+    const executor = threads({ following: (root) => (asked.push(root), () => {}) });
+    expect(await executor.run(op("resolve", { path: "" }), signal())).toEqual({ ok: expect.any(String) });
+    expect(fakes).toHaveLength(1);
+    expect(asked).toEqual([]);
   });
 
   it("starts its host on its copy once that is made, named by the folder's path, and two threads on one folder each have their own", async () => {
