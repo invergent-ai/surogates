@@ -27,6 +27,7 @@ import { asItLies } from "./as-it-lies.js";
 
 const ROOT_A = "11111111-1111-4111-8111-111111111111";
 const ROOT_B = "22222222-2222-4222-8222-222222222222";
+const ROOT_C = "33333333-3333-4333-8333-333333333333";
 const SLEEP = "37.25";
 // What a search asks for when it is to stay running: only then does the fake rg sleep.
 const NEVER = "never-answers";
@@ -1048,6 +1049,81 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
     expect(await waiting).toEqual({ error: { type: "unavailable", message: "This computer could not open the folder's sandbox: no host to be had" } });
     expect(await executor.run(resolveOf(ROOT_B), signal())).toMatchObject({ ok: expect.any(String) });
     expect(calls).toBe(3);
+  });
+
+  const sameFolder = () => {
+    folders[ROOT_B] = folders[ROOT_A] ?? "";
+    folders[ROOT_C] = folders[ROOT_A] ?? "";
+  };
+  // The chats whose hosts were started, in order.
+  const startedFor = (follows: Array<{ root: string }>) => follows.map((follow) => follow.root);
+
+  it("gives the folder to waiting chats in the order they asked", async () => {
+    sameFolder();
+    const { follows, following } = followed();
+    const executor = toolHosts({ idleMs: 60_000, following, spawnHost: fakeSpawn(answering) });
+    await executor.run(resolve(), signal());
+    const second = executor.run(resolveOf(ROOT_B), signal());
+    await new Promise((done) => setTimeout(done, 50));
+    const third = executor.run(resolveOf(ROOT_C), signal());
+    expect(await pendingAfter(Promise.race([second, third]), 100)).toBe(true);
+    follows[0]?.turnEnded();
+    expect(await second).toMatchObject({ ok: expect.any(String) });
+    expect(await pendingAfter(third, 200)).toBe(true);
+    expect(startedFor(follows)).toEqual([ROOT_A, ROOT_B]);
+    follows[1]?.turnEnded();
+    expect(await third).toMatchObject({ ok: expect.any(String) });
+    expect(startedFor(follows)).toEqual([ROOT_A, ROOT_B, ROOT_C]);
+  });
+
+  it("keeps a chat that asks again after its turn behind the chats already waiting", async () => {
+    sameFolder();
+    const { follows, following } = followed();
+    const executor = toolHosts({ idleMs: 60_000, following, spawnHost: fakeSpawn(answering) });
+    await executor.run(resolve(), signal());
+    const second = executor.run(resolveOf(ROOT_B), signal());
+    expect(await pendingAfter(second, 100)).toBe(true);
+    follows[0]?.turnEnded();
+    const again = executor.run(resolve(), signal());
+    expect(await second).toMatchObject({ ok: expect.any(String) });
+    expect(await pendingAfter(again, 200)).toBe(true);
+    expect(startedFor(follows)).toEqual([ROOT_A, ROOT_B]);
+    follows[1]?.turnEnded();
+    expect(await again).toMatchObject({ ok: expect.any(String) });
+    expect(startedFor(follows)).toEqual([ROOT_A, ROOT_B, ROOT_A]);
+  });
+
+  it("moves the chats behind a waiter that was cancelled up", async () => {
+    sameFolder();
+    const { follows, following } = followed();
+    const executor = toolHosts({ idleMs: 60_000, following, spawnHost: fakeSpawn(answering) });
+    await executor.run(resolve(), signal());
+    const controller = new AbortController();
+    const second = executor.run(resolveOf(ROOT_B), controller.signal);
+    await new Promise((done) => setTimeout(done, 50));
+    const third = executor.run(resolveOf(ROOT_C), signal());
+    expect(await pendingAfter(third, 100)).toBe(true);
+    controller.abort();
+    expect(await second).toEqual(CANCELLED);
+    follows[0]?.turnEnded();
+    expect(await third).toMatchObject({ ok: expect.any(String) });
+    expect(startedFor(follows)).toEqual([ROOT_A, ROOT_C]);
+  });
+
+  it("lets a waiter past the limit go without holding up the others", async () => {
+    sameFolder();
+    const { follows, following } = followed();
+    const executor = toolHosts({ idleMs: 60_000, folderWaitMs: 400, following, spawnHost: fakeSpawn(answering) });
+    await executor.run(resolve(), signal());
+    const second = executor.run(resolveOf(ROOT_B), signal());
+    await new Promise((done) => setTimeout(done, 250));
+    const third = executor.run(resolveOf(ROOT_C), signal());
+    // The second chat's limit passes while the third, asked later, still waits.
+    expect(await second).toEqual(WAITED_TOO_LONG);
+    expect(await pendingAfter(third, 20)).toBe(true);
+    follows[0]?.turnEnded();
+    expect(await third).toMatchObject({ ok: expect.any(String) });
+    expect(startedFor(follows)).toEqual([ROOT_A, ROOT_C]);
   });
 
   it("keeps today's short wait behind a holder that is no chat of this app's", async () => {
