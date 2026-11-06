@@ -707,10 +707,16 @@ async def serve_device_link(
         with contextlib.suppress(Exception):
             await websocket.close(code=1011, reason="server error")
     finally:
-        await link.forget_waits()
+        # Decided before the release: a link a newer one superseded leaves the
+        # waits to that one, which the app told them again.
+        held = False
         if claimed:
             with contextlib.suppress(Exception):
+                held = await _bounded(presence.holds(device.id, holder))
+            with contextlib.suppress(Exception):
                 await _bounded(presence.release(device.id, holder))
+        if held:
+            await link.forget_waits()
         if pubsub is not None:
             with contextlib.suppress(Exception):
                 await _bounded(pubsub.aclose())

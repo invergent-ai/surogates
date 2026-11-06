@@ -612,6 +612,63 @@ async def test_a_new_connection_supersedes_the_old_one(api, link_url):
             assert await receive(new) == {"type": "pong"}
 
 
+async def a_folder_wait_recorded_over(ws, ops, root, device_id, session_factory, redis_client, monkeypatch):
+    """An operation of the device, open, with the folder wait the app said of it on *ws* recorded."""
+    monkeypatch.setattr(operations_module, "WAIT_GRACE_S", 0.1)
+    request = request_for(device_id, root)
+    task = asyncio.create_task(ops.run(request))
+    for _ in range(60):
+        found = [o for o in await ops.pending(device_id, 1) if o.invocation_id == request.invocation_id]
+        if found:
+            break
+        await asyncio.sleep(0.05)
+    [op] = found
+    await send(ws, {"type": "op_waiting", "id": str(op.id), "reason": "folder"})
+    key = operations_module.waiting_key(op.id)
+
+    async def recorded() -> bool:
+        return await redis_client.get(key) is not None
+
+    await eventually(recorded)
+    return task, key
+
+
+async def test_a_link_that_ends_forgets_the_folder_waits_it_recorded(
+    api, link_url, session_factory, redis_client, monkeypatch,
+):
+    issued, root = await bound_device(api)
+    ops = DeviceOperations(session_factory, redis_client)
+    async with linked(link_url, issued["token"]) as (ws, _):
+        task, key = await a_folder_wait_recorded_over(
+            ws, ops, root, UUID(issued["id"]), session_factory, redis_client, monkeypatch,
+        )
+    try:
+        async def forgotten() -> bool:
+            return await redis_client.get(key) is None
+
+        await eventually(forgotten)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_a_superseded_link_leaves_the_folder_waits_to_the_link_that_superseded_it(
+    api, link_url, session_factory, redis_client, monkeypatch,
+):
+    issued, root = await bound_device(api)
+    ops = DeviceOperations(session_factory, redis_client)
+    async with linked(link_url, issued["token"]) as (old, _):
+        task, key = await a_folder_wait_recorded_over(
+            old, ops, root, UUID(issued["id"]), session_factory, redis_client, monkeypatch,
+        )
+        async with linked(link_url, issued["token"]) as (new, _):
+            assert await close_code(old) == 4409
+            await asyncio.sleep(0.3)  # the old link's cleanup has run
+            assert await redis_client.get(key) is not None
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+
 async def test_two_connections_opened_together_leave_exactly_one(api, link_url):
     issued = await register(api)
 
