@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { type Api, Burst, followChat, followInbox, type InboxItem } from "../src/shell/agent-events.js";
+import { type Api, Burst, followChat, followInbox, followTurns, type InboxItem } from "../src/shell/agent-events.js";
 
 // The agent's routes as the app reads them: each stream opened is kept, for the test to send on or end.
 class FakeAgent {
@@ -254,6 +254,25 @@ describe("the chat the window shows, followed", () => {
     followChat({ api: agent.api, agentId: "a", onError: (error) => errors.push(String(error)), delayMs: () => 0, sessionId: CHAT, onTurnEnd: () => {} });
     await settle();
     expect([agent.streams.length, errors]).toEqual([0, []]);
+  });
+});
+
+describe("a chat's turns, followed", () => {
+  it("tells each turn's end of a chat at once, asking nothing more of the agent", async () => {
+    const agent = new FakeAgent();
+    const paths: string[] = [];
+    const api: Api = (path, init) => {
+      paths.push(path);
+      return agent.api(path, init);
+    };
+    let ended = 0;
+    const { stop } = followTurns({ api, agentId: "a", onError: () => {}, delayMs: () => 0, sessionId: "chat-1", onTurnEnd: () => ended++ });
+    await until(() => agent.streams.length === 1);
+    agent.streams[0]!.send("id: 3\r\nevent: session.complete\r\ndata: {}\r\n\r\n");
+    await until(() => ended === 1);
+    stop();
+    expect(paths).toEqual([expect.stringMatching(/^\/api\/v1\/sessions\/chat-1\/events\?/)]);
+    expect(agent.streams[0]!.signal.aborted).toBe(true);
   });
 });
 

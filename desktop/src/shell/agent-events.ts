@@ -127,20 +127,13 @@ export async function titleOf(api: Api, agentId: string, sessionId: string): Pro
 const GONE: ReadonlySet<unknown> = new Set(["archived", "session_not_found"]);
 
 /**
- * Follow chat *sessionId* across its turns (watch=1): *onTurnEnd* hears the chat's title each time one
- * of its turns ends. It starts at the chat's newest event, and takes up after the last event it heard,
- * stream.start's included, whenever its stream closes. Only a chat archived or gone ends it, short of
- * stop. Until *started*, it has heard nothing of the chat: a turn that ends meanwhile it never tells.
+ * Follow chat *sessionId* across its turns (watch=1): *onTurnEnd* is called each time one of its turns
+ * ends. It starts at the chat's newest event, and takes up after the last event it heard, stream.start's
+ * included, whenever its stream closes. Only a chat archived or gone ends it, short of stop. Until
+ * *started*, it has heard nothing of the chat: a turn that ends meanwhile it never tells.
  */
-export function followChat(options: FollowOptions & { sessionId: string; onTurnEnd(title: string): void }): { stop(): void; started(): boolean } {
+export function followTurns(options: FollowOptions & { sessionId: string; onTurnEnd(): void }): { stop(): void; started(): boolean } {
   let after = -1;
-  const told = async (): Promise<void> => {
-    try {
-      options.onTurnEnd(await titleOf(options.api, options.agentId, options.sessionId));
-    } catch (error) {
-      options.onError(error);
-    }
-  };
   // A chat the agent does not have as its stream opens, deleted or another organisation's, is gone too.
   const api: Api = async (path, init) => {
     const response = await options.api(path, init);
@@ -149,10 +142,24 @@ export function followChat(options: FollowOptions & { sessionId: string; onTurnE
   };
   const stop = follow({ ...options, api }, () => `/api/v1/sessions/${options.sessionId}/events?after=${after}&watch=1`, (event) => {
     if (event.id !== null && /^\d+$/.test(event.id)) after = Number(event.id);
-    if (event.type === "session.complete") void told();
+    if (event.type === "session.complete") options.onTurnEnd();
     else if (event.type === "session.done" && GONE.has(parsed(event.data)?.reason)) stop();
   });
   return { stop, started: () => after >= 0 };
+}
+
+/** Chat *sessionId* followed across its turns: *onTurnEnd* hears the chat's title each time one ends. */
+export function followChat(options: FollowOptions & { sessionId: string; onTurnEnd(title: string): void }): { stop(): void; started(): boolean } {
+  return followTurns({
+    ...options,
+    onTurnEnd: async () => {
+      try {
+        options.onTurnEnd(await titleOf(options.api, options.agentId, options.sessionId));
+      } catch (error) {
+        options.onError(error);
+      }
+    },
+  });
 }
 
 // More than this many items close together are told as one notice: a night asleep, or an agent's own burst.

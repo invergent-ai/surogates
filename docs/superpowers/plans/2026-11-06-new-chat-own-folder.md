@@ -16,7 +16,7 @@
 - [x] Task 2: The tool hosts know which chat's host is on a folder
 - [x] Task 3: The sheet warns about a folder in use, with New folder and Browse…
 - [x] Task 4: A chat's host lets its folder go at its turn's end
-- [ ] Task 5: The app follows each chat host's turns
+- [x] Task 5: The app follows each chat host's turns
 - [ ] Task 6: A chat waits for another chat's folder, up to 10 minutes
 - [ ] Task 7: Several waiting chats get the folder in the order they asked
 - [ ] Task 8: The desktop tells the server an operation waits for the folder

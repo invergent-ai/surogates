@@ -39,7 +39,7 @@ import { type FromManager, MANAGER, type ManagerProcess, REPO_IMAGE, type ToMana
 import { type Delivery, ImageDelivery, imageArch, installBase, readManifest } from "../vm/image.js";
 import type { Boot } from "../vm/manager.js";
 import { openAbout } from "./about.js";
-import { BURST, Burst, followChat, followInbox, type InboxItem, titleOf } from "./agent-events.js";
+import { BURST, Burst, followChat, followTurns, followInbox, type InboxItem, titleOf } from "./agent-events.js";
 import { type Agent, AgentStore, connectAgent, describeAgent, type Get, linksFor, linkUrl, partitionFor, readAgent } from "./agents.js";
 import { AppearanceStore, Theme } from "./appearance.js";
 import { nameTheApp, quitAsked } from "./app-identity.js";
@@ -993,6 +993,17 @@ function startStack(agent: Agent, credential: LiveCredential): Promise<DeviceSta
         user: credential.userId,
         // The sidebar says while a thread's copy of its folder is being made: its first step waits for it.
         making: (event) => copying.heard(event),
+        // A chat host hears the end of its chat's turns on the app's sign-in at that moment; with nobody
+        // signed in the idle time lets the folder go. A turn's end missed before the stream opened leaves
+        // that idle time to let it go too.
+        following: (chatId, turnEnded) => {
+          const session = signedIn;
+          if (!session) return () => {};
+          return followTurns({
+            api: (path, init) => session.api(path, init), agentId: agents.get()?.agentId ?? "", onError: report,
+            sessionId: chatId, onTurnEnd: turnEnded,
+          }).stop;
+        },
       }),
       browser: new BrowserClient(utilityBrowser(profilesOf(root, credential))),
       staging: browserTemp(profilesOf(root, credential)),
