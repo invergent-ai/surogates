@@ -8,7 +8,11 @@ import { AppShell } from "@/components/app-shell";
 import { SessionSidebar } from "@/components/navbar";
 import { TransparencyBanner } from "@/components/transparency-banner";
 import { useAttention } from "@/hooks/use-attention";
-import { type DesktopDeviceState, getDesktop } from "@/lib/desktop-bridge";
+import {
+  type DesktopDeviceState,
+  type DesktopFolderChoice,
+  getDesktop,
+} from "@/lib/desktop-bridge";
 import {
   type HandedMessage,
   PRE_SESSION_KEY,
@@ -146,8 +150,13 @@ export function ChatPage() {
   // computer may have been added, or its access ended, meanwhile. The chat itself goes where the
   // desktop says when it is sent.
   const [device, setDevice] = useState<DesktopDeviceState | null>(null);
-  const [folderChoice, setFolderChoice] = useState<"last" | "pick">("last");
+  // A desktop built before new folders have no such choice: the page looks first.
+  const menu = getDesktop()?.offersNewFolder === true;
+  const firstChoice: DesktopFolderChoice = menu ? "new" : "last";
+  const [folderChoice, setFolderChoice] =
+    useState<DesktopFolderChoice>(firstChoice);
   useEffect(() => {
+    setFolderChoice(firstChoice);
     const desktop = getDesktop();
     if (!desktop) {
       return;
@@ -187,6 +196,7 @@ export function ChatPage() {
     device,
     { desktopSessions, multiSession },
     folderChoice,
+    menu,
   );
   // What the composer shows, for the chat adapter to read when a message is sent: the adapter
   // stays the same, since the SDK clears a chat that has no session yet whenever its adapter changes.
@@ -422,6 +432,7 @@ export function ChatPage() {
                   <NewChatPlace
                     place={{ local: place.local, text: place.text }}
                     choice={folderChoice}
+                    menu={menu}
                     onChoice={setFolderChoice}
                   />
                 ) : undefined

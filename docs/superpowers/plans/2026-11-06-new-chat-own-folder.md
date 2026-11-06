@@ -22,8 +22,8 @@
 - [x] Task 8: The desktop tells the server an operation waits for the folder
 - [x] Task 9: The server's link takes `op_waiting`
 - [x] Task 10: The worker says `device.waiting` with reason `folder`
-- [ ] Task 11: The chat SDK shows the folder wait (ui-kit repo)
-- [ ] Task 12: The page's folder choice, and older desktops
+- [x] Task 11: The chat SDK shows the folder wait (ui-kit repo)
+- [x] Task 12: The page's folder choice, and older desktops
 - [ ] Task 13: The folder menu under the composer
 - [ ] Task 14: The web takes the SDK that shows the folder wait
 

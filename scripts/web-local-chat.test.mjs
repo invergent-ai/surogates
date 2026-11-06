@@ -5,7 +5,7 @@ import { test } from "node:test";
 
 import {
   AGENT_GOES_ON, actOnBrowser, BUSY_WAITS_MS, browserPane, browserPanes, browserRelease, computerBrowser, createChat, desktopSessionsOf, folderCalls, handedNow,
-  localChatOf, NO_FOLDER, newChatPlace, PRE_SESSION_KEY, saidBy, saidOfHandBack, switchMode, WRITE_TO_THE_AGENT,
+  FOLDER_CHOICES, FOLDER_NOTE, localChatOf, NO_FOLDER, newChatPlace, PRE_SESSION_KEY, saidBy, saidOfHandBack, switchMode, WRITE_TO_THE_AGENT,
 } from "../web/src/lib/local-chat.ts";
 
 const PREPARED = { folder: "/home/flavius/notes", mode: "ask", nonce: "n".repeat(43), token: "t".repeat(43) };
@@ -74,7 +74,7 @@ test("confirms the folder on this computer, makes the chat with it, then binds i
 test("makes the first chat after this computer was added in its folder, though the line under the composer was drawn before", async () => {
   // A fresh install: the page drew the line before the app had added this computer to the agent.
   const desktop = bridge({ device: NONE });
-  assert.equal(newChatPlace(await desktop.getDevice(), AGENT, "last").local, false);
+  assert.equal(newChatPlace(await desktop.getDevice(), AGENT, "last", false).local, false);
   desktop.device = THIS_COMPUTER;
   const server = agent();
   await createChat(desktop, AGENT, "last", SHOWN_CLOUD, server);
@@ -106,7 +106,7 @@ test("makes no chat in the cloud where the line under the composer said this com
     });
     assert.deepEqual([server.made, desktop.calls], [[], [["getDevice"]]]);
     // Sent again, under the line that now says the cloud: made there.
-    await createChat(desktop, AGENT, "last", newChatPlace(device, AGENT, "last"), server);
+    await createChat(desktop, AGENT, "last", newChatPlace(device, AGENT, "last", false), server);
     assert.deepEqual(server.made, [undefined]);
   }
 });
@@ -214,8 +214,32 @@ test("says where a new chat works: on a folder of this computer, or in the cloud
     [NONE, { desktopSessions: true, multiSession: false }, "last", { local: false, text: null }],
   ];
   for (const [device, capabilities, choice, place] of cases) {
-    assert.deepEqual(newChatPlace(device, capabilities, choice), place);
+    assert.deepEqual(newChatPlace(device, capabilities, choice, false), place);
   }
+});
+
+test("offers a new folder, the last folder or one chosen when sent, in that order, with their words", () => {
+  assert.equal(FOLDER_NOTE, "You confirm the folder after your first message.");
+  assert.deepEqual(FOLDER_CHOICES, [
+    { value: "new", label: "A new folder", hint: "Made for this chat", shown: "a new folder" },
+    { value: "last", label: "The last folder", hint: "Where your last chat worked", shown: "the last folder" },
+    { value: "pick", label: "Choose a folder…", hint: "The folder window opens after you send", shown: "a folder you choose" },
+  ]);
+});
+
+test("says Works in before the menu, and today's sentences to a desktop without one", () => {
+  assert.deepEqual(newChatPlace(THIS_COMPUTER, AGENT, "new", true), { local: true, text: "Works in" });
+  assert.equal(newChatPlace(THIS_COMPUTER, AGENT, "pick", true).text, "Works in");
+  assert.match(newChatPlace(THIS_COMPUTER, AGENT, "last", false).text, /^Works in a folder on this computer: the one you used last/);
+  assert.match(newChatPlace(THIS_COMPUTER, AGENT, "pick", false).text, /that you choose when you send\.$/);
+  // The cloud and the browser are the same with or without the menu.
+  assert.deepEqual(newChatPlace(null, AGENT, "new", true), { local: false, text: null });
+});
+
+test("asks the desktop for the folder kind chosen, a new one too", async () => {
+  const desktop = bridge();
+  await createChat(desktop, AGENT, "new", SHOWN_HERE, agent());
+  assert.deepEqual(desktop.calls.filter(([name]) => name === "prepareFolder"), [["prepareFolder", "new"]]);
 });
 
 const EXECUTION = { kind: "device", device_id: "d-1", device_name: "Flavius's ThinkPad" };

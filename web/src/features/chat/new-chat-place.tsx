@@ -3,23 +3,26 @@
 //
 // Under a new chat's composer, in Surogate Desktop: where the chat will work (Section 8).
 import { TextLink } from "@invergent/ui-sdk/text-link";
+import type { DesktopFolderChoice } from "@/lib/desktop-bridge-contract";
 import { CloudIcon, LaptopIcon } from "lucide-react";
 
 export function NewChatPlace({
   place,
   choice,
+  menu,
   onChoice,
 }: {
   place: { local: boolean; text: string };
-  choice: "last" | "pick";
-  onChoice: (choice: "last" | "pick") => void;
+  choice: DesktopFolderChoice;
+  menu: boolean;
+  onChoice: (choice: DesktopFolderChoice) => void;
 }) {
   const Icon = place.local ? LaptopIcon : CloudIcon;
   return (
     <p className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 px-1 text-xs text-muted-foreground">
       <Icon className="size-3.5 shrink-0" aria-hidden="true" />
       <span>{place.text}</span>
-      {place.local && (
+      {place.local && !menu && (
         // The desktop's own picker opens when the message is sent: the page names no folder before then.
         <TextLink asChild size="inline">
           <button
