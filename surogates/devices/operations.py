@@ -791,12 +791,15 @@ class DeviceOperations:
                     return waiter.result()
         finally:
             # The folder wait first: ending both together while away says nothing of the folder.
+            # A resumable wait handed to another worker goes on there, still said; one not
+            # resumable is cancelled with its turn, and nobody waits any more.
+            handed_on = self._resumable and turn_detached()
             if folder:
                 if self._patience is not None:
                     self._patience.freed()
-                await self._notice.folder_free(request, announce=not turn_detached())
+                await self._notice.folder_free(request, announce=not handed_on)
             if away:
-                await self._notice.back(request, announce=not turn_detached())
+                await self._notice.back(request, announce=not handed_on)
 
     async def _online(self, presence: DevicePresence, device_id: UUID) -> bool | None:
         """Whether a link holds the device: None when Redis cannot tell."""

@@ -4210,7 +4210,10 @@ async def test_a_harness_request_waiting_for_its_folder_is_dropped_when_its_turn
     await eventually(recorded)
     [op] = await rig.ops.pending(rig.device_id, 1)
     await rig.ops.waiting(op.id, "folder")
-    await eventually(lambda: asyncio.sleep(0, turn[0].waiting_resumably))
+    async def says_waiting() -> bool:
+        return turn[0].waiting_resumably and await device_wait_events(session_factory, rig.root) == [folder_waiting_for(rig)]
+
+    await eventually(says_waiting)
     turn[0].detach()
     await asyncio.gather(task, return_exceptions=True)
     # The next worker starts its turn over, with a read of its own: nothing would ever ask for this one again.
@@ -4220,6 +4223,8 @@ async def test_a_harness_request_waiting_for_its_folder_is_dropped_when_its_turn
         return str(op.id) in rig.laptop.cancelled
 
     await eventually(dropped)
+    # Nobody waits for it any more: the chat no longer says it waits for another chat.
+    assert await device_wait_events(session_factory, rig.root) == [folder_waiting_for(rig), resumed_from(rig)]
 
 
 async def test_a_request_without_the_harness_deadline_says_nothing_of_a_folder_wait(
