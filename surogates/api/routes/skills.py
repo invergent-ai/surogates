@@ -185,7 +185,7 @@ def _get_skill_stager(request: Request, session: Any) -> SkillStager:
     from surogates.harness.tool_exec import workspace_mount
     from surogates.sandbox.pool import sandbox_session_key
 
-    workspace_prefix, mount_root = workspace_mount(session, sandbox_session_key(session))
+    workspace_prefix, mount_root, _ = workspace_mount(session, sandbox_session_key(session))
     redis = getattr(request.app.state, "redis", None)
     bucket = agent_session_bucket(request.app.state.settings.storage.bucket)
     return SkillStager(
@@ -195,8 +195,6 @@ def _get_skill_stager(request: Request, session: Any) -> SkillStager:
         workspace_prefix=workspace_prefix,
         mount_root=mount_root,
     )
-
-
 
 
 def _resource_loader(request: Request):

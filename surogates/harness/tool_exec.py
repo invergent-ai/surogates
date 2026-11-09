@@ -69,8 +69,8 @@ def build_workspace_source_ref(
     return f"s3://{storage_bucket}/{workspace_prefix}"
 
 
-def workspace_mount(session: Any, sandbox_owner: str) -> tuple[str, str]:
-    """The object prefix of *session*'s real workspace, and where its sandbox mounts it.
+def workspace_mount(session: Any, sandbox_owner: str) -> tuple[str, str, str | None]:
+    """The object prefix of *session*'s real workspace, where its sandbox mounts it, and its thread.
 
     A project's thread works on its own copy: its pod mounts the real files
     at /project, and /workspace, the path the model and the tools know, is
@@ -80,7 +80,7 @@ def workspace_mount(session: Any, sandbox_owner: str) -> tuple[str, str]:
     thread = config.get("history_thread") or (sandbox_owner if is_project_thread(config) else None)
     copy = bool(config.get("storage_bucket")) and not config.get("history_off") and thread is not None
     prefix = boundary_workspace_prefix(config, session, sandbox_owner)
-    return prefix, PROJECT_MOUNT if copy else _WORKSPACE_MOUNT_PATH
+    return prefix, PROJECT_MOUNT if copy else _WORKSPACE_MOUNT_PATH, thread
 
 
 async def _build_session_sandbox_spec(
@@ -138,8 +138,7 @@ async def _build_session_sandbox_spec(
 
     storage_bucket = session.config.get("storage_bucket", "")
     helper = session.config.get("history_thread")
-    thread = helper or (sandbox_owner if is_project_thread(session.config) else None)
-    workspace_prefix, mount_path = workspace_mount(session, sandbox_owner)
+    workspace_prefix, mount_path, thread = workspace_mount(session, sandbox_owner)
     copy = mount_path == PROJECT_MOUNT
     has_workspace_mount = any(
         r.mount_path == mount_path for r in sandbox_spec.resources

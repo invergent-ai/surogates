@@ -137,7 +137,7 @@ class SkillStager:
         share of the bucket.
         """
         if self._workspace_prefix is not None:
-            return f"{self._workspace_prefix.rstrip('/')}/{sub_key.lstrip('/')}"
+            return prefixed(sub_key, self._workspace_prefix)
         return prefixed(session_workspace_key(session_id, sub_key), self._storage_key_prefix)
 
     # ------------------------------------------------------------------
@@ -169,14 +169,15 @@ class SkillStager:
     async def is_staged(self, session_id: UUID | str, skill_name: str) -> bool:
         """Return ``True`` if *skill_name* has already been staged for this session."""
         key = self._physical_key(session_id, f"{self.staged_key_prefix(skill_name)}/{STAGING_MARKER}")
-        if not await self._backend.exists(self._storage_bucket, key):
-            return False
         if self._workspace_prefix is None:
-            return True
+            return await self._backend.exists(self._storage_bucket, key)
         # A workspace shared across sessions (a boundary, a delegation root)
         # outlives any one copy of the skill: restage once per session so an
         # edited skill reaches the next run instead of the first run's files.
-        return (await self._backend.read(self._storage_bucket, key)).decode() == str(session_id)
+        try:
+            return (await self._backend.read(self._storage_bucket, key)).decode() == str(session_id)
+        except KeyError:
+            return False
 
     # ------------------------------------------------------------------
     # Cross-worker lock (Redis) / single-worker lock (asyncio fallback)
