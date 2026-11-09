@@ -222,9 +222,10 @@ FOLDER_WAIT_S = 10 * 60
 class FolderPatience:
     """A request's deadline, held off while the app says one of its operations waits its turn for a folder.
 
-    Never past *within_s* plus FOLDER_WAIT_S from its start: the app gives up
-    at that limit itself, and a wait it never took back must not hold a turn
-    for ever.
+    A wait holds it off never past *within_s* plus FOLDER_WAIT_S from its
+    start: the app gives up at that limit itself, and a wait it never took
+    back must not hold a turn for ever.  Once a wait ends, what is left of
+    the request has *within_s* again, however late that is.
     """
 
     def __init__(self, deadline: asyncio.Timeout, within_s: float) -> None:
@@ -233,19 +234,24 @@ class FolderPatience:
         self._latest = asyncio.get_running_loop().time() + within_s + FOLDER_WAIT_S
 
     def held(self, ahead_s: float) -> None:
-        """An operation still waits for its folder: the deadline is at least *ahead_s* away."""
+        """An operation still waits for its folder: the deadline is at least *ahead_s* away, up to the limit."""
+        self._not_before(min(self._latest, asyncio.get_running_loop().time() + ahead_s))
+
+    def freed(self) -> None:
+        """Its wait ended: what is left of the request has *within_s* from now, whatever the limit.
+
+        The limit bounds only how long a folder wait holds the deadline off.
+        """
+        self._not_before(asyncio.get_running_loop().time() + self._within_s)
+
+    def _not_before(self, when: float) -> None:
         current = self._deadline.when()
         if current is None:
             return  # a request with no deadline is not given one
-        when = min(self._latest, asyncio.get_running_loop().time() + ahead_s)
         try:
             self._deadline.reschedule(max(current, when))
         except RuntimeError:
             pass  # its timeout already fired or exited: there is nothing left to hold off
-
-    def freed(self) -> None:
-        """Its wait ended: what is left of the request has *within_s* from now."""
-        self.held(self._within_s)
 
 
 def _database_unavailable(exc: Exception) -> bool:
@@ -649,11 +655,15 @@ class DeviceOperations:
         recheck_interval_s: float = RECHECK_INTERVAL_S,
         notice: DeviceWaitNotice | None = None,
         patience: FolderPatience | None = None,
+        resumable: bool = True,
     ) -> None:
         """*patience* holds a request's deadline off while its operation waits for its folder.
 
         It is heeded only where *notice* is given: only then is a wait watched,
-        so *patience* without *notice* is refused.
+        so *patience* without *notice* is refused.  A request not *resumable*
+        is one no worker asks for again from the journal, as a tool call is:
+        the harness's own, outside any tool call.  Its operation is closed
+        when its turn is handed to another worker too.
         """
         if patience is not None and notice is None:
             raise ValueError("patience needs a notice: only a watched wait is held off")
@@ -662,6 +672,7 @@ class DeviceOperations:
         self._recheck_interval_s = recheck_interval_s
         self._notice = notice
         self._patience = patience
+        self._resumable = resumable
 
     async def waiting(self, operation_id: UUID, reason: str | None) -> None:
         """Record that the app holds an operation back for *reason*, or that it no longer does.
@@ -705,8 +716,8 @@ class DeviceOperations:
         deleted one, raises "This session was stopped" and records nothing.
         A caller that is stopped while it waits, or while its request is
         being recorded, closes its own operation unless its turn is detached,
-        handed to another worker that carries the wait on, or it is
-        *keep_open*: a request whose HTTP wait ended before its computer
+        handed to another worker that carries the wait on (a *resumable*
+        journal's), or it is *keep_open*: a request whose HTTP wait ended before its computer
         answered, which the same request joins again later.  Nor does a
         thread's put-back of its copy close: its computer runs it once it is
         back, and the undo it is a step of joins it again later.  The call
@@ -733,7 +744,7 @@ class DeviceOperations:
             # again, so it must not run when the computer comes back.  Found by
             # the request's key: a stop during the record's commit leaves no
             # operation id to name, and the row may be committed.
-            if not keep_open and not turn_detached() and not _puts_back(request):
+            if not keep_open and not (self._resumable and turn_detached()) and not _puts_back(request):
                 await self._cancel_own(request)
             raise
         finally:
@@ -756,6 +767,11 @@ class DeviceOperations:
                 held, online = await asyncio.gather(
                     self._folder_held(operation_id), self._online(presence, request.device_id),
                 )
+                # Before the viewers are told, which may be slow: two rechecks and two polls'
+                # Redis patience ahead (one recheck each), so a poll that times out, and the
+                # one after it, or a link back within seconds, keep the wait.
+                if held is True and online is not False and self._patience is not None:
+                    self._patience.held(4 * self._recheck_interval_s)
                 if held is True and not folder:
                     folder = True
                     await self._notice.folder_held(request)
@@ -764,9 +780,6 @@ class DeviceOperations:
                     if self._patience is not None:
                         self._patience.freed()
                     await self._notice.folder_free(request)
-                # Two polls ahead, so one missed poll or a link back within seconds keeps the wait.
-                if held is True and online is not False and self._patience is not None:
-                    self._patience.held(2 * self._recheck_interval_s)
                 if online is False and not away:
                     away = True
                     await self._notice.away(request)

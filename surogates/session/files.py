@@ -45,8 +45,8 @@ logger = logging.getLogger(__name__)
 # How long the harness waits for a local folder's computer outside a tool
 # call: what it reads or writes there for itself (the folder's project
 # context, the turn's files, an artifact promoted from a reply) is best
-# effort, and a turn waits on it no longer than this (see session_files'
-# *within*).
+# effort, and a turn waits on it no longer than this, held off while another
+# chat holds the folder (see session_files' *within*).
 HARNESS_WITHIN_S = 10.0
 
 
@@ -118,7 +118,9 @@ async def session_files(
     operations waits its turn for a folder another chat holds, up to
     FOLDER_WAIT_S more (so a caller's "within" holds, while another chat holds
     the folder, once it has had its turn); such a wait is told to the session's
-    viewers as a tool call's is.
+    viewers as a tool call's is.  Its operations are closed if its turn is
+    handed to another worker meanwhile: that one starts the turn over, with a
+    request of its own.
     """
     if change is not None and (access is None or access.session_id != session.id or not access.bound):
         # A route that forgot the check would claim a change for anyone in the org, or on a folder not set up.
@@ -144,6 +146,8 @@ async def session_files(
                 session_factory, redis,
                 notice=DeviceWaitNotice(SessionStore(session_factory, redis), session_factory),
                 patience=FolderPatience(deadline, within),
+                # The next worker starts the turn over, with a request of its own: nothing asks for this one again.
+                resumable=False,
             )
         async with session_factory() as db:
             device = (await db.execute(

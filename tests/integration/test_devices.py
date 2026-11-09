@@ -3239,8 +3239,8 @@ async def test_a_computer_gone_away_ends_its_folder_wait_patience(
     await presence.release(rig.device_id, "holder")
     with pytest.raises(TimeoutError):
         await asyncio.wait_for(reading, 5.0)
-    # The two polls held ahead, and no fresh deadline: the computer going away is not the folder freed.
-    assert loop.time() - released < 2 * 0.1 + 0.5
+    # The polls held ahead, and no fresh deadline: the computer going away is not the folder freed.
+    assert loop.time() - released < 4 * 0.1 + 0.5
 
 
 async def test_an_operation_answered_after_its_folder_wait_leaves_the_next_the_whole_deadline(
@@ -4171,6 +4171,49 @@ async def test_a_stop_ends_a_turn_start_read_waiting_for_its_folder_and_its_comp
 
     harness.interrupt("paused by user")
     assert await asyncio.wait_for(reading, 1.0) == (True, None)
+    assert await rig.ops.closed_among(rig.device_id, [op.id]) == [op.id]
+
+    async def dropped() -> bool:
+        return str(op.id) in rig.laptop.cancelled
+
+    await eventually(dropped)
+
+
+async def test_a_harness_request_waiting_for_its_folder_is_dropped_when_its_turn_is_handed_over(
+    laptop_rig, session_factory, redis_client, monkeypatch,
+):
+    rig = laptop_rig
+    await rig.laptop.connect()
+    rig.laptop.hold = True
+    monkeypatch.setattr(operations_module, "WAIT_GRACE_S", 0.1)
+    monkeypatch.setattr(files_module, "DeviceOperations", functools.partial(DeviceOperations, recheck_interval_s=0.1))
+    session = await SessionStore(session_factory).get_session(rig.root)
+    turn: list[TurnSlots] = []
+
+    async def worker() -> None:
+        slots = TurnSlots(
+            semaphore=asyncio.Semaphore(1), gate=None, org_id="", agent_id="",
+            gate_held=False, task=asyncio.current_task(),
+        )
+        turn.append(slots)
+        current_turn.set(slots)
+        async with slots.activity(), session_files(
+            session, storage=None, session_factory=session_factory, redis=redis_client, within=1.0,
+        ) as files:
+            await files.stat(await files.resolve("AGENTS.md"))
+
+    task = asyncio.create_task(worker())
+
+    async def recorded() -> bool:
+        return bool(await rig.ops.pending(rig.device_id, 1))
+
+    await eventually(recorded)
+    [op] = await rig.ops.pending(rig.device_id, 1)
+    await rig.ops.waiting(op.id, "folder")
+    await eventually(lambda: asyncio.sleep(0, turn[0].waiting_resumably))
+    turn[0].detach()
+    await asyncio.gather(task, return_exceptions=True)
+    # The next worker starts its turn over, with a read of its own: nothing would ever ask for this one again.
     assert await rig.ops.closed_among(rig.device_id, [op.id]) == [op.id]
 
     async def dropped() -> bool:
