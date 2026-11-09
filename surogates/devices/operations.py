@@ -652,8 +652,11 @@ class DeviceOperations:
     ) -> None:
         """*patience* holds a request's deadline off while its operation waits for its folder.
 
-        It is heeded only where *notice* is given: only then is a wait watched.
+        It is heeded only where *notice* is given: only then is a wait watched,
+        so *patience* without *notice* is refused.
         """
+        if patience is not None and notice is None:
+            raise ValueError("patience needs a notice: only a watched wait is held off")
         self._sf = session_factory
         self._redis = redis
         self._recheck_interval_s = recheck_interval_s
