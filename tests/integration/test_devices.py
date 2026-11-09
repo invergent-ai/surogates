@@ -42,6 +42,7 @@ from surogates.devices.browser import DeviceBrowserClient
 from surogates.devices.operations import (
     CANCELLED_OUTCOME,
     DeviceOperations,
+    FolderPatience,
     JournalRunner,
     OperationConflict,
     OperationRequest,
@@ -3125,6 +3126,136 @@ async def test_ending_the_folder_wait_and_the_computers_absence_together_says_on
     assert await device_wait_events(session_factory, rig.root) == [
         folder_waiting_for(rig), waiting_for(rig), resumed_from(rig),
     ]
+
+
+WITHIN = 1.0
+
+
+def patient_journal(session_factory, redis_client, deadline, within) -> DeviceOperations:
+    """A journal whose request deadline a folder wait holds off, telling sessions as it goes, quickly."""
+    return DeviceOperations(
+        session_factory, redis_client, recheck_interval_s=0.1,
+        notice=DeviceWaitNotice(SessionStore(session_factory, redis_client), session_factory),
+        patience=FolderPatience(deadline, within),
+    )
+
+
+async def patiently(session_factory, redis_client, *requests: OperationRequest) -> dict:
+    """Run *requests* in turn under one deadline of WITHIN that their folder waits hold off."""
+    async with asyncio.timeout(WITHIN) as deadline:
+        ops = patient_journal(session_factory, redis_client, deadline, WITHIN)
+        for request in requests:
+            outcome = await ops.run(request)
+        return outcome
+
+
+async def test_a_deadline_stands_still_while_its_operation_waits_for_its_folder(
+    laptop_rig, session_factory, redis_client, monkeypatch,
+):
+    monkeypatch.setattr(operations_module, "WAIT_GRACE_S", 0.1)
+    rig = laptop_rig
+    await DevicePresence(redis_client).claim(rig.device_id, "holder")
+    request = request_for(rig.device_id, rig.root)
+    reading = asyncio.create_task(patiently(session_factory, redis_client, request))
+    op = await operation_of(rig.ops, rig, request)
+    await rig.ops.waiting(op.id, "folder")
+    await asyncio.sleep(2.5)
+    assert not reading.done()
+    assert await rig.ops.complete(rig.device_id, 1, op.id, op.digest, {"ok": True}) == "completed"
+    assert await asyncio.wait_for(reading, 5.0) == {"ok": True}
+    assert await device_wait_events(session_factory, rig.root) == [folder_waiting_for(rig), resumed_from(rig)]
+
+
+async def test_a_deadline_runs_again_once_the_folder_is_free(
+    laptop_rig, session_factory, redis_client, monkeypatch,
+):
+    monkeypatch.setattr(operations_module, "WAIT_GRACE_S", 0.1)
+    rig = laptop_rig
+    loop = asyncio.get_running_loop()
+    await DevicePresence(redis_client).claim(rig.device_id, "holder")
+    request = request_for(rig.device_id, rig.root)
+    reading = asyncio.create_task(patiently(session_factory, redis_client, request))
+    op = await operation_of(rig.ops, rig, request)
+    await rig.ops.waiting(op.id, "folder")
+    await asyncio.sleep(2.0)
+    freed = loop.time()
+    await rig.ops.waiting(op.id, None)
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(reading, 5.0)
+    assert WITHIN - 0.2 <= loop.time() - freed <= WITHIN + 1.0
+
+
+async def test_a_deadline_with_no_folder_wait_runs_out_as_before(
+    laptop_rig, session_factory, redis_client, monkeypatch,
+):
+    monkeypatch.setattr(operations_module, "WAIT_GRACE_S", 0.1)
+    rig = laptop_rig
+    loop = asyncio.get_running_loop()
+    await DevicePresence(redis_client).claim(rig.device_id, "holder")
+    started = loop.time()
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(patiently(session_factory, redis_client, request_for(rig.device_id, rig.root)), 5.0)
+    assert loop.time() - started < WITHIN + 0.5
+    assert await device_wait_events(session_factory, rig.root) == []
+
+
+async def test_a_folder_wait_holds_a_deadline_off_no_longer_than_the_folder_limit(
+    laptop_rig, session_factory, redis_client, monkeypatch,
+):
+    monkeypatch.setattr(operations_module, "WAIT_GRACE_S", 0.1)
+    monkeypatch.setattr(operations_module, "FOLDER_WAIT_S", 1.0)
+    rig = laptop_rig
+    loop = asyncio.get_running_loop()
+    await DevicePresence(redis_client).claim(rig.device_id, "holder")
+    request = request_for(rig.device_id, rig.root)
+    started = loop.time()
+    reading = asyncio.create_task(patiently(session_factory, redis_client, request))
+    op = await operation_of(rig.ops, rig, request)
+    await rig.ops.waiting(op.id, "folder")
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(reading, 5.0)
+    assert WITHIN + 1.0 - 0.2 <= loop.time() - started <= WITHIN + 1.0 + 0.5
+
+
+async def test_a_computer_gone_away_ends_its_folder_wait_patience(
+    laptop_rig, session_factory, redis_client, monkeypatch,
+):
+    monkeypatch.setattr(operations_module, "WAIT_GRACE_S", 0.1)
+    rig = laptop_rig
+    loop = asyncio.get_running_loop()
+    presence = DevicePresence(redis_client)
+    await presence.claim(rig.device_id, "holder")
+    request = request_for(rig.device_id, rig.root)
+    reading = asyncio.create_task(patiently(session_factory, redis_client, request))
+    op = await operation_of(rig.ops, rig, request)
+    await rig.ops.waiting(op.id, "folder")
+    await asyncio.sleep(1.5)
+    released = loop.time()
+    await presence.release(rig.device_id, "holder")
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(reading, 5.0)
+    assert loop.time() - released < 2 * 0.1 + WITHIN + 0.5
+
+
+async def test_an_operation_answered_after_its_folder_wait_leaves_the_next_the_whole_deadline(
+    laptop_rig, session_factory, redis_client, monkeypatch,
+):
+    monkeypatch.setattr(operations_module, "WAIT_GRACE_S", 0.1)
+    rig = laptop_rig
+    loop = asyncio.get_running_loop()
+    await DevicePresence(redis_client).claim(rig.device_id, "holder")
+    first = request_for(rig.device_id, rig.root)
+    second = request_for(rig.device_id, rig.root, ordinal=2)
+    reading = asyncio.create_task(patiently(session_factory, redis_client, first, second))
+    op = await operation_of(rig.ops, rig, first)
+    await rig.ops.waiting(op.id, "folder")
+    await asyncio.sleep(2.0)
+    assert await rig.ops.complete(rig.device_id, 1, op.id, op.digest, {"ok": True}) == "completed"
+    answered = loop.time()
+    await operation_of(rig.ops, rig, second)
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(reading, 5.0)
+    assert loop.time() - answered >= WITHIN - 0.2
 
 
 async def test_an_operation_is_open_for_its_own_device_only_and_its_wait_can_be_forgotten(

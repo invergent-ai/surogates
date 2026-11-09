@@ -215,6 +215,36 @@ def waiting_key(operation_id: UUID) -> str:
     return f"{operation_channel(operation_id)}:waiting"
 
 
+# How long the app lets an operation wait its turn for a folder before it gives up on it.
+FOLDER_WAIT_S = 10 * 60
+
+
+class FolderPatience:
+    """A request's deadline, held off while the app says one of its operations waits its turn for a folder.
+
+    Never past *within_s* plus FOLDER_WAIT_S from its start: the app gives up
+    at that limit itself, and a wait it never took back must not hold a turn
+    for ever.
+    """
+
+    def __init__(self, deadline: asyncio.Timeout, within_s: float) -> None:
+        self._deadline = deadline
+        self._within_s = within_s
+        self._latest = asyncio.get_running_loop().time() + within_s + FOLDER_WAIT_S
+
+    def held(self, ahead_s: float) -> None:
+        """An operation still waits for its folder: the deadline is at least *ahead_s* away."""
+        if self._deadline.expired():
+            return
+        when = min(self._latest, asyncio.get_running_loop().time() + ahead_s)
+        current = self._deadline.when()
+        self._deadline.reschedule(when if current is None else max(current, when))
+
+    def freed(self) -> None:
+        """Its wait ended: what is left of the request has *within_s* from now."""
+        self.held(self._within_s)
+
+
 def _database_unavailable(exc: Exception) -> bool:
     """Whether *exc* is the database being briefly out of reach, not a bug or a refusal.
 
@@ -615,11 +645,17 @@ class DeviceOperations:
         *,
         recheck_interval_s: float = RECHECK_INTERVAL_S,
         notice: DeviceWaitNotice | None = None,
+        patience: FolderPatience | None = None,
     ) -> None:
+        """*patience* holds a request's deadline off while its operation waits for its folder.
+
+        It is heeded only where *notice* is given: only then is a wait watched.
+        """
         self._sf = session_factory
         self._redis = redis
         self._recheck_interval_s = recheck_interval_s
         self._notice = notice
+        self._patience = patience
 
     async def waiting(self, operation_id: UUID, reason: str | None) -> None:
         """Record that the app holds an operation back for *reason*, or that it no longer does.
@@ -719,7 +755,12 @@ class DeviceOperations:
                     await self._notice.folder_held(request)
                 elif held is False and folder:
                     folder = False
+                    if self._patience is not None:
+                        self._patience.freed()
                     await self._notice.folder_free(request)
+                # Two polls ahead, so one missed poll or a link back within seconds keeps the wait.
+                if held is True and online is not False and self._patience is not None:
+                    self._patience.held(2 * self._recheck_interval_s)
                 if online is False and not away:
                     away = True
                     await self._notice.away(request)
@@ -732,6 +773,8 @@ class DeviceOperations:
         finally:
             # The folder wait first: ending both together while away says nothing of the folder.
             if folder:
+                if self._patience is not None:
+                    self._patience.freed()
                 await self._notice.folder_free(request, announce=not turn_detached())
             if away:
                 await self._notice.back(request, announce=not turn_detached())

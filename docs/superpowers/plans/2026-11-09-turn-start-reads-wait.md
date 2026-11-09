@@ -12,7 +12,7 @@
 
 ## Todo
 
-- [ ] Task 1: A deadline that a folder wait holds off (`FolderPatience`, `DeviceOperations(patience=)`)
+- [x] Task 1: A deadline that a folder wait holds off (`FolderPatience`, `DeviceOperations(patience=)`)
 - [ ] Task 2: `session_files(within=)` waits a folder's turn and says so
 - [ ] Task 3: The harness's folder requests ask with `within`
 
