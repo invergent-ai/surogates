@@ -1021,7 +1021,11 @@ class ContextReplayMixin:
     # ------------------------------------------------------------------
 
     async def _read_folder_context(self, session: Session) -> tuple[bool, str | None]:
-        """Whether a local folder's computer answered within ``HARNESS_WITHIN_S``, and its AGENTS.md (or CLAUDE.md, …) if it has one."""
+        """Whether a local folder's computer answered, and its AGENTS.md (or CLAUDE.md, …) if it has one.
+
+        Asked within ``HARNESS_WITHIN_S``, held off while another chat holds
+        the folder (see session_files' *within*).
+        """
         try:
             async with session_files(
                 session, storage=self._storage, session_factory=self._session_factory, redis=self._redis,

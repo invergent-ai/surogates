@@ -295,7 +295,8 @@ class ArtifactCompletionMixin:
         Only fires when:
         - an API client is wired (``self._api_client``), or the session
           is on a local folder, where it is made in the folder, within
-          ``HARNESS_WITHIN_S``,
+          ``HARNESS_WITHIN_S``, held off while another chat holds the
+          folder (see session_files' *within*),
         - the content contains at least one promotable fence (svg/html),
         - the fence body parses as non-empty.
 
@@ -876,7 +877,8 @@ class ArtifactCompletionMixin:
     async def _walk_folder(self, session: Any, *, since: str) -> Any | None:
         """The files of *session*'s local folder changed since the cursor *since*, as the file panel's tree sees them.
 
-        None when its computer cannot say within ``HARNESS_WITHIN_S``: the turn's files are best effort.
+        None when its computer cannot say within ``HARNESS_WITHIN_S``, held off while another chat holds
+        the folder (see session_files' *within*): the turn's files are best effort.
         """
         from surogates.api.routes.workspace import _FOLDER_TOP_HIDDEN, _SKIP_DIRS
 
@@ -898,7 +900,8 @@ class ArtifactCompletionMixin:
         """Where a local folder's turn begins, by the folder's own clock: the stamp of a mark written there, less the walk's margin.
 
         A few small operations, never a walk.  None when its computer cannot
-        say within ``HARNESS_WITHIN_S``.
+        say within ``HARNESS_WITHIN_S``, held off while another chat holds
+        the folder (see session_files' *within*).
         """
         try:
             async with session_files(
@@ -918,6 +921,10 @@ class ArtifactCompletionMixin:
             return None
         return str(max(0, int(stamped.mtime * 1_000_000_000) - WALK_MARGIN_NS))
 
+    def _needs_turn_mark(self, session: Any) -> bool:
+        """Whether _mark_turn_start would mark the turn: a local folder's turn not marked yet whose summary may list files."""
+        return not self._turn_marked and device_of(session.config) is not None and not summary_ruled_out(session)
+
     async def _mark_turn_start(self, session: Any) -> None:
         """Before a local folder's turn's first tool call: where the turn begins there (see _folder_cursor).
 
@@ -925,7 +932,7 @@ class ArtifactCompletionMixin:
         landed after a tool's first write would miss its file.  Not taken for
         a turn whose summary is ruled out, which lists no files.
         """
-        if self._turn_marked or device_of(session.config) is None or summary_ruled_out(session):
+        if not self._needs_turn_mark(session):
             return
         self._turn_marked = True
         self._turn_cursor = await self._folder_cursor(session)

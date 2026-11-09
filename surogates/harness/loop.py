@@ -4330,12 +4330,17 @@ class AgentHarness(
             # 7. Execute tool calls.
             # The mark waits while another chat holds the folder: a Stop ends it, and the calls the stream holds.
             # A cloud turn takes no mark, and its early-started calls finish and are recorded before a Stop pauses it.
-            if device_of(session.config) is not None and not self._turn_marked:
+            if self._needs_turn_mark(session):
                 stopped, _ = await self._unless_stopped(
                     self._mark_turn_start(session),
                     also=streaming_executor.discard if streaming_executor is not None else None,
                 )
                 if stopped:
+                    if streaming_executor is not None:
+                        # Its cancelled calls record that they were stopped, and close their
+                        # operations, before the pause: none lands after it, or in the next turn.
+                        async with turn_joining():
+                            await streaming_executor.get_all_results()
                     await self._abort_iteration_with_pause(session, saga, cost_tracker, lease=lease)
                     return
             if use_streaming_exec:
