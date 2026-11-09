@@ -185,3 +185,30 @@ async def test_stages_under_the_mounted_workspace_prefix(backend: LocalBackend):
     assert f"{mounted}.skills/report/scripts/run.py" in keys
     assert not any(k.startswith(f"{session_id}/") for k in keys)
     assert await stager.is_staged(session_id, "report")
+
+
+async def test_a_shared_workspace_restages_for_each_new_session(backend: LocalBackend):
+    """An edited skill reaches the next scheduled run instead of the first run's copy."""
+    tenant_bucket = "tenant-cccccccc"
+    await backend.create_bucket(tenant_bucket)
+    await backend.create_bucket(STORAGE_BUCKET)
+    await backend.write_text(tenant_bucket, "skills/report/run.py", "v1")
+    mounted = "proj/agent/boundaries/user:42/workspace/"
+    stager = SkillStager(backend=backend, storage_bucket=STORAGE_BUCKET, workspace_prefix=mounted)
+    first, second = uuid4(), uuid4()
+
+    await stager.stage_from_object_store(first, "report", tenant_bucket, "skills/report")
+    await backend.write_text(tenant_bucket, "skills/report/run.py", "v2")
+    assert await stager.is_staged(first, "report")
+    assert not await stager.is_staged(second, "report")
+    await stager.stage_from_object_store(second, "report", tenant_bucket, "skills/report")
+
+    assert await backend.read(STORAGE_BUCKET, f"{mounted}.skills/report/run.py") == b"v2"
+
+
+def test_a_project_thread_sees_staged_files_under_its_project_mount(backend: LocalBackend):
+    stager = SkillStager(
+        backend=backend, storage_bucket=STORAGE_BUCKET,
+        workspace_prefix="p/a/boundaries/project:1/workspace/", mount_root="/project",
+    )
+    assert stager.workspace_path_for(uuid4(), "report") == "/project/.skills/report/"

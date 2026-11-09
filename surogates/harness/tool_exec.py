@@ -69,6 +69,20 @@ def build_workspace_source_ref(
     return f"s3://{storage_bucket}/{workspace_prefix}"
 
 
+def workspace_mount(session: Any, sandbox_owner: str) -> tuple[str, str]:
+    """The object prefix of *session*'s real workspace, and where its sandbox mounts it.
+
+    A project's thread works on its own copy: its pod mounts the real files
+    at /project, and /workspace, the path the model and the tools know, is
+    the copy.  So does each of its helpers, on a copy of its own.
+    """
+    config = session.config or {}
+    thread = config.get("history_thread") or (sandbox_owner if is_project_thread(config) else None)
+    copy = bool(config.get("storage_bucket")) and not config.get("history_off") and thread is not None
+    prefix = boundary_workspace_prefix(config, session, sandbox_owner)
+    return prefix, PROJECT_MOUNT if copy else _WORKSPACE_MOUNT_PATH
+
+
 async def _build_session_sandbox_spec(
     session: Any,
     tenant: Any,
@@ -123,13 +137,10 @@ async def _build_session_sandbox_spec(
         )
 
     storage_bucket = session.config.get("storage_bucket", "")
-    # A project's thread works on its own copy: its pod mounts the real
-    # files at /project, and /workspace, the path the model and the tools
-    # know, is the copy.  So does each of its helpers, on a copy of its own.
     helper = session.config.get("history_thread")
     thread = helper or (sandbox_owner if is_project_thread(session.config) else None)
-    copy = bool(storage_bucket) and not session.config.get("history_off") and thread is not None
-    mount_path = PROJECT_MOUNT if copy else _WORKSPACE_MOUNT_PATH
+    workspace_prefix, mount_path = workspace_mount(session, sandbox_owner)
+    copy = mount_path == PROJECT_MOUNT
     has_workspace_mount = any(
         r.mount_path == mount_path for r in sandbox_spec.resources
     )
@@ -138,11 +149,7 @@ async def _build_session_sandbox_spec(
             Resource(
                 source_ref=build_workspace_source_ref(
                     storage_bucket=storage_bucket,
-                    workspace_prefix=boundary_workspace_prefix(
-                        session.config,
-                        session,
-                        sandbox_owner,
-                    ),
+                    workspace_prefix=workspace_prefix,
                 ),
                 mount_path=mount_path,
             ),

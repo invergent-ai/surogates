@@ -40,11 +40,9 @@ from surogates.api.routes._shared import (
 )
 from surogates.devices.binding import device_of
 from surogates.storage.skill_staging import SkillStager, has_stageable_assets, staging_preamble
-from surogates.session.attachment_ingest import workspace_root_id
 from surogates.storage.tenant import (
     TenantStorage,
     agent_session_bucket,
-    boundary_workspace_prefix,
 )
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import TenantContext
@@ -172,9 +170,7 @@ def _get_tenant_storage(request: Request, tenant: TenantContext) -> TenantStorag
     )
 
 
-def _get_skill_stager(
-    request: Request, storage_key_prefix: str = "", workspace_prefix: str | None = None,
-) -> SkillStager:
+def _get_skill_stager(request: Request, session: Any) -> SkillStager:
     """Create a ``SkillStager`` bound to the request's storage backend.
 
     Threads the app-wide Redis client through so concurrent staging calls
@@ -182,30 +178,25 @@ def _get_skill_stager(
     worker replicas.  When Redis is not wired (tests / dev without a
     broker), the stager falls back to an in-process ``asyncio.Lock``.
 
-    *storage_key_prefix* is the per-agent prefix under the shared
-    workspace bucket (typically ``{project_id}/{agent_id}``).  Callers
-    fetch it from the session config; ``""`` reproduces the
-    bucket-rooted layout used before the shared-bucket cutover.
+    Files land where *session*'s sandbox mounts its workspace: a scheduled
+    run, a managed-channel chat or a sub-agent mounts a boundary or
+    delegation-root workspace, not its own session id.
     """
+    from surogates.harness.tool_exec import workspace_mount
+    from surogates.sandbox.pool import sandbox_session_key
+
+    workspace_prefix, mount_root = workspace_mount(session, sandbox_session_key(session))
     redis = getattr(request.app.state, "redis", None)
     bucket = agent_session_bucket(request.app.state.settings.storage.bucket)
     return SkillStager(
         backend=request.app.state.storage,
         storage_bucket=bucket,
-        storage_key_prefix=storage_key_prefix,
         redis=redis,
         workspace_prefix=workspace_prefix,
+        mount_root=mount_root,
     )
 
 
-def _session_storage_key_prefix(session: Any) -> str:
-    """Return the per-agent storage prefix stamped onto *session*."""
-    return (session.config or {}).get("storage_key_prefix", "") or ""
-
-
-def _session_workspace_prefix(session: Any) -> str:
-    """The object prefix the sandbox mounts at /workspace for *session*."""
-    return boundary_workspace_prefix(session.config, session, workspace_root_id(session))
 
 
 def _resource_loader(request: Request):
@@ -263,10 +254,9 @@ async def _stage_skill_for_session(
     skill_def: Any,
     session_id: UUID,
     linked_files: list[str] | dict[str, list[str]] | None,
-    storage_key_prefix: str = "",
+    session: Any,
     bundle: Any = None,
     system_bundle: Any = None,
-    workspace_prefix: str | None = None,
 ) -> str | None:
     """Auto-stage a skill into the session workspace when it has assets to stage.
 
@@ -286,9 +276,7 @@ async def _stage_skill_for_session(
     if not has_stageable_assets(linked_files):
         return None
 
-    stager = _get_skill_stager(
-        request, storage_key_prefix=storage_key_prefix, workspace_prefix=workspace_prefix,
-    )
+    stager = _get_skill_stager(request, session)
 
     if skill_def.source == SKILL_SOURCE_PLATFORM:
         source_bundle, prefix = _skill_bundle(skill_def, bundle, system_bundle)
@@ -685,10 +673,9 @@ async def view_skill(
             skill_def=skill_def,
             session_id=session_id,
             linked_files=detail.linked_files,
-            storage_key_prefix=_session_storage_key_prefix(session),
+            session=session,
             bundle=bundle,
             system_bundle=system_bundle,
-            workspace_prefix=_session_workspace_prefix(session),
         )
         if staged_at is not None:
             detail.staged_at = staged_at
@@ -783,22 +770,19 @@ async def read_skill_file(
         """Stage the skill and return a redirect response, or ``None``."""
         if session_id is None or session_for_staging is None or device_of(session_for_staging.config) is not None:
             return None
-        key_prefix = _session_storage_key_prefix(session_for_staging)
-        workspace_prefix = _session_workspace_prefix(session_for_staging)
         staged_at = await _stage_skill_for_session(
             request=request,
             tenant=tenant,
             skill_def=skill_def_to_stage,
             session_id=session_id,
             linked_files=[path],  # forces stageable_assets to be True
-            storage_key_prefix=key_prefix,
+            session=session_for_staging,
             bundle=bundle,
             system_bundle=system_bundle,
-            workspace_prefix=workspace_prefix,
         )
         if staged_at is None:
             return None
-        stager = _get_skill_stager(request, storage_key_prefix=key_prefix, workspace_prefix=workspace_prefix)
+        stager = _get_skill_stager(request, session_for_staging)
         return {
             "file_path": path,
             "binary": True,

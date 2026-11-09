@@ -109,6 +109,7 @@ class SkillStager:
         redis: "Redis | None" = None,
         storage_key_prefix: str = "",
         workspace_prefix: str | None = None,
+        mount_root: str | None = None,
     ) -> None:
         self._backend = backend
         self._storage_bucket = storage_bucket
@@ -118,6 +119,9 @@ class SkillStager:
         # root-session workspace, not its own session id, so staging under
         # the session id leaves the files where the sandbox never looks.
         self._workspace_prefix = workspace_prefix
+        # Where the sandbox sees that prefix, when it is not /workspace (a
+        # project thread's real files sit at /project; /workspace is a copy).
+        self._mount_root = mount_root
         self._redis = redis
         # In-process fallback locks — only used when Redis isn't available.
         # Keyed by the same string as the Redis lock so the two code paths
@@ -153,7 +157,7 @@ class SkillStager:
         at ``/workspace``.  In development (``LocalBackend``) this resolves
         to ``{base_path}/{agent_bucket}/sessions/{session_id}/.skills/{name}/``.
         """
-        root = self._backend.resolve_workspace_path(
+        root = self._mount_root or self._backend.resolve_workspace_path(
             self._storage_bucket, str(session_id),
         )
         return f"{root.rstrip('/')}/{STAGING_DIR}/{skill_name}/"
@@ -164,20 +168,27 @@ class SkillStager:
 
     async def is_staged(self, session_id: UUID | str, skill_name: str) -> bool:
         """Return ``True`` if *skill_name* has already been staged for this session."""
-        marker = f"{self.staged_key_prefix(skill_name)}/{STAGING_MARKER}"
-        return await self._backend.exists(
-            self._storage_bucket,
-            self._physical_key(session_id, marker),
-        )
+        key = self._physical_key(session_id, f"{self.staged_key_prefix(skill_name)}/{STAGING_MARKER}")
+        if not await self._backend.exists(self._storage_bucket, key):
+            return False
+        if self._workspace_prefix is None:
+            return True
+        # A workspace shared across sessions (a boundary, a delegation root)
+        # outlives any one copy of the skill: restage once per session so an
+        # edited skill reaches the next run instead of the first run's files.
+        return (await self._backend.read(self._storage_bucket, key)).decode() == str(session_id)
 
     # ------------------------------------------------------------------
     # Cross-worker lock (Redis) / single-worker lock (asyncio fallback)
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _lock_key(session_id: UUID | str, skill_name: str) -> str:
-        """Return the Redis key used to serialise staging for this skill."""
-        return f"{_LOCK_KEY_PREFIX}{session_id}:{skill_name}"
+    def _lock_key(self, session_id: UUID | str, skill_name: str) -> str:
+        """Return the Redis key used to serialise staging for this skill.
+
+        Keyed by where the files land, so sessions sharing a workspace also
+        share the lock.
+        """
+        return f"{_LOCK_KEY_PREFIX}{self._physical_key(session_id, self.staged_key_prefix(skill_name))}"
 
     @asynccontextmanager
     async def _stage_lock(
@@ -286,7 +297,7 @@ class SkillStager:
             await self._backend.write(
                 self._storage_bucket,
                 self._physical_key(session_id, f"{dest_prefix}/{STAGING_MARKER}"),
-                b"",
+                str(session_id).encode(),
             )
             logger.info(
                 "Staged tenant skill '%s' (%d files) for session %s",
@@ -366,7 +377,7 @@ class SkillStager:
             await self._backend.write(
                 self._storage_bucket,
                 self._physical_key(session_id, f"{dest_prefix}/{STAGING_MARKER}"),
-                b"",
+                str(session_id).encode(),
             )
             logger.info(
                 "Staged bundle skill '%s' (%d files) for session %s",
