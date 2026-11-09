@@ -120,3 +120,39 @@ Linux and Windows both, tested live on each (Ubuntu laptop, Windows 11 VM). The 
   - closing A's window or quitting the app while B waits; restarting the app mid-wait;
   - an older installed desktop with the new page shows today's line;
   - a project's threads and landings still work as before.
+
+## Addendum
+
+### 6. Turn-start reads wait their turn too
+
+Server only: `surogates/session/files.py`, `surogates/devices/operations.py` and the harness callers.
+
+**What went wrong.** Section 4 makes an agent's tool calls wait for a folder another chat holds: the desktop queues the operation (`ToolHosts.inTurn`, up to `FOLDER_WAIT_MS`) and says so with `op_waiting`, and the worker waits "however long that takes" (`DeviceOperations.run`). But at the start of a turn the harness reads the folder for itself, outside any tool call, under a fixed `asyncio.timeout(HARNESS_WITHIN_S)` of 10 s (`surogates/session/files.py:42`): the folder's AGENTS.md or CLAUDE.md for the system prompt (`_read_folder_context`, `surogates/harness/loop_context_replay.py:1024-1036`) and the folder's clock, the mark that says where the turn began (`_folder_cursor`, `surogates/harness/loop_artifact_completion.py:896-916`). These reads are device operations like any other (`session_files` builds a `JournalRunner` over `DeviceOperations.run`), so on the desktop they go through the same `ToolHosts.hostOf` and are queued behind the other chat, and the desktop does send `op_waiting` for them. The server never looks: `session_files` makes its `DeviceOperations` without a notice, so `_wait_watching` only awaits, and the 10 s deadline cuts the read off. The turn then runs without the folder's instructions file, lists none of the files it changed ("its computer did not say where this turn began"), and starts about 20 s late.
+
+**New behaviour.** A read the harness makes in a chat's folder outside a tool call waits its turn like a tool call does:
+
+- while the desktop says the operation waits for its folder (`waiting_key` holds `"folder"`), the read's deadline does not run out: it is kept two recheck intervals ahead;
+- once the folder is free (the key is gone), the deadline is `HARNESS_WITHIN_S` from then: the operation, and the reads after it in the same request, get the usual 10 s to be answered;
+- the wait is shown in the chat with the same `device.waiting` reason `folder` notice as a tool call's, and cleared the same way;
+- the deadline is never held off past `HARNESS_WITHIN_S` plus `FOLDER_WAIT_S` (10 minutes, the desktop's own `FOLDER_WAIT_MS`) from the read's start.
+
+It lives in one place: `session_files(..., within=HARNESS_WITHIN_S)` sets the deadline itself, and gives its `DeviceOperations` a notice and a `FolderPatience` over that deadline, which `_wait_watching` holds off or lets run as it polls the key. The four harness callers stop wrapping `session_files` in their own `asyncio.timeout` and pass `within` instead.
+
+**Scope.** Every harness read or write of a local folder outside a tool call: the project context and the turn mark at the turn's start, and at its end the walk that lists the turn's files (`_walk_folder`) and a fenced SVG or HTML promoted to an artifact (`_promote_fenced_artifacts`). The turn-end two rarely wait, since the chat's own host still holds the folder until the desktop hears the turn ended, which comes after them; when they do (the chat went quiet past the host's idle time and another chat took the folder), waiting is still better than a turn that lists nothing or loses its artifact.
+
+**Unchanged.**
+
+- A folder no other chat holds: the 10 s deadline as today. A computer that is away is still said at once (`ComputerAway`), and one that is online but silent still gives up after 10 s, so a turn start is never stalled by a slow or absent computer.
+- The file panel's reads and changes (`READ_WITHIN_S` 60 s, `CHANGE_WITHIN_S` 20 s, `surogates/api/routes/workspace.py:123-124`). They are HTTP requests: holding one open 10 minutes is no answer. A change already comes back as 202 and is joined again by the page; a read still says the computer did not answer in time. They make no `within` request, so they show no notice either: the API's notices would fight the worker's counts.
+- Tool calls (`surogates/devices/sandbox.py`): they wait as before, with no deadline.
+- The desktop. It already sends `op_waiting` for every operation it queues, whatever its kind (`desktop/test/tool-hosts.test.ts`, "tells when each operation starts and stops waiting for the folder").
+
+**Edge cases.**
+
+- The folder is freed mid-wait: the desktop clears the key, the next poll sees it, and the read has 10 s from then to finish. A read answered before the poll sees the key cleared also gets the fresh 10 s, so the reads after it in the same request are not cut short.
+- The 10-minute limit is reached: the desktop answers the queued operation with its `busy` error ("Another chat on this computer has been working in this folder for more than 10 minutes, ..."), which the harness logs and goes on without, as for any failed read. Should the desktop never answer, the server's cap ends the read just after. The turn then runs without what it could not read, and its first tool call waits for the folder again, as any tool call does, so a turn behind a chat that keeps the folder for long can wait twice.
+- The computer goes away while the read waits: while the server sees the computer offline it does not hold the deadline off, and the link's end forgets the computer's folder waits (`forget_waits`), so the read gives up within about 10 s, as for a silent computer today. A link that drops and comes back within those seconds says the wait again after its welcome, and the read goes on waiting.
+- Redis cannot tell whether the operation waits: the deadline is not held off, as today.
+- The user stops the chat, or the deadline runs out: the read is cancelled, as today, and the desktop takes it out of the folder's queue.
+- An old desktop sends no `op_waiting`: nothing holds the deadline off, and the reads give up after 10 s exactly as today.
+- A worker that shuts down during the wait hands the turn to another worker, as for any wait on the computer; the read it leaves open is run by the desktop once the folder is free and its answer is not used (a read, or the turn mark written again), and the new worker reads again.
