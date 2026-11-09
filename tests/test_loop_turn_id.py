@@ -472,6 +472,36 @@ async def test_a_folders_harness_request_that_gives_up_logs_by_why(
 
 
 @pytest.mark.asyncio
+async def test_every_harness_request_on_a_folder_asks_with_the_harness_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from surogates.harness import loop_artifact_completion, loop_context_replay
+    from surogates.harness.loop_artifact_completion import ArtifactCompletionMixin
+    from surogates.harness.loop_context_replay import ContextReplayMixin
+    from surogates.session.files import HARNESS_WITHIN_S
+
+    asked: list[Any] = []
+
+    @asynccontextmanager
+    async def files_that_record(*_args: Any, **kwargs: Any):
+        asked.append(kwargs.get("within"))
+        raise ComputerAway("the laptop", revoked=False)
+        yield
+
+    monkeypatch.setattr(loop_context_replay, "session_files", files_that_record)
+    monkeypatch.setattr(loop_artifact_completion, "session_files", files_that_record)
+    harness = SimpleNamespace(_api_client=None, _storage=None, _session_factory=None, _redis=None, _store=None)
+    session = SimpleNamespace(id=uuid4(), config={"execution": {"kind": "device", "device_id": str(uuid4())}})
+
+    await ContextReplayMixin._read_folder_context(harness, session)
+    await ArtifactCompletionMixin._folder_cursor(harness, session)
+    await ArtifactCompletionMixin._walk_folder(harness, session, since="1")
+    await ArtifactCompletionMixin._promote_fenced_artifacts(harness, session, "```svg\n<svg></svg>\n```", [])
+
+    assert asked == [HARNESS_WITHIN_S] * 4
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("channel, reason, asks_for_a_reply", [
     ("whatsapp", "tool_loop_halt", True),
     ("telegram", "invalid_tool_calls", True),

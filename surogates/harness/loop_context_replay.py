@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import re
@@ -1022,10 +1021,11 @@ class ContextReplayMixin:
     # ------------------------------------------------------------------
 
     async def _read_folder_context(self, session: Session) -> tuple[bool, str | None]:
-        """Whether a local folder's computer answered within ``HARNESS_WITHIN_S``, and its AGENTS.md (or CLAUDE.md, …) if it has one."""
+        """Whether a local folder's computer answered within ``HARNESS_WITHIN_S`` (or, while another chat holds the folder, once it has had its turn), and its AGENTS.md (or CLAUDE.md, …) if it has one."""
         try:
-            async with asyncio.timeout(HARNESS_WITHIN_S), session_files(
+            async with session_files(
                 session, storage=self._storage, session_factory=self._session_factory, redis=self._redis,
+                within=HARNESS_WITHIN_S,
             ) as files:
                 return True, await load_folder_context(files)
         except Exception as exc:
