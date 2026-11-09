@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
@@ -221,3 +223,123 @@ async def test_streaming_scrubs_split_think_and_memory_context_tags(monkeypatch)
     assert emitted == msg["content"]
     assert "hidden reasoning" not in emitted
     assert "hidden memory" not in emitted
+
+
+# -- A provider that never answers ------------------------------------------
+
+
+async def _hang(**_kwargs):
+    await asyncio.Event().wait()
+
+
+def _chunk(**delta_fields):
+    delta = SimpleNamespace(content=None, role="assistant", tool_calls=None, **delta_fields)
+    return SimpleNamespace(choices=[SimpleNamespace(delta=delta, finish_reason=None)],
+                           model="gpt-4o", usage=None)
+
+
+def _client(create, base_url="https://gw.example/v1"):
+    llm_client = MagicMock(base_url=base_url)
+    llm_client.chat.completions.create = create
+    return llm_client
+
+
+def _stream(llm_client, interrupt_check=lambda: False):
+    return call_llm_streaming_inner(
+        session=_make_session(),
+        create_kwargs={"model": "gpt-4o", "messages": []},
+        iteration=1, llm_client=llm_client, store=AsyncMock(),
+        interrupt_check=interrupt_check,
+    )
+
+
+@pytest.fixture
+def fast_clock(monkeypatch):
+    for name, value in [("STREAM_FIRST_BYTE_TIMEOUT", 0.1), ("STREAM_STALE_TIMEOUT", 0.1),
+                        ("NON_STREAMING_INTERRUPT_POLL", 0.02),
+                        ("STREAM_CHUNK_POLL_INTERVAL", 0.02)]:
+        monkeypatch.setattr(f"surogates.harness.llm_call.{name}", value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("create", [
+    _hang,  # never answers
+    AsyncMock(return_value=_BlockingStream([])),  # answers, then says nothing
+], ids=["no-answer", "silent-stream"])
+async def test_a_provider_that_says_nothing_raises_stall(fast_clock, create):
+    from surogates.harness.llm_call import StreamStalledError
+
+    with pytest.raises(StreamStalledError):
+        await asyncio.wait_for(_stream(_client(create)), timeout=3.0)
+
+
+@pytest.mark.asyncio
+async def test_stop_while_waiting_for_the_provider(fast_clock, monkeypatch):
+    monkeypatch.setattr("surogates.harness.llm_call.STREAM_FIRST_BYTE_TIMEOUT", 5.0)
+    stop_at = time.monotonic() + 0.05
+    _msg, usage = await asyncio.wait_for(
+        _stream(_client(_hang), interrupt_check=lambda: time.monotonic() > stop_at),
+        timeout=3.0,
+    )
+    assert usage["finish_reason"] == "interrupted"
+
+
+@pytest.mark.asyncio
+async def test_local_upstream_has_no_first_byte_bound(fast_clock):
+    """Ollama cold-loading a model must not be cut off."""
+    async def _slow(**_kwargs):
+        await asyncio.sleep(0.3)
+        return _BlockingStream([])
+
+    task = asyncio.ensure_future(_stream(_client(_slow, "http://localhost:11434/v1")))
+    await asyncio.sleep(0.2)
+    assert not task.done(), "past the bound, still waiting on the local model"
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+
+@pytest.mark.asyncio
+async def test_reasoning_then_silence_is_not_restarted(fast_clock):
+    create = AsyncMock(return_value=_BlockingStream([_chunk(reasoning_content="Mă gândesc")]))
+    _msg, usage = await asyncio.wait_for(_stream(_client(create)), timeout=3.0)
+    assert usage["finish_reason"] == "interrupted"
+
+
+def _gateway_error(status):
+    import httpx
+    from openai import APIStatusError
+
+    req = httpx.Request("POST", "https://gw.example/v1/chat/completions")
+    return APIStatusError(f"{status}", response=httpx.Response(status, request=req), body=None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["stall", 524, 502])
+async def test_stuck_provider_is_retried_as_a_stream(monkeypatch, failure):
+    """No detour through the non-streaming fallback: retry the stream."""
+    from surogates.harness import llm_call
+    from surogates.harness.llm_call import StreamStalledError, call_llm_with_retry
+
+    good = ({"role": "assistant", "content": "gata"}, {"finish_reason": "stop"})
+    first = StreamStalledError("stuck") if failure == "stall" else _gateway_error(failure)
+    inner = AsyncMock(side_effect=[first, good])
+    non_streaming = AsyncMock()
+    monkeypatch.setattr(llm_call, "call_llm_streaming_inner", inner)
+    monkeypatch.setattr(llm_call, "call_llm_non_streaming", non_streaming)
+    monkeypatch.setattr(llm_call, "jittered_backoff", lambda _attempt: 0)
+    streaming = []
+
+    msg, _usage = await call_llm_with_retry(
+        session=_make_session(),
+        create_kwargs={"model": "gpt-4o", "messages": []},
+        iteration=1, llm_client=MagicMock(), store=AsyncMock(),
+        streaming_enabled=True, interrupt_check=lambda: False,
+        activate_fallback=lambda: False, get_current_model=lambda: None,
+        set_streaming_enabled=streaming.append,
+    )
+
+    assert msg["content"] == "gata"
+    assert inner.await_count == 2
+    non_streaming.assert_not_awaited()
+    assert streaming == []

@@ -129,6 +129,13 @@ STREAM_STALE_TIMEOUT: float = float(
 # while GLM-5.1 was still reasoning silently.
 STREAM_STALE_TIMEOUT_REASONING: float = 600.0
 
+# How long a remote provider may take to start answering.  Reasoning silence
+# comes after the response starts; healthy streams start in 5-15s even at
+# 43k tokens (measured on PROD 2026-11-09, where a stuck one held a turn 6 min).
+STREAM_FIRST_BYTE_TIMEOUT: float = float(
+    os.environ.get("SUROGATES_STREAM_FIRST_BYTE_TIMEOUT", "120.0")
+)
+
 # Polling interval (seconds) used to wake up between chunk reads so the
 # stale-stream and interrupt checks run even when the upstream provider
 # stops sending bytes entirely.  Short enough that user-initiated stops
@@ -202,6 +209,10 @@ _LOCAL_STREAM_HOSTS: frozenset[str] = frozenset({
     "0.0.0.0",
     "host.docker.internal",
 })
+
+
+class StreamStalledError(TimeoutError):
+    """The provider never answered, or went silent before saying anything."""
 
 
 class PartialToolCallStreamError(ConnectionError):
@@ -1160,9 +1171,14 @@ async def call_llm_streaming(
             turn_id=turn_id,
             iteration_index=iteration_index,
         )
-    except PartialToolCallStreamError:
+    except (PartialToolCallStreamError, StreamStalledError):
         raise
     except Exception as exc:
+        # A stuck or failing gateway is retried as a stream: the non-streaming
+        # fallback waits on the same upstream, longer, with nothing to show.
+        status = extract_status_code(exc)
+        if status is not None and status >= 500:
+            raise
         logger.warning(
             "Streaming failed for session %s (iteration %d), "
             "falling back to non-streaming: %s",
@@ -1251,11 +1267,25 @@ async def call_llm_streaming_inner(
         merged = {**existing_extra, **cache_extra}
         final_kwargs["extra_body"] = merged
 
-    response = await llm_client.chat.completions.create(
-        **final_kwargs,
-        stream=True,
-        stream_options={"include_usage": True},
-    )
+    try:
+        response = await _await_with_heartbeats(
+            llm_client.chat.completions.create(
+                **final_kwargs,
+                stream=True,
+                stream_options={"include_usage": True},
+            ),
+            session=session,
+            store=store,
+            iteration=iteration,
+            turn_id=turn_id,
+            iteration_index=iteration_index,
+            interrupt_check=interrupt_check,
+            phase="waiting",
+            # A local upstream may cold-load a model before answering.
+            deadline=None if stale_timeout == float("inf") else STREAM_FIRST_BYTE_TIMEOUT,
+        )
+    except _TurnStopped:
+        return _interrupted_result(model_id)
 
     # Accumulators
     content_parts: list[str] = []
@@ -1601,6 +1631,8 @@ async def call_llm_streaming_inner(
     # triggered the close, surface it as an interruption regardless.
     if stop_reason is not None:
         interrupted = True
+    if stop_reason == "stale" and not (content_parts or tool_calls_acc or reasoning_parts):
+        raise StreamStalledError(f"stream silent for {stale_timeout:.0f}s")
 
     tail_scrubbed = (
         context_scrubber.feed(think_scrubber.flush()) + context_scrubber.flush()
@@ -1694,8 +1726,13 @@ async def _await_with_heartbeats(
     turn_id: str | None,
     iteration_index: int | None,
     interrupt_check: Callable[[], bool] | None = None,
+    phase: str = "non_streaming",
+    deadline: float | None = None,
 ) -> Any:
     """Await *coro*, emitting ``LLM_HEARTBEAT`` while it is in flight.
+
+    With *deadline*, a call still unanswered after that many seconds is
+    cancelled and raises ``StreamStalledError``.
 
     With *interrupt_check*, the wait also looks for a stopped turn every
     ``NON_STREAMING_INTERRUPT_POLL`` seconds and raises ``_TurnStopped``
@@ -1719,6 +1756,10 @@ async def _await_with_heartbeats(
                 return task.result()
             if interrupt_check is not None and interrupt_check():
                 raise _TurnStopped()
+            if deadline is not None and time.monotonic() - start > deadline:
+                raise StreamStalledError(
+                    f"provider did not answer within {deadline:.0f}s"
+                )
             if time.monotonic() - last_beat < STREAM_HEARTBEAT_INTERVAL:
                 continue
             last_beat = time.monotonic()
@@ -1731,7 +1772,7 @@ async def _await_with_heartbeats(
                         "silent_for_seconds": round(time.monotonic() - start, 1),
                         "turn_id": turn_id,
                         "iteration_index": iteration_index,
-                        "phase": "non_streaming",
+                        "phase": phase,
                     },
                 )
             except Exception:
