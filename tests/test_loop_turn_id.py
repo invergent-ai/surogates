@@ -719,3 +719,18 @@ async def test_a_cloud_turns_stop_after_its_response_lets_its_started_calls_fini
     # As before folder reads could wait: the started calls' results are kept, and the next iteration pauses.
     assert _StartedCalls.discarded is False
     harness._abort_iteration_with_pause.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_the_pause_a_stopped_turn_ends_with_says_the_turn_has_ended() -> None:
+    from tests.test_loop_ordering import _harness
+
+    harness = _harness()
+    harness._sandbox_pool = None
+    harness._store.get_session = AsyncMock(return_value=SimpleNamespace(status="paused"))
+    harness.interrupt("paused by user")
+    await harness._abort_iteration_with_pause(_make_session(), None)
+
+    # The pause route's own comes before the turn has stopped: this one, after its undo, is the turn's end.
+    [pause] = [data for etype, data in harness._store.persisted if etype == EventType.SESSION_PAUSE]
+    assert pause["turn_ended"] is True and pause["reason"] == "interrupted"

@@ -1511,6 +1511,8 @@ class AgentHarness(
                     "reason": "interrupted",
                     "message": reason_msg,
                     "worker_id": self._worker_id,
+                    # The turn has stopped, its undo done: the pause route's own came before.
+                    "turn_ended": True,
                     **said,
                 },
             )
