@@ -1296,7 +1296,7 @@ async def call_llm_streaming_inner(
         )
     except _TurnStopped:
         return _interrupted_result(model_id)
-    except asyncio.TimeoutError as exc:
+    except TimeoutError as exc:
         raise StreamStalledError(
             f"provider did not answer within {STREAM_FIRST_BYTE_TIMEOUT:.0f}s"
         ) from exc
