@@ -1501,12 +1501,14 @@ class Host {
     // Something of it began since the timer was set: its end sets another.
     if (!this.free) return;
     if (!this.atRest || left() <= 0) return go();
-    if (this.answering) return keep();
+    // Asked even where its stream said a turn started: at rest, the agent is believed, as a turn's end can go unheard
+    // (a stream that stopped), and a waiting chat would otherwise wait out the whole hold. The agent marks a chat active
+    // before its turn sends anything, so its "at rest" is never a turn's start not yet seen.
     const asked = this.seen;
     void this.atRest().catch(() => undefined).then((rest) => {
       // Something of it began meanwhile, or it went: that has its own time.
       if (this.seen !== asked || !this.free) return;
-      if (rest === false) keep();
+      if (rest === false || (rest === undefined && this.answering)) keep();
       else go();
     });
   }

@@ -1069,13 +1069,15 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
   it("keeps the folder past its idle time from a waiting chat while its stream says the turn goes on, and gives it at the turn's end", async () => {
     folders[ROOT_B] = folders[ROOT_A] ?? "";
     const { follows, following } = followed();
-    const executor = toolHosts({ idleMs: 100, folderWaitMs: 5_000, following, spawnHost: fakeSpawn(answering), atRest: async () => true });
+    let rest: boolean | undefined;
+    const executor = toolHosts({ idleMs: 100, folderWaitMs: 5_000, following, spawnHost: fakeSpawn(answering), atRest: async () => rest });
     await executor.run(resolve(), signal());
     follows[0]?.turnStarted();
     const second = executor.run(resolveOf(ROOT_B), signal());
-    // Three idle times with nothing of the turn on this computer: its cloud tools, say.
+    // Three idle times with nothing of the turn on this computer: its cloud tools, say; the agent cannot say meanwhile.
     expect(await pendingAfter(second, 300)).toBe(true);
     expect(sent(0, "stop")).toBe(0);
+    rest = true;
     follows[0]?.turnEnded();
     expect(await second).toMatchObject({ ok: expect.any(String) });
   });
@@ -1094,10 +1096,24 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
     expect(await second).toMatchObject({ ok: expect.any(String) });
   });
 
+  it("lets the folder go after its idle time where the stream said a turn started but the agent says the chat is at rest", async () => {
+    folders[ROOT_B] = folders[ROOT_A] ?? "";
+    const { follows, following } = followed();
+    const executor = toolHosts({ idleMs: 100, folderWaitMs: 5_000, following, spawnHost: fakeSpawn(answering), atRest: async () => true });
+    await executor.run(resolve(), signal());
+    follows[0]?.turnStarted();
+    // Its end never heard: the stream stopped, say.
+    const second = executor.run(resolveOf(ROOT_B), signal());
+    expect(await pendingAfter(second, 50)).toBe(true);
+    // At its idle time, not at the end of its hold (15 idle times, 1.5 s here).
+    expect(await pendingAfter(second, 400)).toBe(false);
+    expect(await second).toMatchObject({ ok: expect.any(String) });
+  });
+
   it("lets the folder go at last where a turn's end is never heard of, its idle time many times over", async () => {
     folders[ROOT_B] = folders[ROOT_A] ?? "";
     const { follows, following } = followed();
-    const executor = toolHosts({ idleMs: 20, folderWaitMs: 5_000, following, spawnHost: fakeSpawn(answering), atRest: async () => true });
+    const executor = toolHosts({ idleMs: 20, folderWaitMs: 5_000, following, spawnHost: fakeSpawn(answering), atRest: async () => undefined });
     await executor.run(resolve(), signal());
     follows[0]?.turnStarted();
     const second = executor.run(resolveOf(ROOT_B), signal());
