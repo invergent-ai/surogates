@@ -124,14 +124,21 @@ export async function titleOf(api: Api, agentId: string, sessionId: string): Pro
 }
 
 /**
- * Whether chat *sessionId* is at rest between its turns, as the agent has it now: true where its last turn is done or
- * failed, false where one is under way, undefined where it says neither (paused) or cannot be read.
+ * Whether chat *sessionId* is at rest between its turns, as the agent has it now: true where its last turn and every
+ * helper's under it (which work in its folder too) are done or failed, false where one of them is under way, undefined
+ * where it says neither (paused, not yet started), cannot be read, or lists too many to be sure it named them all.
  */
 export async function restOf(api: Api, agentId: string, sessionId: string): Promise<boolean | undefined> {
-  const response = await api(`/api/v1/sessions/${sessionId}?agent_id=${encodeURIComponent(agentId)}`);
-  const { status } = response.ok ? (parsed(await response.text()) ?? {}) : {};
-  return status === "completed" || status === "failed" ? true : status === "active" ? false : undefined;
+  const response = await api(`/api/v1/sessions/${sessionId}/tree?agent_id=${encodeURIComponent(agentId)}`);
+  const { nodes } = response.ok ? (parsed(await response.text()) ?? {}) : {};
+  if (!Array.isArray(nodes) || nodes.length === 0 || nodes.length >= TREE_CAP) return undefined;
+  const statuses = nodes.map((node) => (node as { status?: unknown })?.status);
+  if (statuses.includes("active")) return false;
+  return statuses.every((status) => status === "completed" || status === "failed") ? true : undefined;
 }
+
+// The server lists at most this many sessions of a chat's tree (_MAX_TREE_NODES): a full list may leave some out.
+const TREE_CAP = 200;
 
 // The events that end a chat's turn: done, failed, or stopped from a channel; a Stop's pause only once the turn has
 // stopped, undo done (turn_ended), not the pause route's own, which the turn hears of while it may still run.

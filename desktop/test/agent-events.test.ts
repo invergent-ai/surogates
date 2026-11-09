@@ -8,6 +8,7 @@ class FakeAgent {
   readonly items = new Map<number, Record<string, unknown>>();
   readonly titles = new Map<string, string>();
   readonly statuses = new Map<string, string | 404>();
+  readonly trees = new Map<string, string[]>(); // each chat's tree's statuses, the chat's own first
   status = 200; // what the next stream opens with
   itemFailure: number | "throw" | null = null; // how the next item's read fails: an HTTP status, or no answer at all
   readonly api: Api = async (path, init) => {
@@ -19,6 +20,12 @@ class FakeAgent {
       if (failure !== null) return new Response(null, { status: failure });
       const found = this.items.get(Number(item[1]));
       return found ? Response.json(found) : new Response(null, { status: 404 });
+    }
+    const tree = /^\/api\/v1\/sessions\/([^/?]+)\/tree\?agent_id=a$/.exec(path);
+    if (tree) {
+      const statuses = this.trees.get(tree[1]!);
+      if (statuses === undefined) return new Response(null, { status: 404 });
+      return Response.json({ nodes: statuses.map((status, i) => ({ id: `${tree[1]}-${i}`, status })), total: statuses.length });
     }
     const chat = /^\/api\/v1\/sessions\/([^/?]+)\?agent_id=a$/.exec(path);
     if (chat) {
@@ -327,9 +334,22 @@ describe("a chat's turns, followed", () => {
 
   it("says a chat is at rest between its turns, done or failed, in a turn while active, and nothing of one it cannot tell", async () => {
     const agent = new FakeAgent();
-    agent.statuses.set("done", "completed").set("failed", "failed").set("busy", "active").set("paused", "paused").set("gone", 404);
+    agent.trees.set("done", ["completed"]).set("failed", ["failed"]).set("busy", ["active"]).set("paused", ["paused"]);
     const said = await Promise.all(["done", "failed", "busy", "paused", "gone"].map((id) => restOf(agent.api, "a", id)));
     expect(said).toEqual([true, true, false, undefined, undefined]);
+  });
+
+  it("says a chat whose turn is done is in a turn while a helper under it still works, and not at rest while one has not started", async () => {
+    const agent = new FakeAgent();
+    agent.trees.set("helping", ["completed", "active"]).set("helped", ["completed", "completed", "failed"]).set("starting", ["completed", "pending"]);
+    const said = await Promise.all(["helping", "helped", "starting"].map((id) => restOf(agent.api, "a", id)));
+    expect(said).toEqual([false, true, undefined]);
+  });
+
+  it("says nothing of a chat whose tree is listed in full to the server's cap, as some of it may be left out", async () => {
+    const agent = new FakeAgent();
+    agent.trees.set("big", Array<string>(200).fill("completed"));
+    expect(await restOf(agent.api, "a", "big")).toBeUndefined();
   });
 
   it("tells a Stop's end only once its turn has stopped, not at the pause the Stop starts with", async () => {
