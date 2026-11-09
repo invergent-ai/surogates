@@ -134,8 +134,8 @@ def _staging_request(
 ) -> SimpleNamespace:
     """A request whose session authorizes and whose storage is local disk."""
 
-    async def _authorized(*_args: object) -> SimpleNamespace:
-        return SimpleNamespace(config=session_config or {})
+    async def _authorized(_request: object, _tenant: object, session_id: object) -> SimpleNamespace:
+        return SimpleNamespace(id=session_id, channel="web", config=session_config or {})
 
     monkeypatch.setattr(
         skills_routes, "_authorize_session_for_staging", _authorized,
