@@ -222,6 +222,20 @@ describe("the chat the window shows, followed", () => {
     stop();
   });
 
+  it("tells nothing of a turn that failed or was stopped", async () => {
+    const agent = new FakeAgent();
+    agent.titles.set(CHAT, "Quarterly report");
+    const ended: string[] = [];
+    const { stop } = following(agent, ended);
+    await until(() => agent.streams.length === 1);
+    agent.streams[0]!.send(["session.pause", "session.fail", "session.complete"]
+      .map((type, at) => `id: ${at + 3}\r\nevent: ${type}\r\ndata: {}\r\n\r\n`).join(""));
+    await until(() => ended.length === 1);
+    await settle();
+    expect(ended).toEqual(["Quarterly report"]);
+    stop();
+  });
+
   it("says it has started only once the chat's stream has, whatever was refused before", async () => {
     const agent = new FakeAgent();
     agent.status = 503;
@@ -273,6 +287,18 @@ describe("a chat's turns, followed", () => {
     stop();
     expect(paths).toEqual([expect.stringMatching(/^\/api\/v1\/sessions\/chat-1\/events\?/)]);
     expect(agent.streams[0]!.signal.aborted).toBe(true);
+  });
+
+  it("tells a turn that failed or was stopped as an end too, apart from one done", async () => {
+    const agent = new FakeAgent();
+    const ended: boolean[] = [];
+    const { stop } = followTurns({ api: agent.api, onError: () => {}, delayMs: () => 0, sessionId: "chat-1", onTurnEnd: (done) => ended.push(done) });
+    await until(() => agent.streams.length === 1);
+    agent.streams[0]!.send(["session.pause", "session.fail", "session.stopped", "llm.response", "session.complete"]
+      .map((type, at) => `id: ${at + 3}\r\nevent: ${type}\r\ndata: {}\r\n\r\n`).join(""));
+    await until(() => ended.length === 4);
+    expect(ended).toEqual([false, false, false, true]);
+    stop();
   });
 
   it("stops by itself, telling nothing more and opening no stream again, once the sign-in it was started under has ended", async () => {

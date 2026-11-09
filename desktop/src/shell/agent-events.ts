@@ -123,17 +123,21 @@ export async function titleOf(api: Api, agentId: string, sessionId: string): Pro
   return typeof title === "string" && title !== "" ? title : "A chat";
 }
 
+// The events that end a chat's turn: done, failed, paused by a Stop, or stopped from a channel.
+const TURN_ENDS: ReadonlySet<string> = new Set(["session.complete", "session.fail", "session.pause", "session.stopped"]);
+
 // What ends a chat's follow: the chat archived, or gone. Any other close is followed by a reconnection.
 const GONE: ReadonlySet<unknown> = new Set(["archived", "session_not_found"]);
 
 /**
  * Follow chat *sessionId* across its turns (watch=1): *onTurnEnd* is called each time one of its turns
- * ends. It starts at the chat's newest event, and takes up after the last event it heard, stream.start's
- * included, whenever its stream closes. Only a chat archived or gone ends it, short of stop. Until
- * *started*, it has heard nothing of the chat: a turn that ends meanwhile it never tells.
+ * ends, done or not: a turn that failed or was stopped has ended too. It starts at the chat's newest event,
+ * and takes up after the last event it heard, stream.start's included, whenever its stream closes. Only a
+ * chat archived or gone ends it, short of stop. Until *started*, it has heard nothing of the chat: a turn
+ * that ends meanwhile it never tells.
  */
 export function followTurns(
-  options: Omit<FollowOptions, "agentId"> & { sessionId: string; onTurnEnd(): void; live?(): boolean },
+  options: Omit<FollowOptions, "agentId"> & { sessionId: string; onTurnEnd(done: boolean): void; live?(): boolean },
 ): { stop(): void; started(): boolean } {
   let after = -1;
   // Followed only while *live* says so, as the sign-in it was started under: once that has ended it stops, and
@@ -153,17 +157,19 @@ export function followTurns(
   const stop = follow({ ...options, api }, () => `/api/v1/sessions/${options.sessionId}/events?after=${after}&watch=1`, (event) => {
     if (ended()) return;
     if (event.id !== null && /^\d+$/.test(event.id)) after = Number(event.id);
-    if (event.type === "session.complete") options.onTurnEnd();
+    if (TURN_ENDS.has(event.type)) options.onTurnEnd(event.type === "session.complete");
     else if (event.type === "session.done" && GONE.has(parsed(event.data)?.reason)) stop();
   });
   return { stop, started: () => after >= 0 };
 }
 
-/** Chat *sessionId* followed across its turns: *onTurnEnd* hears the chat's title each time one ends. */
+/** Chat *sessionId* followed across its turns: *onTurnEnd* hears the chat's title each time one is done. */
 export function followChat(options: FollowOptions & { sessionId: string; onTurnEnd(title: string): void }): { stop(): void; started(): boolean } {
   return followTurns({
     ...options,
-    onTurnEnd: async () => {
+    onTurnEnd: async (done) => {
+      // Told only of a turn done: a failed or stopped one is not this notice's to tell.
+      if (!done) return;
       try {
         options.onTurnEnd(await titleOf(options.api, options.agentId, options.sessionId));
       } catch (error) {
