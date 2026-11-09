@@ -7,7 +7,6 @@ class FakeAgent {
   readonly streams: Array<{ path: string; send(text: string): void; end(): void; signal: AbortSignal }> = [];
   readonly items = new Map<number, Record<string, unknown>>();
   readonly titles = new Map<string, string>();
-  readonly statuses = new Map<string, string | 404>();
   readonly trees = new Map<string, string[]>(); // each chat's tree's statuses, the chat's own first
   status = 200; // what the next stream opens with
   itemFailure: number | "throw" | null = null; // how the next item's read fails: an HTTP status, or no answer at all
@@ -29,8 +28,7 @@ class FakeAgent {
     }
     const chat = /^\/api\/v1\/sessions\/([^/?]+)\?agent_id=a$/.exec(path);
     if (chat) {
-      if (this.statuses.get(chat[1]!) === 404) return new Response(null, { status: 404 });
-      return Response.json({ id: chat[1], title: this.titles.get(chat[1]!) ?? null, status: this.statuses.get(chat[1]!) ?? "active" });
+      return Response.json({ id: chat[1], title: this.titles.get(chat[1]!) ?? null });
     }
     if (this.status !== 200) {
       const status = this.status;

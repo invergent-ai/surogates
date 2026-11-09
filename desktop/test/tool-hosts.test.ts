@@ -1009,26 +1009,32 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
     await until(() => sent(0, "stop") === 1, 1_000);
   });
 
-  it("keeps a chat's folder for its idle time where the agent cannot say whether the chat is at rest", async () => {
+  it.each([
+    ["the agent cannot say whether the chat is at rest", async () => undefined],
+    ["asking whether its chat is at rest fails", () => Promise.reject(new Error("offline"))],
+  ])("keeps a chat's folder for its idle time where %s", async (_, atRest: () => Promise<boolean | undefined>) => {
     folders[ROOT_B] = folders[ROOT_A] ?? "";
     const { following } = followed();
-    const executor = toolHosts({
-      idleMs: 60_000, folderWaitMs: 300, following, spawnHost: fakeSpawn(answering), atRest: async () => undefined,
-    });
+    const executor = toolHosts({ idleMs: 60_000, folderWaitMs: 300, following, spawnHost: fakeSpawn(answering), atRest });
     await executor.run(resolve(), signal());
     expect(await executor.run(resolveOf(ROOT_B), signal())).toEqual(WAITED_TOO_LONG);
     expect([fakes.length, sent(0, "stop")]).toEqual([1, 0]);
   });
 
-  it("keeps a chat's folder for its idle time where asking whether its chat is at rest fails", async () => {
+  it("asks no more whether a chat is at rest, once the agent could not say, until something of the chat changes", async () => {
     folders[ROOT_B] = folders[ROOT_A] ?? "";
+    folders[ROOT_C] = folders[ROOT_A] ?? "";
     const { following } = followed();
+    let asked = 0;
     const executor = toolHosts({
-      idleMs: 60_000, folderWaitMs: 300, following, spawnHost: fakeSpawn(answering), atRest: () => Promise.reject(new Error("offline")),
+      idleMs: 60_000, folderWaitMs: 300, following, spawnHost: fakeSpawn(answering), atRest: async () => (asked++, undefined),
     });
     await executor.run(resolve(), signal());
-    expect(await executor.run(resolveOf(ROOT_B), signal())).toEqual(WAITED_TOO_LONG);
-    expect([fakes.length, sent(0, "stop")]).toEqual([1, 0]);
+    const waitingB = executor.run(resolveOf(ROOT_B), signal());
+    await new Promise((r) => setTimeout(r, 50));
+    expect(asked).toBe(1);
+    await Promise.all([waitingB, executor.run(resolveOf(ROOT_C), signal())]);
+    expect(asked).toBe(1);
   });
 
   it("keeps the folder of a chat at rest from a waiting chat while a background process of it lives", async () => {

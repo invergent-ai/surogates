@@ -1199,6 +1199,8 @@ class Host {
   private answering = false;
   private asking = false;
   private seen = 0;
+  // The seen of the last answer that said neither: nothing is asked again until something changes.
+  private unsure = -1;
 
   constructor(
     private readonly process: HostProcess,
@@ -1445,7 +1447,7 @@ class Host {
   // Never while it starts: its start is bounded by its own time.
   private idle(): void {
     clearTimeout(this.idleTimer);
-    if (!this.readied || this.running > 0 || this.live > 0 || this.gone || this.finished) return;
+    if (!this.still) return;
     // A landing's steps that nothing waits for any more, a cancelled one: given STEP_MS to end, then the host goes.
     if (this.unanswered.size > 0) {
       this.idleTimer = setTimeout(() => this.finish(0), STEP_MS).unref();
@@ -1465,9 +1467,14 @@ class Host {
     }, this.idleMs).unref();
   }
 
-  // Whether nothing of it runs, no process of its root lives and it still holds its folder: it may let it go now.
+  // Whether it has started, nothing of it runs, no process of its root lives and it still holds its folder.
+  private get still(): boolean {
+    return this.readied && this.running === 0 && this.live === 0 && !this.gone && !this.finished;
+  }
+
+  // Still, with no landing's step left unanswered: it may let its folder go now.
   private get free(): boolean {
-    return this.readied && this.running === 0 && this.live === 0 && this.unanswered.size === 0 && !this.gone && !this.finished;
+    return this.still && this.unanswered.size === 0;
   }
 
   // The agent asked whether its chat is at rest, where another chat waits for its folder, nothing of it runs, and no turn
@@ -1475,14 +1482,15 @@ class Host {
   // that turn's end. An answer that cannot be had, or says neither, leaves it as it was: its idle time lets the folder go.
   // One stale by the time it comes is asked again.
   private askRest(): void {
-    if (!this.atRest || this.answering || this.asking || !this.free || !this.othersWait()) return;
+    if (!this.atRest || this.answering || this.asking || this.unsure === this.seen || !this.free || !this.othersWait()) return;
     const asked = this.seen;
     this.asking = true;
     void this.atRest().catch(() => undefined).then((rest) => {
       this.asking = false;
       if (this.seen !== asked) this.askRest();
       else if (rest === false) this.answering = true;
-      else if (rest === true && this.free && this.othersWait()) this.finish();
+      else if (rest === undefined) this.unsure = asked;
+      else if (this.free && this.othersWait()) this.finish();
     });
   }
 

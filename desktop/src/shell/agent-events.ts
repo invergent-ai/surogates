@@ -116,12 +116,20 @@ export function followInbox(options: FollowOptions & { onItem(item: InboxItem): 
   });
 }
 
+// What the agent's route for chat *sessionId* (*under* it, if given) answers; nothing where it cannot be read.
+async function chatRead(api: Api, agentId: string, sessionId: string, under = ""): Promise<Record<string, unknown>> {
+  const response = await api(`/api/v1/sessions/${sessionId}${under}?agent_id=${encodeURIComponent(agentId)}`);
+  return response.ok ? (parsed(await response.text()) ?? {}) : {};
+}
+
 /** Chat *sessionId*'s title, as the agent names it; "A chat" for one it names not. */
 export async function titleOf(api: Api, agentId: string, sessionId: string): Promise<string> {
-  const response = await api(`/api/v1/sessions/${sessionId}?agent_id=${encodeURIComponent(agentId)}`);
-  const { title } = response.ok ? (parsed(await response.text()) ?? {}) : {};
+  const { title } = await chatRead(api, agentId, sessionId);
   return typeof title === "string" && title !== "" ? title : "A chat";
 }
+
+// The server lists at most this many sessions of a chat's tree (_MAX_TREE_NODES): a full list may leave some out.
+const TREE_CAP = 200;
 
 /**
  * Whether chat *sessionId* is at rest between its turns, as the agent has it now: true where its last turn and every
@@ -129,16 +137,12 @@ export async function titleOf(api: Api, agentId: string, sessionId: string): Pro
  * where it says neither (paused, not yet started), cannot be read, or lists too many to be sure it named them all.
  */
 export async function restOf(api: Api, agentId: string, sessionId: string): Promise<boolean | undefined> {
-  const response = await api(`/api/v1/sessions/${sessionId}/tree?agent_id=${encodeURIComponent(agentId)}`);
-  const { nodes } = response.ok ? (parsed(await response.text()) ?? {}) : {};
+  const { nodes } = await chatRead(api, agentId, sessionId, "/tree");
   if (!Array.isArray(nodes) || nodes.length === 0 || nodes.length >= TREE_CAP) return undefined;
   const statuses = nodes.map((node) => (node as { status?: unknown })?.status);
   if (statuses.includes("active")) return false;
   return statuses.every((status) => status === "completed" || status === "failed") ? true : undefined;
 }
-
-// The server lists at most this many sessions of a chat's tree (_MAX_TREE_NODES): a full list may leave some out.
-const TREE_CAP = 200;
 
 // The events that end a chat's turn: done, failed, or stopped from a channel; a Stop's pause only once the turn has
 // stopped, undo done (turn_ended), not the pause route's own, which the turn hears of while it may still run.
@@ -156,8 +160,7 @@ const GONE: ReadonlySet<unknown> = new Set(["archived", "session_not_found"]);
  * Follow chat *sessionId* across its turns (watch=1): *onTurnEnd* is called each time one of its turns
  * ends, done or not: a turn that failed or was stopped has ended too; *onTurnStart* each time one starts.
  * It starts at the chat's newest event, and takes up after the last event it heard, stream.start's
- * included, whenever its stream closes. Only a
- * chat archived or gone ends it, short of stop. Until *started*, it has heard nothing of the chat: a turn
+ * included, whenever its stream closes. Only a chat archived or gone ends it, short of stop. Until *started*, it has heard nothing of the chat: a turn
  * that ends meanwhile it never tells.
  */
 export function followTurns(
