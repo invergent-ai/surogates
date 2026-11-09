@@ -629,3 +629,44 @@ async def test_a_stop_while_the_turns_mark_waits_for_its_folder_ends_the_turn_st
     # The calls the stream held are discarded with the read, as a Stop discards them while they run.
     assert _StreamedCalls.discarded is streamed
     assert harness._active_executor is None
+
+
+class _StartedCalls(_StreamedCalls):
+    """A cloud stream's calls, started early: they finish and are recorded."""
+
+    async def get_all_results(self) -> list[dict]:
+        return [{"role": "tool", "tool_call_id": "c1", "content": "ok"}]
+
+
+@pytest.mark.asyncio
+async def test_a_cloud_turns_stop_after_its_response_lets_its_started_calls_finish_and_pauses_at_the_loop_top(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from surogates.harness import loop as loop_module
+    from tests.test_loop_ordering import _harness, _tool_resp
+
+    harness = _harness()
+    harness._abort_iteration_with_pause = AsyncMock(return_value=None)
+    harness._streaming_enabled = True
+    _StartedCalls.discarded = False
+    monkeypatch.setattr("surogates.harness.loop.StreamingToolExecutor", _StartedCalls)
+    neutralize = loop_module.neutralize_unsendable_tool_names
+
+    def stop_once_saved(calls: Any, offered: Any) -> Any:
+        # The Stop lands after the response's interrupt guard, before its calls are collected.
+        harness.interrupt("paused by user")
+        return neutralize(calls, offered)
+
+    async def fake_call_llm_with_retry(**_kwargs: Any) -> tuple[dict, dict]:
+        return _tool_resp("c1")
+
+    monkeypatch.setattr(loop_module, "neutralize_unsendable_tool_names", stop_once_saved)
+    monkeypatch.setattr("surogates.harness.loop.call_llm_with_retry", fake_call_llm_with_retry)
+    await asyncio.wait_for(harness._run_loop(
+        _make_session(), [{"role": "user", "content": "do the task"}], "system",
+        SimpleNamespace(lease_token=uuid4()), all_events=[],
+    ), 5.0)
+
+    # As before folder reads could wait: the started calls' results are kept, and the next iteration pauses.
+    assert _StartedCalls.discarded is False
+    harness._abort_iteration_with_pause.assert_awaited_once()

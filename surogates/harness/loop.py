@@ -2394,10 +2394,14 @@ class AgentHarness(
 
             # 8. Build the system prompt (with caching).
             # A local folder's project context waits while another chat holds the folder: a Stop ends it there.
-            stopped, system_prompt = await self._unless_stopped(self._build_system_prompt(session))
-            if stopped:
-                await self._abort_iteration_with_pause(session, None)
-                return
+            # A cloud prompt waits on no folder, and a Stop meanwhile is left to the loop's own check.
+            if device_of(session.config) is None:
+                system_prompt = await self._build_system_prompt(session)
+            else:
+                stopped, system_prompt = await self._unless_stopped(self._build_system_prompt(session))
+                if stopped:
+                    await self._abort_iteration_with_pause(session, None)
+                    return
 
             # 9. Create per-session cost tracker.
             cost_tracker = SessionCostTracker()
@@ -4336,13 +4340,15 @@ class AgentHarness(
 
             # 7. Execute tool calls.
             # The mark waits while another chat holds the folder: a Stop ends it, and the calls the stream holds.
-            stopped, _ = await self._unless_stopped(
-                self._mark_turn_start(session),
-                also=streaming_executor.discard if streaming_executor is not None else None,
-            )
-            if stopped:
-                await self._abort_iteration_with_pause(session, saga, cost_tracker, lease=lease)
-                return
+            # A cloud turn takes no mark, and its early-started calls finish and are recorded before a Stop pauses it.
+            if device_of(session.config) is not None:
+                stopped, _ = await self._unless_stopped(
+                    self._mark_turn_start(session),
+                    also=streaming_executor.discard if streaming_executor is not None else None,
+                )
+                if stopped:
+                    await self._abort_iteration_with_pause(session, saga, cost_tracker, lease=lease)
+                    return
             if use_streaming_exec:
                 # ── Streaming executor path ──────────────────────────
                 # Some or all tools started executing during LLM streaming.
