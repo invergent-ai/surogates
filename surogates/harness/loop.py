@@ -2804,24 +2804,13 @@ class AgentHarness(
             async with turn_joining():
                 return await execute_single_tool(call, replay_of=event_id, **tool_kwargs)
 
-        replay = asyncio.ensure_future(replay_unanswered(
-            session=session, events=events, messages=messages,
-            session_factory=self._session_factory, run_tool=resume,
-        ))
         # A pause or stop cancels the wait, as it cancels a streamed call: the
         # pause's cancellation completes the call in the journal, and the next
         # wake reports it stopped.
-        self._active_executor = SimpleNamespace(discard=replay.cancel)
-        # A pause that landed before this point only set the flag.
-        if self._check_interrupt():
-            replay.cancel()
-        try:
-            await replay
-        except asyncio.CancelledError:
-            if not self._check_interrupt() or asyncio.current_task().cancelling():
-                raise
-        finally:
-            self._active_executor = None
+        await self._unless_stopped(replay_unanswered(
+            session=session, events=events, messages=messages,
+            session_factory=self._session_factory, run_tool=resume,
+        ))
 
     # ------------------------------------------------------------------
     # Core LLM loop
@@ -4341,7 +4330,7 @@ class AgentHarness(
             # 7. Execute tool calls.
             # The mark waits while another chat holds the folder: a Stop ends it, and the calls the stream holds.
             # A cloud turn takes no mark, and its early-started calls finish and are recorded before a Stop pauses it.
-            if device_of(session.config) is not None:
+            if device_of(session.config) is not None and not self._turn_marked:
                 stopped, _ = await self._unless_stopped(
                     self._mark_turn_start(session),
                     also=streaming_executor.discard if streaming_executor is not None else None,

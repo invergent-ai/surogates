@@ -45,8 +45,8 @@ logger = logging.getLogger(__name__)
 # How long the harness waits for a local folder's computer outside a tool
 # call: what it reads or writes there for itself (the folder's project
 # context, the turn's files, an artifact promoted from a reply) is best
-# effort, and a turn waits on it no longer than this, but for a wait the
-# computer says is for a folder another chat holds.
+# effort, and a turn waits on it no longer than this (see session_files'
+# *within*).
 HARNESS_WITHIN_S = 10.0
 
 
@@ -116,8 +116,9 @@ async def session_files(
     *within*, the harness's deadline for a request outside a tool call: past it
     the request raises TimeoutError, but not while the computer says one of its
     operations waits its turn for a folder another chat holds, up to
-    FOLDER_WAIT_S more; such a wait is told to the session's viewers as a tool
-    call's is.
+    FOLDER_WAIT_S more (so a caller's "within" holds, while another chat holds
+    the folder, once it has had its turn); such a wait is told to the session's
+    viewers as a tool call's is.
     """
     if change is not None and (access is None or access.session_id != session.id or not access.bound):
         # A route that forgot the check would claim a change for anyone in the org, or on a folder not set up.

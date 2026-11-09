@@ -295,8 +295,7 @@ class ArtifactCompletionMixin:
         Only fires when:
         - an API client is wired (``self._api_client``), or the session
           is on a local folder, where it is made in the folder, within
-          ``HARNESS_WITHIN_S`` (or, while another chat holds the folder,
-          once it has had its turn),
+          ``HARNESS_WITHIN_S``,
         - the content contains at least one promotable fence (svg/html),
         - the fence body parses as non-empty.
 
@@ -877,8 +876,7 @@ class ArtifactCompletionMixin:
     async def _walk_folder(self, session: Any, *, since: str) -> Any | None:
         """The files of *session*'s local folder changed since the cursor *since*, as the file panel's tree sees them.
 
-        None when its computer cannot say within ``HARNESS_WITHIN_S`` (or, while another chat
-        holds the folder, once it has had its turn): the turn's files are best effort.
+        None when its computer cannot say within ``HARNESS_WITHIN_S``: the turn's files are best effort.
         """
         from surogates.api.routes.workspace import _FOLDER_TOP_HIDDEN, _SKIP_DIRS
 
@@ -900,8 +898,7 @@ class ArtifactCompletionMixin:
         """Where a local folder's turn begins, by the folder's own clock: the stamp of a mark written there, less the walk's margin.
 
         A few small operations, never a walk.  None when its computer cannot
-        say within ``HARNESS_WITHIN_S`` (or, while another chat holds the
-        folder, once it has had its turn).
+        say within ``HARNESS_WITHIN_S``.
         """
         try:
             async with session_files(
