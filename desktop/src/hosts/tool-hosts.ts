@@ -60,6 +60,9 @@ export const IDLE_MS = 120_000;
 // While another chat waits for a chat host's folder and the agent said its chat is in a turn, or could not say, the host
 // asks again this long after: a helper's end, or the agent back, is told on no stream of the chat's own.
 export const REST_RECHECK_MS = 15_000;
+// How many of its idle times a chat's host keeps its folder, nothing of it running, while its chat is in a turn: with
+// IDLE_MS, 30 minutes. ponytail: a multiple of idleMs, not an option of its own; one if tests or users need it.
+export const HOLD_IDLE_TIMES = 15;
 // How long a landing's host waits for the folder (spec, Section 13, "Waits"): a chat's host lets it go IDLE_MS after
 // its last operation, and another landing's once that landing is forgotten, or IDLE_MS after its last step.
 export const LAND_WAIT_MS = IDLE_MS + 30_000;
@@ -1205,6 +1208,8 @@ class Host {
   private answering = false;
   private asking = false;
   private seen = 0;
+  // Since when nothing of it has run: what bounds how long a turn under way keeps the folder past its idle time.
+  private quietSince?: number;
   // The seen of the last answer that did not let the folder go: nothing is asked again until something changes, or
   // restRecheckMs has passed.
   private unsure = -1;
@@ -1435,6 +1440,7 @@ class Host {
     this.running += 1;
     this.seen += 1;
     this.turnEnded = false;
+    this.quietSince = undefined;
     clearTimeout(this.idleTimer);
     try {
       return this.answered(await work());
@@ -1473,10 +1479,36 @@ class Host {
       return;
     }
     this.askRest();
-    this.idleTimer = setTimeout(() => {
+    this.quietSince ??= Date.now();
+    this.idleTimer = setTimeout(() => this.idleOut(), this.idleMs).unref();
+  }
+
+  // Its idle time passed. A chat's own host whose chat is still in a turn, as its stream said or the agent says, keeps
+  // the folder: a turn can spend minutes on the agent's cloud tools between two operations here, and a waiting chat
+  // given the folder meanwhile would work in it mid-turn. It looks again restRecheckMs on. Never past HOLD_IDLE_TIMES
+  // its idle time with nothing of it running: a turn's end it never heard of does not hold the folder for good.
+  private idleOut(): void {
+    const go = (): void => {
       this.onGone();
       void this.letGo().then(() => this.stop());
-    }, this.idleMs).unref();
+    };
+    // Its last look comes when its hold ends, not up to restRecheckMs after.
+    const left = (): number => this.idleMs * HOLD_IDLE_TIMES - (Date.now() - (this.quietSince ?? Date.now()));
+    const keep = (): void => {
+      clearTimeout(this.idleTimer);
+      this.idleTimer = setTimeout(() => this.idleOut(), Math.max(0, Math.min(this.restRecheckMs, left()))).unref();
+    };
+    // Something of it began since the timer was set: its end sets another.
+    if (!this.free) return;
+    if (!this.atRest || left() <= 0) return go();
+    if (this.answering) return keep();
+    const asked = this.seen;
+    void this.atRest().catch(() => undefined).then((rest) => {
+      // Something of it began meanwhile, or it went: that has its own time.
+      if (this.seen !== asked || !this.free) return;
+      if (rest === false) keep();
+      else go();
+    });
   }
 
   // Whether it has started, nothing of it runs, no process of its root lives and it still holds its folder.

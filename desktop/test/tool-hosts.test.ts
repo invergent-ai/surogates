@@ -1066,6 +1066,46 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
     expect(asked).toBe(1);
   });
 
+  it("keeps the folder past its idle time from a waiting chat while its stream says the turn goes on, and gives it at the turn's end", async () => {
+    folders[ROOT_B] = folders[ROOT_A] ?? "";
+    const { follows, following } = followed();
+    const executor = toolHosts({ idleMs: 100, folderWaitMs: 5_000, following, spawnHost: fakeSpawn(answering), atRest: async () => true });
+    await executor.run(resolve(), signal());
+    follows[0]?.turnStarted();
+    const second = executor.run(resolveOf(ROOT_B), signal());
+    // Three idle times with nothing of the turn on this computer: its cloud tools, say.
+    expect(await pendingAfter(second, 300)).toBe(true);
+    expect(sent(0, "stop")).toBe(0);
+    follows[0]?.turnEnded();
+    expect(await second).toMatchObject({ ok: expect.any(String) });
+  });
+
+  it("keeps the folder past its idle time while the agent says the chat is in a turn, and gives it once it is not", async () => {
+    folders[ROOT_B] = folders[ROOT_A] ?? "";
+    const { following } = followed();
+    let rest = false;
+    const executor = toolHosts({
+      idleMs: 100, restRecheckMs: 50, folderWaitMs: 5_000, following, spawnHost: fakeSpawn(answering), atRest: async () => rest,
+    });
+    await executor.run(resolve(), signal());
+    const second = executor.run(resolveOf(ROOT_B), signal());
+    expect(await pendingAfter(second, 300)).toBe(true);
+    rest = true;
+    expect(await second).toMatchObject({ ok: expect.any(String) });
+  });
+
+  it("lets the folder go at last where a turn's end is never heard of, its idle time many times over", async () => {
+    folders[ROOT_B] = folders[ROOT_A] ?? "";
+    const { follows, following } = followed();
+    const executor = toolHosts({ idleMs: 20, folderWaitMs: 5_000, following, spawnHost: fakeSpawn(answering), atRest: async () => true });
+    await executor.run(resolve(), signal());
+    follows[0]?.turnStarted();
+    const second = executor.run(resolveOf(ROOT_B), signal());
+    expect(await pendingAfter(second, 100)).toBe(true);
+    // HOLD_IDLE_TIMES (15) idle times: 300 ms here.
+    expect(await second).toMatchObject({ ok: expect.any(String) });
+  });
+
   it("keeps the folder of a chat at rest from a waiting chat while a background process of it lives", async () => {
     folders[ROOT_B] = folders[ROOT_A] ?? "";
     const { following } = followed();
