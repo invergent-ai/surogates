@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import functools
 import json
 import logging
 import os
@@ -46,6 +47,7 @@ from surogates.devices.operations import (
     JournalRunner,
     OperationConflict,
     OperationRequest,
+    REQUEST_PREFIX,
     operation_channel,
     waiting_key,
     FOLDER_WAIT_KEY_S,
@@ -64,7 +66,9 @@ from surogates.harness.loop_context_replay import ContextReplayMixin
 from surogates.harness.prompt_cache import SystemPromptCache
 from surogates.harness.tool_exec import execute_single_tool
 from surogates.runtime.turn_slots import TurnSlots, current_turn
+from surogates.session import files as files_module
 from surogates.session.events import EventType
+from surogates.session.files import session_files
 from surogates.session.provisioning import create_child_session
 from surogates.session.store import SessionStore
 from surogates.tenant.auth.jwt import create_access_token
@@ -4086,6 +4090,61 @@ async def test_a_prompt_waits_no_longer_than_its_bound_on_a_computer_that_does_n
     session = await SessionStore(session_factory).get_session(rig.root)
     prompt = await asyncio.wait_for(Prompting(session_factory, redis_client)._build_system_prompt(session), 3.0)
     assert prompt == "prompt with None"
+
+
+async def silent_laptop_read(rig, session_factory, redis_client, monkeypatch, *, within=None, bound=None):
+    """A read of AGENTS.md, under *bound*, on a laptop that is online but answers nothing, and its open operation."""
+    await rig.laptop.connect()
+    rig.laptop.hold = True
+    monkeypatch.setattr(operations_module, "WAIT_GRACE_S", 0.1)
+    monkeypatch.setattr(files_module, "DeviceOperations", functools.partial(DeviceOperations, recheck_interval_s=0.1))
+    session = await SessionStore(session_factory).get_session(rig.root)
+
+    async def read():
+        async with asyncio.timeout(bound), session_files(
+            session, storage=None, session_factory=session_factory, redis=redis_client, within=within,
+        ) as files:
+            return await files.stat(await files.resolve("AGENTS.md"))
+
+    reading = asyncio.create_task(read())
+    for _ in range(60):
+        found = [o for o in await rig.ops.pending(rig.device_id, 1) if o.invocation_id.startswith(REQUEST_PREFIX)]
+        if found:
+            return reading, found[0]
+        if reading.done():
+            await reading  # raises what stopped it
+        await asyncio.sleep(0.05)
+    reading.cancel()
+    raise AssertionError("the read was never recorded")
+
+
+async def test_a_harness_request_waits_for_a_folder_another_chat_holds_and_says_so(
+    laptop_rig, session_factory, redis_client, monkeypatch,
+):
+    rig = laptop_rig
+    reading, op = await silent_laptop_read(rig, session_factory, redis_client, monkeypatch, within=1.0)
+    await rig.ops.waiting(op.id, "folder")
+    await asyncio.sleep(2.5)
+    assert not reading.done()
+    assert await device_wait_events(session_factory, rig.root) == [folder_waiting_for(rig)]
+    await rig.ops.waiting(op.id, None)
+    with pytest.raises(TimeoutError):  # the laptop still answers nothing
+        await asyncio.wait_for(reading, 5.0)
+    assert (await device_wait_events(session_factory, rig.root))[-1] == resumed_from(rig)
+
+
+async def test_a_request_without_the_harness_deadline_says_nothing_of_a_folder_wait(
+    laptop_rig, session_factory, redis_client, monkeypatch,
+):
+    rig = laptop_rig
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    reading, op = await silent_laptop_read(rig, session_factory, redis_client, monkeypatch, bound=1.0)
+    await rig.ops.waiting(op.id, "folder")
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(reading, 5.0)
+    assert loop.time() - started < 1.5
+    assert await device_wait_events(session_factory, rig.root) == []
 
 
 async def test_the_folder_wait_key_holds_the_reason_until_it_is_cleared(redis_client):

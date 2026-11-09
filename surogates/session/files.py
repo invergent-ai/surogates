@@ -13,6 +13,7 @@ editor's pending saves, under ``_office/pending/``, outside every chat's files.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from collections.abc import AsyncIterator
@@ -25,7 +26,13 @@ from sqlalchemy import select
 
 from surogates.db.models import Device
 from surogates.devices.binding import device_of
-from surogates.devices.operations import REQUEST_PREFIX, DeviceOperations, JournalRunner, OperationRequest
+from surogates.devices.operations import (
+    REQUEST_PREFIX,
+    DeviceOperations,
+    FolderPatience,
+    JournalRunner,
+    OperationRequest,
+)
 from surogates.devices.presence import DevicePresence
 from surogates.devices.workspace import DeviceWorkspaceIO
 from surogates.sandbox.pool import sandbox_session_key
@@ -38,7 +45,8 @@ logger = logging.getLogger(__name__)
 # How long the harness waits for a local folder's computer outside a tool
 # call: what it reads or writes there for itself (the folder's project
 # context, the turn's files, an artifact promoted from a reply) is best
-# effort, and a turn waits on it no longer than this.
+# effort, and a turn waits on it no longer than this, but for a wait the
+# computer says is for a folder another chat holds.
 HARNESS_WITHIN_S = 10.0
 
 
@@ -87,6 +95,7 @@ async def session_files(
     request_id: str | None = None,
     change: str | None = None,
     access: DeviceAccess | None = None,
+    within: float | None = None,
 ) -> AsyncIterator[WorkspaceFiles]:
     """*session*'s files, for one request.
 
@@ -103,59 +112,77 @@ async def session_files(
     Raises :class:`ComputerAway` at once when the computer is offline or its
     access ended: a change it left open is then cancelled, since its caller is
     told it failed.  A read under the same id cancels nothing.
+
+    *within*, the harness's deadline for a request outside a tool call: past it
+    the request raises TimeoutError, but not while the computer says one of its
+    operations waits its turn for a folder another chat holds, up to
+    FOLDER_WAIT_S more; such a wait is told to the session's viewers as a tool
+    call's is.
     """
     if change is not None and (access is None or access.session_id != session.id or not access.bound):
         # A route that forgot the check would claim a change for anyone in the org, or on a folder not set up.
         raise RuntimeError("A change reaches a session's files only once require_device_access let its caller in")
-    device_id = device_of(session.config)
-    if device_id is None:
-        yield StorageWorkspaceIO(
-            storage,
-            bucket=session.config["storage_bucket"],
-            prefix=boundary_workspace_prefix(session.config, session, workspace_root_id(session)),
-        )
-        return
-    invocation = f"{REQUEST_PREFIX}{request_id or uuid.uuid4().hex}"
-    operations = DeviceOperations(session_factory, redis)
-    async with session_factory() as db:
-        device = (await db.execute(
-            select(Device.name, Device.revoked_at).where(Device.id == device_id)
-        )).one_or_none()
-    if device is None or device.revoked_at is not None:
-        raise ComputerAway(device.name if device is not None else "your computer", revoked=True)
-    root = UUID(sandbox_session_key(session))
-    if change is not None:
-        # Before the computer is asked after: the same request id sent with another change is
-        # refused, online or not, and cancels nothing of the first.
-        await operations.claim(OperationRequest(
+    async with asyncio.timeout(within) as deadline:
+        device_id = device_of(session.config)
+        if device_id is None:
+            yield StorageWorkspaceIO(
+                storage,
+                bucket=session.config["storage_bucket"],
+                prefix=boundary_workspace_prefix(session.config, session, workspace_root_id(session)),
+            )
+            return
+        invocation = f"{REQUEST_PREFIX}{request_id or uuid.uuid4().hex}"
+        if within is None:
+            operations = DeviceOperations(session_factory, redis)
+        else:
+            # Imported here: both reach surogates.session, whose store imports the harness, which imports this module.
+            from surogates.devices.waits import DeviceWaitNotice
+            from surogates.session.store import SessionStore
+
+            operations = DeviceOperations(
+                session_factory, redis,
+                notice=DeviceWaitNotice(SessionStore(session_factory, redis), session_factory),
+                patience=FolderPatience(deadline, within),
+            )
+        async with session_factory() as db:
+            device = (await db.execute(
+                select(Device.name, Device.revoked_at).where(Device.id == device_id)
+            )).one_or_none()
+        if device is None or device.revoked_at is not None:
+            raise ComputerAway(device.name if device is not None else "your computer", revoked=True)
+        root = UUID(sandbox_session_key(session))
+        if change is not None:
+            # Before the computer is asked after: the same request id sent with another change is
+            # refused, online or not, and cancels nothing of the first.
+            await operations.claim(OperationRequest(
+                device_id=device_id,
+                root_session_id=root,
+                calling_session_id=session.id,
+                invocation_id=invocation,
+                ordinal=0,
+                kind="request",
+                args={"change": change},
+            ))
+        if device_id not in await DevicePresence(redis).online([device_id]):
+            # A change's own caller, told it failed, cancels what it left waiting; a read leaves nothing open.
+            if change is not None:
+                # The app answers what it still asks about not run, once its link ends.  The one
+                # exception: a change its user allowed just before is running, and may still land.
+                await operations.cancel_invocation(session.id, invocation)
+            raise ComputerAway(device.name, revoked=False)
+        runner = JournalRunner(
+            operations,
             device_id=device_id,
             root_session_id=root,
             calling_session_id=session.id,
             invocation_id=invocation,
-            ordinal=0,
-            kind="request",
-            args={"change": change},
-        ))
-    if device_id not in await DevicePresence(redis).online([device_id]):
-        # A change's own caller, told it failed, cancels what it left waiting; a read leaves nothing open.
-        if change is not None:
-            # The app answers what it still asks about not run, once its link ends.  The one
-            # exception: a change its user allowed just before is running, and may still land.
-            await operations.cancel_invocation(session.id, invocation)
-        raise ComputerAway(device.name, revoked=False)
-    runner = JournalRunner(
-        operations,
-        device_id=device_id,
-        root_session_id=root,
-        calling_session_id=session.id,
-        invocation_id=invocation,
-        keep_open=change is not None,
-    )
-    try:
-        yield DeviceWorkspaceIO(runner, root=session.config["workspace_path"], identity=f"device:{device_id}")
-    finally:
+            keep_open=change is not None,
+        )
         try:
-            await runner.consumed()
-        except Exception:
-            # Best effort: a read left unmarked goes as an orphan instead.
-            logger.warning("could not mark what a request read as consumed", exc_info=True)
+            yield DeviceWorkspaceIO(runner, root=session.config["workspace_path"], identity=f"device:{device_id}")
+        finally:
+            try:
+                await runner.consumed()
+            except Exception:
+                # Best effort: a read left unmarked goes as an orphan instead.
+                logger.warning("could not mark what a request read as consumed", exc_info=True)
