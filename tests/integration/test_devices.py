@@ -59,6 +59,7 @@ from surogates.devices.waits import DeviceWaitNotice
 from surogates.devices.workspace import WALK_MARGIN_NS, DeviceOperationError, DeviceWorkspaceIO
 from surogates.governance.policy import GovernanceGate
 from surogates.harness.device_replay import replay_unanswered
+from surogates.harness.loop import AgentHarness
 from surogates.harness import loop_artifact_completion
 from surogates.harness.loop_artifact_completion import ArtifactCompletionMixin
 from surogates.harness import loop_context_replay
@@ -4136,6 +4137,46 @@ async def test_a_harness_request_waits_for_a_folder_another_chat_holds_and_says_
         await asyncio.wait_for(reading, 5.0)
     assert loop.time() - freed <= 1.0 + 1.0
     assert (await device_wait_events(session_factory, rig.root))[-1] == resumed_from(rig)
+
+
+@pytest.mark.parametrize("read", ["context", "cursor"])
+async def test_a_stop_ends_a_turn_start_read_waiting_for_its_folder_and_its_computer_drops_it(
+    laptop_rig, session_factory, redis_client, monkeypatch, read,
+):
+    rig = laptop_rig
+    await rig.laptop.connect()
+    rig.laptop.hold = True  # another chat holds the folder: the app keeps the operation back
+    monkeypatch.setattr(operations_module, "WAIT_GRACE_S", 0.1)
+    monkeypatch.setattr(files_module, "DeviceOperations", functools.partial(DeviceOperations, recheck_interval_s=0.1))
+    monkeypatch.setattr(loop_context_replay, "HARNESS_WITHIN_S", 0.5)
+    monkeypatch.setattr(loop_artifact_completion, "HARNESS_WITHIN_S", 0.5)
+    store = SessionStore(session_factory)
+    session = await store.get_session(rig.root)
+    work = (
+        Prompting(session_factory, redis_client)._read_folder_context(session) if read == "context"
+        else TurnEnd(store, session_factory, redis_client)._folder_cursor(session)
+    )
+    harness = AgentHarness.__new__(AgentHarness)
+    harness._active_executor, harness._interrupt_requested, harness._interrupt_message = None, False, None
+    reading = asyncio.create_task(harness._unless_stopped(work))
+
+    async def recorded() -> bool:
+        return bool(await rig.ops.pending(rig.device_id, 1))
+
+    await eventually(recorded)
+    [op] = await rig.ops.pending(rig.device_id, 1)
+    await rig.ops.waiting(op.id, "folder")
+    await asyncio.sleep(1.5)
+    assert not reading.done()  # past its bound: it waits the folder's turn
+
+    harness.interrupt("paused by user")
+    assert await asyncio.wait_for(reading, 1.0) == (True, None)
+    assert await rig.ops.closed_among(rig.device_id, [op.id]) == [op.id]
+
+    async def dropped() -> bool:
+        return str(op.id) in rig.laptop.cancelled
+
+    await eventually(dropped)
 
 
 async def test_a_request_without_the_harness_deadline_says_nothing_of_a_folder_wait(

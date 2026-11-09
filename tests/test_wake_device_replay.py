@@ -133,3 +133,27 @@ async def test_a_pause_that_landed_before_the_replay_still_stops_it(monkeypatch)
         before_replay=lambda harness: harness.interrupt("paused by user"),
     )
     assert "compact" not in order and "loop" not in order
+
+
+async def test_a_stop_while_the_prompt_waits_for_its_folder_ends_the_wake_stopped_before_its_loop(monkeypatch):
+    # The project context read waits while another chat holds the folder, up to minutes: a Stop ends it now.
+    waiting = asyncio.Event()
+
+    async def build_waiting_for_the_folder(session):
+        waiting.set()
+        await _waits_forever(None)
+
+    def stop_once_it_waits(harness):
+        harness._build_system_prompt = build_waiting_for_the_folder
+
+        async def stop():
+            await waiting.wait()
+            harness.interrupt("paused by user")
+
+        asyncio.ensure_future(stop())
+
+    paused = AsyncMock(return_value=None)
+    monkeypatch.setattr(loop_module.AgentHarness, "_abort_iteration_with_pause", paused)
+    order, _ = await _wake(monkeypatch, {}, before_replay=stop_once_it_waits)
+    assert order == ["compact"]
+    paused.assert_awaited_once()
