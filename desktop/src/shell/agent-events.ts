@@ -123,24 +123,38 @@ export async function titleOf(api: Api, agentId: string, sessionId: string): Pro
   return typeof title === "string" && title !== "" ? title : "A chat";
 }
 
+/**
+ * Whether chat *sessionId* is at rest between its turns, as the agent has it now: true where its last turn is done or
+ * failed, false where one is under way, undefined where it says neither (paused) or cannot be read.
+ */
+export async function restOf(api: Api, agentId: string, sessionId: string): Promise<boolean | undefined> {
+  const response = await api(`/api/v1/sessions/${sessionId}?agent_id=${encodeURIComponent(agentId)}`);
+  const { status } = response.ok ? (parsed(await response.text()) ?? {}) : {};
+  return status === "completed" || status === "failed" ? true : status === "active" ? false : undefined;
+}
+
 // The events that end a chat's turn: done, failed, or stopped from a channel; a Stop's pause only once the turn has
 // stopped, undo done (turn_ended), not the pause route's own, which the turn hears of while it may still run.
 const TURN_ENDS: ReadonlySet<string> = new Set(["session.complete", "session.fail", "session.stopped"]);
 const endsTheTurn = (event: ServerEvent): boolean =>
   TURN_ENDS.has(event.type) || (event.type === "session.pause" && parsed(event.data)?.turn_ended === true);
 
+// The events that start a chat's turn, or take one up again: a message to it, the harness's wake, a resume.
+const TURN_STARTS: ReadonlySet<string> = new Set(["user.message", "coordinator.message", "harness.wake", "session.resume"]);
+
 // What ends a chat's follow: the chat archived, or gone. Any other close is followed by a reconnection.
 const GONE: ReadonlySet<unknown> = new Set(["archived", "session_not_found"]);
 
 /**
  * Follow chat *sessionId* across its turns (watch=1): *onTurnEnd* is called each time one of its turns
- * ends, done or not: a turn that failed or was stopped has ended too. It starts at the chat's newest event,
- * and takes up after the last event it heard, stream.start's included, whenever its stream closes. Only a
+ * ends, done or not: a turn that failed or was stopped has ended too; *onTurnStart* each time one starts.
+ * It starts at the chat's newest event, and takes up after the last event it heard, stream.start's
+ * included, whenever its stream closes. Only a
  * chat archived or gone ends it, short of stop. Until *started*, it has heard nothing of the chat: a turn
  * that ends meanwhile it never tells.
  */
 export function followTurns(
-  options: Omit<FollowOptions, "agentId"> & { sessionId: string; onTurnEnd(done: boolean): void; live?(): boolean },
+  options: Omit<FollowOptions, "agentId"> & { sessionId: string; onTurnEnd(done: boolean): void; onTurnStart?(): void; live?(): boolean },
 ): { stop(): void; started(): boolean } {
   let after = -1;
   // Followed only while *live* says so, as the sign-in it was started under: once that has ended it stops, and
@@ -161,6 +175,7 @@ export function followTurns(
     if (ended()) return;
     if (event.id !== null && /^\d+$/.test(event.id)) after = Number(event.id);
     if (endsTheTurn(event)) options.onTurnEnd(event.type === "session.complete");
+    else if (TURN_STARTS.has(event.type)) options.onTurnStart?.();
     else if (event.type === "session.done" && GONE.has(parsed(event.data)?.reason)) stop();
   });
   return { stop, started: () => after >= 0 };

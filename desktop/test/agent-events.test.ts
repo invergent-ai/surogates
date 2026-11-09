@@ -1,12 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { type Api, Burst, followChat, followInbox, followTurns, type InboxItem } from "../src/shell/agent-events.js";
+import { type Api, Burst, followChat, followInbox, followTurns, type InboxItem, restOf } from "../src/shell/agent-events.js";
 
 // The agent's routes as the app reads them: each stream opened is kept, for the test to send on or end.
 class FakeAgent {
   readonly streams: Array<{ path: string; send(text: string): void; end(): void; signal: AbortSignal }> = [];
   readonly items = new Map<number, Record<string, unknown>>();
   readonly titles = new Map<string, string>();
+  readonly statuses = new Map<string, string | 404>();
   status = 200; // what the next stream opens with
   itemFailure: number | "throw" | null = null; // how the next item's read fails: an HTTP status, or no answer at all
   readonly api: Api = async (path, init) => {
@@ -20,7 +21,10 @@ class FakeAgent {
       return found ? Response.json(found) : new Response(null, { status: 404 });
     }
     const chat = /^\/api\/v1\/sessions\/([^/?]+)\?agent_id=a$/.exec(path);
-    if (chat) return Response.json({ id: chat[1], title: this.titles.get(chat[1]!) ?? null });
+    if (chat) {
+      if (this.statuses.get(chat[1]!) === 404) return new Response(null, { status: 404 });
+      return Response.json({ id: chat[1], title: this.titles.get(chat[1]!) ?? null, status: this.statuses.get(chat[1]!) ?? "active" });
+    }
     if (this.status !== 200) {
       const status = this.status;
       this.status = 200;
@@ -301,6 +305,31 @@ describe("a chat's turns, followed", () => {
     await until(() => ended.length === 4);
     expect(ended).toEqual([false, false, false, true]);
     stop();
+  });
+
+  it("tells each turn's start, a message, a wake or a resume, and no other event of a turn as one", async () => {
+    const agent = new FakeAgent();
+    const told: string[] = [];
+    const { stop } = followTurns({
+      api: agent.api, onError: () => {}, delayMs: () => 0, sessionId: "chat-1",
+      onTurnEnd: () => told.push("end"), onTurnStart: () => told.push("start"),
+    });
+    await until(() => agent.streams.length === 1);
+    agent.streams[0]!.send(([
+      "user.message", "harness.wake", "llm.request", "tool.call", "session.complete", "session.title_updated", "session.resume",
+      "coordinator.message", "device.waiting", "session.pause",
+    ] as const).map((type, at) => `id: ${at + 3}\r\nevent: ${type}\r\ndata: {}\r\n\r\n`).join(""));
+    await until(() => told.length === 5);
+    await settle();
+    expect(told).toEqual(["start", "start", "end", "start", "start"]);
+    stop();
+  });
+
+  it("says a chat is at rest between its turns, done or failed, in a turn while active, and nothing of one it cannot tell", async () => {
+    const agent = new FakeAgent();
+    agent.statuses.set("done", "completed").set("failed", "failed").set("busy", "active").set("paused", "paused").set("gone", 404);
+    const said = await Promise.all(["done", "failed", "busy", "paused", "gone"].map((id) => restOf(agent.api, "a", id)));
+    expect(said).toEqual([true, true, false, undefined, undefined]);
   });
 
   it("tells a Stop's end only once its turn has stopped, not at the pause the Stop starts with", async () => {

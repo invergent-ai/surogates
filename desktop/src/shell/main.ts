@@ -39,7 +39,7 @@ import { type FromManager, MANAGER, type ManagerProcess, REPO_IMAGE, type ToMana
 import { type Delivery, ImageDelivery, imageArch, installBase, readManifest } from "../vm/image.js";
 import type { Boot } from "../vm/manager.js";
 import { openAbout } from "./about.js";
-import { BURST, Burst, followChat, followInbox, followTurns, type InboxItem, titleOf } from "./agent-events.js";
+import { BURST, Burst, followChat, followInbox, followTurns, type InboxItem, restOf, titleOf } from "./agent-events.js";
 import { type Agent, AgentStore, connectAgent, describeAgent, type Get, linksFor, linkUrl, partitionFor, readAgent } from "./agents.js";
 import { AppearanceStore, Theme } from "./appearance.js";
 import { nameTheApp, quitAsked } from "./app-identity.js";
@@ -993,16 +993,22 @@ function startStack(agent: Agent, credential: LiveCredential): Promise<DeviceSta
         user: credential.userId,
         // The sidebar says while a thread's copy of its folder is being made: its first step waits for it.
         making: (event) => copying.heard(event),
-        // A chat host hears the end of its chat's turns on the app's sign-in at that moment, until that sign-in
-        // ends; with nobody signed in the idle time lets the folder go. A turn's end missed before the stream
+        // A chat host hears the start and end of its chat's turns on the app's sign-in at that moment, until that
+        // sign-in ends; with nobody signed in the idle time lets the folder go. A turn's end missed before the stream
         // opened leaves that idle time to let it go too.
-        following: (chatId, turnEnded) => {
+        following: (chatId, turnEnded, turnStarted) => {
           const session = signedIn;
           if (!session) return () => {};
           return followTurns({
             api: (path, init) => session.api(path, init), onError: report,
-            sessionId: chatId, onTurnEnd: turnEnded, live: () => signedIn === session,
+            sessionId: chatId, onTurnEnd: turnEnded, onTurnStart: turnStarted, live: () => signedIn === session,
           }).stop;
+        },
+        // And whether its chat is at rest, asked of the agent on the app's sign-in where another chat waits for the
+        // folder: with nobody signed in, or no answer, nobody can say, and the idle time lets the folder go.
+        atRest: (chatId) => {
+          const session = signedIn;
+          return session ? restOf((path, init) => session.api(path, init), credential.agentId, chatId) : Promise.resolve(undefined);
         },
       }),
       browser: new BrowserClient(utilityBrowser(profilesOf(root, credential))),
