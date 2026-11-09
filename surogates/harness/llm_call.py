@@ -100,11 +100,6 @@ _FALLBACK_CONTEXT_WINDOW: int = 128_000
 # Retry constants
 MAX_LLM_RETRIES: int = 3
 
-#: The gateway gave up waiting on the model (Cloudflare 524, proxy 504).
-#: Retried as a stream; the non-streaming fallback would wait on the same
-#: upstream again.
-_GATEWAY_TIMEOUT_STATUSES: frozenset[int] = frozenset({504, 524})
-
 #: Longest provider cooldown worth waiting out in-session rather than
 #: failing. Every cooldown seen on the workspace-bench prod run was under
 #: five minutes (6s to 291s), and the sessions that died had already spent
@@ -134,12 +129,9 @@ STREAM_STALE_TIMEOUT: float = float(
 # while GLM-5.1 was still reasoning silently.
 STREAM_STALE_TIMEOUT_REASONING: float = 600.0
 
-# How long a streaming request may wait for the provider to answer at all.
-# Reasoning silence happens after the response has started; a request that
-# has not even started answering is stuck upstream.  Measured on PROD
-# 2026-11-09: healthy llm.buzz streams answer in 5-15s even at 43k tokens,
-# while a stuck one held the turn 6 minutes before Cloudflare's 524, then
-# another 600s in the non-streaming fallback.
+# How long a remote provider may take to start answering.  Reasoning silence
+# comes after the response starts; healthy streams start in 5-15s even at
+# 43k tokens (measured on PROD 2026-11-09, where a stuck one held a turn 6 min).
 STREAM_FIRST_BYTE_TIMEOUT: float = float(
     os.environ.get("SUROGATES_STREAM_FIRST_BYTE_TIMEOUT", "120.0")
 )
@@ -220,11 +212,7 @@ _LOCAL_STREAM_HOSTS: frozenset[str] = frozenset({
 
 
 class StreamStalledError(TimeoutError):
-    """The provider never answered, or went silent before saying anything.
-
-    Retried as a stream: the non-streaming fallback goes to the same stuck
-    upstream with a longer timeout and no output to show meanwhile.
-    """
+    """The provider never answered, or went silent before saying anything."""
 
 
 class PartialToolCallStreamError(ConnectionError):
@@ -1100,7 +1088,7 @@ async def call_llm_with_retry(
             is_retryable = (
                 classified.retryable
                 or
-                status_code in (429, 500, 502, 503, 529, *_GATEWAY_TIMEOUT_STATUSES)
+                status_code in (429, 500, 502, 503, 529)
                 or is_transient_error(exc)
             )
 
@@ -1186,7 +1174,10 @@ async def call_llm_streaming(
     except (PartialToolCallStreamError, StreamStalledError):
         raise
     except Exception as exc:
-        if extract_status_code(exc) in _GATEWAY_TIMEOUT_STATUSES:
+        # A stuck or failing gateway is retried as a stream: the non-streaming
+        # fallback waits on the same upstream, longer, with nothing to show.
+        status = extract_status_code(exc)
+        if status is not None and status >= 500:
             raise
         logger.warning(
             "Streaming failed for session %s (iteration %d), "
