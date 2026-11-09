@@ -234,11 +234,14 @@ class FolderPatience:
 
     def held(self, ahead_s: float) -> None:
         """An operation still waits for its folder: the deadline is at least *ahead_s* away."""
-        if self._deadline.expired():
-            return
-        when = min(self._latest, asyncio.get_running_loop().time() + ahead_s)
         current = self._deadline.when()
-        self._deadline.reschedule(when if current is None else max(current, when))
+        if current is None:
+            return  # a request with no deadline is not given one
+        when = min(self._latest, asyncio.get_running_loop().time() + ahead_s)
+        try:
+            self._deadline.reschedule(max(current, when))
+        except RuntimeError:
+            pass  # its timeout already fired or exited: there is nothing left to hold off
 
     def freed(self) -> None:
         """Its wait ended: what is left of the request has *within_s* from now."""

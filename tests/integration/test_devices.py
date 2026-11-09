@@ -3234,7 +3234,8 @@ async def test_a_computer_gone_away_ends_its_folder_wait_patience(
     await presence.release(rig.device_id, "holder")
     with pytest.raises(TimeoutError):
         await asyncio.wait_for(reading, 5.0)
-    assert loop.time() - released < 2 * 0.1 + WITHIN + 0.5
+    # The two polls held ahead, and no fresh deadline: the computer going away is not the folder freed.
+    assert loop.time() - released < 2 * 0.1 + 0.5
 
 
 async def test_an_operation_answered_after_its_folder_wait_leaves_the_next_the_whole_deadline(
@@ -3255,7 +3256,22 @@ async def test_an_operation_answered_after_its_folder_wait_leaves_the_next_the_w
     await operation_of(rig.ops, rig, second)
     with pytest.raises(TimeoutError):
         await asyncio.wait_for(reading, 5.0)
-    assert loop.time() - answered >= WITHIN - 0.2
+    assert WITHIN - 0.2 <= loop.time() - answered <= WITHIN + 1.0
+
+
+async def test_folder_patience_puts_no_limit_on_a_request_that_has_none():
+    async with asyncio.timeout(None) as deadline:
+        patience = FolderPatience(deadline, WITHIN)
+        patience.held(1.0)
+        patience.freed()
+        assert deadline.when() is None
+
+
+async def test_folder_patience_does_nothing_once_its_request_has_ended():
+    async with asyncio.timeout(WITHIN) as deadline:
+        patience = FolderPatience(deadline, WITHIN)
+    patience.held(1.0)
+    patience.freed()
 
 
 async def test_an_operation_is_open_for_its_own_device_only_and_its_wait_can_be_forgotten(
