@@ -294,10 +294,27 @@ describe("a chat's turns, followed", () => {
     const ended: boolean[] = [];
     const { stop } = followTurns({ api: agent.api, onError: () => {}, delayMs: () => 0, sessionId: "chat-1", onTurnEnd: (done) => ended.push(done) });
     await until(() => agent.streams.length === 1);
-    agent.streams[0]!.send(["session.pause", "session.fail", "session.stopped", "llm.response", "session.complete"]
-      .map((type, at) => `id: ${at + 3}\r\nevent: ${type}\r\ndata: {}\r\n\r\n`).join(""));
+    agent.streams[0]!.send(([
+      ["session.pause", `{"reason": "interrupted", "turn_ended": true}`], ["session.fail", "{}"], ["session.stopped", "{}"],
+      ["llm.response", "{}"], ["session.complete", "{}"],
+    ] as const).map(([type, data], at) => `id: ${at + 3}\r\nevent: ${type}\r\ndata: ${data}\r\n\r\n`).join(""));
     await until(() => ended.length === 4);
     expect(ended).toEqual([false, false, false, true]);
+    stop();
+  });
+
+  it("tells a Stop's end only once its turn has stopped, not at the pause the Stop starts with", async () => {
+    const agent = new FakeAgent();
+    const ended: boolean[] = [];
+    const { stop } = followTurns({ api: agent.api, onError: () => {}, delayMs: () => 0, sessionId: "chat-1", onTurnEnd: (done) => ended.push(done) });
+    await until(() => agent.streams.length === 1);
+    // The pause route's own, while the turn may still undo what it did on this computer.
+    agent.streams[0]!.send("id: 3\r\nevent: session.pause\r\ndata: {}\r\n\r\n");
+    await settle();
+    expect(ended).toEqual([]);
+    agent.streams[0]!.send(`id: 4\r\nevent: session.pause\r\ndata: {"reason": "interrupted", "turn_ended": true}\r\n\r\n`);
+    await until(() => ended.length === 1);
+    expect(ended).toEqual([false]);
     stop();
   });
 

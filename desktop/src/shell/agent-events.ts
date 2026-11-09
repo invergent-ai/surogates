@@ -123,8 +123,11 @@ export async function titleOf(api: Api, agentId: string, sessionId: string): Pro
   return typeof title === "string" && title !== "" ? title : "A chat";
 }
 
-// The events that end a chat's turn: done, failed, paused by a Stop, or stopped from a channel.
-const TURN_ENDS: ReadonlySet<string> = new Set(["session.complete", "session.fail", "session.pause", "session.stopped"]);
+// The events that end a chat's turn: done, failed, or stopped from a channel; a Stop's pause only once the turn has
+// stopped, undo done (turn_ended), not the pause route's own, which the turn hears of while it may still run.
+const TURN_ENDS: ReadonlySet<string> = new Set(["session.complete", "session.fail", "session.stopped"]);
+const endsTheTurn = (event: ServerEvent): boolean =>
+  TURN_ENDS.has(event.type) || (event.type === "session.pause" && parsed(event.data)?.turn_ended === true);
 
 // What ends a chat's follow: the chat archived, or gone. Any other close is followed by a reconnection.
 const GONE: ReadonlySet<unknown> = new Set(["archived", "session_not_found"]);
@@ -157,7 +160,7 @@ export function followTurns(
   const stop = follow({ ...options, api }, () => `/api/v1/sessions/${options.sessionId}/events?after=${after}&watch=1`, (event) => {
     if (ended()) return;
     if (event.id !== null && /^\d+$/.test(event.id)) after = Number(event.id);
-    if (TURN_ENDS.has(event.type)) options.onTurnEnd(event.type === "session.complete");
+    if (endsTheTurn(event)) options.onTurnEnd(event.type === "session.complete");
     else if (event.type === "session.done" && GONE.has(parsed(event.data)?.reason)) stop();
   });
   return { stop, started: () => after >= 0 };
