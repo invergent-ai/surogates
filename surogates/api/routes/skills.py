@@ -40,9 +40,11 @@ from surogates.api.routes._shared import (
 )
 from surogates.devices.binding import device_of
 from surogates.storage.skill_staging import SkillStager, has_stageable_assets, staging_preamble
+from surogates.session.attachment_ingest import workspace_root_id
 from surogates.storage.tenant import (
     TenantStorage,
     agent_session_bucket,
+    boundary_workspace_prefix,
 )
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import TenantContext
@@ -171,7 +173,7 @@ def _get_tenant_storage(request: Request, tenant: TenantContext) -> TenantStorag
 
 
 def _get_skill_stager(
-    request: Request, storage_key_prefix: str = "",
+    request: Request, storage_key_prefix: str = "", workspace_prefix: str | None = None,
 ) -> SkillStager:
     """Create a ``SkillStager`` bound to the request's storage backend.
 
@@ -192,12 +194,18 @@ def _get_skill_stager(
         storage_bucket=bucket,
         storage_key_prefix=storage_key_prefix,
         redis=redis,
+        workspace_prefix=workspace_prefix,
     )
 
 
 def _session_storage_key_prefix(session: Any) -> str:
     """Return the per-agent storage prefix stamped onto *session*."""
     return (session.config or {}).get("storage_key_prefix", "") or ""
+
+
+def _session_workspace_prefix(session: Any) -> str:
+    """The object prefix the sandbox mounts at /workspace for *session*."""
+    return boundary_workspace_prefix(session.config, session, workspace_root_id(session))
 
 
 def _resource_loader(request: Request):
@@ -258,6 +266,7 @@ async def _stage_skill_for_session(
     storage_key_prefix: str = "",
     bundle: Any = None,
     system_bundle: Any = None,
+    workspace_prefix: str | None = None,
 ) -> str | None:
     """Auto-stage a skill into the session workspace when it has assets to stage.
 
@@ -277,7 +286,9 @@ async def _stage_skill_for_session(
     if not has_stageable_assets(linked_files):
         return None
 
-    stager = _get_skill_stager(request, storage_key_prefix=storage_key_prefix)
+    stager = _get_skill_stager(
+        request, storage_key_prefix=storage_key_prefix, workspace_prefix=workspace_prefix,
+    )
 
     if skill_def.source == SKILL_SOURCE_PLATFORM:
         source_bundle, prefix = _skill_bundle(skill_def, bundle, system_bundle)
@@ -677,6 +688,7 @@ async def view_skill(
             storage_key_prefix=_session_storage_key_prefix(session),
             bundle=bundle,
             system_bundle=system_bundle,
+            workspace_prefix=_session_workspace_prefix(session),
         )
         if staged_at is not None:
             detail.staged_at = staged_at
@@ -772,6 +784,7 @@ async def read_skill_file(
         if session_id is None or session_for_staging is None or device_of(session_for_staging.config) is not None:
             return None
         key_prefix = _session_storage_key_prefix(session_for_staging)
+        workspace_prefix = _session_workspace_prefix(session_for_staging)
         staged_at = await _stage_skill_for_session(
             request=request,
             tenant=tenant,
@@ -781,10 +794,11 @@ async def read_skill_file(
             storage_key_prefix=key_prefix,
             bundle=bundle,
             system_bundle=system_bundle,
+            workspace_prefix=workspace_prefix,
         )
         if staged_at is None:
             return None
-        stager = _get_skill_stager(request, storage_key_prefix=key_prefix)
+        stager = _get_skill_stager(request, storage_key_prefix=key_prefix, workspace_prefix=workspace_prefix)
         return {
             "file_path": path,
             "binary": True,

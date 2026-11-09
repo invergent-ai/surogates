@@ -108,10 +108,16 @@ class SkillStager:
         storage_bucket: str,
         redis: "Redis | None" = None,
         storage_key_prefix: str = "",
+        workspace_prefix: str | None = None,
     ) -> None:
         self._backend = backend
         self._storage_bucket = storage_bucket
         self._storage_key_prefix = storage_key_prefix
+        # The prefix the sandbox actually mounts at /workspace. A scheduled
+        # run, a managed-channel chat or a sub-agent mounts a boundary or
+        # root-session workspace, not its own session id, so staging under
+        # the session id leaves the files where the sandbox never looks.
+        self._workspace_prefix = workspace_prefix
         self._redis = redis
         # In-process fallback locks — only used when Redis isn't available.
         # Keyed by the same string as the Redis lock so the two code paths
@@ -126,6 +132,8 @@ class SkillStager:
         ``sessions/{id}/`` prefix so staged keys land under the agent's
         share of the bucket.
         """
+        if self._workspace_prefix is not None:
+            return f"{self._workspace_prefix.rstrip('/')}/{sub_key.lstrip('/')}"
         return prefixed(session_workspace_key(session_id, sub_key), self._storage_key_prefix)
 
     # ------------------------------------------------------------------

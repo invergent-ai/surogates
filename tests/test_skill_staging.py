@@ -162,3 +162,26 @@ class TestStageFromBundle:
         assert session_workspace_key(session_id, ".skills/proc/references/notes.md") in keys
         assert session_workspace_key(session_id, ".skills/proc/SKILL.md") not in keys
         assert session_workspace_key(session_id, ".skills/proc/SKILL.graph.json") not in keys
+
+
+async def test_stages_under_the_mounted_workspace_prefix(backend: LocalBackend):
+    """A scheduled or managed-channel run mounts a boundary workspace, not its session id."""
+    tenant_bucket = "tenant-bbbbbbbb"
+    await backend.create_bucket(tenant_bucket)
+    await backend.create_bucket(STORAGE_BUCKET)
+    await backend.write_text(tenant_bucket, "skills/report/scripts/run.py", "print('x')")
+    mounted = "proj/agent/boundaries/user:42/workspace/"
+    stager = SkillStager(backend=backend, storage_bucket=STORAGE_BUCKET, workspace_prefix=mounted)
+    session_id = uuid4()
+
+    await stager.stage_from_object_store(
+        session_id=session_id,
+        skill_name="report",
+        source_bucket=tenant_bucket,
+        source_prefix="skills/report",
+    )
+
+    keys = await backend.list_keys(STORAGE_BUCKET, prefix="")
+    assert f"{mounted}.skills/report/scripts/run.py" in keys
+    assert not any(k.startswith(f"{session_id}/") for k in keys)
+    assert await stager.is_staged(session_id, "report")
