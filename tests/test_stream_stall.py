@@ -251,6 +251,7 @@ async def test_unanswered_request_raises_stall(monkeypatch):
     from surogates.harness.llm_call import StreamStalledError
 
     monkeypatch.setattr("surogates.harness.llm_call.STREAM_FIRST_BYTE_TIMEOUT", 0.3)
+    monkeypatch.setattr("surogates.harness.llm_call.NON_STREAMING_INTERRUPT_POLL", 0.05)
     llm_client = MagicMock()
     llm_client.chat.completions.create = _never_answers()
 
@@ -277,7 +278,7 @@ async def test_stop_while_waiting_for_the_provider(monkeypatch):
         await asyncio.sleep(0.2)
         stopped["now"] = True
 
-    asyncio.ensure_future(_stop_soon())
+    stopper = asyncio.ensure_future(_stop_soon())
     _msg, usage = await asyncio.wait_for(
         call_llm_streaming_inner(
             session=_make_session(),
@@ -287,6 +288,7 @@ async def test_stop_while_waiting_for_the_provider(monkeypatch):
         ),
         timeout=3.0,
     )
+    await stopper
     assert usage["finish_reason"] == "interrupted"
 
 
@@ -340,3 +342,49 @@ async def test_stuck_provider_is_retried_as_a_stream(monkeypatch, failure):
     assert inner.await_count == 2
     non_streaming.assert_not_awaited()
     assert streaming == []
+
+
+@pytest.mark.asyncio
+async def test_local_upstream_has_no_first_byte_bound(monkeypatch):
+    """Ollama cold-loading a model must not be cut off."""
+    monkeypatch.setattr("surogates.harness.llm_call.STREAM_FIRST_BYTE_TIMEOUT", 0.1)
+    monkeypatch.setattr("surogates.harness.llm_call.NON_STREAMING_INTERRUPT_POLL", 0.05)
+
+    async def _slow(**_kwargs):
+        await asyncio.sleep(0.4)
+        return _BlockingStream([])
+
+    llm_client = MagicMock(base_url="http://localhost:11434/v1")
+    llm_client.chat.completions.create = _slow
+    stream_task = asyncio.ensure_future(call_llm_streaming_inner(
+        session=_make_session(),
+        create_kwargs={"model": "gpt-4o", "messages": []},
+        iteration=1, llm_client=llm_client, store=AsyncMock(),
+        interrupt_check=lambda: False,
+    ))
+    await asyncio.sleep(0.6)
+    assert not stream_task.done(), "past the bound, still waiting on the local model"
+    stream_task.cancel()
+
+
+@pytest.mark.asyncio
+async def test_reasoning_then_silence_is_not_restarted(monkeypatch):
+    monkeypatch.setattr("surogates.harness.llm_call.STREAM_STALE_TIMEOUT", 0.3)
+    monkeypatch.setattr("surogates.harness.llm_call.STREAM_CHUNK_POLL_INTERVAL", 0.05)
+    delta = SimpleNamespace(content=None, role="assistant", tool_calls=None,
+                            reasoning_content="Mă gândesc")
+    chunk = SimpleNamespace(choices=[SimpleNamespace(delta=delta, finish_reason=None)],
+                            model="gpt-4o", usage=None)
+    llm_client = MagicMock()
+    llm_client.chat.completions.create = AsyncMock(return_value=_BlockingStream([chunk]))
+
+    _msg, usage = await asyncio.wait_for(
+        call_llm_streaming_inner(
+            session=_make_session(),
+            create_kwargs={"model": "gpt-4o", "messages": []},
+            iteration=1, llm_client=llm_client, store=AsyncMock(),
+            interrupt_check=lambda: False,
+        ),
+        timeout=3.0,
+    )
+    assert usage["finish_reason"] == "interrupted"

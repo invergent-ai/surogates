@@ -1277,29 +1277,24 @@ async def call_llm_streaming_inner(
         final_kwargs["extra_body"] = merged
 
     try:
-        response = await asyncio.wait_for(
-            _await_with_heartbeats(
-                llm_client.chat.completions.create(
-                    **final_kwargs,
-                    stream=True,
-                    stream_options={"include_usage": True},
-                ),
-                session=session,
-                store=store,
-                iteration=iteration,
-                turn_id=turn_id,
-                iteration_index=iteration_index,
-                interrupt_check=interrupt_check,
-                phase="waiting",
+        response = await _await_with_heartbeats(
+            llm_client.chat.completions.create(
+                **final_kwargs,
+                stream=True,
+                stream_options={"include_usage": True},
             ),
-            STREAM_FIRST_BYTE_TIMEOUT,
+            session=session,
+            store=store,
+            iteration=iteration,
+            turn_id=turn_id,
+            iteration_index=iteration_index,
+            interrupt_check=interrupt_check,
+            phase="waiting",
+            # A local upstream may cold-load a model before answering.
+            deadline=None if stale_timeout == float("inf") else STREAM_FIRST_BYTE_TIMEOUT,
         )
     except _TurnStopped:
         return _interrupted_result(model_id)
-    except TimeoutError as exc:
-        raise StreamStalledError(
-            f"provider did not answer within {STREAM_FIRST_BYTE_TIMEOUT:.0f}s"
-        ) from exc
 
     # Accumulators
     content_parts: list[str] = []
@@ -1645,7 +1640,7 @@ async def call_llm_streaming_inner(
     # triggered the close, surface it as an interruption regardless.
     if stop_reason is not None:
         interrupted = True
-    if stop_reason == "stale" and not content_parts and not tool_calls_acc:
+    if stop_reason == "stale" and not (content_parts or tool_calls_acc or reasoning_parts):
         raise StreamStalledError(f"stream silent for {stale_timeout:.0f}s")
 
     tail_scrubbed = (
@@ -1741,8 +1736,12 @@ async def _await_with_heartbeats(
     iteration_index: int | None,
     interrupt_check: Callable[[], bool] | None = None,
     phase: str = "non_streaming",
+    deadline: float | None = None,
 ) -> Any:
     """Await *coro*, emitting ``LLM_HEARTBEAT`` while it is in flight.
+
+    With *deadline*, a call still unanswered after that many seconds is
+    cancelled and raises ``StreamStalledError``.
 
     With *interrupt_check*, the wait also looks for a stopped turn every
     ``NON_STREAMING_INTERRUPT_POLL`` seconds and raises ``_TurnStopped``
@@ -1766,6 +1765,10 @@ async def _await_with_heartbeats(
                 return task.result()
             if interrupt_check is not None and interrupt_check():
                 raise _TurnStopped()
+            if deadline is not None and time.monotonic() - start > deadline:
+                raise StreamStalledError(
+                    f"provider did not answer within {deadline:.0f}s"
+                )
             if time.monotonic() - last_beat < STREAM_HEARTBEAT_INTERVAL:
                 continue
             last_beat = time.monotonic()
