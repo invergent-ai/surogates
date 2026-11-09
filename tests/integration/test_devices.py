@@ -3274,8 +3274,10 @@ async def test_folder_patience_puts_no_limit_on_a_request_that_has_none():
 async def test_folder_patience_does_nothing_once_its_request_has_ended():
     async with asyncio.timeout(WITHIN) as deadline:
         patience = FolderPatience(deadline, WITHIN)
+    when = deadline.when()
     patience.held(1.0)
     patience.freed()
+    assert deadline.when() == when
 
 
 async def test_an_operation_is_open_for_its_own_device_only_and_its_wait_can_be_forgotten(
@@ -4127,9 +4129,12 @@ async def test_a_harness_request_waits_for_a_folder_another_chat_holds_and_says_
     await asyncio.sleep(2.5)
     assert not reading.done()
     assert await device_wait_events(session_factory, rig.root) == [folder_waiting_for(rig)]
+    loop = asyncio.get_running_loop()
+    freed = loop.time()
     await rig.ops.waiting(op.id, None)
     with pytest.raises(TimeoutError):  # the laptop still answers nothing
         await asyncio.wait_for(reading, 5.0)
+    assert loop.time() - freed <= 1.0 + 1.0
     assert (await device_wait_events(session_factory, rig.root))[-1] == resumed_from(rig)
 
 
