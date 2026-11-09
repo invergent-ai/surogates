@@ -221,3 +221,122 @@ async def test_streaming_scrubs_split_think_and_memory_context_tags(monkeypatch)
     assert emitted == msg["content"]
     assert "hidden reasoning" not in emitted
     assert "hidden memory" not in emitted
+
+
+# -- A provider that never answers ------------------------------------------
+# PROD 2026-11-09: one llm.buzz request held a turn 6 minutes before the
+# response even started, then 600s more in the non-streaming fallback.
+
+
+def _never_answers():
+    async def _hang(**_kwargs):
+        await asyncio.Event().wait()
+    return _hang
+
+
+def _gateway_524():
+    import httpx
+    from openai import APIStatusError
+
+    req = httpx.Request("POST", "https://gw.example/v1/chat/completions")
+    return APIStatusError(
+        "<html>524: A timeout occurred</html>",
+        response=httpx.Response(524, request=req),
+        body=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_unanswered_request_raises_stall(monkeypatch):
+    from surogates.harness.llm_call import StreamStalledError
+
+    monkeypatch.setattr("surogates.harness.llm_call.STREAM_FIRST_BYTE_TIMEOUT", 0.3)
+    llm_client = MagicMock()
+    llm_client.chat.completions.create = _never_answers()
+
+    with pytest.raises(StreamStalledError):
+        await asyncio.wait_for(
+            call_llm_streaming_inner(
+                session=_make_session(),
+                create_kwargs={"model": "gpt-4o", "messages": []},
+                iteration=1, llm_client=llm_client, store=AsyncMock(),
+                interrupt_check=lambda: False,
+            ),
+            timeout=3.0,
+        )
+
+
+@pytest.mark.asyncio
+async def test_stop_while_waiting_for_the_provider(monkeypatch):
+    monkeypatch.setattr("surogates.harness.llm_call.NON_STREAMING_INTERRUPT_POLL", 0.05)
+    llm_client = MagicMock()
+    llm_client.chat.completions.create = _never_answers()
+    stopped = {"now": False}
+
+    async def _stop_soon():
+        await asyncio.sleep(0.2)
+        stopped["now"] = True
+
+    asyncio.ensure_future(_stop_soon())
+    _msg, usage = await asyncio.wait_for(
+        call_llm_streaming_inner(
+            session=_make_session(),
+            create_kwargs={"model": "gpt-4o", "messages": []},
+            iteration=1, llm_client=llm_client, store=AsyncMock(),
+            interrupt_check=lambda: stopped["now"],
+        ),
+        timeout=3.0,
+    )
+    assert usage["finish_reason"] == "interrupted"
+
+
+@pytest.mark.asyncio
+async def test_silent_stream_with_nothing_said_raises_stall(monkeypatch):
+    from surogates.harness.llm_call import StreamStalledError
+
+    monkeypatch.setattr("surogates.harness.llm_call.STREAM_STALE_TIMEOUT", 0.3)
+    monkeypatch.setattr("surogates.harness.llm_call.STREAM_CHUNK_POLL_INTERVAL", 0.05)
+    llm_client = MagicMock()
+    llm_client.chat.completions.create = AsyncMock(return_value=_BlockingStream([]))
+
+    with pytest.raises(StreamStalledError):
+        await asyncio.wait_for(
+            call_llm_streaming_inner(
+                session=_make_session(),
+                create_kwargs={"model": "gpt-4o", "messages": []},
+                iteration=1, llm_client=llm_client, store=AsyncMock(),
+                interrupt_check=lambda: False,
+            ),
+            timeout=3.0,
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["stall", "524"])
+async def test_stuck_provider_is_retried_as_a_stream(monkeypatch, failure):
+    """No detour through the non-streaming fallback: retry the stream."""
+    from surogates.harness import llm_call
+    from surogates.harness.llm_call import StreamStalledError, call_llm_with_retry
+
+    good = ({"role": "assistant", "content": "gata"}, {"finish_reason": "stop"})
+    first = StreamStalledError("stuck") if failure == "stall" else _gateway_524()
+    inner = AsyncMock(side_effect=[first, good])
+    non_streaming = AsyncMock()
+    monkeypatch.setattr(llm_call, "call_llm_streaming_inner", inner)
+    monkeypatch.setattr(llm_call, "call_llm_non_streaming", non_streaming)
+    monkeypatch.setattr(llm_call, "jittered_backoff", lambda _attempt: 0)
+    streaming = []
+
+    msg, _usage = await call_llm_with_retry(
+        session=_make_session(),
+        create_kwargs={"model": "gpt-4o", "messages": []},
+        iteration=1, llm_client=MagicMock(), store=AsyncMock(),
+        streaming_enabled=True, interrupt_check=lambda: False,
+        activate_fallback=lambda: False, get_current_model=lambda: None,
+        set_streaming_enabled=streaming.append,
+    )
+
+    assert msg["content"] == "gata"
+    assert inner.await_count == 2
+    non_streaming.assert_not_awaited()
+    assert streaming == []

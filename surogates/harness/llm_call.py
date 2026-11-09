@@ -100,6 +100,11 @@ _FALLBACK_CONTEXT_WINDOW: int = 128_000
 # Retry constants
 MAX_LLM_RETRIES: int = 3
 
+#: The gateway gave up waiting on the model (Cloudflare 524, proxy 504).
+#: Retried as a stream; the non-streaming fallback would wait on the same
+#: upstream again.
+_GATEWAY_TIMEOUT_STATUSES: frozenset[int] = frozenset({504, 524})
+
 #: Longest provider cooldown worth waiting out in-session rather than
 #: failing. Every cooldown seen on the workspace-bench prod run was under
 #: five minutes (6s to 291s), and the sessions that died had already spent
@@ -128,6 +133,16 @@ STREAM_STALE_TIMEOUT: float = float(
 # against PROD session 5274a540: iter 8 was killed by the 180s watchdog
 # while GLM-5.1 was still reasoning silently.
 STREAM_STALE_TIMEOUT_REASONING: float = 600.0
+
+# How long a streaming request may wait for the provider to answer at all.
+# Reasoning silence happens after the response has started; a request that
+# has not even started answering is stuck upstream.  Measured on PROD
+# 2026-11-09: healthy llm.buzz streams answer in 5-15s even at 43k tokens,
+# while a stuck one held the turn 6 minutes before Cloudflare's 524, then
+# another 600s in the non-streaming fallback.
+STREAM_FIRST_BYTE_TIMEOUT: float = float(
+    os.environ.get("SUROGATES_STREAM_FIRST_BYTE_TIMEOUT", "120.0")
+)
 
 # Polling interval (seconds) used to wake up between chunk reads so the
 # stale-stream and interrupt checks run even when the upstream provider
@@ -202,6 +217,14 @@ _LOCAL_STREAM_HOSTS: frozenset[str] = frozenset({
     "0.0.0.0",
     "host.docker.internal",
 })
+
+
+class StreamStalledError(TimeoutError):
+    """The provider never answered, or went silent before saying anything.
+
+    Retried as a stream: the non-streaming fallback goes to the same stuck
+    upstream with a longer timeout and no output to show meanwhile.
+    """
 
 
 class PartialToolCallStreamError(ConnectionError):
@@ -1077,7 +1100,7 @@ async def call_llm_with_retry(
             is_retryable = (
                 classified.retryable
                 or
-                status_code in (429, 500, 502, 503, 529)
+                status_code in (429, 500, 502, 503, 529, *_GATEWAY_TIMEOUT_STATUSES)
                 or is_transient_error(exc)
             )
 
@@ -1160,9 +1183,11 @@ async def call_llm_streaming(
             turn_id=turn_id,
             iteration_index=iteration_index,
         )
-    except PartialToolCallStreamError:
+    except (PartialToolCallStreamError, StreamStalledError):
         raise
     except Exception as exc:
+        if extract_status_code(exc) in _GATEWAY_TIMEOUT_STATUSES:
+            raise
         logger.warning(
             "Streaming failed for session %s (iteration %d), "
             "falling back to non-streaming: %s",
@@ -1251,11 +1276,30 @@ async def call_llm_streaming_inner(
         merged = {**existing_extra, **cache_extra}
         final_kwargs["extra_body"] = merged
 
-    response = await llm_client.chat.completions.create(
-        **final_kwargs,
-        stream=True,
-        stream_options={"include_usage": True},
-    )
+    try:
+        response = await asyncio.wait_for(
+            _await_with_heartbeats(
+                llm_client.chat.completions.create(
+                    **final_kwargs,
+                    stream=True,
+                    stream_options={"include_usage": True},
+                ),
+                session=session,
+                store=store,
+                iteration=iteration,
+                turn_id=turn_id,
+                iteration_index=iteration_index,
+                interrupt_check=interrupt_check,
+                phase="waiting",
+            ),
+            STREAM_FIRST_BYTE_TIMEOUT,
+        )
+    except _TurnStopped:
+        return _interrupted_result(model_id)
+    except asyncio.TimeoutError as exc:
+        raise StreamStalledError(
+            f"provider did not answer within {STREAM_FIRST_BYTE_TIMEOUT:.0f}s"
+        ) from exc
 
     # Accumulators
     content_parts: list[str] = []
@@ -1601,6 +1645,8 @@ async def call_llm_streaming_inner(
     # triggered the close, surface it as an interruption regardless.
     if stop_reason is not None:
         interrupted = True
+    if stop_reason == "stale" and not content_parts and not tool_calls_acc:
+        raise StreamStalledError(f"stream silent for {stale_timeout:.0f}s")
 
     tail_scrubbed = (
         context_scrubber.feed(think_scrubber.flush()) + context_scrubber.flush()
@@ -1694,6 +1740,7 @@ async def _await_with_heartbeats(
     turn_id: str | None,
     iteration_index: int | None,
     interrupt_check: Callable[[], bool] | None = None,
+    phase: str = "non_streaming",
 ) -> Any:
     """Await *coro*, emitting ``LLM_HEARTBEAT`` while it is in flight.
 
@@ -1731,7 +1778,7 @@ async def _await_with_heartbeats(
                         "silent_for_seconds": round(time.monotonic() - start, 1),
                         "turn_id": turn_id,
                         "iteration_index": iteration_index,
-                        "phase": "non_streaming",
+                        "phase": phase,
                     },
                 )
             except Exception:
