@@ -936,19 +936,48 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
     expect([fakes.length, sent(1, "stop"), sent(2, "op")]).toEqual([3, 1, 1]);
   });
 
-  it("keeps the folder from a waiting chat between the operations of a turn the agent says is under way, asking once, until that turn ends", async () => {
+  it("keeps the folder from a waiting chat between the operations of a turn the agent says is under way, asking at each, until it is at rest", async () => {
     folders[ROOT_B] = folders[ROOT_A] ?? "";
     const { follows, following } = followed();
     let asked = 0;
-    const executor = toolHosts({ idleMs: 60_000, following, spawnHost: fakeSpawn(answering), atRest: async () => (asked++, false) });
+    let rest = false;
+    const executor = toolHosts({ idleMs: 60_000, following, spawnHost: fakeSpawn(answering), atRest: async () => (asked++, rest) });
     await executor.run(resolve(), signal());
     const second = executor.run(resolveOf(ROOT_B), signal());
     expect(await pendingAfter(second, 100)).toBe(true);
     await executor.run(resolve(), signal());
     expect(await pendingAfter(second, 100)).toBe(true);
-    expect([sent(0, "stop"), asked]).toEqual([0, 1]);
+    expect([sent(0, "stop"), asked]).toEqual([0, 2]);
+    rest = true;
     follows[0]?.turnEnded();
     expect(await second).toMatchObject({ ok: expect.any(String) });
+  });
+
+  it("keeps the folder past its chat's turn's end while a helper of the chat works, and lets it go once the helper is done", async () => {
+    folders[ROOT_B] = folders[ROOT_A] ?? "";
+    const { follows, following } = followed();
+    let rest = false;
+    const executor = toolHosts({
+      idleMs: 60_000, restRecheckMs: 50, following, spawnHost: fakeSpawn(answering), atRest: async () => rest,
+    });
+    await executor.run(resolve(), signal());
+    follows[0]?.turnEnded();
+    const second = executor.run(resolveOf(ROOT_B), signal());
+    expect(await pendingAfter(second, 200)).toBe(true);
+    expect(sent(0, "stop")).toBe(0);
+    rest = true;
+    expect(await second).toMatchObject({ ok: expect.any(String) });
+  });
+
+  it("lets the folder go at its chat's turn's end where the agent cannot be asked, as before it was asked at all", async () => {
+    folders[ROOT_B] = folders[ROOT_A] ?? "";
+    const { follows, following } = followed();
+    const executor = toolHosts({
+      idleMs: 60_000, following, spawnHost: fakeSpawn(answering), atRest: () => Promise.reject(new Error("offline")),
+    });
+    await executor.run(resolve(), signal());
+    follows[0]?.turnEnded();
+    expect(await executor.run(resolveOf(ROOT_B), signal())).toMatchObject({ ok: expect.any(String) });
   });
 
   it("keeps the folder from a waiting chat through a turn its stream says started, whatever the agent said before", async () => {

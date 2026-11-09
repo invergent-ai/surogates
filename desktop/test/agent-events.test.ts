@@ -24,7 +24,9 @@ class FakeAgent {
     if (tree) {
       const statuses = this.trees.get(tree[1]!);
       if (statuses === undefined) return new Response(null, { status: 404 });
-      return Response.json({ nodes: statuses.map((status, i) => ({ id: `${tree[1]}-${i}`, status })), total: statuses.length });
+      // The chat's own first, then its helpers.
+      const nodes = statuses.map((status, i) => ({ id: i === 0 ? tree[1] : `${tree[1]}-${i}`, status }));
+      return Response.json({ nodes, total: nodes.length });
     }
     const chat = /^\/api\/v1\/sessions\/([^/?]+)\?agent_id=a$/.exec(path);
     if (chat) {
@@ -337,11 +339,18 @@ describe("a chat's turns, followed", () => {
     expect(said).toEqual([true, true, false, undefined, undefined]);
   });
 
-  it("says a chat whose turn is done is in a turn while a helper under it still works, and not at rest while one has not started", async () => {
+  it("says a chat whose turn is done is in a turn while a helper under it still works", async () => {
     const agent = new FakeAgent();
-    agent.trees.set("helping", ["completed", "active"]).set("helped", ["completed", "completed", "failed"]).set("starting", ["completed", "pending"]);
-    const said = await Promise.all(["helping", "helped", "starting"].map((id) => restOf(agent.api, "a", id)));
-    expect(said).toEqual([false, true, undefined]);
+    agent.trees.set("helping", ["completed", "active"]).set("helped", ["completed", "completed", "failed"]);
+    const said = await Promise.all(["helping", "helped"].map((id) => restOf(agent.api, "a", id)));
+    expect(said).toEqual([false, true]);
+  });
+
+  it("says a chat is at rest whatever its stopped, deleted or archived helpers are, but not while it is paused itself", async () => {
+    const agent = new FakeAgent();
+    agent.trees.set("done", ["completed", "paused", "cancelled", "archived"]).set("stopped", ["paused", "completed"]);
+    const said = await Promise.all(["done", "stopped"].map((id) => restOf(agent.api, "a", id)));
+    expect(said).toEqual([true, undefined]);
   });
 
   it("says nothing of a chat whose tree is listed in full to the server's cap, as some of it may be left out", async () => {

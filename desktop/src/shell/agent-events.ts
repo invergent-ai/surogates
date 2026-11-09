@@ -132,16 +132,18 @@ export async function titleOf(api: Api, agentId: string, sessionId: string): Pro
 const TREE_CAP = 200;
 
 /**
- * Whether chat *sessionId* is at rest between its turns, as the agent has it now: true where its last turn and every
- * helper's under it (which work in its folder too) are done or failed, false where one of them is under way, undefined
- * where it says neither (paused, not yet started), cannot be read, or lists too many to be sure it named them all.
+ * Whether chat *sessionId* is at rest between its turns, as the agent has it now: true where its last turn is done or
+ * failed and no helper under it (which works in its folder too) is under way, false where it or a helper is,
+ * undefined where it says neither (paused), cannot be read, or lists too many to be sure it named every helper.
+ * A helper stopped, deleted or archived works no more.
  */
 export async function restOf(api: Api, agentId: string, sessionId: string): Promise<boolean | undefined> {
   const { nodes } = await chatRead(api, agentId, sessionId, "/tree");
-  if (!Array.isArray(nodes) || nodes.length === 0 || nodes.length >= TREE_CAP) return undefined;
-  const statuses = nodes.map((node) => (node as { status?: unknown })?.status);
-  if (statuses.includes("active")) return false;
-  return statuses.every((status) => status === "completed" || status === "failed") ? true : undefined;
+  if (!Array.isArray(nodes)) return undefined;
+  const sessions = nodes as Array<{ id?: unknown; status?: unknown }>;
+  if (sessions.some((node) => node?.status === "active")) return false;
+  const own = sessions.find((node) => node?.id === sessionId)?.status;
+  return sessions.length < TREE_CAP && (own === "completed" || own === "failed") ? true : undefined;
 }
 
 // The events that end a chat's turn: done, failed, or stopped from a channel; a Stop's pause only once the turn has

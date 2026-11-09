@@ -57,6 +57,9 @@ const STOP_TIMEOUT_MS = 5_000;
 export const START_TIMEOUT_MS = 30_000;
 // How long a host with nothing to do keeps its folder: another chat may want it.
 export const IDLE_MS = 120_000;
+// While another chat waits for a chat host's folder and the agent said its chat is in a turn, or could not say, the host
+// asks again this long after: a helper's end, or the agent back, is told on no stream of the chat's own.
+export const REST_RECHECK_MS = 15_000;
 // How long a landing's host waits for the folder (spec, Section 13, "Waits"): a chat's host lets it go IDLE_MS after
 // its last operation, and another landing's once that landing is forgotten, or IDLE_MS after its last step.
 export const LAND_WAIT_MS = IDLE_MS + 30_000;
@@ -316,6 +319,8 @@ export interface ToolHostsOptions {
   landWaitMs?: number;
   // FOLDER_WAIT_MS unless a test says.
   folderWaitMs?: number;
+  // REST_RECHECK_MS unless a test says.
+  restRecheckMs?: number;
   // Waited for before a root's host lets its folder go, so what else holds the folder
   // lets it go first; told too when a host went by itself.
   release?(root: string): Promise<void>;
@@ -938,6 +943,7 @@ export class ToolHosts implements Executor {
       before,
       othersWait,
       atRest,
+      this.options.restRecheckMs ?? REST_RECHECK_MS,
     );
     this.hosts.set(root, host);
     this.keep(host);
@@ -1192,15 +1198,17 @@ class Host {
   // at the turn's end, by their ids: those keep the folder only until they end.
   private turnEnded = false;
   private endedWith = new Set<string>();
-  // Its chat is in a turn: one its stream said started, or the agent said was under way, and no turn's end heard since.
+  // Its chat is in a turn: one its stream said started, and no turn's end heard since.
   // While another chat waits for its folder and nothing of it runs, a chat's host not known to be in one asks the agent
-  // whether its chat is at rest (atRest), once at a time; at rest, it lets the folder go as at a turn's end. Counted in
-  // seen: what could make an answer stale, an operation begun or a turn's start or end; one asked before is not heeded.
+  // whether its chat, helpers included, is at rest (atRest), once at a time. Counted in seen: what could make an answer
+  // stale, an operation begun or a turn's start or end; one asked before is not heeded.
   private answering = false;
   private asking = false;
   private seen = 0;
-  // The seen of the last answer that said neither: nothing is asked again until something changes.
+  // The seen of the last answer that did not let the folder go: nothing is asked again until something changes, or
+  // restRecheckMs has passed.
   private unsure = -1;
+  private recheck?: NodeJS.Timeout;
 
   constructor(
     private readonly process: HostProcess,
@@ -1219,6 +1227,7 @@ class Host {
     private readonly othersWait: () => boolean = () => false,
     // Whether its chat is at rest, as the agent says: a chat's own host is told by its hosts, where they can ask.
     private readonly atRest?: () => Promise<boolean | undefined>,
+    private readonly restRecheckMs = REST_RECHECK_MS,
   ) {
     this.recovers = start.recovery !== undefined;
     this.lands = start.landing !== undefined || this.recovers;
@@ -1354,7 +1363,10 @@ class Host {
     this.idle();
   }
 
-  /** Its chat's turn started: it keeps its folder from a waiting chat until that turn's end, operation or not. */
+  /**
+   * Its chat's turn started: no waiting chat is handed its folder on the agent's say until that turn's end. The idle
+   * time still lets it go where nothing of the turn reached this computer for idleMs.
+   */
   startTurn(): void {
     this.seen += 1;
     this.answering = true;
@@ -1456,7 +1468,7 @@ class Host {
     // No command or process of the root is left, so no connection waits on its prompts.
     this.prompts.abort();
     this.prompts = new AbortController();
-    if (this.yielding || (this.turnEnded && this.othersWait())) {
+    if (this.yielding || (this.turnEnded && this.othersWait() && !this.atRest)) {
       this.finish();
       return;
     }
@@ -1478,9 +1490,10 @@ class Host {
   }
 
   // The agent asked whether its chat is at rest, where another chat waits for its folder, nothing of it runs, and no turn
-  // of it is known under way. At rest, still free and still waited for, it goes; in a turn, it keeps the folder until
-  // that turn's end. An answer that cannot be had, or says neither, leaves it as it was: its idle time lets the folder go.
-  // One stale by the time it comes is asked again.
+  // of it is known under way. At rest, still free and still waited for, it goes. Past its turn's end it goes too unless a
+  // helper of the chat is still at work: the agent unread, it goes as at any turn's end. Otherwise it keeps the folder
+  // and asks again restRecheckMs on, or once something changes; its idle time lets the folder go in any case. One answer
+  // stale by the time it comes is asked again.
   private askRest(): void {
     if (!this.atRest || this.answering || this.asking || this.unsure === this.seen || !this.free || !this.othersWait()) return;
     const asked = this.seen;
@@ -1488,9 +1501,16 @@ class Host {
     void this.atRest().catch(() => undefined).then((rest) => {
       this.asking = false;
       if (this.seen !== asked) this.askRest();
-      else if (rest === false) this.answering = true;
-      else if (rest === undefined) this.unsure = asked;
-      else if (this.free && this.othersWait()) this.finish();
+      else if (rest === true || (rest === undefined && this.turnEnded)) {
+        if (this.free && this.othersWait()) this.finish();
+      } else {
+        this.unsure = asked;
+        clearTimeout(this.recheck);
+        this.recheck = setTimeout(() => {
+          this.unsure = -1;
+          this.askRest();
+        }, this.restRecheckMs).unref();
+      }
     });
   }
 
