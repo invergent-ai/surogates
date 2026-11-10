@@ -1082,6 +1082,24 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
     expect(await second).toMatchObject({ ok: expect.any(String) });
   });
 
+  it("asks the agent nothing past its idle time while no other chat waits, and answers one that comes to wait", async () => {
+    folders[ROOT_B] = folders[ROOT_A] ?? "";
+    const { follows, following } = followed();
+    let asked = 0;
+    const executor = toolHosts({
+      idleMs: 50, restRecheckMs: 50, folderWaitMs: 5_000, following, spawnHost: fakeSpawn(answering),
+      atRest: async () => (asked++, true),
+    });
+    await executor.run(resolve(), signal());
+    follows[0]?.turnStarted();
+    // Six idle times with its turn going on and nobody waiting.
+    await new Promise((r) => setTimeout(r, 300));
+    expect([asked, sent(0, "stop")]).toEqual([0, 0]);
+    // A chat comes to wait: the agent says the chat is at rest (its turn's end went unheard), and the folder goes.
+    expect(await executor.run(resolveOf(ROOT_B), signal())).toMatchObject({ ok: expect.any(String) });
+    expect(asked).toBeGreaterThan(0);
+  });
+
   it("keeps the folder past its idle time while the agent says the chat is in a turn, and gives it once it is not", async () => {
     folders[ROOT_B] = folders[ROOT_A] ?? "";
     const { following } = followed();

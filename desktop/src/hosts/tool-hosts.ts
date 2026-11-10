@@ -1214,9 +1214,9 @@ class Host {
   // whether its chat, helpers included, is at rest (atRest), once at a time. Counted in seen: what could make an answer
   // stale, an operation begun or a turn's start or end; one asked before is not heeded.
   private answering = false;
-  private asking = false;
+  private looking = false;
   // Its chat waits on its user's answer to a question (askUser), until a turn starts again or an operation begins.
-  private askingUser = false;
+  private waitingOnUser = false;
   private seen = 0;
   // Since when nothing of it has run: what bounds how long a turn under way keeps the folder past its idle time.
   private quietSince?: number;
@@ -1354,6 +1354,7 @@ class Host {
     if (this.finished) return;
     this.finished = true;
     clearTimeout(this.idleTimer);
+    clearTimeout(this.recheck);
     this.onGone();
     void this.letGo().then(() => this.stop(stepMs));
   }
@@ -1385,7 +1386,7 @@ class Host {
   startTurn(): void {
     this.seen += 1;
     this.answering = true;
-    this.askingUser = false;
+    this.waitingOnUser = false;
     this.turnEnded = false;
   }
 
@@ -1396,7 +1397,7 @@ class Host {
    */
   waitOnUser(): void {
     // Set first: the turn's end asks the agent at once, and must say the chat waits on its user.
-    this.askingUser = true;
+    this.waitingOnUser = true;
     this.endTurn();
   }
 
@@ -1462,7 +1463,7 @@ class Host {
     this.running += 1;
     this.seen += 1;
     this.turnEnded = false;
-    this.askingUser = false;
+    this.waitingOnUser = false;
     this.quietSince = undefined;
     clearTimeout(this.idleTimer);
     try {
@@ -1524,13 +1525,15 @@ class Host {
     // Something of it began since the timer was set: its end sets another.
     if (!this.free) return;
     if (!this.atRest || left() <= 0) return go();
+    // Nobody waits: the folder matters to no one yet, so the agent is not asked. A turn its stream says goes on keeps
+    // it, looked at again on the same beat, so a chat that comes to wait is answered within restRecheckMs.
+    if (!this.othersWait()) return this.answering ? keep() : go();
     // Asked even where its stream said a turn started: at rest, the agent is believed, as a turn's end can go unheard
     // (a stream that stopped), and a waiting chat would otherwise wait out the whole hold. The agent marks a chat active
     // before its turn sends anything, so its "at rest" is never a turn's start not yet seen.
-    const asked = this.seen;
-    void this.atRest(this.askingUser).catch(() => undefined).then((rest) => {
+    void this.look().then(({ rest, stale }) => {
       // Something of it began meanwhile, or it went: that has its own time.
-      if (this.seen !== asked || !this.free) return;
+      if (stale || !this.free) return;
       if (rest === false || (rest === undefined && this.answering)) keep();
       else go();
     });
@@ -1552,16 +1555,15 @@ class Host {
   // and asks again restRecheckMs on, or once something changes; its idle time lets the folder go in any case. One answer
   // stale by the time it comes is asked again.
   private askRest(): void {
-    if (!this.atRest || this.answering || this.asking || this.unsure === this.seen || !this.free || !this.othersWait()) return;
-    const asked = this.seen;
-    this.asking = true;
-    void this.atRest(this.askingUser).catch(() => undefined).then((rest) => {
-      this.asking = false;
-      if (this.seen !== asked) this.askRest();
+    if (!this.atRest || this.answering || this.looking || this.unsure === this.seen || !this.free || !this.othersWait()) return;
+    this.looking = true;
+    void this.look().then(({ rest, stale }) => {
+      this.looking = false;
+      if (stale) this.askRest();
       else if (rest === true || (rest === undefined && this.turnEnded)) {
         if (this.free && this.othersWait()) this.finish();
       } else {
-        this.unsure = asked;
+        this.unsure = this.seen;
         clearTimeout(this.recheck);
         this.recheck = setTimeout(() => {
           this.unsure = -1;
@@ -1569,6 +1571,15 @@ class Host {
         }, this.restRecheckMs).unref();
       }
     });
+  }
+
+  // The agent asked whether its chat is at rest, told whether it waits on its user; stale where something of it began,
+  // or a turn of it started or ended, by the time the answer came.
+  private look(): Promise<{ rest: boolean | undefined; stale: boolean }> {
+    const asked = this.seen;
+    return (this.atRest?.(this.waitingOnUser) ?? Promise.resolve(undefined))
+      .catch(() => undefined)
+      .then((rest) => ({ rest, stale: this.seen !== asked }));
   }
 
   // Its folder's other holders let it go, once a host's life: before it stops, or after it went.
@@ -1645,6 +1656,7 @@ class Host {
    */
   async stop(stepMs = STEP_MS): Promise<void> {
     clearTimeout(this.idleTimer);
+    clearTimeout(this.recheck);
     this.closing = true;
     if (this.lands) await this.stepsEnded(stepMs);
     this.send({ type: "stop" });
@@ -1699,6 +1711,7 @@ class Host {
 
   private leave(): void {
     clearTimeout(this.idleTimer);
+    clearTimeout(this.recheck);
     this.prompts.abort();
     this.gone = true;
     this.onGone();

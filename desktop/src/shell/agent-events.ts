@@ -116,11 +116,15 @@ export function followInbox(options: FollowOptions & { onItem(item: InboxItem): 
   });
 }
 
-// What the agent's route for chat *sessionId* (*under* it, if given) answers; nothing where it cannot be read.
-async function chatRead(api: Api, agentId: string, sessionId: string, under = ""): Promise<Record<string, unknown>> {
-  const response = await api(`/api/v1/sessions/${sessionId}${under}?agent_id=${encodeURIComponent(agentId)}`);
+// What the agent's route *path* answers, for agent *agentId*; nothing where it cannot be read.
+async function read(api: Api, agentId: string, path: string): Promise<Record<string, unknown>> {
+  const response = await api(`${path}${path.includes("?") ? "&" : "?"}agent_id=${encodeURIComponent(agentId)}`);
   return response.ok ? (parsed(await response.text()) ?? {}) : {};
 }
+
+// What the agent's route for chat *sessionId* (*under* it, if given) answers; nothing where it cannot be read.
+const chatRead = (api: Api, agentId: string, sessionId: string, under = ""): Promise<Record<string, unknown>> =>
+  read(api, agentId, `/api/v1/sessions/${sessionId}${under}`);
 
 /** Chat *sessionId*'s title, as the agent names it; "A chat" for one it names not. */
 export async function titleOf(api: Api, agentId: string, sessionId: string): Promise<string> {
@@ -131,8 +135,7 @@ export async function titleOf(api: Api, agentId: string, sessionId: string): Pro
 // Whether the agent holds a question of chat *sessionId* to its user open, waiting for the answer.
 async function waitsOnItsUser(api: Api, agentId: string, sessionId: string): Promise<boolean> {
   const query = `session_id=${encodeURIComponent(sessionId)}&kind=input_required&status=pending&limit=1`;
-  const response = await api(`/api/v1/inbox?${query}&agent_id=${encodeURIComponent(agentId)}`);
-  const { items } = response.ok ? (parsed(await response.text()) ?? {}) : {};
+  const { items } = await read(api, agentId, `/api/v1/inbox?${query}`);
   return Array.isArray(items) && items.length > 0;
 }
 
@@ -148,17 +151,17 @@ const TREE_CAP = 200;
 export async function restOf(api: Api, agentId: string, sessionId: string, asked = false): Promise<boolean | undefined> {
   // Its stream said it asked its user something: believed only while the agent still holds that question open. A
   // question nobody answered in time is closed there with no event on the stream, and the turn goes on.
-  const [{ nodes }, asking] = await Promise.all([
+  const [{ nodes }, held] = await Promise.all([
     chatRead(api, agentId, sessionId, "/tree"),
     asked ? waitsOnItsUser(api, agentId, sessionId) : false,
   ]);
   if (!Array.isArray(nodes)) return undefined;
   const sessions = nodes as Array<{ id?: unknown; status?: unknown }>;
   const own = sessions.find((node) => node?.id === sessionId)?.status;
-  // *asking*: the chat waits on its user's answer, which the agent counts as active; only a helper at work then is.
+  // *held*: the chat waits on its user's answer, its question still open, which the agent counts as active; only a helper at work then is.
   const helping = sessions.some((node) => node?.id !== sessionId && node?.status === "active");
-  if (helping || (own === "active" && !asking)) return false;
-  const done = own === "completed" || own === "failed" || (asking && own === "active");
+  if (helping || (own === "active" && !held)) return false;
+  const done = own === "completed" || own === "failed" || (held && own === "active");
   return sessions.length < TREE_CAP && done ? true : undefined;
 }
 
