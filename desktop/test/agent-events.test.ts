@@ -332,6 +332,30 @@ describe("a chat's turns, followed", () => {
     stop();
   });
 
+  it("tells when the chat asks its user something, and takes the answer for its turn going on", async () => {
+    const agent = new FakeAgent();
+    const told: string[] = [];
+    const { stop } = followTurns({
+      api: agent.api, onError: () => {}, delayMs: () => 0, sessionId: "chat-1",
+      onTurnEnd: () => told.push("end"), onTurnStart: () => told.push("start"), onAsking: () => told.push("asks"),
+    });
+    await until(() => agent.streams.length === 1);
+    agent.streams[0]!.send((["tool.call", "inbox.input_required", "ask_user_question.response", "session.complete"] as const)
+      .map((type, at) => `id: ${at + 3}\r\nevent: ${type}\r\ndata: {}\r\n\r\n`).join(""));
+    await until(() => told.length === 3);
+    expect(told).toEqual(["asks", "start", "end"]);
+    stop();
+  });
+
+  it("says a chat that waits on its user's answer is at rest, unless a helper under it works", async () => {
+    const agent = new FakeAgent();
+    agent.trees.set("asks", ["active"]).set("asks-helped", ["active", "active"]).set("asks-helped-done", ["active", "completed"]);
+    const said = await Promise.all(["asks", "asks-helped", "asks-helped-done"].map((id) => restOf(agent.api, "a", id, true)));
+    expect(said).toEqual([true, false, true]);
+    // Not told it waits on its user: active is a turn under way.
+    expect(await restOf(agent.api, "a", "asks")).toBe(false);
+  });
+
   it("says a chat is at rest between its turns, done or failed, in a turn while active, and nothing of one it cannot tell", async () => {
     const agent = new FakeAgent();
     agent.trees.set("done", ["completed"]).set("failed", ["failed"]).set("busy", ["active"]).set("paused", ["paused"]);

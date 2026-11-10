@@ -996,19 +996,19 @@ function startStack(agent: Agent, credential: LiveCredential): Promise<DeviceSta
         // A chat host hears the start and end of its chat's turns on the app's sign-in at that moment, until that
         // sign-in ends; with nobody signed in the idle time lets the folder go. A turn's end missed before the stream
         // opened leaves that idle time to let it go too.
-        following: (chatId, turnEnded, turnStarted) => {
+        following: (chatId, turnEnded, turnStarted, asking) => {
           const session = signedIn;
           if (!session) return () => {};
           return followTurns({
             api: (path, init) => session.api(path, init), onError: report,
-            sessionId: chatId, onTurnEnd: turnEnded, onTurnStart: turnStarted, live: () => signedIn === session,
+            sessionId: chatId, onTurnEnd: turnEnded, onTurnStart: turnStarted, onAsking: asking, live: () => signedIn === session,
           }).stop;
         },
         // And whether its chat is at rest, asked of the agent on the app's sign-in where another chat waits for the
         // folder: with nobody signed in, or no answer, nobody can say, and the idle time lets the folder go.
-        atRest: (chatId) => {
+        atRest: (chatId, asking) => {
           const session = signedIn;
-          return session ? restOf((path, init) => session.api(path, init), credential.agentId, chatId) : Promise.resolve(undefined);
+          return session ? restOf((path, init) => session.api(path, init), credential.agentId, chatId, asking) : Promise.resolve(undefined);
         },
       }),
       browser: new BrowserClient(utilityBrowser(profilesOf(root, credential))),

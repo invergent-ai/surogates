@@ -786,9 +786,9 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
 
   // A stand-in for following each chat's turns: each host's following, as it was asked, and how often it was stopped.
   const followed = () => {
-    const follows: Array<{ root: string; turnEnded: () => void; turnStarted: () => void; stopped: number }> = [];
-    const following = (root: string, turnEnded: () => void, turnStarted: () => void) => {
-      const follow = { root, turnEnded, turnStarted, stopped: 0 };
+    const follows: Array<{ root: string; turnEnded: () => void; turnStarted: () => void; asking: () => void; stopped: number }> = [];
+    const following = (root: string, turnEnded: () => void, turnStarted: () => void, asking: () => void = () => {}) => {
+      const follow = { root, turnEnded, turnStarted, asking, stopped: 0 };
       follows.push(follow);
       return () => void (follow.stopped += 1);
     };
@@ -1108,6 +1108,63 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
     // At its idle time, not at the end of its hold (15 idle times, 1.5 s here).
     expect(await pendingAfter(second, 400)).toBe(false);
     expect(await second).toMatchObject({ ok: expect.any(String) });
+  });
+
+  it("lets a waiting chat have the folder while its chat waits on its user's answer, and takes it back after", async () => {
+    folders[ROOT_B] = folders[ROOT_A] ?? "";
+    const { follows, following } = followed();
+    const asked: Array<boolean | undefined> = [];
+    let restB = false; // the other chat: in its turn until it ends
+    // The agent counts a chat that waits on its user as active: at rest only when told it waits on its user.
+    const executor = toolHosts({
+      idleMs: 60_000, folderWaitMs: 5_000, following, spawnHost: fakeSpawn(answering),
+      atRest: async (root: string, asking?: boolean) => (asked.push(asking), root === ROOT_B ? restB : asking === true),
+    });
+    await executor.run(resolve(), signal());
+    follows[0]?.turnStarted();
+    const second = executor.run(resolveOf(ROOT_B), signal());
+    expect(await pendingAfter(second, 100)).toBe(true);
+    follows[0]?.asking();
+    expect(await second).toMatchObject({ ok: expect.any(String) });
+    expect(asked).toContain(true);
+    // Its user answers: its next operation waits its turn, behind the other chat's, then runs.
+    follows[0]?.turnStarted();
+    const next = executor.run(resolve(), signal());
+    expect(await pendingAfter(next, 100)).toBe(true);
+    restB = true;
+    follows[1]?.turnEnded();
+    expect(await next).toMatchObject({ ok: expect.any(String) });
+  });
+
+  it("keeps the folder past its idle time once its user answered, the chat's turn going on", async () => {
+    folders[ROOT_B] = folders[ROOT_A] ?? "";
+    const { follows, following } = followed();
+    // The agent counts the chat active, at rest only for a chat said to wait on its user.
+    const executor = toolHosts({
+      idleMs: 100, restRecheckMs: 50, folderWaitMs: 5_000, following, spawnHost: fakeSpawn(answering),
+      atRest: async (_root: string, asking?: boolean) => asking === true,
+    });
+    await executor.run(resolve(), signal());
+    follows[0]?.turnStarted();
+    follows[0]?.asking();
+    // Its user answers before any other chat waits: its turn goes on.
+    follows[0]?.turnStarted();
+    const second = executor.run(resolveOf(ROOT_B), signal());
+    expect(await pendingAfter(second, 400)).toBe(true);
+    follows[0]?.turnEnded();
+  });
+
+  it("keeps the folder while its chat waits on its user's answer where a helper of the chat still works", async () => {
+    folders[ROOT_B] = folders[ROOT_A] ?? "";
+    const { follows, following } = followed();
+    const executor = toolHosts({
+      idleMs: 60_000, folderWaitMs: 300, following, spawnHost: fakeSpawn(answering), atRest: async () => false,
+    });
+    await executor.run(resolve(), signal());
+    follows[0]?.turnStarted();
+    follows[0]?.asking();
+    expect(await executor.run(resolveOf(ROOT_B), signal())).toEqual(WAITED_TOO_LONG);
+    expect(sent(0, "stop")).toBe(0);
   });
 
   it("lets the folder go at last where a turn's end is never heard of, its idle time many times over", async () => {

@@ -137,13 +137,16 @@ const TREE_CAP = 200;
  * undefined where it says neither (paused), cannot be read, or lists too many to be sure it named every helper.
  * A helper stopped, deleted or archived works no more.
  */
-export async function restOf(api: Api, agentId: string, sessionId: string): Promise<boolean | undefined> {
+export async function restOf(api: Api, agentId: string, sessionId: string, asking = false): Promise<boolean | undefined> {
   const { nodes } = await chatRead(api, agentId, sessionId, "/tree");
   if (!Array.isArray(nodes)) return undefined;
   const sessions = nodes as Array<{ id?: unknown; status?: unknown }>;
-  if (sessions.some((node) => node?.status === "active")) return false;
   const own = sessions.find((node) => node?.id === sessionId)?.status;
-  return sessions.length < TREE_CAP && (own === "completed" || own === "failed") ? true : undefined;
+  // *asking*: the chat waits on its user's answer, which the agent counts as active; only a helper at work then is.
+  const helping = sessions.some((node) => node?.id !== sessionId && node?.status === "active");
+  if (helping || (own === "active" && !asking)) return false;
+  const done = own === "completed" || own === "failed" || (asking && own === "active");
+  return sessions.length < TREE_CAP && done ? true : undefined;
 }
 
 // The events that end a chat's turn: done, failed, or stopped from a channel; a Stop's pause only once the turn has
@@ -153,7 +156,12 @@ const endsTheTurn = (event: ServerEvent): boolean =>
   TURN_ENDS.has(event.type) || (event.type === "session.pause" && parsed(event.data)?.turn_ended === true);
 
 // The events that start a chat's turn, or take one up again: a message to it, the harness's wake, a resume.
-const TURN_STARTS: ReadonlySet<string> = new Set(["user.message", "coordinator.message", "harness.wake", "session.resume"]);
+// An answer to the chat's question carries its turn on, as a message does.
+const TURN_STARTS: ReadonlySet<string> = new Set([
+  "user.message", "coordinator.message", "harness.wake", "session.resume", "ask_user_question.response",
+]);
+// The chat asked its user something and waits for the answer: nothing of its turn runs meanwhile.
+const ASKS = "inbox.input_required";
 
 // What ends a chat's follow: the chat archived, or gone. Any other close is followed by a reconnection.
 const GONE: ReadonlySet<unknown> = new Set(["archived", "session_not_found"]);
@@ -166,7 +174,9 @@ const GONE: ReadonlySet<unknown> = new Set(["archived", "session_not_found"]);
  * that ends meanwhile it never tells.
  */
 export function followTurns(
-  options: Omit<FollowOptions, "agentId"> & { sessionId: string; onTurnEnd(done: boolean): void; onTurnStart?(): void; live?(): boolean },
+  options: Omit<FollowOptions, "agentId"> & {
+    sessionId: string; onTurnEnd(done: boolean): void; onTurnStart?(): void; onAsking?(): void; live?(): boolean;
+  },
 ): { stop(): void; started(): boolean } {
   let after = -1;
   // Followed only while *live* says so, as the sign-in it was started under: once that has ended it stops, and
@@ -188,6 +198,7 @@ export function followTurns(
     if (event.id !== null && /^\d+$/.test(event.id)) after = Number(event.id);
     if (endsTheTurn(event)) options.onTurnEnd(event.type === "session.complete");
     else if (TURN_STARTS.has(event.type)) options.onTurnStart?.();
+    else if (event.type === ASKS) options.onAsking?.();
     else if (event.type === "session.done" && GONE.has(parsed(event.data)?.reason)) stop();
   });
   return { stop, started: () => after >= 0 };

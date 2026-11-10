@@ -334,10 +334,13 @@ export interface ToolHostsOptions {
   recovered?(recovery: Recovery): void;
   // Asked once for each chat's own host as it is made: *turnEnded* is called each time a turn of the chat ends,
   // *turnStarted* each time one starts, and the stop it gives once that host has exited.
-  following?(root: string, turnEnded: () => void, turnStarted: () => void): () => void;
+  // *asking* each time it asks its user something and waits for the answer.
+  following?(root: string, turnEnded: () => void, turnStarted: () => void, asking?: () => void): () => void;
   // Asked of a chat's own host whose folder another chat waits for, with nothing of it running and no turn of it heard of
   // under way: whether chat *root* is at rest between its turns (true), in a turn (false), or nobody can say (undefined).
-  atRest?(root: string): Promise<boolean | undefined>;
+  // *asking*: the chat waits on its user's answer, which the agent counts as a turn under way: only a helper at work
+  // keeps it from being at rest then.
+  atRest?(root: string, asking?: boolean): Promise<boolean | undefined>;
 }
 
 export class ToolHosts implements Executor {
@@ -918,7 +921,7 @@ export class ToolHosts implements Executor {
     const { atRest } = this.options;
     const host = this.hostFor(
       root, { folder: { path: binding.folder, dev: binding.dev, ino: binding.ino, boot: binding.boot } }, before, othersWait,
-      atRest && (() => atRest(root)),
+      atRest && ((asking) => atRest(root, asking)),
     );
     this.chats.set(host, root);
     // At a turn's end the chat lets its folder go to a waiting chat once nothing of it runs and no process of it lives;
@@ -927,12 +930,17 @@ export class ToolHosts implements Executor {
       if (this.hosts.get(root) === host) host.endTurn();
     }, () => {
       if (this.hosts.get(root) === host) host.startTurn();
+    }, () => {
+      if (this.hosts.get(root) === host) host.waitOnUser();
     });
     if (unfollow) void host.exited.then(unfollow);
     return host;
   }
 
-  private hostFor(root: string, works: Works, before?: Promise<void>, othersWait?: () => boolean, atRest?: () => Promise<boolean | undefined>): Host {
+  private hostFor(
+    root: string, works: Works, before?: Promise<void>, othersWait?: () => boolean,
+    atRest?: (asking: boolean) => Promise<boolean | undefined>,
+  ): Host {
     const { network } = this.options;
     const ask = (asked: NetworkAsk, signal: AbortSignal): Promise<NetworkAnswer> =>
       network ? network.askNetwork(root, asked, signal) : Promise.resolve("deny");
@@ -1207,6 +1215,8 @@ class Host {
   // stale, an operation begun or a turn's start or end; one asked before is not heeded.
   private answering = false;
   private asking = false;
+  // Its chat waits on its user's answer to a question (askUser), until a turn starts again or an operation begins.
+  private askingUser = false;
   private seen = 0;
   // Since when nothing of it has run: what bounds how long a turn under way keeps the folder past its idle time.
   private quietSince?: number;
@@ -1231,7 +1241,7 @@ class Host {
     // Whether another chat waits for its folder: a chat's own host is told by its hosts.
     private readonly othersWait: () => boolean = () => false,
     // Whether its chat is at rest, as the agent says: a chat's own host is told by its hosts, where they can ask.
-    private readonly atRest?: () => Promise<boolean | undefined>,
+    private readonly atRest?: (asking: boolean) => Promise<boolean | undefined>,
     private readonly restRecheckMs = REST_RECHECK_MS,
   ) {
     this.recovers = start.recovery !== undefined;
@@ -1375,7 +1385,19 @@ class Host {
   startTurn(): void {
     this.seen += 1;
     this.answering = true;
+    this.askingUser = false;
     this.turnEnded = false;
+  }
+
+  /**
+   * Its chat asked its user something and waits for the answer: nothing of its turn runs meanwhile, so a waiting chat
+   * may have the folder as at a turn's end. The answer starts its turn again (startTurn), and its next operation
+   * waits its turn like any other.
+   */
+  waitOnUser(): void {
+    // Set first: the turn's end asks the agent at once, and must say the chat waits on its user.
+    this.askingUser = true;
+    this.endTurn();
   }
 
   /**
@@ -1440,6 +1462,7 @@ class Host {
     this.running += 1;
     this.seen += 1;
     this.turnEnded = false;
+    this.askingUser = false;
     this.quietSince = undefined;
     clearTimeout(this.idleTimer);
     try {
@@ -1505,7 +1528,7 @@ class Host {
     // (a stream that stopped), and a waiting chat would otherwise wait out the whole hold. The agent marks a chat active
     // before its turn sends anything, so its "at rest" is never a turn's start not yet seen.
     const asked = this.seen;
-    void this.atRest().catch(() => undefined).then((rest) => {
+    void this.atRest(this.askingUser).catch(() => undefined).then((rest) => {
       // Something of it began meanwhile, or it went: that has its own time.
       if (this.seen !== asked || !this.free) return;
       if (rest === false || (rest === undefined && this.answering)) keep();
@@ -1532,7 +1555,7 @@ class Host {
     if (!this.atRest || this.answering || this.asking || this.unsure === this.seen || !this.free || !this.othersWait()) return;
     const asked = this.seen;
     this.asking = true;
-    void this.atRest().catch(() => undefined).then((rest) => {
+    void this.atRest(this.askingUser).catch(() => undefined).then((rest) => {
       this.asking = false;
       if (this.seen !== asked) this.askRest();
       else if (rest === true || (rest === undefined && this.turnEnded)) {
