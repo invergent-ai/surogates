@@ -80,12 +80,13 @@ export interface FolderSheet {
   refusal: string | null; // why no chat may work on this folder: the sheet offers Change and Cancel only
   thread: ThreadLabel | null; // a project's thread the folder is for; null for a new chat
   project: string | null; // a new project the folder is for, by the name it has so far ("" before it has one); null for a chat or a thread
+  busy: boolean; // another chat on this computer works in the folder: the sheet warns, and offers New folder beside Browse
 }
 
 // The desktop shell's own windows; fakes in tests. Each call is dismissed by its signal.
 export interface FolderPrompts {
-  // The new-chat sheet: Enter accepts, Change opens the folder dialog, null is cancel.
-  confirmFolder(sheet: FolderSheet, signal: AbortSignal): Promise<{ mode: Mode } | "change" | null>;
+  // The new-chat sheet: Enter accepts, Change opens the folder dialog, New makes another folder, null is cancel.
+  confirmFolder(sheet: FolderSheet, signal: AbortSignal): Promise<{ mode: Mode } | "change" | "new" | null>;
   // The operating system's folder dialog; null is cancel.
   pickFolder(startIn: string, signal: AbortSignal): Promise<string | null>;
 }
@@ -107,6 +108,7 @@ export interface BinderOptions {
   // Whether the hosts give a project's thread a copy of its folder to work in: without, a bind that asks for one is refused.
   keepsCopies?: boolean;
   refusal?(operation: Operation): Outcome | null; // what the hosts refuse anyway, before anyone is asked
+  inUse?(dev: number, ino: number): boolean; // whether a chat on this computer works in the folder: its sheet warns
   retired?(root: string): void; // a deleted chat's root: the hosts let go of what they keep for it
   // The page a session's next browser operation acts in, for its prompt; for an upload, the frame of the file input
   // that asked, *of* being the upload's operation; *root*, the chat that asks.
@@ -220,28 +222,33 @@ export class Binder implements Executor {
   }
 
   /**
-   * The folder for a new chat, as the user confirms it in the sheet: the last one
-   * bound, if it can still be used, else a new one under ~/Surogate/<agent>; or one
-   * from the folder dialog. Null when the user cancels. Every new chat asks, the last
-   * folder too, so a server cannot bind a chat to a folder the user did not see.
+   * The folder for a new chat, as the user confirms it in the sheet: a new one under ~/Surogate/<agent> for "new";
+   * for "last", the last one bound if it can still be used, else a new one; or one from the folder dialog for "pick".
+   * Null when the user cancels. Every new chat asks, the last folder too, so a server cannot bind a chat to a folder
+   * the user did not see.
    */
   async prepareFolder(
-    choice: "last" | "pick", window: string, signal: AbortSignal, thread: ThreadLabel | null = null,
+    choice: "new" | "last" | "pick", window: string, signal: AbortSignal, thread: ThreadLabel | null = null,
   ): Promise<Prepared | null> {
     const { guards } = this.options;
     const last = this.options.bindings.last()?.folder;
     const usable = choice === "last" && last !== undefined && (await this.answers(last)) && checkFolder(last, guards).ok ? last : null;
-    // Made for this chat, and gone again unless the user takes it, even when the sheet fails.
-    const made = usable === null && choice === "last" && !signal.aborted ? newFolder(guards, this.options.agent) : null;
+    // Every folder made for this chat, here and at New folder on the sheet: gone again unless the user takes it, even
+    // when the sheet fails.
+    const made: string[] = [];
+    const first = usable === null && choice !== "pick" && !signal.aborted ? newFolder(guards, this.options.agent) : null;
+    if (first !== null) made.push(first);
     let prepared: Prepared | null = null;
     try {
-      prepared = await this.confirm(usable ?? made, last ?? guestPathOf(guards.home), window, signal, thread, null);
+      prepared = await this.confirm(usable ?? first, last ?? guestPathOf(guards.home), window, signal, thread, null, {}, made);
       return prepared;
     } finally {
-      // Taken: it goes still if its chat is never bound.
-      const preparation = made !== null && prepared?.folder === made ? this.byToken.get(prepared.token) : undefined;
-      if (preparation) preparation.made = true;
-      else if (made !== null) this.release(made);
+      const preparation = prepared !== null && made.includes(prepared.folder) ? this.byToken.get(prepared.token) : undefined;
+      for (const folder of made) {
+        // Taken: it goes still if its chat is never bound.
+        if (preparation && folder === prepared?.folder) preparation.made = true;
+        else this.release(folder);
+      }
     }
   }
 
@@ -389,7 +396,7 @@ export class Binder implements Executor {
   // for a chat, a project's thread, or a *project*'s own folder (*marks*).
   private async confirm(
     offered: string | null, startIn: string, window: string, signal: AbortSignal, thread: ThreadLabel | null,
-    project: string | null, marks: Marks = {},
+    project: string | null, marks: Marks = {}, made: string[] = [],
   ): Promise<Prepared | null> {
     const { prompts, guards } = this.options;
     // A page that has gone gets no prompt: the signal is looked at before each one.
@@ -410,10 +417,20 @@ export class Binder implements Executor {
         refusal: checked.ok ? null : checked.message,
         thread,
         project,
+        // A chat's own sheet alone: a project's and a thread's folder are meant to be shared.
+        busy: thread === null && project === null && checked.ok && this.options.inUse?.(checked.dev, checked.ino) === true,
       };
       const answer = await prompts.confirmFolder(sheet, signal);
       if (answer === null || signal.aborted) return null;
-      if (answer !== "change") return checked.ok ? this.prepare(checked, answer.mode, window, marks) : null;
+      if (answer === "new") {
+        // None can be made: the dialog opens, as at Browse.
+        const fresh = newFolder(guards, this.options.agent);
+        if (fresh !== null) {
+          made.push(fresh);
+          folder = fresh;
+          continue;
+        }
+      } else if (answer !== "change") return checked.ok ? this.prepare(checked, answer.mode, window, marks) : null;
       // A dialog the user cancels goes back to the sheet.
       folder = (await prompts.pickFolder(sheet.folder, signal)) ?? folder;
     }

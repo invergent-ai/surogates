@@ -15,7 +15,7 @@ import type { NetworkApprovals } from "../hosts/tool-hosts.js";
 import type { Bindings } from "../journal/bindings.js";
 import { OperationJournal } from "../journal/journal.js";
 import type { LinkStatus } from "../link/client.js";
-import type { Operation, Outcome, Welcome } from "../link/protocol.js";
+import { type Operation, type Outcome, opWaiting, type Welcome } from "../link/protocol.js";
 import { APP_CLOSED, type Executor } from "../operations/runner.js";
 
 // How long a quit waits for what runs to be recorded "closed by the app". An operation
@@ -39,6 +39,8 @@ export interface ToolLayer extends Executor {
   retired?(root: string): void;
   // Whether a project's thread is given a copy of its folder to work in: without, the binder binds it to none.
   keepsCopies?(): boolean;
+  // Whether a chat's host is on the folder of this identity, by its device and inode: another chat works there.
+  folderInUse?(dev: number, ino: number): boolean;
   // The address of the page a calling session's next browser operation acts in, for its prompt; for an
   // upload, of the frame of the file input its page asked for, *of* being the upload's operation, by its id; or
   // why that upload can be given to nothing. *root*: the chat that asks, which is told of no other chat's session.
@@ -73,7 +75,8 @@ export interface DeviceStackOptions {
   agent: string; // the agent's name, as the prompts show it
   identity: Identity; // who every welcome must name
   // *changed*: what the tools' live() names may have changed.
-  tools(bindings: Bindings, network: NetworkApprovals, changed: () => void): ToolLayer;
+  // *waiting*: tell an operation starts ("folder") or stops (null) waiting for its chat's folder.
+  tools(bindings: Bindings, network: NetworkApprovals, changed: () => void, waiting: (operationId: string, reason: "folder" | null) => void): ToolLayer;
   prompts: FolderPrompts;
   approvalPrompts: ApprovalPrompts;
   // Whether a folder for a new chat answered a look off the main thread in time (FolderLooks).
@@ -162,7 +165,23 @@ function deviceOn(journal: OperationJournal, options: DeviceStackOptions, made: 
     const now = working();
     if (now !== told) options.onWorking?.((told = now));
   };
-  const tools = options.tools(journal.bindings, network, tell);
+  // The operations waiting for their folder now, and whether the server of the link now open said it takes the news.
+  // The operations a server was told wait, until it is told they stopped: one that stopped while no link took it is
+  // told so on the next that does, or the server would show it waiting while it runs.
+  const waiting = new Map<string, "folder">();
+  const known = new Set<string>();
+  let serverWaits = false;
+  const sendWaiting = (id: string, reason: "folder" | null): void => {
+    if (!serverWaits || !link.send(opWaiting(id, reason))) return;
+    if (reason === null) known.delete(id);
+    else known.add(id);
+  };
+  const waitingTold = (id: string, reason: "folder" | null): void => {
+    if (reason === null) waiting.delete(id);
+    else waiting.set(id, reason);
+    sendWaiting(id, reason);
+  };
+  const tools = options.tools(journal.bindings, network, tell, waitingTold);
   made.tools = tools;
   if (options.onBindingChanged) journal.bindings.watch(options.onBindingChanged);
   // The ports the browser may open are the journal's: told at the start, what the run before kept, and at each
@@ -195,6 +214,7 @@ function deviceOn(journal: OperationJournal, options: DeviceStackOptions, made: 
     agent: options.agent,
     hosts: counted,
     keepsCopies,
+    inUse: (dev, ino) => tools.folderInUse?.(dev, ino) === true,
     refusal: (operation) => tools.refusal?.(operation) ?? null,
     retired: (root) => tools.retired?.(root),
     address: tools.address?.bind(tools),
@@ -217,6 +237,7 @@ function deviceOn(journal: OperationJournal, options: DeviceStackOptions, made: 
     executor: binder,
     copies: keepsCopies,
     onStatus: (status) => {
+      if (status !== "connected") serverWaits = false;
       if (ENDED.includes(status)) ended.resolve();
       options.onStatus(status);
     },
@@ -230,6 +251,9 @@ function deviceOn(journal: OperationJournal, options: DeviceStackOptions, made: 
           `This computer's token now connects to ${named.replace("Id", "")} ${welcome[named]}, not ${identity[named]}, so its link stopped`,
         );
       }
+      serverWaits = welcome.waits;
+      for (const id of known) if (!waiting.has(id)) sendWaiting(id, null);
+      for (const [id, reason] of waiting) sendWaiting(id, reason);
     },
   });
   link.start();

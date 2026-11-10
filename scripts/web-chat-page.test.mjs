@@ -26,15 +26,15 @@ const STUBS = {
     export const useParams = () => useSyncExternalStore(page().subscribe, () => page().params);
     export const useNavigate = () => page().navigate;`,
   "@/api/transparency": "export const getTransparencyConfig = () => globalThis.chatPage.transparency.promise;",
-  "@invergent/agent-chat-react": "export function AgentChat(props) { globalThis.chatPage.chat = props; return null; }",
+  "@invergent/agent-chat-react": "export function AgentChat(props) { globalThis.chatPage.chat = props; return props.composerHeader ?? null; }",
   "@/components/transparency-banner": "export function TransparencyBanner(props) { globalThis.chatPage.banner = props; return null; }",
   "@/components/app-shell": "export const AppShell = ({ children }) => children;",
   "@/components/navbar": "export const SessionSidebar = () => null;",
   "@/stores/capabilities-slice": "export const slashCommandEnabled = () => true;",
-  "@/api/devices": "export const listDevices = async () => [];",
+  "@/api/devices": "export const listDevices = async () => [{ id: 'd-1', online: true }];",
   "@/api/sessions": "export const createSession = async () => ({ id: 's-made' }); export const confirmDisclosure = async () => {};",
   "./local-chat-bar": "export const LocalChatBar = () => null;",
-  "./new-chat-place": "export const NewChatPlace = () => null;",
+  "./new-chat-place": "export const NewChatPlace = (props) => { globalThis.chatPage.place = props; return null; };",
   "./surogates-web-chat-adapter": "export const surogatesWebChatAdapter = {}; export const toAgentChatSession = (session) => session;",
 };
 
@@ -84,7 +84,7 @@ const HANDED = { id: "q-1", text: "Draft the March invoices" };
  * The chat page at /chat in Surogate Desktop, as a fresh load draws it: the store's reads not in,
  * the transparency read and this computer's state answered when the test says.
  */
-async function opened() {
+async function opened(bridge = {}) {
   const listeners = new Set();
   const page = {
     store: {
@@ -120,6 +120,7 @@ async function opened() {
       return () => {};
     },
     answerQuickEntry: (id, refused) => page.answers.push([id, refused]),
+    ...bridge,
   };
   const container = document.createElement("div");
   document.body.append(container);
@@ -142,6 +143,52 @@ async function opened() {
 }
 
 const LOCAL = { device: { deviceId: "d-1", name: "Laptop" }, localFolders: true };
+
+test("starts each new chat on a new folder of its own where the desktop offers one, and keeps the choice made across chats where it does not", async () => {
+  const ready = { sessionsLoading: false, multiSession: true, desktopSessions: true };
+  const asked = [];
+  const prepared = { folder: "/f", nonce: "n", token: "t" };
+  const bridge = (offers) => ({
+    offersNewFolder: offers || undefined,
+    prepareFolder: async (choice) => (asked.push(choice), prepared),
+    bindSession: async () => {},
+    cancelPrepared: async () => {},
+  });
+  const withMenu = await opened(bridge(true));
+  try {
+    await withMenu.act(() => withMenu.page.device.resolve(LOCAL));
+    await withMenu.change(ready);
+    assert.equal(withMenu.page.place.choice, "new");
+    assert.equal(withMenu.page.place.menu, true);
+    await withMenu.act(() => withMenu.page.place.onChoice("pick"));
+    assert.equal(withMenu.page.place.choice, "pick");
+    await withMenu.act(() => withMenu.page.navigate({ to: "/chat/$sessionId", params: { sessionId: "s-1" } }));
+    await withMenu.act(() => withMenu.page.navigate({ to: "/chat", params: {} }));
+    assert.equal(withMenu.page.place.choice, "new");
+    await withMenu.act(() => withMenu.page.chat.adapter.createSession({}));
+    assert.deepEqual(asked, ["new"]);
+  } finally {
+    await withMenu.unmount();
+  }
+
+  const without = await opened(bridge(false));
+  try {
+    await without.act(() => without.page.device.resolve(LOCAL));
+    await without.change(ready);
+    assert.equal(without.page.place.choice, "last");
+    assert.equal(without.page.place.menu, false);
+    await without.act(() => without.page.place.onChoice("pick"));
+    assert.equal(without.page.place.choice, "pick");
+    await without.act(() => without.page.navigate({ to: "/chat/$sessionId", params: { sessionId: "s-1" } }));
+    await without.act(() => without.page.navigate({ to: "/chat", params: {} }));
+    // As such a desktop's page always did: the choice made stays across the chats opened.
+    assert.equal(without.page.place.choice, "pick");
+    await without.act(() => without.page.chat.adapter.createSession({}));
+    assert.deepEqual(asked, ["new", "pick"]);
+  } finally {
+    await without.unmount();
+  }
+});
 
 // What the web client's own read of the transparency setting answers once the agent refuses it: its
 // module itself, which the page's stand-in for it hands on.

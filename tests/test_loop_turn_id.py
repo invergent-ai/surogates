@@ -472,6 +472,36 @@ async def test_a_folders_harness_request_that_gives_up_logs_by_why(
 
 
 @pytest.mark.asyncio
+async def test_every_harness_request_on_a_folder_asks_with_the_harness_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from surogates.harness import loop_artifact_completion, loop_context_replay
+    from surogates.harness.loop_artifact_completion import ArtifactCompletionMixin
+    from surogates.harness.loop_context_replay import ContextReplayMixin
+    from surogates.session.files import HARNESS_WITHIN_S
+
+    asked: list[Any] = []
+
+    @asynccontextmanager
+    async def files_that_record(*_args: Any, **kwargs: Any):
+        asked.append(kwargs.get("within"))
+        raise ComputerAway("the laptop", revoked=False)
+        yield
+
+    monkeypatch.setattr(loop_context_replay, "session_files", files_that_record)
+    monkeypatch.setattr(loop_artifact_completion, "session_files", files_that_record)
+    harness = SimpleNamespace(_api_client=None, _storage=None, _session_factory=None, _redis=None, _store=None)
+    session = SimpleNamespace(id=uuid4(), config={"execution": {"kind": "device", "device_id": str(uuid4())}})
+
+    await ContextReplayMixin._read_folder_context(harness, session)
+    await ArtifactCompletionMixin._folder_cursor(harness, session)
+    await ArtifactCompletionMixin._walk_folder(harness, session, since="1")
+    await ArtifactCompletionMixin._promote_fenced_artifacts(harness, session, "```svg\n<svg></svg>\n```", [])
+
+    assert asked == [HARNESS_WITHIN_S] * 4
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("channel, reason, asks_for_a_reply", [
     ("whatsapp", "tool_loop_halt", True),
     ("telegram", "invalid_tool_calls", True),
@@ -538,3 +568,169 @@ async def test_a_timed_out_question_gets_one_tools_off_reply(
     response = next(c.args[2] for c in store.emit_event.await_args_list if c.args[1] == EventType.LLM_RESPONSE)
     assert response["finish_reason"] == "question_timed_out"
     assert harness._complete_session.await_args.kwargs["reason"] == "question_timed_out"
+
+
+class _StreamedCalls:
+    """A streaming executor that holds the response's calls, recording whether it was discarded, and its calls ended."""
+
+    has_tools, stats, discarded, ended = True, {"overlapped_with_streaming": 0, "total": 1}, False, False
+
+    def __init__(self, **_kwargs: Any) -> None:
+        pass
+
+    def add_tool(self, call: dict) -> None:
+        pass
+
+    def discard(self) -> None:
+        type(self).discarded = True
+
+    async def get_all_results(self) -> list[dict]:
+        # Discarded first, it only waits for its cancelled calls to record that they were stopped.
+        if not type(self).discarded:
+            raise AssertionError("a stopped turn ran its calls")
+        await asyncio.sleep(0)
+        type(self).ended = True
+        return [{"role": "tool", "tool_call_id": "c1", "content": "cancelled"}]
+
+
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.asyncio
+async def test_a_stop_while_the_turns_mark_waits_for_its_folder_ends_the_turn_stopped_and_runs_no_call(
+    monkeypatch: pytest.MonkeyPatch, streamed: bool,
+) -> None:
+    from surogates.harness.cost_tracker import SessionCostTracker
+    from tests.test_loop_ordering import _harness, _tool_resp
+
+    harness = _harness()
+    harness._find_invalid_tool_calls = MagicMock(return_value=[])
+    ended_before_the_pause: list[bool] = []
+    harness._abort_iteration_with_pause = AsyncMock(
+        side_effect=lambda *_a, **_k: ended_before_the_pause.append(_StreamedCalls.ended),
+    )
+    harness._streaming_enabled = streamed
+    _StreamedCalls.discarded = _StreamedCalls.ended = False
+    monkeypatch.setattr("surogates.harness.loop.StreamingToolExecutor", _StreamedCalls)
+
+    async def folder_cursor(session: Any) -> str:
+        # Waits while another chat holds the folder, up to minutes; the user stops the chat meanwhile.
+        asyncio.get_running_loop().call_soon(harness.interrupt, "paused by user")
+        await asyncio.Event().wait()
+
+    async def fake_call_llm_with_retry(**_kwargs: Any) -> tuple[dict, dict]:
+        return _tool_resp("c1")
+
+    async def no_calls(*_args: Any, **_kwargs: Any) -> list[dict]:
+        raise AssertionError("a stopped turn ran its calls")
+
+    harness._folder_cursor = folder_cursor
+    monkeypatch.setattr("surogates.harness.loop.call_llm_with_retry", fake_call_llm_with_retry)
+    monkeypatch.setattr("surogates.harness.loop.execute_tool_calls", no_calls)
+    session, tracker = _make_session(), SessionCostTracker()
+    session.config.update({"execution": {"kind": "device", "device_id": str(uuid4())}})
+    await asyncio.wait_for(harness._run_loop(
+        session, [{"role": "user", "content": "do the task"}], "system",
+        SimpleNamespace(lease_token=uuid4()), cost_tracker=tracker, all_events=[],
+    ), 5.0)
+
+    [(args, _)] = harness._abort_iteration_with_pause.await_args_list
+    assert (args[0], args[2]) == (session, tracker)
+    # The calls the stream held are discarded with the read, as a Stop discards them while they run,
+    # and have ended, their stopped results recorded, before the turn's pause.
+    assert _StreamedCalls.discarded is streamed
+    assert ended_before_the_pause == [streamed]
+    assert harness._active_executor is None
+
+
+@pytest.mark.asyncio
+async def test_a_folder_turn_whose_summary_is_ruled_out_takes_no_mark_and_no_stop_wrapper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.test_loop_ordering import _harness, _resp, _tool_resp
+
+    harness = _harness()
+    harness._find_invalid_tool_calls = MagicMock(return_value=[])
+    harness._streaming_enabled = False
+    wrapped: list[Any] = []
+
+    async def unless_stopped(work: Any, **_kwargs: Any) -> tuple[bool, Any]:
+        wrapped.append(work)
+        return False, await work
+
+    calls = 0
+
+    async def fake_call_llm_with_retry(**_kwargs: Any) -> tuple[dict, dict]:
+        nonlocal calls
+        calls += 1
+        return _tool_resp("c1") if calls == 1 else _resp("done")
+
+    async def ran(*_args: Any, **_kwargs: Any) -> list[dict]:
+        return [{"role": "tool", "tool_call_id": "c1", "content": "ok"}]
+
+    harness._unless_stopped = unless_stopped
+    monkeypatch.setattr("surogates.harness.loop.call_llm_with_retry", fake_call_llm_with_retry)
+    monkeypatch.setattr("surogates.harness.loop.execute_tool_calls", ran)
+    session = _make_session()
+    session.config.update({"execution": {"kind": "device", "device_id": str(uuid4())}, "active_mission_id": "m1"})
+    await asyncio.wait_for(harness._run_loop(
+        session, [{"role": "user", "content": "do the task"}], "system",
+        SimpleNamespace(lease_token=uuid4()), all_events=[],
+    ), 5.0)
+
+    assert wrapped == []
+    assert harness._turn_marked is False
+
+
+class _StartedCalls(_StreamedCalls):
+    """A cloud stream's calls, started early: they finish and are recorded."""
+
+    async def get_all_results(self) -> list[dict]:
+        return [{"role": "tool", "tool_call_id": "c1", "content": "ok"}]
+
+
+@pytest.mark.asyncio
+async def test_a_cloud_turns_stop_after_its_response_lets_its_started_calls_finish_and_pauses_at_the_loop_top(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from surogates.harness import loop as loop_module
+    from tests.test_loop_ordering import _harness, _tool_resp
+
+    harness = _harness()
+    harness._abort_iteration_with_pause = AsyncMock(return_value=None)
+    harness._streaming_enabled = True
+    _StartedCalls.discarded = False
+    monkeypatch.setattr("surogates.harness.loop.StreamingToolExecutor", _StartedCalls)
+    neutralize = loop_module.neutralize_unsendable_tool_names
+
+    def stop_once_saved(calls: Any, offered: Any) -> Any:
+        # The Stop lands after the response's interrupt guard, before its calls are collected.
+        harness.interrupt("paused by user")
+        return neutralize(calls, offered)
+
+    async def fake_call_llm_with_retry(**_kwargs: Any) -> tuple[dict, dict]:
+        return _tool_resp("c1")
+
+    monkeypatch.setattr(loop_module, "neutralize_unsendable_tool_names", stop_once_saved)
+    monkeypatch.setattr("surogates.harness.loop.call_llm_with_retry", fake_call_llm_with_retry)
+    await asyncio.wait_for(harness._run_loop(
+        _make_session(), [{"role": "user", "content": "do the task"}], "system",
+        SimpleNamespace(lease_token=uuid4()), all_events=[],
+    ), 5.0)
+
+    # As before folder reads could wait: the started calls' results are kept, and the next iteration pauses.
+    assert _StartedCalls.discarded is False
+    harness._abort_iteration_with_pause.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_the_pause_a_stopped_turn_ends_with_says_the_turn_has_ended() -> None:
+    from tests.test_loop_ordering import _harness
+
+    harness = _harness()
+    harness._sandbox_pool = None
+    harness._store.get_session = AsyncMock(return_value=SimpleNamespace(status="paused"))
+    harness.interrupt("paused by user")
+    await harness._abort_iteration_with_pause(_make_session(), None)
+
+    # The pause route's own comes before the turn has stopped: this one, after its undo, is the turn's end.
+    [pause] = [data for etype, data in harness._store.persisted if etype == EventType.SESSION_PAUSE]
+    assert pause["turn_ended"] is True and pause["reason"] == "interrupted"

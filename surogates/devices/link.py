@@ -14,7 +14,7 @@ accept frames that large.
                                                         for a project's thread to work in: a
                                                         bind that names one is sent to no other
   server -> app   {"type": "welcome", "protocol": 1, "device_id", "org_id",
-                   "agent_id", "user_id", "name", "heartbeat_s": 15}
+                   "agent_id", "user_id", "name", "heartbeat_s": 15, "waits": true}
   app -> server   {"type": "ping"}                      every heartbeat_s
   server -> app   {"type": "pong"}
   app -> server   {"type": "revoke"}                    the app removes this device
@@ -47,6 +47,14 @@ accept frames that large.
                                                          standard base64, the last chunk the rest
   app -> server   {"type": "chunk_ack", "id", "seq"}     the app has that chunk of the write's data,
                                                          and every one before it
+  app -> server   {"type": "op_waiting", "id", "reason"} the app holds this operation back, because
+                                                         another chat works in the same folder
+                                                         (reason "folder"), or no longer does
+                                                         (null).  Sent only to a server whose
+                                                         welcome says "waits": any other unknown
+                                                         frame closes the link with 4400.  One for
+                                                         an operation this link did not deliver,
+                                                         or has finished, is ignored.
 
 Every handshake is accepted and a refusal is a close code, so the app can tell
 a refused token from a proxy's HTTP error:
@@ -289,6 +297,9 @@ class _Link:
         self._operations = operations
         self._send_lock = asyncio.Lock()
         self._delivered: set[UUID] = set()
+        # Operations whose folder wait this link recorded and that still wait:
+        # forgotten when it ends.  One whose wait ended, or that ended, leaves.
+        self._waited: set[UUID] = set()
         self._delivery_wanted = asyncio.Event()
         self._incoming: _Incoming | None = None
         # Writes whose data goes after their op, in order, each with when its op
@@ -366,6 +377,7 @@ class _Link:
     def forget(self, operation_id: UUID) -> None:
         """Stop tracking an operation as sent and unanswered, and stop sending its data."""
         self._delivered.discard(operation_id)
+        self._waited.discard(operation_id)
         self._heard.set()
 
     async def transfers(self) -> None:
@@ -573,6 +585,49 @@ class _Link:
             return
         await self.send({"type": "chunk_ack", "id": str(operation_id), "seq": seq})
 
+    async def waiting(self, frame: dict[str, Any]) -> None:
+        """Record an ``op_waiting`` for an operation this link delivered, best effort."""
+        try:
+            operation_id = UUID(str(frame["id"]))
+        except (KeyError, ValueError):
+            raise _Close(CLOSE_PROTOCOL, "malformed op_waiting") from None
+        reason = frame.get("reason")
+        if reason not in ("folder", None):
+            raise _Close(CLOSE_PROTOCOL, "malformed op_waiting")
+        # After a reconnect the app speaks of operations a link before this one
+        # delivered: they count while they are still open for this device.  Any
+        # other id, a finished operation or another device's, is nothing to
+        # record, and no fault.
+        try:
+            if operation_id not in self._delivered and not await _bounded(
+                self._operations.is_open(self._device.id, operation_id),
+            ):
+                return
+            # A wait's end leaves the set once it is recorded: until then the
+            # link's end forgets it.
+            if reason is not None:
+                self._waited.add(operation_id)
+            await _bounded(self._operations.waiting(operation_id, reason))
+            if reason is None:
+                self._waited.discard(operation_id)
+        except Exception:
+            # The notice is a courtesy; Redis being away must not end the link.
+            logger.warning("device %s could not record that operation %s waits", self._device.id, operation_id, exc_info=True)
+
+    @property
+    def waits(self) -> bool:
+        """Whether the link recorded that any operation waits."""
+        return bool(self._waited)
+
+    async def forget_waits(self) -> None:
+        """The link ended: what it was told about waits no longer holds, the app being gone."""
+        if not self._waited:
+            return
+        try:
+            await _bounded(self._operations.forget_waits(self._waited))
+        except Exception:
+            logger.warning("device %s could not forget its operations' waits", self._device.id, exc_info=True)
+
     def closed(self, code: int, reason: str) -> None:
         """The connection ends with this close: so does a transfer under way."""
         if (incoming := self._incoming) is not None:
@@ -642,6 +697,7 @@ async def serve_device_link(
             "user_id": str(device.user_id),
             "name": device.name,
             "heartbeat_s": HEARTBEAT_INTERVAL_S,
+            "waits": True,
         })
         await _bounded(store.welcomed(device.id))
         # Cancellations come before any new work, so the app stops what the
@@ -663,9 +719,17 @@ async def serve_device_link(
         with contextlib.suppress(Exception):
             await websocket.close(code=1011, reason="server error")
     finally:
+        # Decided before the release: a link a newer one superseded leaves the
+        # waits to that one, which the app told them again.
+        held = False
         if claimed:
+            if link.waits:
+                with contextlib.suppress(Exception):
+                    held = await _bounded(presence.holds(device.id, holder))
             with contextlib.suppress(Exception):
                 await _bounded(presence.release(device.id, holder))
+        if held:
+            await link.forget_waits()
         if pubsub is not None:
             with contextlib.suppress(Exception):
                 await _bounded(pubsub.aclose())
@@ -794,6 +858,9 @@ async def _heartbeats(
             continue
         if kind == "chunk_ack":
             link.chunk_acked(frame)
+            continue
+        if kind == "op_waiting":
+            await link.waiting(frame)
             continue
         if kind != "ping":
             raise _Close(CLOSE_PROTOCOL, "unexpected frame")

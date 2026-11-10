@@ -180,6 +180,9 @@ def _working(latest: dict[str, Any]) -> tuple[str | None, str | None]:
         # Its computer is there, and makes the thread's first copy of its folder: no wait of the user's.
         if wait.data.get("reason") == "copying":
             return None, _line(f"Making this thread's copy of {wait.data.get('folder') or 'its folder'}…")
+        # Another chat holds its folder: the user's computer is fine and there is nothing for the user to do.
+        if wait.data.get("reason") == "folder":
+            return None, "Waiting for another chat in the same folder"
         return "computer", f"Waiting for {wait.data.get('device_name') or 'your computer'}"
     # An iteration summary from before the latest message is the last turn's.
     summary = latest.get(EventType.ITERATION_SUMMARY.value)

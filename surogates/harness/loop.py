@@ -1000,6 +1000,34 @@ class AgentHarness(
         if executor is not None:
             executor.discard()
 
+    async def _unless_stopped(self, work: Awaitable[Any], *, also: Callable[[], None] | None = None) -> tuple[bool, Any]:
+        """Await *work* where a Stop cancels it, as it cancels a resumed call; whether it was stopped, and its result.
+
+        For a wait no tool call holds: a folder another chat keeps holds a
+        harness read for minutes.  A Stop also calls *also*, the discard of
+        whatever else the turn has under way.  The cancel closes the read's
+        operation in the journal, which tells its computer to drop it.
+        """
+        running = asyncio.ensure_future(work)
+
+        def discard() -> None:
+            running.cancel()
+            if also is not None:
+                also()
+
+        self._active_executor = SimpleNamespace(discard=discard)
+        # A Stop that landed before this point only set the flag.
+        if self._check_interrupt():
+            discard()
+        try:
+            return False, await running
+        except asyncio.CancelledError:
+            if not self._check_interrupt() or asyncio.current_task().cancelling():
+                raise
+            return True, None
+        finally:
+            self._active_executor = None
+
     def _check_interrupt(self) -> bool:
         """Return ``True`` if an interrupt has been requested."""
         return self._interrupt_requested
@@ -1483,6 +1511,8 @@ class AgentHarness(
                     "reason": "interrupted",
                     "message": reason_msg,
                     "worker_id": self._worker_id,
+                    # The turn has stopped, its undo done: the pause route's own came before.
+                    "turn_ended": True,
                     **said,
                 },
             )
@@ -2365,7 +2395,15 @@ class AgentHarness(
             )
 
             # 8. Build the system prompt (with caching).
-            system_prompt = await self._build_system_prompt(session)
+            # A local folder's project context waits while another chat holds the folder: a Stop ends it there.
+            # A cloud prompt waits on no folder, and a Stop meanwhile is left to the loop's own check.
+            if device_of(session.config) is None:
+                system_prompt = await self._build_system_prompt(session)
+            else:
+                stopped, system_prompt = await self._unless_stopped(self._build_system_prompt(session))
+                if stopped:
+                    await self._abort_iteration_with_pause(session, None)
+                    return
 
             # 9. Create per-session cost tracker.
             cost_tracker = SessionCostTracker()
@@ -2768,24 +2806,13 @@ class AgentHarness(
             async with turn_joining():
                 return await execute_single_tool(call, replay_of=event_id, **tool_kwargs)
 
-        replay = asyncio.ensure_future(replay_unanswered(
-            session=session, events=events, messages=messages,
-            session_factory=self._session_factory, run_tool=resume,
-        ))
         # A pause or stop cancels the wait, as it cancels a streamed call: the
         # pause's cancellation completes the call in the journal, and the next
         # wake reports it stopped.
-        self._active_executor = SimpleNamespace(discard=replay.cancel)
-        # A pause that landed before this point only set the flag.
-        if self._check_interrupt():
-            replay.cancel()
-        try:
-            await replay
-        except asyncio.CancelledError:
-            if not self._check_interrupt() or asyncio.current_task().cancelling():
-                raise
-        finally:
-            self._active_executor = None
+        await self._unless_stopped(replay_unanswered(
+            session=session, events=events, messages=messages,
+            session_factory=self._session_factory, run_tool=resume,
+        ))
 
     # ------------------------------------------------------------------
     # Core LLM loop
@@ -4303,7 +4330,21 @@ class AgentHarness(
             messages.append(assistant_message)
 
             # 7. Execute tool calls.
-            await self._mark_turn_start(session)
+            # The mark waits while another chat holds the folder: a Stop ends it, and the calls the stream holds.
+            # A cloud turn takes no mark, and its early-started calls finish and are recorded before a Stop pauses it.
+            if self._needs_turn_mark(session):
+                stopped, _ = await self._unless_stopped(
+                    self._mark_turn_start(session),
+                    also=streaming_executor.discard if streaming_executor is not None else None,
+                )
+                if stopped:
+                    if streaming_executor is not None:
+                        # Its cancelled calls record that they were stopped, and close their
+                        # operations, before the pause: none lands after it, or in the next turn.
+                        async with turn_joining():
+                            await streaming_executor.get_all_results()
+                    await self._abort_iteration_with_pause(session, saga, cost_tracker, lease=lease)
+                    return
             if use_streaming_exec:
                 # ── Streaming executor path ──────────────────────────
                 # Some or all tools started executing during LLM streaming.

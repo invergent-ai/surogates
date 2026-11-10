@@ -10,6 +10,7 @@ import type {
   DesktopBinding,
   DesktopBridge,
   DesktopDeviceState,
+  DesktopFolderChoice,
 } from "./desktop-bridge-contract";
 
 /** What the new chat's create sends the agent: the folder the user confirmed on this computer. */
@@ -56,15 +57,48 @@ export interface LocalCapabilities {
   multiSession: boolean | null;
 }
 
+/** Said beside the folder menu: the sheet that confirms the folder opens after the first message. */
+export const FOLDER_NOTE = "You confirm the folder after your first message.";
+
+/** The folders a new chat may work in, in menu order: *shown* is what the menu's button says. */
+export const FOLDER_CHOICES: ReadonlyArray<{
+  value: DesktopFolderChoice;
+  label: string;
+  hint: string;
+  shown: string;
+}> = [
+  {
+    value: "new",
+    label: "A new folder",
+    hint: "Made for this chat",
+    shown: "a new folder",
+  },
+  {
+    value: "last",
+    label: "The last folder",
+    hint: "Where your last chat worked",
+    shown: "the last folder",
+  },
+  {
+    value: "pick",
+    label: "Choose a folder…",
+    hint: "The folder window opens after you send",
+    shown: "a folder you choose",
+  },
+];
+
 /**
  * Where a new chat works, as the line under its composer says it. *device* is the desktop's,
- * null in a browser. The folder itself is shown only in the desktop's own sheet: the page
- * learns no path of this computer before its user confirms one.
+ * null in a browser. *menu* is whether the desktop offers a new folder: the folder is then chosen
+ * from a menu after "Works in", and without it the line says it in a sentence. The folder itself
+ * is shown only in the desktop's own sheet: the page learns no path of this computer before its
+ * user confirms one.
  */
 export function newChatPlace(
   device: DesktopDeviceState | null,
   agent: LocalCapabilities,
-  choice: "last" | "pick",
+  choice: DesktopFolderChoice,
+  menu: boolean,
 ): { local: boolean; text: string | null } {
   // A browser, or an agent that keeps one conversation: nothing to say.
   if (device === null || agent.multiSession === false) {
@@ -73,10 +107,11 @@ export function newChatPlace(
   if (device.localFolders) {
     return {
       local: true,
-      text:
-        choice === "last"
-          ? "Works in a folder on this computer: the one you used last, or a new one. You confirm it when you send."
-          : "Works in a folder on this computer that you choose when you send.",
+      text: menu
+        ? "Works in"
+        : choice === "pick"
+          ? "Works in a folder on this computer that you choose when you send."
+          : "Works in a folder on this computer: the one you used last, or a new one. You confirm it when you send.",
     };
   }
   // Nothing is said until the agent's config has been read.
@@ -132,7 +167,7 @@ export async function createChat<T extends { id: string }>(
       >
     | undefined,
   agent: LocalCapabilities,
-  choice: "last" | "pick",
+  choice: DesktopFolderChoice,
   shown: { local: boolean },
   api: NewChatApi<T>,
 ): Promise<T> {
@@ -149,7 +184,7 @@ export async function createChat<T extends { id: string }>(
   }
   const state = await desktop.getDevice().catch(said);
   const device = state.device;
-  if (!(device && newChatPlace(state, known, choice).local)) {
+  if (!(device && newChatPlace(state, known, choice, false).local)) {
     if (!shown.local) {
       return api.create();
     }

@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from surogates.devices.link import _Link
+from surogates.devices.link import CLOSE_PROTOCOL, _Close, _Link
 from surogates.devices.operations import OpenOperation
 
 ROOT = uuid.UUID("00000000-0000-4000-8000-000000000001")
@@ -31,13 +31,30 @@ class FakeOperations:
     """The journal's calls the link makes, over a list of open operations."""
 
     def __init__(self, *operations: OpenOperation, delay: float = 0.0) -> None:
+        # The device the open operations are of: the link's, which make_link names.
+        self.device_id: uuid.UUID | None = None
         self.open = list(operations)
         self.delay = delay
         self.statuses: list[str] = []
         self.closed: set[uuid.UUID] = set()  # by a cancellation or a revocation
+        self.waits: list[tuple[uuid.UUID, str | None]] = []
+        self.forgotten: set[uuid.UUID] = set()
+        # Open operations of other devices, by their ids, with their device's.
+        self.elsewhere: dict[uuid.UUID, uuid.UUID] = {}
 
     async def closed_among(self, device_id, operation_ids):
         return [i for i in operation_ids if i in self.closed]
+
+    async def waiting(self, operation_id, reason):
+        self.waits.append((operation_id, reason))
+
+    async def is_open(self, device_id, operation_id):
+        if device_id == self.device_id:
+            return any(op.id == operation_id for op in self.open)
+        return self.elsewhere.get(operation_id) == device_id
+
+    async def forget_waits(self, operation_ids):
+        self.forgotten = set(operation_ids)
 
     async def pending(self, device_id, generation, *, exclude=frozenset(), limit=100):
         # The query reads the journal first and the caller sees the answer
@@ -71,9 +88,11 @@ class FakePresence:
 
 def make_link(operations: FakeOperations) -> tuple[_Link, FakeSocket]:
     socket = FakeSocket()
+    device = SimpleNamespace(id=uuid.uuid4(), credential_generation=1)
+    operations.device_id = device.id
     link = _Link(
         socket,
-        device=SimpleNamespace(id=uuid.uuid4(), credential_generation=1),
+        device=device,
         holder="holder",
         presence=FakePresence(),
         operations=operations,
@@ -126,3 +145,117 @@ async def test_a_cancelled_operation_is_told_to_the_app_once_and_leaves_the_deli
 
     assert [f for f in socket.sent if f["type"] == "cancel"] == [{"type": "cancel", "id": str(first.id)}]
     assert link._delivered == {second.id}
+
+
+def waiting(operation_id, reason) -> dict:
+    return {"type": "op_waiting", "id": str(operation_id), "reason": reason}
+
+
+async def test_an_operation_waiting_for_its_folder_is_recorded_while_it_waits_and_forgotten_after():
+    op = open_operation(1)
+    operations = FakeOperations(op)
+    link, _ = make_link(operations)
+    await link.deliver()
+    await link.waiting(waiting(op.id, "folder"))
+    await link.waiting(waiting(op.id, None))
+    assert operations.waits == [(op.id, "folder"), (op.id, None)]
+
+
+async def test_a_wait_for_an_operation_not_open_for_this_device_changes_nothing():
+    op = open_operation(1)
+    operations = FakeOperations(op)
+    link, _ = make_link(operations)
+    await link.waiting(waiting(uuid.uuid4(), "folder"))
+    await link.waiting(waiting(uuid.uuid4(), None))
+    assert operations.waits == []
+
+
+async def test_a_wait_that_cannot_be_recorded_leaves_the_link_open():
+    op = open_operation(1)
+    operations = FakeOperations(op)
+
+    async def refuse(operation_id, reason):
+        raise ConnectionError("redis is away")
+
+    operations.waiting = refuse
+    link, _ = make_link(operations)
+    await link.deliver()
+    await link.waiting(waiting(op.id, "folder"))
+
+
+async def test_a_wait_before_redelivery_is_taken_for_an_open_operation_of_this_device():
+    op = open_operation(1)
+    operations = FakeOperations(op)
+    link, _ = make_link(operations)  # nothing delivered on this link yet
+    await link.waiting(waiting(op.id, "folder"))
+    await link.waiting(waiting(uuid.uuid4(), "folder"))  # not open for this device
+    assert operations.waits == [(op.id, "folder")]
+
+
+async def test_a_wait_for_another_devices_open_operation_changes_nothing():
+    op = open_operation(1)
+    operations = FakeOperations(op)
+    elsewhere = open_operation(2)
+    operations.elsewhere[elsewhere.id] = uuid.uuid4()
+    link, _ = make_link(operations)
+    await link.waiting(waiting(elsewhere.id, "folder"))
+    await link.waiting(waiting(op.id, "folder"))
+    assert operations.waits == [(op.id, "folder")]
+
+
+async def test_a_link_that_ends_forgets_the_waits_it_recorded():
+    op = open_operation(1)
+    operations = FakeOperations(op)
+    link, _ = make_link(operations)
+    await link.waiting(waiting(op.id, "folder"))
+    await link.forget_waits()
+    assert operations.forgotten == {op.id}
+
+
+async def test_a_link_that_ends_forgets_only_the_waits_still_open():
+    ended, answered, waits = open_operation(1), open_operation(2), open_operation(3)
+    operations = FakeOperations(ended, answered, waits)
+    link, _ = make_link(operations)
+    await link.deliver()
+    for op in (ended, answered, waits):
+        await link.waiting(waiting(op.id, "folder"))
+    await link.waiting(waiting(ended.id, None))
+    link.forget(answered.id)
+    await link.forget_waits()
+    assert operations.forgotten == {waits.id}
+
+
+async def test_a_link_whose_every_wait_ended_has_no_waits_to_forget():
+    op = open_operation(1)
+    operations = FakeOperations(op)
+    link, _ = make_link(operations)
+    await link.waiting(waiting(op.id, "folder"))
+    await link.waiting(waiting(op.id, None))
+    assert not link.waits
+
+
+async def test_a_wait_whose_end_cannot_be_recorded_is_still_forgotten_when_the_link_ends():
+    op = open_operation(1)
+    operations = FakeOperations(op)
+    link, _ = make_link(operations)
+    await link.waiting(waiting(op.id, "folder"))
+    recorded = operations.waiting
+
+    async def refuse(operation_id, reason):
+        raise ConnectionError("redis is away")
+
+    operations.waiting = refuse
+    await link.waiting(waiting(op.id, None))
+    operations.waiting = recorded
+    await link.forget_waits()
+    assert operations.forgotten == {op.id}
+
+
+@pytest.mark.parametrize("frame_id, reason", [("nope", "folder"), (None, None), ("delivered", "offline"), ("delivered", 3)])
+async def test_a_malformed_wait_closes_the_link_as_a_protocol_error(frame_id, reason):
+    op = open_operation(1)
+    link, _ = make_link(FakeOperations(op))
+    await link.deliver()
+    with pytest.raises(_Close) as closed:
+        await link.waiting({"type": "op_waiting", "id": str(op.id) if frame_id == "delivered" else frame_id, "reason": reason})
+    assert closed.value.code == CLOSE_PROTOCOL

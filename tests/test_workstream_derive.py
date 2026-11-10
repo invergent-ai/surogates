@@ -200,6 +200,10 @@ THREAD = "9f0e1d2c-3b4a-4c5d-8e6f-708192a3b4c5"
     (facts(THREAD, "T", 60, "active", events=[
         event(4, "iteration.summary", summary="Read the brief"), event(6, "user.message", content="Also add a chart."),
     ]), "working", None, None),
+    # Another chat in the same folder holds this one back: not a wait of the user's.
+    (facts(THREAD, "T", 60, "active", events=[
+        event(4, "device.waiting", device_name="thinkpad", reason="folder"),
+    ]), "working", None, "Waiting for another chat in the same folder"),
     # The computer came back.
     (facts(THREAD, "T", 60, "active", events=[
         event(4, "device.waiting", device_name="thinkpad"), event(5, "device.resumed"),
@@ -233,7 +237,7 @@ THREAD = "9f0e1d2c-3b4a-4c5d-8e6f-708192a3b4c5"
 ], ids=[
     "expired-question", "expired-question-answered", "expired-approval", "pending-before-failed",
     "failed-before-expired-question", "paused", "seven-quiet-days", "quiet-but-working", "resolved-first",
-    "stale-iteration-summary", "computer-back", "computer-woken", "ended-early", "long-line",
+    "stale-iteration-summary", "waiting-for-folder", "computer-back", "computer-woken", "ended-early", "long-line",
     "half-landed", "pending-before-half-landed", "failed-before-half-landed", "half-landed-before-expired-question",
 ])
 def test_the_first_rule_that_matches_wins(given, group, reason, status_line):

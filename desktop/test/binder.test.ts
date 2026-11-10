@@ -35,14 +35,14 @@ class User implements FolderPrompts {
   readonly sheets: FolderSheet[] = [];
   readonly dialogs: string[] = [];
 
-  constructor(readonly picks: Array<string | null> = [], readonly answers: Array<{ mode: Mode } | "change" | null> = []) {}
+  constructor(readonly picks: Array<string | null> = [], readonly answers: Array<{ mode: Mode } | "change" | "new" | null> = []) {}
 
   pickFolder(startIn: string): Promise<string | null> {
     this.dialogs.push(startIn);
     return Promise.resolve(this.picks.shift() ?? null);
   }
 
-  confirmFolder(sheet: FolderSheet): Promise<{ mode: Mode } | "change" | null> {
+  confirmFolder(sheet: FolderSheet): Promise<{ mode: Mode } | "change" | "new" | null> {
     this.sheets.push(sheet);
     return Promise.resolve(this.answers.shift() ?? null);
   }
@@ -159,7 +159,7 @@ describe("preparing a new chat's folder", () => {
     const made = user.sheets[0]?.folder ?? "";
     expect(made).toMatch(new RegExp(`^${join(base, "home", "Surogate", "Research-assistant")}/\\d{4}-\\d{2}-\\d{2}$`));
     expect(user.dialogs).toEqual([]);
-    expect(user.sheets).toEqual([{ agent: "Research assistant", folder: made, mode: "free", links: null, refusal: null, thread: null, project: null }]);
+    expect(user.sheets).toEqual([{ agent: "Research assistant", folder: made, mode: "free", links: null, refusal: null, thread: null, project: null, busy: false }]);
     expect(ready).toEqual({
       folder: made, mode: "ask", nonce: expect.stringMatching(/^[A-Za-z0-9_-]{16,128}$/), token: expect.any(String),
     });
@@ -168,6 +168,26 @@ describe("preparing a new chat's folder", () => {
     // Another chat the same day, before the first is bound, gets a folder of its own.
     const second = new User([], [{ mode: "free" }]);
     expect((await binder(second).prepareFolder("last", WINDOW, never()))?.folder).toBe(`${made} 2`);
+  });
+
+  it("offers a new folder of its own for a new chat even when a last folder is bound", async () => {
+    journal.bindings.add({ root: OTHER, nonce: "n".repeat(16), folder: notes, dev: 1, ino: 1, boot: BOOT_ID, mode: "free", boundAt: 1 });
+    const user = new User([], [{ mode: "free" }]);
+    const ready = await binder(user).prepareFolder("new", WINDOW, never());
+    const made = user.sheets[0]?.folder ?? "";
+    expect(made).toMatch(/Surogate\/Research-assistant\/\d{4}-\d{2}-\d{2}$/);
+    expect(user.dialogs).toEqual([]);
+    expect(ready?.folder).toBe(made);
+  });
+
+  it("removes the new folder made for new when the user cancels", async () => {
+    journal.bindings.add({ root: OTHER, nonce: "n".repeat(16), folder: notes, dev: 1, ino: 1, boot: BOOT_ID, mode: "free", boundAt: 1 });
+    const user = new User([], [null]);
+    expect(await binder(user).prepareFolder("new", WINDOW, never())).toBeNull();
+    expect(user.sheets).toHaveLength(1);
+    const made = user.sheets[0]?.folder ?? "";
+    expect(made).toMatch(/Surogate\/Research-assistant\/\d{4}-\d{2}-\d{2}$/);
+    expect(existsSync(made)).toBe(false);
   });
 
   it("removes the new folder again when the user cancels, or takes another", async () => {
@@ -252,6 +272,39 @@ describe("preparing a new chat's folder", () => {
     expect(user.dialogs).toEqual([join(base, "home")]);
     expect(user.sheets.map((sheet) => sheet.folder)).toEqual([notes]);
     expect(readdirSync(join(base, "data", "Research-assistant"))).toEqual([]);
+  });
+
+  it("says the folder is in use by another chat, for a new chat's sheet alone", async () => {
+    const user = new User([notes, notes, notes], [{ mode: "free" }, { mode: "free" }, { mode: "free" }]);
+    const busy = binder(user, { inUse: () => true });
+    await busy.prepareFolder("pick", WINDOW, never());
+    expect(user.sheets[0]?.busy).toBe(true);
+    await busy.prepareFolder("pick", WINDOW, never(), { project: "Q3 report", thread: "Check the totals" });
+    await busy.prepareProjectFolder(WINDOW, never(), "Q3 report");
+    expect(user.sheets.slice(1).map((sheet) => sheet.busy)).toEqual([false, false]);
+  });
+
+  it("offers a fresh folder at New folder, and removes every folder made and not taken", async () => {
+    const user = new User([], ["new", "new", { mode: "free" }]);
+    const ready = (await binder(user, { inUse: () => true }).prepareFolder("last", WINDOW, never()))!;
+    const [first, second, third] = user.sheets.map((sheet) => sheet.folder) as [string, string, string];
+    expect(first).toMatch(/\/\d{4}-\d{2}-\d{2}$/);
+    expect(second).toMatch(/\/\d{4}-\d{2}-\d{2} 2$/);
+    expect(third).toMatch(/\/\d{4}-\d{2}-\d{2} 3$/);
+    expect(ready.folder).toBe(third);
+    expect([existsSync(first), existsSync(second), existsSync(third)]).toEqual([false, false, true]);
+    const none = new User([], ["new", null]);
+    await binder(none, { inUse: () => true }).prepareFolder("last", WINDOW, never());
+    expect(none.sheets.map((sheet) => existsSync(sheet.folder))).toEqual([false, false]);
+  });
+
+  it("opens the folder dialog at New folder when no folder can be made", async () => {
+    const { dev, ino } = statSync(notes);
+    journal.bindings.add({ root: OTHER, nonce: "n".repeat(16), folder: notes, dev, ino, boot: BOOT_ID, mode: "free", boundAt: 1 });
+    const user = new User([notes], ["new", { mode: "free" }]);
+    const ready = await binder(user, { agent: "..", inUse: () => true }).prepareFolder("last", WINDOW, never());
+    expect(user.dialogs).toHaveLength(1);
+    expect(ready?.folder).toBe(notes);
   });
 
   it("names on the sheet the project's thread the folder is for", async () => {

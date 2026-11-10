@@ -39,7 +39,7 @@ import { type FromManager, MANAGER, type ManagerProcess, REPO_IMAGE, type ToMana
 import { type Delivery, ImageDelivery, imageArch, installBase, readManifest } from "../vm/image.js";
 import type { Boot } from "../vm/manager.js";
 import { openAbout } from "./about.js";
-import { BURST, Burst, followChat, followInbox, type InboxItem, titleOf } from "./agent-events.js";
+import { BURST, Burst, followChat, followInbox, followTurns, type InboxItem, restOf, titleOf } from "./agent-events.js";
 import { type Agent, AgentStore, connectAgent, describeAgent, type Get, linksFor, linkUrl, partitionFor, readAgent } from "./agents.js";
 import { AppearanceStore, Theme } from "./appearance.js";
 import { nameTheApp, quitAsked } from "./app-identity.js";
@@ -986,13 +986,31 @@ function startStack(agent: Agent, credential: LiveCredential): Promise<DeviceSta
     identity: { deviceId: credential.deviceId, orgId: credential.orgId, agentId: credential.agentId, userId: credential.userId },
     // The tool layer under the binder: the file kinds in the root's file host, the process kinds in the
     // VM, and the browser's kinds in this identity's browser host, with the browser Settings chose.
-    tools: (bindings, network, changed) => new Browsing({
+    tools: (bindings, network, changed, waiting) => new Browsing({
       tools: appTools({
-        bindingOf: (bound) => bindings.get(bound), network, dataDir: root, cacheDir: places.cache, env, vm: vmFor(), changed,
+        bindingOf: (bound) => bindings.get(bound), network, dataDir: root, cacheDir: places.cache, env, vm: vmFor(), changed, waiting,
         // A thread's history is made in the name of the account signed in on this device.
         user: credential.userId,
         // The sidebar says while a thread's copy of its folder is being made: its first step waits for it.
         making: (event) => copying.heard(event),
+        // A chat host hears the start and end of its chat's turns on the app's sign-in at that moment, until that
+        // sign-in ends; with nobody signed in the idle time lets the folder go. A turn's end missed before the stream
+        // opened leaves that idle time to let it go too.
+        following: (chatId, turnEnded, turnStarted, asking) => {
+          const session = signedIn;
+          if (!session) return () => {};
+          return followTurns({
+            api: (path, init) => session.api(path, init), onError: report,
+            sessionId: chatId, onTurnEnd: turnEnded, onTurnStart: turnStarted, onAsking: asking, live: () => signedIn === session,
+          }).stop;
+        },
+        // And whether its chat is at rest, asked of the agent on the app's sign-in where another chat waits for the
+        // folder: with nobody signed in, or no answer, nobody can say. A turn heard of then keeps the folder, at most
+        // HOLD_IDLE_TIMES idle times (tool-hosts.ts, idleOut); anything else lets it go at its idle time.
+        atRest: (chatId, asking) => {
+          const session = signedIn;
+          return session ? restOf((path, init) => session.api(path, init), credential.agentId, chatId, asking) : Promise.resolve(undefined);
+        },
       }),
       browser: new BrowserClient(utilityBrowser(profilesOf(root, credential))),
       staging: browserTemp(profilesOf(root, credential)),

@@ -207,6 +207,53 @@ def operation_channel(operation_id: UUID) -> str:
     return f"surogates:device_operation:{operation_id}"
 
 
+FOLDER_WAIT_KEY_S = 15 * 60
+
+
+def waiting_key(operation_id: UUID) -> str:
+    """Where the app's word that an operation waits for its folder is kept."""
+    return f"{operation_channel(operation_id)}:waiting"
+
+
+# How long the app lets an operation wait its turn for a folder before it gives up on it.
+FOLDER_WAIT_S = 10 * 60
+
+
+class FolderPatience:
+    """A request's deadline, held off while the app says one of its operations waits its turn for a folder.
+
+    A wait holds it off never past *within_s* plus FOLDER_WAIT_S from its
+    start: the app gives up at that limit itself, and a wait it never took
+    back must not hold a turn for ever.  Once a wait ends, what is left of
+    the request has *within_s* again, however late that is.
+    """
+
+    def __init__(self, deadline: asyncio.Timeout, within_s: float) -> None:
+        self._deadline = deadline
+        self._within_s = within_s
+        self._latest = asyncio.get_running_loop().time() + within_s + FOLDER_WAIT_S
+
+    def held(self, ahead_s: float) -> None:
+        """An operation still waits for its folder: the deadline is at least *ahead_s* away, up to the limit."""
+        self._not_before(min(self._latest, asyncio.get_running_loop().time() + ahead_s))
+
+    def freed(self) -> None:
+        """Its wait ended: what is left of the request has *within_s* from now, whatever the limit.
+
+        The limit bounds only how long a folder wait holds the deadline off.
+        """
+        self._not_before(asyncio.get_running_loop().time() + self._within_s)
+
+    def _not_before(self, when: float) -> None:
+        current = self._deadline.when()
+        if current is None:
+            return  # a request with no deadline is not given one
+        try:
+            self._deadline.reschedule(max(current, when))
+        except RuntimeError:
+            pass  # its timeout already fired or exited: there is nothing left to hold off
+
+
 def _database_unavailable(exc: Exception) -> bool:
     """Whether *exc* is the database being briefly out of reach, not a bug or a refusal.
 
@@ -607,11 +654,52 @@ class DeviceOperations:
         *,
         recheck_interval_s: float = RECHECK_INTERVAL_S,
         notice: DeviceWaitNotice | None = None,
+        patience: FolderPatience | None = None,
+        resumable: bool = True,
     ) -> None:
+        """*patience* holds a request's deadline off while its operation waits for its folder.
+
+        It is heeded only where *notice* is given: only then is a wait watched,
+        so *patience* without *notice* is refused.  A request not *resumable*
+        is one no worker asks for again from the journal, as a tool call is:
+        the harness's own, outside any tool call.  Its operation is closed
+        when its turn is handed to another worker too.
+        """
+        if patience is not None and notice is None:
+            raise ValueError("patience needs a notice: only a watched wait is held off")
         self._sf = session_factory
         self._redis = redis
         self._recheck_interval_s = recheck_interval_s
         self._notice = notice
+        self._patience = patience
+        self._resumable = resumable
+
+    async def waiting(self, operation_id: UUID, reason: str | None) -> None:
+        """Record that the app holds an operation back for *reason*, or that it no longer does.
+
+        The key expires, so a wait the app never takes back (it went away)
+        does not show for ever.
+        """
+        if reason is None:
+            await self._redis.delete(waiting_key(operation_id))
+        else:
+            await self._redis.set(waiting_key(operation_id), reason, ex=FOLDER_WAIT_KEY_S)
+
+    async def forget_waits(self, operation_ids: Collection[UUID]) -> None:
+        """Drop the recorded folder waits of these operations."""
+        if operation_ids:
+            await self._redis.delete(*(waiting_key(i) for i in operation_ids))
+
+    async def is_open(self, device_id: UUID, operation_id: UUID) -> bool:
+        """Whether *operation_id* is an operation of the device that is not finished."""
+        async with self._sf() as db:
+            return (await db.execute(
+                select(DeviceOperation.id).where(
+                    DeviceOperation.id == operation_id,
+                    DeviceOperation.device_id == device_id,
+                    DeviceOperation.completed_at.is_(None),
+                )
+            )).first() is not None
 
     # -- the worker's side -----------------------------------------------
 
@@ -628,8 +716,8 @@ class DeviceOperations:
         deleted one, raises "This session was stopped" and records nothing.
         A caller that is stopped while it waits, or while its request is
         being recorded, closes its own operation unless its turn is detached,
-        handed to another worker that carries the wait on, or it is
-        *keep_open*: a request whose HTTP wait ended before its computer
+        handed to another worker that carries the wait on (a *resumable*
+        journal's), or it is *keep_open*: a request whose HTTP wait ended before its computer
         answered, which the same request joins again later.  Nor does a
         thread's put-back of its copy close: its computer runs it once it is
         back, and the undo it is a step of joins it again later.  The call
@@ -650,13 +738,13 @@ class DeviceOperations:
                 return waiter.result()
             # Still running, or the computer is away: the turn need not hold the worker meanwhile.
             async with turn_waiting(resumable=True):
-                return await self._wait_watching(waiter, request)
+                return await self._wait_watching(waiter, request, operation_id)
         except asyncio.CancelledError:
             # Stopped, not handed to another worker: nothing will ask for it
             # again, so it must not run when the computer comes back.  Found by
             # the request's key: a stop during the record's commit leaves no
             # operation id to name, and the row may be committed.
-            if not keep_open and not turn_detached() and not _puts_back(request):
+            if not keep_open and not (self._resumable and turn_detached()) and not _puts_back(request):
                 await self._cancel_own(request)
             raise
         finally:
@@ -665,15 +753,33 @@ class DeviceOperations:
                 # Its subscription is closed before this call returns.
                 await asyncio.gather(waiter, return_exceptions=True)
 
-    async def _wait_watching(self, waiter: asyncio.Future, request: OperationRequest) -> dict[str, Any]:
-        """Await *waiter*, telling the session's viewers whenever its computer is away."""
+    async def _wait_watching(
+        self, waiter: asyncio.Future, request: OperationRequest, operation_id: UUID,
+    ) -> dict[str, Any]:
+        """Await *waiter*, telling the session's viewers whenever its computer is away or holds the operation for its folder."""
         if self._notice is None:
             return await waiter
         presence = DevicePresence(self._redis)
         away = False
+        folder = False
         try:
             while True:
-                online = await self._online(presence, request.device_id)
+                held, online = await asyncio.gather(
+                    self._folder_held(operation_id), self._online(presence, request.device_id),
+                )
+                # Before the viewers are told, which may be slow: two rechecks and two polls'
+                # Redis patience ahead (one recheck each), so a poll that times out, and the
+                # one after it, or a link back within seconds, keep the wait.
+                if held is True and online is not False and self._patience is not None:
+                    self._patience.held(4 * self._recheck_interval_s)
+                if held is True and not folder:
+                    folder = True
+                    await self._notice.folder_held(request)
+                elif held is False and folder:
+                    folder = False
+                    if self._patience is not None:
+                        self._patience.freed()
+                    await self._notice.folder_free(request)
                 if online is False and not away:
                     away = True
                     await self._notice.away(request)
@@ -684,13 +790,28 @@ class DeviceOperations:
                 if done:
                     return waiter.result()
         finally:
+            # The folder wait first: ending both together while away says nothing of the folder.
+            # A resumable wait handed to another worker goes on there, still said; one not
+            # resumable is cancelled with its turn, and nobody waits any more.
+            handed_on = self._resumable and turn_detached()
+            if folder:
+                if self._patience is not None:
+                    self._patience.freed()
+                await self._notice.folder_free(request, announce=not handed_on)
             if away:
-                await self._notice.back(request, announce=not turn_detached())
+                await self._notice.back(request, announce=not handed_on)
 
     async def _online(self, presence: DevicePresence, device_id: UUID) -> bool | None:
         """Whether a link holds the device: None when Redis cannot tell."""
         try:
             return device_id in await self._within_redis_patience(presence.online([device_id]))
+        except Exception:
+            return None
+
+    async def _folder_held(self, operation_id: UUID) -> bool | None:
+        """Whether the app says the operation waits for its folder: None when Redis cannot tell."""
+        try:
+            return await self._within_redis_patience(self._redis.get(waiting_key(operation_id))) is not None
         except Exception:
             return None
 

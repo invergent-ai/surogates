@@ -80,7 +80,7 @@ export function desktopPrompts(options: DesktopPromptsOptions): FolderPrompts & 
     async confirmFolder(sheet, signal) {
       const answer = await ask(folderSheet(sheet), signal);
       if (answer === null || answer === TIMEOUT) return null;
-      if (answer.button === "change") return "change";
+      if (answer.button === "change" || answer.button === "new") return answer.button;
       return answer.button === "accept" && (answer.choice === "free" || answer.choice === "ask") ? { mode: answer.choice } : null;
     },
     // Its buttons' ids are the answers; one closed some other way, or dismissed, denies.

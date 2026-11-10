@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import functools
 import json
 import logging
 import os
@@ -42,10 +43,14 @@ from surogates.devices.browser import DeviceBrowserClient
 from surogates.devices.operations import (
     CANCELLED_OUTCOME,
     DeviceOperations,
+    FolderPatience,
     JournalRunner,
     OperationConflict,
     OperationRequest,
+    REQUEST_PREFIX,
     operation_channel,
+    waiting_key,
+    FOLDER_WAIT_KEY_S,
 )
 from surogates.devices.presence import DevicePresence, PRESENCE_TTL_S, presence_key
 from surogates.devices.sandbox import INTERRUPTED, INTERRUPTED_IN_BROWSER
@@ -54,6 +59,7 @@ from surogates.devices.waits import DeviceWaitNotice
 from surogates.devices.workspace import WALK_MARGIN_NS, DeviceOperationError, DeviceWorkspaceIO
 from surogates.governance.policy import GovernanceGate
 from surogates.harness.device_replay import replay_unanswered
+from surogates.harness.loop import AgentHarness
 from surogates.harness import loop_artifact_completion
 from surogates.harness.loop_artifact_completion import ArtifactCompletionMixin
 from surogates.harness import loop_context_replay
@@ -61,7 +67,9 @@ from surogates.harness.loop_context_replay import ContextReplayMixin
 from surogates.harness.prompt_cache import SystemPromptCache
 from surogates.harness.tool_exec import execute_single_tool
 from surogates.runtime.turn_slots import TurnSlots, current_turn
+from surogates.session import files as files_module
 from surogates.session.events import EventType
+from surogates.session.files import session_files
 from surogates.session.provisioning import create_child_session
 from surogates.session.store import SessionStore
 from surogates.tenant.auth.jwt import create_access_token
@@ -548,6 +556,7 @@ async def test_a_connected_device_is_online_until_it_leaves(api, link_url):
             "user_id": str(api.user_id),
             "name": "Flavius's ThinkPad",
             "heartbeat_s": 15,
+            "waits": True,
         }
         assert await online(api) is True
         await send(ws, {"type": "ping"})
@@ -607,6 +616,63 @@ async def test_a_new_connection_supersedes_the_old_one(api, link_url):
             assert await online(api) is True
             await send(new, {"type": "ping"})
             assert await receive(new) == {"type": "pong"}
+
+
+async def a_folder_wait_recorded_over(ws, ops, root, device_id, session_factory, redis_client, monkeypatch):
+    """An operation of the device, open, with the folder wait the app said of it on *ws* recorded."""
+    monkeypatch.setattr(operations_module, "WAIT_GRACE_S", 0.1)
+    request = request_for(device_id, root)
+    task = asyncio.create_task(ops.run(request))
+    for _ in range(60):
+        found = [o for o in await ops.pending(device_id, 1) if o.invocation_id == request.invocation_id]
+        if found:
+            break
+        await asyncio.sleep(0.05)
+    [op] = found
+    await send(ws, {"type": "op_waiting", "id": str(op.id), "reason": "folder"})
+    key = operations_module.waiting_key(op.id)
+
+    async def recorded() -> bool:
+        return await redis_client.get(key) is not None
+
+    await eventually(recorded)
+    return task, key
+
+
+async def test_a_link_that_ends_forgets_the_folder_waits_it_recorded(
+    api, link_url, session_factory, redis_client, monkeypatch,
+):
+    issued, root = await bound_device(api)
+    ops = DeviceOperations(session_factory, redis_client)
+    async with linked(link_url, issued["token"]) as (ws, _):
+        task, key = await a_folder_wait_recorded_over(
+            ws, ops, root, UUID(issued["id"]), session_factory, redis_client, monkeypatch,
+        )
+    try:
+        async def forgotten() -> bool:
+            return await redis_client.get(key) is None
+
+        await eventually(forgotten)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_a_superseded_link_leaves_the_folder_waits_to_the_link_that_superseded_it(
+    api, link_url, session_factory, redis_client, monkeypatch,
+):
+    issued, root = await bound_device(api)
+    ops = DeviceOperations(session_factory, redis_client)
+    async with linked(link_url, issued["token"]) as (old, _):
+        task, key = await a_folder_wait_recorded_over(
+            old, ops, root, UUID(issued["id"]), session_factory, redis_client, monkeypatch,
+        )
+        async with linked(link_url, issued["token"]) as (new, _):
+            assert await close_code(old) == 4409
+            await asyncio.sleep(0.3)  # the old link's cleanup has run
+            assert await redis_client.get(key) is not None
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
 
 
 async def test_two_connections_opened_together_leave_exactly_one(api, link_url):
@@ -2949,6 +3015,291 @@ async def test_two_waiting_operations_of_a_session_say_so_once(
     assert await device_wait_events(session_factory, rig.root) == [waiting_for(rig), resumed_from(rig)]
 
 
+def folder_waiting_for(rig) -> tuple[str, dict]:
+    return ("device.waiting", {
+        "device_id": str(rig.device_id), "device_name": "Flavius's ThinkPad", "reason": "folder",
+    })
+
+
+async def operation_of(ops, rig, request):
+    """The request's open operation, once it is recorded; nobody answers it unless a test does."""
+    for _ in range(60):
+        found = [o for o in await ops.pending(rig.device_id, 1) if o.invocation_id == request.invocation_id]
+        if found:
+            return found[0]
+        await asyncio.sleep(0.05)
+    raise AssertionError("the operation was never recorded")
+
+
+async def test_a_session_waiting_for_its_folder_says_so_and_says_it_goes_on_once_it_has_it(
+    laptop_rig, session_factory, redis_client, monkeypatch,
+):
+    monkeypatch.setattr(operations_module, "WAIT_GRACE_S", 0.1)
+    rig = laptop_rig
+    presence = DevicePresence(redis_client)
+    await presence.claim(rig.device_id, "holder")
+    ops = noticing_journal(session_factory, redis_client)
+    request = request_for(rig.device_id, rig.root)
+    waiting = asyncio.create_task(ops.run(request))
+    op = await operation_of(ops, rig, request)
+    await ops.waiting(op.id, "folder")
+
+    async def says_waiting() -> bool:
+        return await device_wait_events(session_factory, rig.root) == [folder_waiting_for(rig)]
+
+    await eventually(says_waiting)
+    assert await ops.complete(rig.device_id, 1, op.id, op.digest, {"ok": True}) == "completed"
+    assert await asyncio.wait_for(waiting, 5.0) == {"ok": True}
+    assert await device_wait_events(session_factory, rig.root) == [folder_waiting_for(rig), resumed_from(rig)]
+
+
+async def test_the_computer_away_while_an_operation_waits_for_its_folder_is_said_first_then_the_folder_wait_again(
+    laptop_rig, session_factory, redis_client, monkeypatch,
+):
+    monkeypatch.setattr(operations_module, "WAIT_GRACE_S", 0.1)
+    rig = laptop_rig
+    presence = DevicePresence(redis_client)
+    await presence.claim(rig.device_id, "holder")
+    ops = noticing_journal(session_factory, redis_client)
+    request = request_for(rig.device_id, rig.root)
+    waiting = asyncio.create_task(ops.run(request))
+    op = await operation_of(ops, rig, request)
+    await ops.waiting(op.id, "folder")
+
+    async def events_are(expected) -> bool:
+        return await device_wait_events(session_factory, rig.root) == expected
+
+    await eventually(lambda: events_are([folder_waiting_for(rig)]))
+    await presence.release(rig.device_id, "holder")
+    await eventually(lambda: events_are([folder_waiting_for(rig), waiting_for(rig)]))
+    await presence.claim(rig.device_id, "holder")
+    await eventually(lambda: events_are([folder_waiting_for(rig), waiting_for(rig), folder_waiting_for(rig)]))
+    assert await ops.complete(rig.device_id, 1, op.id, op.digest, {"ok": True}) == "completed"
+    assert await asyncio.wait_for(waiting, 5.0) == {"ok": True}
+    assert (await device_wait_events(session_factory, rig.root))[-1] == resumed_from(rig)
+
+
+async def test_two_operations_of_a_session_waiting_for_its_folder_say_so_once(
+    laptop_rig, session_factory, redis_client, monkeypatch,
+):
+    monkeypatch.setattr(operations_module, "WAIT_GRACE_S", 0.1)
+    rig = laptop_rig
+    presence = DevicePresence(redis_client)
+    await presence.claim(rig.device_id, "holder")
+    ops = noticing_journal(session_factory, redis_client)
+    requests = [request_for(rig.device_id, rig.root) for _ in range(2)]
+    waits = [asyncio.create_task(ops.run(r)) for r in requests]
+    found = [await operation_of(ops, rig, r) for r in requests]
+    for op in found:
+        await ops.waiting(op.id, "folder")
+
+    async def says_waiting() -> bool:
+        return await device_wait_events(session_factory, rig.root) == [folder_waiting_for(rig)]
+
+    await eventually(says_waiting)
+    await asyncio.sleep(0.3)
+    assert await device_wait_events(session_factory, rig.root) == [folder_waiting_for(rig)]
+    for op in found:
+        assert await ops.complete(rig.device_id, 1, op.id, op.digest, {"ok": True}) == "completed"
+    for w in waits:
+        assert await asyncio.wait_for(w, 5.0) == {"ok": True}
+    assert await device_wait_events(session_factory, rig.root) == [folder_waiting_for(rig), resumed_from(rig)]
+
+
+async def test_ending_the_folder_wait_and_the_computers_absence_together_says_only_that_it_is_over(
+    laptop_rig, session_factory, redis_client, monkeypatch,
+):
+    monkeypatch.setattr(operations_module, "WAIT_GRACE_S", 0.1)
+    rig = laptop_rig
+    presence = DevicePresence(redis_client)
+    await presence.claim(rig.device_id, "holder")
+    ops = noticing_journal(session_factory, redis_client)
+    request = request_for(rig.device_id, rig.root)
+    waiting = asyncio.create_task(ops.run(request))
+    op = await operation_of(ops, rig, request)
+    await ops.waiting(op.id, "folder")
+
+    async def events_are(expected) -> bool:
+        return await device_wait_events(session_factory, rig.root) == expected
+
+    await eventually(lambda: events_are([folder_waiting_for(rig)]))
+    await presence.release(rig.device_id, "holder")
+    await eventually(lambda: events_are([folder_waiting_for(rig), waiting_for(rig)]))
+    waiting.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiting
+    assert await device_wait_events(session_factory, rig.root) == [
+        folder_waiting_for(rig), waiting_for(rig), resumed_from(rig),
+    ]
+
+
+WITHIN = 1.0
+
+
+def patient_journal(session_factory, redis_client, deadline, within) -> DeviceOperations:
+    """A journal whose request deadline a folder wait holds off, telling sessions as it goes, quickly."""
+    return DeviceOperations(
+        session_factory, redis_client, recheck_interval_s=0.1,
+        notice=DeviceWaitNotice(SessionStore(session_factory, redis_client), session_factory),
+        patience=FolderPatience(deadline, within),
+    )
+
+
+async def patiently(session_factory, redis_client, *requests: OperationRequest) -> dict:
+    """Run *requests* in turn under one deadline of WITHIN that their folder waits hold off."""
+    async with asyncio.timeout(WITHIN) as deadline:
+        ops = patient_journal(session_factory, redis_client, deadline, WITHIN)
+        for request in requests:
+            outcome = await ops.run(request)
+        return outcome
+
+
+async def test_a_deadline_stands_still_while_its_operation_waits_for_its_folder(
+    laptop_rig, session_factory, redis_client, monkeypatch,
+):
+    monkeypatch.setattr(operations_module, "WAIT_GRACE_S", 0.1)
+    rig = laptop_rig
+    await DevicePresence(redis_client).claim(rig.device_id, "holder")
+    request = request_for(rig.device_id, rig.root)
+    reading = asyncio.create_task(patiently(session_factory, redis_client, request))
+    op = await operation_of(rig.ops, rig, request)
+    await rig.ops.waiting(op.id, "folder")
+    await asyncio.sleep(2.5)
+    assert not reading.done()
+    assert await rig.ops.complete(rig.device_id, 1, op.id, op.digest, {"ok": True}) == "completed"
+    assert await asyncio.wait_for(reading, 5.0) == {"ok": True}
+    assert await device_wait_events(session_factory, rig.root) == [folder_waiting_for(rig), resumed_from(rig)]
+
+
+async def test_a_deadline_runs_again_once_the_folder_is_free(
+    laptop_rig, session_factory, redis_client, monkeypatch,
+):
+    monkeypatch.setattr(operations_module, "WAIT_GRACE_S", 0.1)
+    rig = laptop_rig
+    loop = asyncio.get_running_loop()
+    await DevicePresence(redis_client).claim(rig.device_id, "holder")
+    request = request_for(rig.device_id, rig.root)
+    reading = asyncio.create_task(patiently(session_factory, redis_client, request))
+    op = await operation_of(rig.ops, rig, request)
+    await rig.ops.waiting(op.id, "folder")
+    await asyncio.sleep(2.0)
+    freed = loop.time()
+    await rig.ops.waiting(op.id, None)
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(reading, 5.0)
+    assert WITHIN - 0.2 <= loop.time() - freed <= WITHIN + 1.0
+
+
+async def test_a_deadline_with_no_folder_wait_runs_out_as_before(
+    laptop_rig, session_factory, redis_client, monkeypatch,
+):
+    monkeypatch.setattr(operations_module, "WAIT_GRACE_S", 0.1)
+    rig = laptop_rig
+    loop = asyncio.get_running_loop()
+    await DevicePresence(redis_client).claim(rig.device_id, "holder")
+    started = loop.time()
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(patiently(session_factory, redis_client, request_for(rig.device_id, rig.root)), 5.0)
+    assert loop.time() - started < WITHIN + 0.5
+    assert await device_wait_events(session_factory, rig.root) == []
+
+
+async def test_a_folder_wait_holds_a_deadline_off_no_longer_than_the_folder_limit(
+    laptop_rig, session_factory, redis_client, monkeypatch,
+):
+    monkeypatch.setattr(operations_module, "WAIT_GRACE_S", 0.1)
+    monkeypatch.setattr(operations_module, "FOLDER_WAIT_S", 1.0)
+    rig = laptop_rig
+    loop = asyncio.get_running_loop()
+    await DevicePresence(redis_client).claim(rig.device_id, "holder")
+    request = request_for(rig.device_id, rig.root)
+    started = loop.time()
+    reading = asyncio.create_task(patiently(session_factory, redis_client, request))
+    op = await operation_of(rig.ops, rig, request)
+    await rig.ops.waiting(op.id, "folder")
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(reading, 5.0)
+    assert WITHIN + 1.0 - 0.2 <= loop.time() - started <= WITHIN + 1.0 + 0.5
+
+
+async def test_a_computer_gone_away_ends_its_folder_wait_patience(
+    laptop_rig, session_factory, redis_client, monkeypatch,
+):
+    monkeypatch.setattr(operations_module, "WAIT_GRACE_S", 0.1)
+    rig = laptop_rig
+    loop = asyncio.get_running_loop()
+    presence = DevicePresence(redis_client)
+    await presence.claim(rig.device_id, "holder")
+    request = request_for(rig.device_id, rig.root)
+    reading = asyncio.create_task(patiently(session_factory, redis_client, request))
+    op = await operation_of(rig.ops, rig, request)
+    await rig.ops.waiting(op.id, "folder")
+    await asyncio.sleep(1.5)
+    released = loop.time()
+    await presence.release(rig.device_id, "holder")
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(reading, 5.0)
+    # The polls held ahead, and no fresh deadline: the computer going away is not the folder freed.
+    assert loop.time() - released < 4 * 0.1 + 0.5
+
+
+async def test_an_operation_answered_after_its_folder_wait_leaves_the_next_the_whole_deadline(
+    laptop_rig, session_factory, redis_client, monkeypatch,
+):
+    monkeypatch.setattr(operations_module, "WAIT_GRACE_S", 0.1)
+    rig = laptop_rig
+    loop = asyncio.get_running_loop()
+    await DevicePresence(redis_client).claim(rig.device_id, "holder")
+    first = request_for(rig.device_id, rig.root)
+    second = request_for(rig.device_id, rig.root, ordinal=2)
+    reading = asyncio.create_task(patiently(session_factory, redis_client, first, second))
+    op = await operation_of(rig.ops, rig, first)
+    await rig.ops.waiting(op.id, "folder")
+    await asyncio.sleep(2.0)
+    assert await rig.ops.complete(rig.device_id, 1, op.id, op.digest, {"ok": True}) == "completed"
+    answered = loop.time()
+    await operation_of(rig.ops, rig, second)
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(reading, 5.0)
+    assert WITHIN - 0.2 <= loop.time() - answered <= WITHIN + 1.0
+
+
+async def test_folder_patience_puts_no_limit_on_a_request_that_has_none():
+    async with asyncio.timeout(None) as deadline:
+        patience = FolderPatience(deadline, WITHIN)
+        patience.held(1.0)
+        patience.freed()
+        assert deadline.when() is None
+
+
+async def test_folder_patience_does_nothing_once_its_request_has_ended():
+    async with asyncio.timeout(WITHIN) as deadline:
+        patience = FolderPatience(deadline, WITHIN)
+    when = deadline.when()
+    patience.held(1.0)
+    patience.freed()
+    assert deadline.when() == when
+
+
+async def test_an_operation_is_open_for_its_own_device_only_and_its_wait_can_be_forgotten(
+    laptop_rig, session_factory, redis_client, monkeypatch,
+):
+    monkeypatch.setattr(operations_module, "WAIT_GRACE_S", 0.1)
+    rig = laptop_rig
+    ops = DeviceOperations(session_factory, redis_client)
+    request = request_for(rig.device_id, rig.root)
+    waiting = asyncio.create_task(ops.run(request))
+    op = await operation_of(ops, rig, request)
+    assert await ops.is_open(rig.device_id, op.id)
+    assert not await ops.is_open(uuid.uuid4(), op.id)
+    await ops.waiting(op.id, "folder")
+    await ops.forget_waits([op.id])
+    assert await redis_client.get(operations_module.waiting_key(op.id)) is None
+    waiting.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiting
+
+
 async def test_a_stopped_wait_says_the_computer_is_no_longer_awaited(
     laptop_rig, session_factory, redis_client, monkeypatch,
 ):
@@ -3742,3 +4093,161 @@ async def test_a_prompt_waits_no_longer_than_its_bound_on_a_computer_that_does_n
     session = await SessionStore(session_factory).get_session(rig.root)
     prompt = await asyncio.wait_for(Prompting(session_factory, redis_client)._build_system_prompt(session), 3.0)
     assert prompt == "prompt with None"
+
+
+async def silent_laptop_read(rig, session_factory, redis_client, monkeypatch, *, within=None, bound=None):
+    """A read of AGENTS.md, under *bound*, on a laptop that is online but answers nothing, and its open operation."""
+    await rig.laptop.connect()
+    rig.laptop.hold = True
+    monkeypatch.setattr(operations_module, "WAIT_GRACE_S", 0.1)
+    monkeypatch.setattr(files_module, "DeviceOperations", functools.partial(DeviceOperations, recheck_interval_s=0.1))
+    session = await SessionStore(session_factory).get_session(rig.root)
+
+    async def read():
+        async with asyncio.timeout(bound), session_files(
+            session, storage=None, session_factory=session_factory, redis=redis_client, within=within,
+        ) as files:
+            return await files.stat(await files.resolve("AGENTS.md"))
+
+    reading = asyncio.create_task(read())
+    for _ in range(60):
+        found = [o for o in await rig.ops.pending(rig.device_id, 1) if o.invocation_id.startswith(REQUEST_PREFIX)]
+        if found:
+            return reading, found[0]
+        if reading.done():
+            await reading  # raises what stopped it
+        await asyncio.sleep(0.05)
+    reading.cancel()
+    raise AssertionError("the read was never recorded")
+
+
+async def test_a_harness_request_waits_for_a_folder_another_chat_holds_and_says_so(
+    laptop_rig, session_factory, redis_client, monkeypatch,
+):
+    rig = laptop_rig
+    reading, op = await silent_laptop_read(rig, session_factory, redis_client, monkeypatch, within=1.0)
+    await rig.ops.waiting(op.id, "folder")
+    await asyncio.sleep(2.5)
+    assert not reading.done()
+    assert await device_wait_events(session_factory, rig.root) == [folder_waiting_for(rig)]
+    loop = asyncio.get_running_loop()
+    freed = loop.time()
+    await rig.ops.waiting(op.id, None)
+    with pytest.raises(TimeoutError):  # the laptop still answers nothing
+        await asyncio.wait_for(reading, 5.0)
+    assert loop.time() - freed <= 1.0 + 1.0
+    assert (await device_wait_events(session_factory, rig.root))[-1] == resumed_from(rig)
+
+
+@pytest.mark.parametrize("read", ["context", "cursor"])
+async def test_a_stop_ends_a_turn_start_read_waiting_for_its_folder_and_its_computer_drops_it(
+    laptop_rig, session_factory, redis_client, monkeypatch, read,
+):
+    rig = laptop_rig
+    await rig.laptop.connect()
+    rig.laptop.hold = True  # another chat holds the folder: the app keeps the operation back
+    monkeypatch.setattr(operations_module, "WAIT_GRACE_S", 0.1)
+    monkeypatch.setattr(files_module, "DeviceOperations", functools.partial(DeviceOperations, recheck_interval_s=0.1))
+    monkeypatch.setattr(loop_context_replay, "HARNESS_WITHIN_S", 0.5)
+    monkeypatch.setattr(loop_artifact_completion, "HARNESS_WITHIN_S", 0.5)
+    store = SessionStore(session_factory)
+    session = await store.get_session(rig.root)
+    work = (
+        Prompting(session_factory, redis_client)._read_folder_context(session) if read == "context"
+        else TurnEnd(store, session_factory, redis_client)._folder_cursor(session)
+    )
+    harness = AgentHarness.__new__(AgentHarness)
+    harness._active_executor, harness._interrupt_requested, harness._interrupt_message = None, False, None
+    reading = asyncio.create_task(harness._unless_stopped(work))
+
+    async def recorded() -> bool:
+        return bool(await rig.ops.pending(rig.device_id, 1))
+
+    await eventually(recorded)
+    [op] = await rig.ops.pending(rig.device_id, 1)
+    await rig.ops.waiting(op.id, "folder")
+    await asyncio.sleep(1.5)
+    assert not reading.done()  # past its bound: it waits the folder's turn
+
+    harness.interrupt("paused by user")
+    assert await asyncio.wait_for(reading, 1.0) == (True, None)
+    assert await rig.ops.closed_among(rig.device_id, [op.id]) == [op.id]
+
+    async def dropped() -> bool:
+        return str(op.id) in rig.laptop.cancelled
+
+    await eventually(dropped)
+
+
+async def test_a_harness_request_waiting_for_its_folder_is_dropped_when_its_turn_is_handed_over(
+    laptop_rig, session_factory, redis_client, monkeypatch,
+):
+    rig = laptop_rig
+    await rig.laptop.connect()
+    rig.laptop.hold = True
+    monkeypatch.setattr(operations_module, "WAIT_GRACE_S", 0.1)
+    monkeypatch.setattr(files_module, "DeviceOperations", functools.partial(DeviceOperations, recheck_interval_s=0.1))
+    session = await SessionStore(session_factory).get_session(rig.root)
+    turn: list[TurnSlots] = []
+
+    async def worker() -> None:
+        slots = TurnSlots(
+            semaphore=asyncio.Semaphore(1), gate=None, org_id="", agent_id="",
+            gate_held=False, task=asyncio.current_task(),
+        )
+        turn.append(slots)
+        current_turn.set(slots)
+        async with slots.activity(), session_files(
+            session, storage=None, session_factory=session_factory, redis=redis_client, within=1.0,
+        ) as files:
+            await files.stat(await files.resolve("AGENTS.md"))
+
+    task = asyncio.create_task(worker())
+
+    async def recorded() -> bool:
+        return bool(await rig.ops.pending(rig.device_id, 1))
+
+    await eventually(recorded)
+    [op] = await rig.ops.pending(rig.device_id, 1)
+    await rig.ops.waiting(op.id, "folder")
+    async def says_waiting() -> bool:
+        return turn[0].waiting_resumably and await device_wait_events(session_factory, rig.root) == [folder_waiting_for(rig)]
+
+    await eventually(says_waiting)
+    turn[0].detach()
+    await asyncio.gather(task, return_exceptions=True)
+    # The next worker starts its turn over, with a read of its own: nothing would ever ask for this one again.
+    assert await rig.ops.closed_among(rig.device_id, [op.id]) == [op.id]
+
+    async def dropped() -> bool:
+        return str(op.id) in rig.laptop.cancelled
+
+    await eventually(dropped)
+    # Nobody waits for it any more: the chat no longer says it waits for another chat.
+    assert await device_wait_events(session_factory, rig.root) == [folder_waiting_for(rig), resumed_from(rig)]
+
+
+async def test_a_request_without_the_harness_deadline_says_nothing_of_a_folder_wait(
+    laptop_rig, session_factory, redis_client, monkeypatch,
+):
+    rig = laptop_rig
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    reading, op = await silent_laptop_read(rig, session_factory, redis_client, monkeypatch, bound=1.0)
+    await rig.ops.waiting(op.id, "folder")
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(reading, 5.0)
+    assert loop.time() - started < 1.5
+    assert await device_wait_events(session_factory, rig.root) == []
+
+
+async def test_the_folder_wait_key_holds_the_reason_until_it_is_cleared(redis_client):
+    operations = DeviceOperations(None, redis_client)
+    operation_id = uuid.uuid4()
+
+    await operations.waiting(operation_id, "folder")
+    assert await redis_client.get(waiting_key(operation_id)) == b"folder"
+    assert FOLDER_WAIT_KEY_S - 5 < await redis_client.ttl(waiting_key(operation_id)) <= FOLDER_WAIT_KEY_S
+
+    await operations.waiting(operation_id, None)
+    assert await redis_client.get(waiting_key(operation_id)) is None

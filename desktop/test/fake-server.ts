@@ -13,6 +13,8 @@ export interface FakeLinkServerOptions {
   welcome?: boolean;
   // false: never answer a ping. Default true.
   pong?: boolean;
+  // true: the welcome says the server takes op_waiting frames.
+  waits?: boolean;
 }
 
 export class FakeLinkServer {
@@ -29,11 +31,14 @@ export class FakeLinkServer {
   refusing = false;
   // Frames sent right behind each welcome, in one burst with it.
   behindWelcome: Record<string, unknown>[] = [];
+  // Whether the next welcome says the server takes op_waiting frames: a server restarted on another version may not.
+  waits: boolean;
   private server: WebSocketServer | null = null;
   private socket: WebSocket | null = null;
 
   constructor(private readonly options: FakeLinkServerOptions = {}) {
     this.token = options.token ?? "surg_dev_test";
+    this.waits = options.waits === true;
   }
 
   // On a port of its own; or on *at*'s listening server and path, as the api serves the link beside its pages.
@@ -55,7 +60,7 @@ export class FakeLinkServer {
         if (frame.type === "hello") {
           this.hellos.push(frame);
           if (this.options.welcome !== false) {
-            socket.send(JSON.stringify({ type: "welcome", protocol: 1, ...this.identity, heartbeat_s: this.options.heartbeatS ?? 15 }));
+            socket.send(JSON.stringify({ type: "welcome", protocol: 1, ...this.identity, heartbeat_s: this.options.heartbeatS ?? 15, ...(this.waits ? { waits: true } : {}) }));
             for (const behind of this.behindWelcome) socket.send(JSON.stringify(behind));
           }
         } else if (frame.type === "ping" && this.options.pong !== false) {

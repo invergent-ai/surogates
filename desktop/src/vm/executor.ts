@@ -129,6 +129,11 @@ export class VmExecutor implements Executor {
     return this.files.keepsCopies();
   }
 
+  // Whether a chat's host is on the folder of this identity.
+  folderInUse(dev: number, ino: number): boolean {
+    return this.files.folderInUse(dev, ino);
+  }
+
   // The chats with a background process alive in the guest, and the threads with a landing in their folder: the quit
   // counts them as working.
   live(): string[] {

@@ -39,6 +39,7 @@ import { LOCK_WAIT_MS } from "./folder-record.js";
 import {
   FOLDER_UNAVAILABLE, type FromHost, type HostStart, type NetworkAnswer, type NetworkAsk, type ToHost,
 } from "./messages.js";
+import { isOf } from "./start.js";
 
 // The same from src/hosts and from dist/hosts.
 const PACKAGE = fileURLToPath(new URL("../..", import.meta.url));
@@ -56,9 +57,18 @@ const STOP_TIMEOUT_MS = 5_000;
 export const START_TIMEOUT_MS = 30_000;
 // How long a host with nothing to do keeps its folder: another chat may want it.
 export const IDLE_MS = 120_000;
+// While another chat waits for a chat host's folder and the agent said its chat is in a turn, or could not say, the host
+// asks again this long after: a helper's end, or the agent back, is told on no stream of the chat's own.
+export const REST_RECHECK_MS = 15_000;
+// How many of its idle times a chat's host keeps its folder, nothing of it running, while its chat is in a turn: with
+// IDLE_MS, 30 minutes. ponytail: a multiple of idleMs, not an option of its own; one if tests or users need it.
+export const HOLD_IDLE_TIMES = 15;
 // How long a landing's host waits for the folder (spec, Section 13, "Waits"): a chat's host lets it go IDLE_MS after
 // its last operation, and another landing's once that landing is forgotten, or IDLE_MS after its last step.
 export const LAND_WAIT_MS = IDLE_MS + 30_000;
+// How long a chat waits for the folder while another chat's host is on it: the other lets it go at its turn's end,
+// or while it waits on its user. A turn the agent cannot be asked about can hold it longer (HOLD_IDLE_TIMES).
+export const FOLDER_WAIT_MS = 10 * 60_000;
 // How long the app's quit waits for a step a landing's helper runs (files/land.ts). Past it the host is stopped: the
 // step's record, written before each of its moves, names what it was doing, and it is put back as this computer's tools
 // next start, or by the first step of the next landing's helper in that folder. A step stages a file of at most a GiB,
@@ -92,6 +102,13 @@ export const HOST_STOPPED: Outcome = {
     message: "interrupted: the computer's tool host stopped while this ran, so it was not run again. Check before repeating it.",
   },
 };
+/** A chat that waited FOLDER_WAIT_MS for the folder another chat works in, and stopped waiting. */
+export const WAITED_TOO_LONG: Outcome = {
+  error: {
+    type: "busy",
+    message: "Another chat on this computer has been working in this folder for more than 10 minutes, so this chat stopped waiting. Try again once it is done, or start a new chat in a new folder.",
+  },
+};
 export const NOT_BOUND: Outcome = { error: { type: "binding", message: "This folder was not confirmed on this computer" } };
 
 const unavailable = (why: string): Outcome => ({
@@ -113,6 +130,9 @@ const madeAgain = (at: string): Outcome => unavailable(`the copy of ${at} this t
 const NOT_BEGUN = unavailable("the host of this landing was stopping, so this step of it was not begun. Ask again");
 // What waited for a host that stopped, or was never made, before it was ready.
 const STOPPED_STARTING = unavailable("its tool host stopped while it was starting");
+// What a wait for a chat's folder comes to where the chat's folder was chosen again meanwhile: never an answer, as each
+// operation that waited asks again for the folder named now.
+const REBOUND = unavailable("its chat's folder was chosen again while it waited");
 // A landing's host asked for itself while its landing's last step runs alone: asked again once it has ended.
 const ENDING_ALONE = "the landing in this folder is ending a step it runs alone";
 const BUSY_ALONE: Outcome = { error: { type: "busy", message: ENDING_ALONE } };
@@ -285,6 +305,9 @@ export interface ToolHostsOptions {
   bindingOf(rootSessionId: string): BoundFolder | undefined;
   // Without it, a root bound to a copy has nowhere to work, and every operation of it is refused.
   copies?: ThreadCopies;
+  // Told "folder" when an operation starts waiting for the folder another chat's host holds, and null when it stops,
+  // whatever came of it.
+  waiting?(operationId: string, reason: "folder" | null): void;
   network?: NetworkApprovals; // without it, every destination off the package hosts is refused
   dataDir: string;
   // The app's own cache folder, <cache home>/surogate, by the cache home the app itself uses: no
@@ -298,6 +321,10 @@ export interface ToolHostsOptions {
   idleMs?: number;
   // LAND_WAIT_MS unless a test says.
   landWaitMs?: number;
+  // FOLDER_WAIT_MS unless a test says.
+  folderWaitMs?: number;
+  // REST_RECHECK_MS unless a test says.
+  restRecheckMs?: number;
   // Waited for before a root's host lets its folder go, so what else holds the folder
   // lets it go first; told too when a host went by itself.
   release?(root: string): Promise<void>;
@@ -306,6 +333,15 @@ export interface ToolHostsOptions {
   changed?(): void;
   // Told as what a landing cut short in a folder is being put back, and as that ends, with what it came to.
   recovered?(recovery: Recovery): void;
+  // Asked once for each chat's own host as it is made: *turnEnded* is called each time a turn of the chat ends,
+  // *turnStarted* each time one starts, and the stop it gives once that host has exited.
+  // *asking* each time it asks its user something and waits for the answer.
+  following?(root: string, turnEnded: () => void, turnStarted: () => void, asking?: () => void): () => void;
+  // Asked of a chat's own host whose folder another chat waits for, with nothing of it running and no turn of it heard of
+  // under way: whether chat *root* is at rest between its turns (true), in a turn (false), or nobody can say (undefined).
+  // *asking*: the chat waits on its user's answer, which the agent counts as a turn under way: only a helper at work
+  // keeps it from being at rest then.
+  atRest?(root: string, asking?: boolean): Promise<boolean | undefined>;
 }
 
 export class ToolHosts implements Executor {
@@ -321,6 +357,16 @@ export class ToolHosts implements Executor {
   private readonly landing = new Map<string, Starting>();
   // The root of each host on a thread's copy, until it exits.
   private readonly onCopies = new Map<Host, string>();
+  // The root of each chat's own host on its folder, until it exits: none of a thread's copy, a landing or a put-back.
+  private readonly chats = new Map<Host, string>();
+  // A chat's wait for the folder another chat's host is on, by its root: the root's operations that come meanwhile wait
+  // for that one.
+  private readonly queued = new Map<string, Starting>();
+  // The chats' waits for each folder, by its identity, in the order they began: each a record of its own, saying whether
+  // anything still waits for it.
+  private readonly queues = new Map<string, Array<() => boolean>>();
+  // Settled each time something a wait looks at may have changed, and made anew.
+  private wake = Promise.withResolvers<void>();
   // A deleted thread's binding, by its root, while the landing's host it kept is there: the landing's steps still reach it.
   private readonly deleted = new Map<string, BoundFolder>();
   // How often each thread's root was told its copy is not vouched for: told while its copy was being opened, the copy
@@ -342,7 +388,7 @@ export class ToolHosts implements Executor {
 
   async run(operation: Operation, signal: AbortSignal): Promise<Outcome> {
     if (operation.kind === "bind") return NOT_BOUND;
-    const host = await this.hostOf(operation.sessionId, signal);
+    const host = await this.hostOf(operation.sessionId, signal, operation.id);
     return host instanceof Host ? host.run(operation, signal) : host;
   }
 
@@ -355,7 +401,7 @@ export class ToolHosts implements Executor {
     operation: Operation, signal: AbortSignal, guard: Guard,
     inner: (works: Works, signal: AbortSignal, ended: ProcessHandle[]) => Promise<Outcome>,
   ): Promise<Outcome> {
-    const host = await this.hostOf(operation.sessionId, signal);
+    const host = await this.hostOf(operation.sessionId, signal, operation.id);
     if (!(host instanceof Host)) return host;
     return host.guarded(operation, signal, guard, (aborted, ended) => inner(host.works, aborted, ended));
   }
@@ -542,6 +588,26 @@ export class ToolHosts implements Executor {
     return on.length > 0 ? "chat" : "earlier";
   }
 
+  /**
+   * Whether a chat's host is on the folder of this identity: starting, working, or in its idle tail, until it exits. A
+   * thread's host on its copy, a landing's and a put-back's are no chat in the folder.
+   */
+  folderInUse(dev: number, ino: number): boolean {
+    return this.chatOn({ dev, ino }, "");
+  }
+
+  // Whether a live chat's host of a root other than *except* is on *folder*, by its identity, never its path.
+  private chatOn(folder: { dev: number; ino: number }, except: string): boolean {
+    return !this.chatsOn(folder, except).next().done;
+  }
+
+  // The live chats' hosts of roots other than *except* on *folder*, by its identity.
+  private *chatsOn(folder: { dev: number; ino: number }, except: string): Generator<Host> {
+    for (const [host, root] of this.chats) {
+      if (root !== except && host.works.folder.dev === folder.dev && host.works.folder.ino === folder.ino) yield host;
+    }
+  }
+
   /** What landings cut short came to in each folder whose landings keep anything, as this computer last put them back. */
   recoveries(): Recovery[] {
     return [...this.found.values()];
@@ -604,10 +670,11 @@ export class ToolHosts implements Executor {
     this.landers.clear();
     // A host still being started is started no more: its copy's hold is given back as it is opened, and an operation
     // that comes after has a start of its own.
-    for (const starts of [this.starting, this.landing]) {
+    for (const starts of [this.starting, this.landing, this.queued]) {
       for (const start of starts.values()) start.stopped = true;
       starts.clear();
     }
+    this.nudge();
     await Promise.all(hosts.map(async (host) => {
       let timer: NodeJS.Timeout | undefined;
       await Promise.race([host.letGo(), new Promise((resolve) => {
@@ -620,14 +687,15 @@ export class ToolHosts implements Executor {
 
   // The host of *root*, started if it has none: on its chat's folder, or, for a thread, on its copy,
   // opened first. Or why it has none: a thread never works in its folder for want of its copy.
-  private async hostOf(root: string, signal: AbortSignal): Promise<Host | Outcome> {
+  // *gone*: what the guest lets go of a host of the root before this one, where a wait for its folder left that folder.
+  private async hostOf(root: string, signal: AbortSignal, operationId: string, gone?: Promise<void>): Promise<Host | Outcome> {
     if (this.stopping) return QUITTING;
     const binding = SESSION_ID.test(root) ? this.options.bindingOf(root) : undefined;
     if (!binding) return FOLDER_UNAVAILABLE;
     const known = this.hosts.get(root);
     // A chat's host holds the folder its binding names. One a project's coordinator had before its user chose the
     // project's folder again goes, and the next starts on the folder named now once the guest has let the old one go.
-    let before: Promise<void> | undefined;
+    let before = gone;
     if (known && binding.history === undefined && !sameFolder(known.works.folder, binding)) {
       known.finish();
       before = known.letGo();
@@ -645,7 +713,26 @@ export class ToolHosts implements Executor {
         const started = this.hosts.get(root);
         if (started) return started;
       }
-      return this.hostFor(root, { folder: { path: binding.folder, dev: binding.dev, ino: binding.ino, boot: binding.boot } }, before);
+      // Another chat's host on the folder, or chats already waiting for it: this one waits its turn. A host of the root's
+      // own, one still going too, is never waited for.
+      const key = isOf(binding);
+      if (this.queued.has(root) || this.chatOn(binding, root) || (this.queues.get(key)?.length ?? 0) > 0) {
+        this.options.waiting?.(operationId, "folder");
+        let turn: Host | Outcome;
+        try {
+          const waited = this.once(this.queued, root, signal, (wanted) => this.inTurn(root, binding, key, wanted, before));
+          // Once the wait is counted: a chat whose turn already ended there, with nothing of it running and no process
+          // of it alive, lets the folder go at once.
+          if (!signal.aborted) for (const host of this.chatsOn(binding, root)) host.waitedFor();
+          turn = await waited;
+        } finally {
+          this.options.waiting?.(operationId, null);
+        }
+        // The chat's folder was chosen again while it waited: it goes where its binding names now, waiting there too
+        // where it must.
+        return turn === REBOUND ? this.hostOf(root, signal, operationId, before) : turn;
+      }
+      return this.chatHostFor(root, binding, before);
     }
     const { copies } = this.options;
     if (!copies) return NO_COPIES;
@@ -681,6 +768,48 @@ export class ToolHosts implements Executor {
       signal.addEventListener("abort", cancel, { once: true });
       void waited.host.then(resolve).finally(() => signal.removeEventListener("abort", cancel));
     });
+  }
+
+  // *root*'s own host, once the chats that waited for the folder of identity *key* before it have had their turn and no
+  // other chat's host is on it; for FOLDER_WAIT_MS at most. Or why it has none: the app is quitting, nothing waits for it
+  // any more, or it waited too long.
+  private async inTurn(root: string, binding: BoundFolder, key: string, wanted: () => boolean, before?: Promise<void>): Promise<Host | Outcome> {
+    const queue = this.queues.get(key) ?? [];
+    this.queues.set(key, queue);
+    queue.push(wanted);
+    let late = false;
+    let timer: NodeJS.Timeout | undefined;
+    const deadline = new Promise<void>((resolve) => {
+      timer = setTimeout(() => {
+        late = true;
+        resolve();
+      }, this.options.folderWaitMs ?? FOLDER_WAIT_MS).unref();
+    });
+    // It waits first, as it began only where it could not go yet. However it ends, it leaves the queue and the waits
+    // behind it look again. Each time it looks, the root's binding is read again: one naming another folder now has it
+    // leave this folder's queue.
+    try {
+      for (;;) {
+        await Promise.race([this.wake.promise, deadline]);
+        if (this.stopping) return QUITTING;
+        if (!wanted()) return STOPPED_STARTING;
+        const now = this.options.bindingOf(root);
+        if (!now || now.history !== undefined || !sameFolder({ ...binding, path: binding.folder }, now)) return REBOUND;
+        if (queue[0] === wanted && !this.chatOn(binding, root)) return this.chatHostFor(root, binding, before);
+        if (late) return WAITED_TOO_LONG;
+      }
+    } finally {
+      clearTimeout(timer);
+      queue.splice(queue.indexOf(wanted), 1);
+      if (queue.length === 0 && this.queues.get(key) === queue) this.queues.delete(key);
+      this.nudge();
+    }
+  }
+
+  // Every chat's wait for a folder looks again: a host went, a wait ended, or the hosts were stopped.
+  private nudge(): void {
+    this.wake.resolve();
+    this.wake = Promise.withResolvers<void>();
   }
 
   // *root*'s host on its copy, once the copies have it opened, holding the copy from then until it has gone. A copy
@@ -786,7 +915,33 @@ export class ToolHosts implements Executor {
     return host;
   }
 
-  private hostFor(root: string, works: Works, before?: Promise<void>): Host {
+  // A chat's own host for *root*, on the folder *binding* names: the only place one is made, counted a chat's until it exits.
+  private chatHostFor(root: string, binding: BoundFolder, before?: Promise<void>): Host {
+    const key = isOf(binding);
+    const othersWait = () => this.queues.get(key)?.some((wanted) => wanted()) ?? false;
+    const { atRest } = this.options;
+    const host = this.hostFor(
+      root, { folder: { path: binding.folder, dev: binding.dev, ino: binding.ino, boot: binding.boot } }, before, othersWait,
+      atRest && ((asking) => atRest(root, asking)),
+    );
+    this.chats.set(host, root);
+    // At a turn's end the chat lets its folder go to a waiting chat once nothing of it runs and no process of it lives;
+    // from a turn's start it keeps it until that turn's end.
+    const unfollow = this.options.following?.(root, () => {
+      if (this.hosts.get(root) === host) host.endTurn();
+    }, () => {
+      if (this.hosts.get(root) === host) host.startTurn();
+    }, () => {
+      if (this.hosts.get(root) === host) host.waitOnUser();
+    });
+    if (unfollow) void host.exited.then(unfollow);
+    return host;
+  }
+
+  private hostFor(
+    root: string, works: Works, before?: Promise<void>, othersWait?: () => boolean,
+    atRest?: (asking: boolean) => Promise<boolean | undefined>,
+  ): Host {
     const { network } = this.options;
     const ask = (asked: NetworkAsk, signal: AbortSignal): Promise<NetworkAnswer> =>
       network ? network.askNetwork(root, asked, signal) : Promise.resolve("deny");
@@ -798,6 +953,9 @@ export class ToolHosts implements Executor {
       ask,
       () => this.options.release?.(root) ?? Promise.resolve(),
       before,
+      othersWait,
+      atRest,
+      this.options.restRecheckMs ?? REST_RECHECK_MS,
     );
     this.hosts.set(root, host);
     this.keep(host);
@@ -839,8 +997,10 @@ export class ToolHosts implements Executor {
     this.live.add(host);
     void host.exited.then(() => {
       this.live.delete(host);
+      this.chats.delete(host);
       this.options.changed?.();
       this.wentFrom(host);
+      this.nudge();
     });
   }
 
@@ -1044,6 +1204,28 @@ class Host {
   private putBackOk = false;
   // A landing waits for this host's folder: it lets it go as soon as nothing of it runs, not idleMs after.
   private yielding = false;
+  // Its chat's turn ended, and since then no operation of it began and no process of its root started: it goes once
+  // nothing of it runs, no process lives, and another chat waits for its folder (othersWait). Unlike a landing's
+  // yielding, the next turn's first operation, or a process started after, takes it back. The processes it knew of
+  // at the turn's end, by their ids: those keep the folder only until they end.
+  private turnEnded = false;
+  private endedWith = new Set<string>();
+  // Its chat is in a turn: one its stream said started, and no turn's end heard since.
+  // While another chat waits for its folder and nothing of it runs, a chat's host not known to be in one asks the agent
+  // whether its chat, helpers included, is at rest (atRest), once at a time. Counted in seen: what could make an answer
+  // stale, an operation begun or a turn's start or end; one asked before is not heeded.
+  private answering = false;
+  private looking = false;
+  // Its chat waits on its user's answer to a question (waitOnUser, its stream's inbox.input_required), until a turn
+  // starts again or an operation begins.
+  private waitingOnUser = false;
+  private seen = 0;
+  // Since when nothing of it has run: what bounds how long a turn under way keeps the folder past its idle time.
+  private quietSince?: number;
+  // The seen of the last answer that did not let the folder go: nothing is asked again until something changes, or
+  // restRecheckMs has passed.
+  private unsure = -1;
+  private recheck?: NodeJS.Timeout;
 
   constructor(
     private readonly process: HostProcess,
@@ -1058,6 +1240,11 @@ class Host {
     // Settled once the guest has let go of what it shared of the root's for a host before this one: its root's
     // commands run only after, or one could run in what that host held.
     private readonly before: Promise<void> = Promise.resolve(),
+    // Whether another chat waits for its folder: a chat's own host is told by its hosts.
+    private readonly othersWait: () => boolean = () => false,
+    // Whether its chat is at rest, as the agent says: a chat's own host is told by its hosts, where they can ask.
+    private readonly atRest?: (asking: boolean) => Promise<boolean | undefined>,
+    private readonly restRecheckMs = REST_RECHECK_MS,
   ) {
     this.recovers = start.recovery !== undefined;
     this.lands = start.landing !== undefined || this.recovers;
@@ -1169,6 +1356,7 @@ class Host {
     if (this.finished) return;
     this.finished = true;
     clearTimeout(this.idleTimer);
+    clearTimeout(this.recheck);
     this.onGone();
     void this.letGo().then(() => this.stop(stepMs));
   }
@@ -1177,6 +1365,52 @@ class Host {
   yieldFolder(): void {
     this.yielding = true;
     this.idle();
+  }
+
+  /**
+   * Its chat's turn ended: it lets the folder go to a waiting chat once nothing of it runs and the processes of its root
+   * alive now have ended. Told while an operation of it runs, the end is an earlier turn's, told again as a stream that
+   * came back replays it, and is not heeded: the idle time lets go of a turn that did end with one running.
+   */
+  endTurn(asking = false): void {
+    this.seen += 1;
+    this.answering = false;
+    // A question to its user pauses the turn; any other end ends the wait on its user too.
+    this.waitingOnUser = asking;
+    if (this.running > 0) return;
+    this.turnEnded = true;
+    this.endedWith = new Set(this.handles.map((handle) => handle.id));
+    this.idle();
+  }
+
+  /**
+   * Its chat's turn started: no waiting chat is handed its folder on the agent's say until that turn's end. The idle
+   * time still lets it go where nothing of the turn reached this computer for idleMs.
+   */
+  startTurn(): void {
+    this.seen += 1;
+    this.answering = true;
+    this.waitingOnUser = false;
+    this.turnEnded = false;
+    this.quietSince = undefined;
+  }
+
+  /**
+   * Its chat asked its user something and waits for the answer: nothing of its turn runs meanwhile, so a waiting chat
+   * may have the folder as at a turn's end. The answer starts its turn again (startTurn), and its next operation
+   * waits its turn like any other.
+   */
+  waitOnUser(): void {
+    this.endTurn(true);
+  }
+
+  /**
+   * Another chat came to wait for its folder: it goes at once where its turn ended and nothing of it runs, and where its
+   * chat is at rest, once the agent says so.
+   */
+  waitedFor(): void {
+    if (this.turnEnded) this.idle();
+    else this.askRest();
   }
 
   /**
@@ -1212,6 +1446,9 @@ class Host {
     if (!this.readied) return;
     this.handles = "gone" in change ? lostWith(this.handles) : change.handles;
     this.live = "gone" in change ? 0 : change.live;
+    // Something of it runs here: its quiet, which bounds its hold, starts again once that ends.
+    if (this.live > 0) this.quietSince = undefined;
+    if (this.handles.some((handle) => !this.endedWith.has(handle.id))) this.turnEnded = false;
     this.send({ type: "handles", handles: this.handles, live: this.live });
     this.idle();
   }
@@ -1229,6 +1466,10 @@ class Host {
   // Counted while it runs: a host with work is never idle.
   private async busy(work: () => Promise<Outcome>): Promise<Outcome> {
     this.running += 1;
+    this.seen += 1;
+    this.turnEnded = false;
+    this.waitingOnUser = false;
+    this.quietSince = undefined;
     clearTimeout(this.idleTimer);
     try {
       return this.answered(await work());
@@ -1253,7 +1494,7 @@ class Host {
   // Never while it starts: its start is bounded by its own time.
   private idle(): void {
     clearTimeout(this.idleTimer);
-    if (!this.readied || this.running > 0 || this.live > 0 || this.gone || this.finished) return;
+    if (!this.still) return;
     // A landing's steps that nothing waits for any more, a cancelled one: given STEP_MS to end, then the host goes.
     if (this.unanswered.size > 0) {
       this.idleTimer = setTimeout(() => this.finish(0), STEP_MS).unref();
@@ -1262,14 +1503,95 @@ class Host {
     // No command or process of the root is left, so no connection waits on its prompts.
     this.prompts.abort();
     this.prompts = new AbortController();
-    if (this.yielding) {
+    if (this.yielding || (this.turnEnded && this.othersWait() && !this.atRest)) {
       this.finish();
       return;
     }
-    this.idleTimer = setTimeout(() => {
+    this.askRest();
+    this.quietSince ??= Date.now();
+    this.idleTimer = setTimeout(() => this.idleOut(), this.idleMs).unref();
+  }
+
+  // Its idle time passed. A chat's own host whose chat is still in a turn, as its stream said or the agent says, keeps
+  // the folder: a turn can spend minutes on the agent's cloud tools between two operations here, and a waiting chat
+  // given the folder meanwhile would work in it mid-turn. It looks again restRecheckMs on. Never past HOLD_IDLE_TIMES
+  // its idle time with nothing of it running: a turn's end it never heard of does not hold the folder for good.
+  private idleOut(): void {
+    const go = (): void => {
       this.onGone();
       void this.letGo().then(() => this.stop());
-    }, this.idleMs).unref();
+    };
+    // Its last look comes when its hold ends, not up to restRecheckMs after.
+    const left = (): number => this.idleMs * HOLD_IDLE_TIMES - (Date.now() - (this.quietSince ?? Date.now()));
+    const keep = (): void => {
+      clearTimeout(this.idleTimer);
+      this.idleTimer = setTimeout(() => this.idleOut(), Math.max(0, Math.min(this.restRecheckMs, left()))).unref();
+    };
+    // Something of it began since the timer was set: its end sets another.
+    if (!this.free) return;
+    this.quietSince ??= Date.now();
+    if (!this.atRest || left() <= 0) return go();
+    // Nobody waits: the folder matters to no one yet, so the agent is not asked. A turn its stream says goes on keeps
+    // it, looked at again on the same beat, so a chat that comes to wait is answered within restRecheckMs.
+    if (!this.othersWait()) return this.answering ? keep() : go();
+    // Asked even where its stream said a turn started: at rest, the agent is believed, as a turn's end can go unheard
+    // (a stream that stopped), and a waiting chat would otherwise wait out the whole hold. The agent marks a chat active
+    // before its turn sends anything, so its "at rest" is never a turn's start not yet seen.
+    // askRest looks already: its answer is this look's too.
+    if (this.looking) return keep();
+    this.looking = true;
+    void this.look().then(({ rest, stale }) => {
+      this.looking = false;
+      // Something of it began meanwhile, or it went: an operation's end sets its own time, anything else looks again.
+      if (!this.free) return;
+      // Unknown keeps it where its stream said a turn goes on, or that it waits on its user: a question can end
+      // unheard, its turn going on.
+      if (stale || rest === false || (rest === undefined && (this.answering || this.waitingOnUser))) keep();
+      else go();
+    });
+  }
+
+  // Whether it has started, nothing of it runs, no process of its root lives and it still holds its folder.
+  private get still(): boolean {
+    return this.readied && this.running === 0 && this.live === 0 && !this.gone && !this.finished;
+  }
+
+  // Still, with no landing's step left unanswered: it may let its folder go now.
+  private get free(): boolean {
+    return this.still && this.unanswered.size === 0;
+  }
+
+  // The agent asked whether its chat is at rest, where another chat waits for its folder, nothing of it runs, and no turn
+  // of it is known under way. At rest, still free and still waited for, it goes. Past its turn's end it goes too unless a
+  // helper of the chat is still at work: the agent unread, it goes as at any turn's end. Otherwise it keeps the folder
+  // and asks again restRecheckMs on, or once something changes; its idle time lets the folder go in any case. One answer
+  // stale by the time it comes is asked again.
+  private askRest(): void {
+    if (!this.atRest || this.answering || this.looking || this.unsure === this.seen || !this.free || !this.othersWait()) return;
+    this.looking = true;
+    void this.look().then(({ rest, stale }) => {
+      this.looking = false;
+      if (stale) this.askRest();
+      else if (rest === true || (rest === undefined && this.turnEnded && !this.waitingOnUser)) {
+        if (this.free && this.othersWait()) this.finish();
+      } else {
+        this.unsure = this.seen;
+        clearTimeout(this.recheck);
+        this.recheck = setTimeout(() => {
+          this.unsure = -1;
+          this.askRest();
+        }, this.restRecheckMs).unref();
+      }
+    });
+  }
+
+  // The agent asked whether its chat is at rest, told whether it waits on its user; stale where something of it began,
+  // or a turn of it started or ended, by the time the answer came.
+  private look(): Promise<{ rest: boolean | undefined; stale: boolean }> {
+    const asked = this.seen;
+    return this.atRest!(this.waitingOnUser)
+      .catch(() => undefined)
+      .then((rest) => ({ rest, stale: this.seen !== asked }));
   }
 
   // Its folder's other holders let it go, once a host's life: before it stops, or after it went.
@@ -1346,6 +1668,7 @@ class Host {
    */
   async stop(stepMs = STEP_MS): Promise<void> {
     clearTimeout(this.idleTimer);
+    clearTimeout(this.recheck);
     this.closing = true;
     if (this.lands) await this.stepsEnded(stepMs);
     this.send({ type: "stop" });
@@ -1400,6 +1723,7 @@ class Host {
 
   private leave(): void {
     clearTimeout(this.idleTimer);
+    clearTimeout(this.recheck);
     this.prompts.abort();
     this.gone = true;
     this.onGone();

@@ -1,15 +1,19 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { type Api, Burst, followChat, followInbox, type InboxItem } from "../src/shell/agent-events.js";
+import { type Api, Burst, followChat, followInbox, followTurns, type InboxItem, restOf } from "../src/shell/agent-events.js";
 
 // The agent's routes as the app reads them: each stream opened is kept, for the test to send on or end.
 class FakeAgent {
   readonly streams: Array<{ path: string; send(text: string): void; end(): void; signal: AbortSignal }> = [];
   readonly items = new Map<number, Record<string, unknown>>();
   readonly titles = new Map<string, string>();
+  readonly openQuestions = new Set<string>(); // the chats whose question to their user the agent holds open
+  readonly trees = new Map<string, string[]>(); // each chat's tree's statuses, the chat's own first
   status = 200; // what the next stream opens with
   itemFailure: number | "throw" | null = null; // how the next item's read fails: an HTTP status, or no answer at all
   readonly api: Api = async (path, init) => {
+    const asks = /^\/api\/v1\/inbox\?session_id=([^&]+)&kind=input_required&status=pending&limit=1&agent_id=a$/.exec(path);
+    if (asks) return Response.json({ items: this.openQuestions.has(asks[1]!) ? [{ id: 1 }] : [], next_cursor: null });
     const item = /^\/api\/v1\/inbox\/(\d+)\?agent_id=a$/.exec(path);
     if (item) {
       const failure = this.itemFailure;
@@ -19,8 +23,18 @@ class FakeAgent {
       const found = this.items.get(Number(item[1]));
       return found ? Response.json(found) : new Response(null, { status: 404 });
     }
+    const tree = /^\/api\/v1\/sessions\/([^/?]+)\/tree\?agent_id=a$/.exec(path);
+    if (tree) {
+      const statuses = this.trees.get(tree[1]!);
+      if (statuses === undefined) return new Response(null, { status: 404 });
+      // The chat's own first, then its helpers.
+      const nodes = statuses.map((status, i) => ({ id: i === 0 ? tree[1] : `${tree[1]}-${i}`, status }));
+      return Response.json({ nodes, total: nodes.length });
+    }
     const chat = /^\/api\/v1\/sessions\/([^/?]+)\?agent_id=a$/.exec(path);
-    if (chat) return Response.json({ id: chat[1], title: this.titles.get(chat[1]!) ?? null });
+    if (chat) {
+      return Response.json({ id: chat[1], title: this.titles.get(chat[1]!) ?? null });
+    }
     if (this.status !== 200) {
       const status = this.status;
       this.status = 200;
@@ -222,6 +236,20 @@ describe("the chat the window shows, followed", () => {
     stop();
   });
 
+  it("tells nothing of a turn that failed or was stopped", async () => {
+    const agent = new FakeAgent();
+    agent.titles.set(CHAT, "Quarterly report");
+    const ended: string[] = [];
+    const { stop } = following(agent, ended);
+    await until(() => agent.streams.length === 1);
+    agent.streams[0]!.send(["session.pause", "session.fail", "session.complete"]
+      .map((type, at) => `id: ${at + 3}\r\nevent: ${type}\r\ndata: {}\r\n\r\n`).join(""));
+    await until(() => ended.length === 1);
+    await settle();
+    expect(ended).toEqual(["Quarterly report"]);
+    stop();
+  });
+
   it("says it has started only once the chat's stream has, whatever was refused before", async () => {
     const agent = new FakeAgent();
     agent.status = 503;
@@ -254,6 +282,156 @@ describe("the chat the window shows, followed", () => {
     followChat({ api: agent.api, agentId: "a", onError: (error) => errors.push(String(error)), delayMs: () => 0, sessionId: CHAT, onTurnEnd: () => {} });
     await settle();
     expect([agent.streams.length, errors]).toEqual([0, []]);
+  });
+});
+
+describe("a chat's turns, followed", () => {
+  it("tells each turn's end of a chat at once, asking nothing more of the agent", async () => {
+    const agent = new FakeAgent();
+    const paths: string[] = [];
+    const api: Api = (path, init) => {
+      paths.push(path);
+      return agent.api(path, init);
+    };
+    let ended = 0;
+    const { stop } = followTurns({ api, onError: () => {}, delayMs: () => 0, sessionId: "chat-1", onTurnEnd: () => ended++ });
+    await until(() => agent.streams.length === 1);
+    agent.streams[0]!.send("id: 3\r\nevent: session.complete\r\ndata: {}\r\n\r\n");
+    await until(() => ended === 1);
+    stop();
+    expect(paths).toEqual([expect.stringMatching(/^\/api\/v1\/sessions\/chat-1\/events\?/)]);
+    expect(agent.streams[0]!.signal.aborted).toBe(true);
+  });
+
+  it("tells a turn that failed or was stopped as an end too, apart from one done", async () => {
+    const agent = new FakeAgent();
+    const ended: boolean[] = [];
+    const { stop } = followTurns({ api: agent.api, onError: () => {}, delayMs: () => 0, sessionId: "chat-1", onTurnEnd: (done) => ended.push(done) });
+    await until(() => agent.streams.length === 1);
+    agent.streams[0]!.send(([
+      ["session.pause", `{"reason": "interrupted", "turn_ended": true}`], ["session.fail", "{}"], ["session.stopped", "{}"],
+      ["llm.response", "{}"], ["session.complete", "{}"],
+    ] as const).map(([type, data], at) => `id: ${at + 3}\r\nevent: ${type}\r\ndata: ${data}\r\n\r\n`).join(""));
+    await until(() => ended.length === 4);
+    expect(ended).toEqual([false, false, false, true]);
+    stop();
+  });
+
+  it("tells each turn's start, a message, a wake or a resume, and no other event of a turn as one", async () => {
+    const agent = new FakeAgent();
+    const told: string[] = [];
+    const { stop } = followTurns({
+      api: agent.api, onError: () => {}, delayMs: () => 0, sessionId: "chat-1",
+      onTurnEnd: () => told.push("end"), onTurnStart: () => told.push("start"),
+    });
+    await until(() => agent.streams.length === 1);
+    agent.streams[0]!.send(([
+      "user.message", "harness.wake", "llm.request", "tool.call", "session.complete", "session.title_updated", "session.resume",
+      "coordinator.message", "device.waiting", "session.pause",
+    ] as const).map((type, at) => `id: ${at + 3}\r\nevent: ${type}\r\ndata: {}\r\n\r\n`).join(""));
+    await until(() => told.length === 5);
+    await settle();
+    expect(told).toEqual(["start", "start", "end", "start", "start"]);
+    stop();
+  });
+
+  it("tells when the chat asks its user something, and takes the answer for its turn going on", async () => {
+    const agent = new FakeAgent();
+    const told: string[] = [];
+    const { stop } = followTurns({
+      api: agent.api, onError: () => {}, delayMs: () => 0, sessionId: "chat-1",
+      onTurnEnd: () => told.push("end"), onTurnStart: () => told.push("start"), onAsking: () => told.push("asks"),
+    });
+    await until(() => agent.streams.length === 1);
+    agent.streams[0]!.send((["tool.call", "inbox.input_required", "ask_user_question.response", "session.complete"] as const)
+      .map((type, at) => `id: ${at + 3}\r\nevent: ${type}\r\ndata: {}\r\n\r\n`).join(""));
+    await until(() => told.length === 3);
+    expect(told).toEqual(["asks", "start", "end"]);
+    stop();
+  });
+
+  it("says a chat that waits on its user's answer is at rest, unless a helper under it works", async () => {
+    const agent = new FakeAgent();
+    agent.trees.set("asks", ["active"]).set("asks-helped", ["active", "active"]).set("asks-helped-done", ["active", "completed"]);
+    agent.openQuestions.add("asks").add("asks-helped").add("asks-helped-done");
+    const said = await Promise.all(["asks", "asks-helped", "asks-helped-done"].map((id) => restOf(agent.api, "a", id, true)));
+    expect(said).toEqual([true, false, true]);
+    // Not told it waits on its user: active is a turn under way.
+    expect(await restOf(agent.api, "a", "asks")).toBe(false);
+    // Told so, but the agent holds no question open any more (nobody answered in time): its turn goes on.
+    agent.openQuestions.delete("asks");
+    expect(await restOf(agent.api, "a", "asks", true)).toBe(false);
+  });
+
+  it("says a chat is at rest between its turns, done or failed, in a turn while active, and nothing of one it cannot tell", async () => {
+    const agent = new FakeAgent();
+    agent.trees.set("done", ["completed"]).set("failed", ["failed"]).set("busy", ["active"]).set("paused", ["paused"]);
+    const said = await Promise.all(["done", "failed", "busy", "paused", "gone"].map((id) => restOf(agent.api, "a", id)));
+    expect(said).toEqual([true, true, false, undefined, undefined]);
+  });
+
+  it("says a chat whose turn is done is in a turn while a helper under it still works", async () => {
+    const agent = new FakeAgent();
+    agent.trees.set("helping", ["completed", "active"]).set("helped", ["completed", "completed", "failed"]);
+    const said = await Promise.all(["helping", "helped"].map((id) => restOf(agent.api, "a", id)));
+    expect(said).toEqual([false, true]);
+  });
+
+  it("says a chat is at rest whatever its stopped, deleted or archived helpers are, but not while it is paused itself", async () => {
+    const agent = new FakeAgent();
+    agent.trees.set("done", ["completed", "paused", "cancelled", "archived"]).set("stopped", ["paused", "completed"]);
+    const said = await Promise.all(["done", "stopped"].map((id) => restOf(agent.api, "a", id)));
+    expect(said).toEqual([true, undefined]);
+  });
+
+  it("says nothing of a chat whose tree is listed in full to the server's cap, as some of it may be left out", async () => {
+    const agent = new FakeAgent();
+    agent.trees.set("big", Array<string>(200).fill("completed"));
+    expect(await restOf(agent.api, "a", "big")).toBeUndefined();
+  });
+
+  it("tells a Stop's end only once its turn has stopped, not at the pause the Stop starts with", async () => {
+    const agent = new FakeAgent();
+    const ended: boolean[] = [];
+    const { stop } = followTurns({ api: agent.api, onError: () => {}, delayMs: () => 0, sessionId: "chat-1", onTurnEnd: (done) => ended.push(done) });
+    await until(() => agent.streams.length === 1);
+    // The pause route's own, while the turn may still undo what it did on this computer.
+    agent.streams[0]!.send("id: 3\r\nevent: session.pause\r\ndata: {}\r\n\r\n");
+    await settle();
+    expect(ended).toEqual([]);
+    agent.streams[0]!.send(`id: 4\r\nevent: session.pause\r\ndata: {"reason": "interrupted", "turn_ended": true}\r\n\r\n`);
+    await until(() => ended.length === 1);
+    expect(ended).toEqual([false]);
+    stop();
+  });
+
+  it("stops by itself, telling nothing more and opening no stream again, once the sign-in it was started under has ended", async () => {
+    const agent = new FakeAgent();
+    let ended = 0;
+    let signedIn = true;
+    followTurns({ api: agent.api, onError: () => {}, delayMs: () => 0, sessionId: "chat-1", onTurnEnd: () => ended++, live: () => signedIn });
+    await until(() => agent.streams.length === 1);
+    signedIn = false;
+    agent.streams[0]!.send("id: 3\r\nevent: session.complete\r\ndata: {}\r\n\r\n");
+    await until(() => agent.streams[0]!.signal.aborted);
+    await new Promise((done) => setTimeout(done, 50));
+    expect([ended, agent.streams.length]).toEqual([0, 1]);
+  });
+
+  it("asks nothing of the agent with a sign-in that ended while its stream was down", async () => {
+    const agent = new FakeAgent();
+    let signedIn = true;
+    const paths: string[] = [];
+    const api: Api = (path, init) => {
+      paths.push(path);
+      return agent.api(path, init);
+    };
+    followTurns({ api, onError: () => {}, delayMs: () => 0, sessionId: "chat-1", onTurnEnd: () => {}, live: () => signedIn });
+    await until(() => agent.streams.length === 1);
+    signedIn = false;
+    agent.streams[0]!.end();
+    await new Promise((done) => setTimeout(done, 50));
+    expect(paths).toHaveLength(1);
   });
 });
 

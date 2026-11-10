@@ -1,7 +1,7 @@
 // The bridge Surogate Desktop gives the agent's web client (desktop design, Section 8).
 // A declaration file, so desktop/ can import it from outside its rootDir. The page uses
 // only the calls its `version` has; window.surogateDesktop is undefined in a browser.
-// Version 1 stays open to new calls until the first desktop release.
+// Desktops are released, so what came after the first ones is looked for before it is used.
 //
 // A call that needs this computer's device rejects while there is none, with a message the
 // page can show: another account's, a revoked computer, or none registered yet. One about a
@@ -103,8 +103,14 @@ export interface DesktopAccount {
   orgId: string;
 }
 
+// "new" offers a folder of its own, "last" the last one bound, "pick" the folder dialog.
+export type DesktopFolderChoice = "new" | "last" | "pick";
+
 export interface DesktopBridge {
   readonly version: 1;
+  // Present on a desktop that takes "new" in prepareFolder. Desktops built before it have none,
+  // so the page looks first.
+  readonly offersNewFolder?: true;
   getDevice(): Promise<DesktopDeviceState>;
   // The app signs in itself, in the system browser: this is a one-time code for the page's own
   // session, which the page exchanges at POST /api/v1/auth/oauth/web-session. Null while nobody
@@ -116,7 +122,7 @@ export interface DesktopBridge {
   // Null when the user cancels the sheet, or its page goes. Rejects with "Surogate is already
   // asking" while this window's last one is still open. *thread*, for a project's thread, is
   // named on the sheet.
-  prepareFolder(choice: "last" | "pick", thread?: DesktopThreadLabel | null): Promise<DesktopPreparedFolder | null>;
+  prepareFolder(choice: DesktopFolderChoice, thread?: DesktopThreadLabel | null): Promise<DesktopPreparedFolder | null>;
   bindSession(sessionId: string, token: string): Promise<void>;
   // A copy of a project's folder for a thread of the project, asking nothing: the folder its user chose for it
   // here, which its coordinator's chat, *masterSessionId*, works in on this computer. The thread asks as that

@@ -36,7 +36,7 @@ const parsed = (data: string): Record<string, unknown> | null => {
 };
 
 /** Follow the stream at *path()* until the returned stop is called: *onEvent* hears each event, through every reconnection. */
-export function follow(options: FollowOptions, path: () => string, onEvent: (event: ServerEvent) => void): () => void {
+export function follow(options: Omit<FollowOptions, "agentId">, path: () => string, onEvent: (event: ServerEvent) => void): () => void {
   const stopped = new AbortController();
   void (async () => {
     let attempt = 0;
@@ -116,43 +116,124 @@ export function followInbox(options: FollowOptions & { onItem(item: InboxItem): 
   });
 }
 
+// What the agent's route *path* answers, for agent *agentId*; nothing where it cannot be read.
+async function read(api: Api, agentId: string, path: string): Promise<Record<string, unknown>> {
+  const response = await api(`${path}${path.includes("?") ? "&" : "?"}agent_id=${encodeURIComponent(agentId)}`);
+  return response.ok ? (parsed(await response.text()) ?? {}) : {};
+}
+
+// What the agent's route for chat *sessionId* (*under* it, if given) answers; nothing where it cannot be read.
+const chatRead = (api: Api, agentId: string, sessionId: string, under = ""): Promise<Record<string, unknown>> =>
+  read(api, agentId, `/api/v1/sessions/${sessionId}${under}`);
+
 /** Chat *sessionId*'s title, as the agent names it; "A chat" for one it names not. */
 export async function titleOf(api: Api, agentId: string, sessionId: string): Promise<string> {
-  const response = await api(`/api/v1/sessions/${sessionId}?agent_id=${encodeURIComponent(agentId)}`);
-  const { title } = response.ok ? (parsed(await response.text()) ?? {}) : {};
+  const { title } = await chatRead(api, agentId, sessionId);
   return typeof title === "string" && title !== "" ? title : "A chat";
 }
+
+// Whether the agent holds a question of chat *sessionId* to its user open, waiting for the answer.
+async function waitsOnItsUser(api: Api, agentId: string, sessionId: string): Promise<boolean> {
+  const query = `session_id=${encodeURIComponent(sessionId)}&kind=input_required&status=pending&limit=1`;
+  const { items } = await read(api, agentId, `/api/v1/inbox?${query}`);
+  return Array.isArray(items) && items.length > 0;
+}
+
+// The server lists at most this many sessions of a chat's tree (_MAX_TREE_NODES): a full list may leave some out.
+const TREE_CAP = 200;
+
+/**
+ * Whether chat *sessionId* is at rest between its turns, as the agent has it now: true where its last turn is done or
+ * failed and no helper under it (which works in its folder too) is under way, false where it or a helper is,
+ * undefined where it says neither (paused), cannot be read, or lists too many to be sure it named every helper.
+ * A helper stopped, deleted or archived works no more.
+ */
+export async function restOf(api: Api, agentId: string, sessionId: string, asked = false): Promise<boolean | undefined> {
+  // Its stream said it asked its user something: believed only while the agent still holds that question open. A
+  // question nobody answered in time is closed there with no event on the stream, and the turn goes on.
+  const { nodes } = await chatRead(api, agentId, sessionId, "/tree");
+  if (!Array.isArray(nodes)) return undefined;
+  const sessions = nodes as Array<{ id?: unknown; status?: unknown }>;
+  const own = sessions.find((node) => node?.id === sessionId)?.status;
+  // *held*: the chat waits on its user's answer, its question still open, which the agent counts as active; only a helper at work then is.
+  const helping = sessions.some((node) => node?.id !== sessionId && node?.status === "active");
+  // Asked of the agent only where the tree leaves it open: the chat itself active, no helper at work.
+  const held = asked && !helping && own === "active" && sessions.length < TREE_CAP
+    && (await waitsOnItsUser(api, agentId, sessionId));
+  if (helping || (own === "active" && !held)) return false;
+  const done = own === "completed" || own === "failed" || (held && own === "active");
+  return sessions.length < TREE_CAP && done ? true : undefined;
+}
+
+// The events that end a chat's turn: done, failed, or stopped from a channel; a Stop's pause only once the turn has
+// stopped, undo done (turn_ended), not the pause route's own, which the turn hears of while it may still run.
+const TURN_ENDS: ReadonlySet<string> = new Set(["session.complete", "session.fail", "session.stopped"]);
+const endsTheTurn = (event: ServerEvent): boolean =>
+  TURN_ENDS.has(event.type) || (event.type === "session.pause" && parsed(event.data)?.turn_ended === true);
+
+// The events that start a chat's turn, or take one up again: a message to it, the harness's wake, a resume.
+// An answer to the chat's question carries its turn on, as a message does.
+const TURN_STARTS: ReadonlySet<string> = new Set([
+  "user.message", "coordinator.message", "harness.wake", "session.resume", "ask_user_question.response",
+]);
+// The chat asked its user something and waits for the answer: nothing of its turn runs meanwhile.
+const ASKS = "inbox.input_required";
 
 // What ends a chat's follow: the chat archived, or gone. Any other close is followed by a reconnection.
 const GONE: ReadonlySet<unknown> = new Set(["archived", "session_not_found"]);
 
 /**
- * Follow chat *sessionId* across its turns (watch=1): *onTurnEnd* hears the chat's title each time one
- * of its turns ends. It starts at the chat's newest event, and takes up after the last event it heard,
- * stream.start's included, whenever its stream closes. Only a chat archived or gone ends it, short of
- * stop. Until *started*, it has heard nothing of the chat: a turn that ends meanwhile it never tells.
+ * Follow chat *sessionId* across its turns (watch=1): *onTurnEnd* is called each time one of its turns
+ * ends, done or not: a turn that failed or was stopped has ended too; *onTurnStart* each time one starts.
+ * It starts at the chat's newest event, and takes up after the last event it heard, stream.start's
+ * included, whenever its stream closes. Only a chat archived or gone ends it, short of stop. Until *started*, it has heard nothing of the chat: a turn
+ * that ends meanwhile it never tells.
  */
-export function followChat(options: FollowOptions & { sessionId: string; onTurnEnd(title: string): void }): { stop(): void; started(): boolean } {
+export function followTurns(
+  options: Omit<FollowOptions, "agentId"> & {
+    sessionId: string; onTurnEnd(done: boolean): void; onTurnStart?(): void; onAsking?(): void; live?(): boolean;
+  },
+): { stop(): void; started(): boolean } {
   let after = -1;
-  const told = async (): Promise<void> => {
-    try {
-      options.onTurnEnd(await titleOf(options.api, options.agentId, options.sessionId));
-    } catch (error) {
-      options.onError(error);
-    }
+  // Followed only while *live* says so, as the sign-in it was started under: once that has ended it stops, and
+  // neither asks the agent nor tells a turn's end again.
+  const ended = (): boolean => {
+    const over = options.live?.() === false;
+    if (over) stop();
+    return over;
   };
   // A chat the agent does not have as its stream opens, deleted or another organisation's, is gone too.
   const api: Api = async (path, init) => {
+    if (ended()) throw new Error("the sign-in this chat's turns were followed under has ended");
     const response = await options.api(path, init);
     if (response.status === 404) stop();
     return response;
   };
   const stop = follow({ ...options, api }, () => `/api/v1/sessions/${options.sessionId}/events?after=${after}&watch=1`, (event) => {
+    if (ended()) return;
     if (event.id !== null && /^\d+$/.test(event.id)) after = Number(event.id);
-    if (event.type === "session.complete") void told();
+    if (endsTheTurn(event)) options.onTurnEnd(event.type === "session.complete");
+    else if (TURN_STARTS.has(event.type)) options.onTurnStart?.();
+    else if (event.type === ASKS) options.onAsking?.();
     else if (event.type === "session.done" && GONE.has(parsed(event.data)?.reason)) stop();
   });
   return { stop, started: () => after >= 0 };
+}
+
+/** Chat *sessionId* followed across its turns: *onTurnEnd* hears the chat's title each time one is done. */
+export function followChat(options: FollowOptions & { sessionId: string; onTurnEnd(title: string): void }): { stop(): void; started(): boolean } {
+  return followTurns({
+    ...options,
+    onTurnEnd: async (done) => {
+      // Told only of a turn done: a failed or stopped one is not this notice's to tell.
+      if (!done) return;
+      try {
+        options.onTurnEnd(await titleOf(options.api, options.agentId, options.sessionId));
+      } catch (error) {
+        options.onError(error);
+      }
+    },
+  });
 }
 
 // More than this many items close together are told as one notice: a night asleep, or an agent's own burst.

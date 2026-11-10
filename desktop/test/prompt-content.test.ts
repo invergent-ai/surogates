@@ -6,7 +6,7 @@ import { segments } from "../src/shell/text.js";
 import { approval, folderSheet, freeMode, handBack, sizeOf } from "../src/shell/prompt-content.js";
 
 const SHEET: FolderSheet = {
-  agent: "acme.surogate.ai", folder: "/home/me/notes", mode: "free", links: null, refusal: null, thread: null, project: null,
+  agent: "acme.surogate.ai", folder: "/home/me/notes", mode: "free", links: null, refusal: null, thread: null, project: null, busy: false,
 };
 const CHAT: ChatLabel = { agent: "acme.surogate.ai", root: "r", calling: "r", folder: "/home/me/notes" };
 const ids = (content: { buttons: Array<{ id: string }> }) => content.buttons.map((button) => button.id);
@@ -21,6 +21,26 @@ describe("the folder sheet", () => {
     expect(content.choice?.value).toBe("free");
     expect([ids(content), allowing(content)]).toEqual([["cancel", "change", "accept"], ["accept"]]);
     expect([content.focus, content.cancel]).toEqual(["cancel", "cancel"]);
+  });
+
+  it("warns that another chat works in a busy folder, and offers New folder and Browse… beside Use this folder", () => {
+    const content = folderSheet({ ...SHEET, busy: true });
+    expect(content.notes).toEqual([
+      "Another chat on this computer is working in this folder. The two chats will take turns: this chat waits while the other one is answering.",
+    ]);
+    expect(content.buttons.map((b) => [b.id, b.label])).toEqual([
+      ["cancel", "Cancel"], ["new", "New folder"], ["change", "Browse…"], ["accept", "Use this folder"],
+    ]);
+    expect(allowing(content)).toEqual(["accept"]);
+    expect(content.focus).toBe("cancel");
+    expect(content.height).toBeGreaterThan(folderSheet(SHEET).height);
+  });
+
+  it("is the sheet it always was for a folder not in use", () => {
+    const content = folderSheet({ ...SHEET, busy: false });
+    expect(content.notes).toEqual([]);
+    expect(ids(content)).toEqual(["cancel", "change", "accept"]);
+    expect(content.buttons[1]?.label).toBe("Change…");
   });
 
   it("names the project's thread the folder is for, each name in a field of its own, and makes room for them", () => {

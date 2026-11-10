@@ -52,6 +52,8 @@ export interface Welcome {
   userId: string;
   name: string;
   heartbeatS: number;
+  // The server understands op_waiting; it closes the link on a frame it does not know, so none is sent without this.
+  waits: boolean;
 }
 
 export type ServerFrame =
@@ -124,6 +126,7 @@ export function parseServerFrame(raw: string): ServerFrame {
           userId: text(frame, "user_id"),
           name: text(frame, "name"),
           heartbeatS: heartbeat,
+          waits: frame.waits === true,
         },
       };
     }
@@ -202,6 +205,11 @@ export function opResult(
   // JSON.stringify drops an undefined ok, a frame the server refuses: send null.
   const sent = "ok" in outcome && outcome.ok === undefined ? { ok: null } : outcome;
   return { type: "op_result", id: operation.id, digest: operation.digest, outcome: sent };
+}
+
+// An operation starts (reason "folder") or stops (null) waiting for another chat's turn in its folder.
+export function opWaiting(id: string, reason: "folder" | null): Record<string, unknown> {
+  return { type: "op_waiting", id, reason };
 }
 
 /** The transfer a result names in place of a read's data, or null. */
