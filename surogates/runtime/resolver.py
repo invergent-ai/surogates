@@ -15,6 +15,7 @@ This module bridges two layers:
 from __future__ import annotations
 
 import logging
+import unicodedata
 
 from fastapi import HTTPException, Request
 
@@ -86,6 +87,32 @@ def multi_session_from_payload(payload: dict) -> bool:
     return bool(payload.get("multi_session", True))
 
 
+_NAME_MAX = 80
+
+
+def _display_name(value: object) -> str | None:
+    """The agent's name as its operator gave it, as its users are shown it.
+
+    One line, with no control, format or line-separator character (nothing
+    that turns text around or hides it), at most ``_NAME_MAX`` characters;
+    None for a value that is not text or holds nothing else.  Breaks become
+    spaces; format characters (a soft hyphen, a joiner, a direction mark)
+    are dropped, so they split no word.
+    """
+    if not isinstance(value, str):
+        return None
+    breaks = {"Cc", "Zl", "Zp"}
+    kept = (
+        " " if unicodedata.category(ch) in breaks else ch
+        for ch in value
+        if unicodedata.category(ch) != "Cf"
+    )
+    shown = " ".join("".join(kept).split())
+    if len(shown) > _NAME_MAX:
+        shown = shown[: _NAME_MAX - 1].rstrip() + "…"
+    return shown or None
+
+
 def build_agent_runtime_context(payload: dict) -> AgentRuntimeContext:
     """Project the platform runtime-config payload into a context.
 
@@ -136,6 +163,7 @@ def build_agent_runtime_context(payload: dict) -> AgentRuntimeContext:
         programs_enabled=bool(payload.get("programs_enabled", False)),
         whatsapp_forms=forms_from_payload(payload.get("whatsapp_forms")),
         multi_session=multi_session_from_payload(payload),
+        display_name=_display_name(payload.get("display_name")),
         linkable_channels=tuple(payload.get("linkable_channels") or ()),
         end_user_token_allowance=payload.get("end_user_token_allowance"),
         # bundle reference.  Empty strings → None

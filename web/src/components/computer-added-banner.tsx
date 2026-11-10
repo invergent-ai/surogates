@@ -33,6 +33,7 @@ export function ComputerAddedBanner() {
   const [devices, setDevices] = useState<Device[]>([]);
   const [dismissed, setDismissed] = useState(() => dismissedNotices(storage()));
   const desktopSessions = useAppStore((s) => s.desktopSessions);
+  const agentName = useAppStore((s) => s.agentName);
   const fetchCapabilities = useAppStore((s) => s.fetchCapabilities);
 
   // Read here too: the Agents, Missions and Skills pages read no config of the agent's.
@@ -77,7 +78,7 @@ export function ComputerAddedBanner() {
             aria-hidden="true"
           />
           <span className="min-w-0 flex-1">
-            {addedNotice(name, window.location.host)}
+            {addedNotice(name, agentName ?? window.location.host)}
           </span>
           {/* Where the user checks the computer, and revokes it if it is not theirs. */}
           <TextLink asChild>

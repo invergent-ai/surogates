@@ -165,6 +165,10 @@ class AuthConfigResponse(BaseModel):
     # operator names (SUROGATES_API_CONSOLE_URL).  None: the agent names
     # none, and Surogate Desktop shows no Usage or Plans and billing.
     console_url: str | None = None
+    # The agent's name as its operator gave it, which Surogate Desktop and the
+    # web app show in place of the agent's address.  None: the agent names
+    # none (an older management plane), and its address stands in.
+    display_name: str | None = None
 
 
 class FirebaseExchangeRequest(BaseModel):
@@ -256,6 +260,7 @@ async def auth_config(
         commerce_mode=str(commerce.get("commerce_mode") or "free"),
         commerce_buy_url=commerce.get("commerce_buy_url"),
         console_url=request.app.state.settings.api.console_url or None,
+        display_name=agent_runtime.display_name,
     )
     cache = getattr(request.app.state, "firebase_config_cache", None)
     project_id = getattr(agent_runtime, "project_id", None)

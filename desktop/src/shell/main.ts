@@ -40,7 +40,7 @@ import { type Delivery, ImageDelivery, imageArch, installBase, readManifest } fr
 import type { Boot } from "../vm/manager.js";
 import { openAbout } from "./about.js";
 import { BURST, Burst, followChat, followInbox, followTurns, type InboxItem, restOf, titleOf } from "./agent-events.js";
-import { type Agent, AgentStore, connectAgent, describeAgent, type Get, linksFor, linkUrl, partitionFor, readAgent } from "./agents.js";
+import { type Agent, AgentStore, connectAgent, describeAgent, type Get, hostOf, linksFor, linkUrl, partitionFor, readAgent } from "./agents.js";
 import { AppearanceStore, Theme } from "./appearance.js";
 import { nameTheApp, quitAsked } from "./app-identity.js";
 import { keepOutOfBackups } from "./backups.js";
@@ -982,7 +982,11 @@ function startStack(agent: Agent, credential: LiveCredential): Promise<DeviceSta
     journalPath: join(root, "devices", credential.deviceId, "journal.sqlite"),
     url: linkUrl(agent.origin),
     token: credential.token,
-    agent: agent.name,
+    // Read at each prompt, so a name the agent gave since the start is the one shown.
+    get agent() {
+      return agent.name;
+    },
+    agentHost: hostOf(agent),
     identity: { deviceId: credential.deviceId, orgId: credential.orgId, agentId: credential.agentId, userId: credential.userId },
     // The tool layer under the binder: the file kinds in the root's file host, the process kinds in the
     // VM, and the browser's kinds in this identity's browser host, with the browser Settings chose.
@@ -1187,16 +1191,20 @@ async function refreshAgent(agent: Agent): Promise<void> {
       report(new Error(`${agent.origin} now answers as agent ${fresh.agentId} at ${fresh.origin}: Surogate keeps the agent it added`));
       return;
     }
-    const { desktopSessions, multiSession, consoleUrl } = fresh;
-    if (desktopSessions === agent.desktopSessions && multiSession === agent.multiSession && consoleUrl === agent.consoleUrl) return;
+    const { name, desktopSessions, multiSession, consoleUrl } = fresh;
+    if (
+      name === agent.name && desktopSessions === agent.desktopSessions && multiSession === agent.multiSession && consoleUrl === agent.consoleUrl
+    ) return;
     // Removed while it was asked: it is not kept again.
     const now = agents.get();
     if (now?.origin !== agent.origin || now.agentId !== agent.agentId) return;
     // In place: the bridge and the device hold this agent.
-    Object.assign(agent, { desktopSessions, multiSession, consoleUrl });
+    const renamedOnly = desktopSessions === agent.desktopSessions && multiSession === agent.multiSession && consoleUrl === agent.consoleUrl;
+    Object.assign(agent, { name, desktopSessions, multiSession, consoleUrl });
     agents.set(agent);
     changed();
-    void registerComputer(agent);
+    // A new name is only shown: the computer registers again only for what it can do.
+    if (!renamedOnly) void registerComputer(agent);
   } catch (error) {
     report(error);
   }
@@ -1408,8 +1416,8 @@ async function restore(agent: Agent): Promise<void> {
       type: "question",
       message: `Restore local access on ${credential.name}?`,
       detail: folders.length > 0
-        ? `${agent.name} revoked this computer's access. Restoring it lets the chats on these folders work here again:\n${folders.map((folder) => `• ${shownPath(folder)}`).join("\n")}\nWork that was cancelled stays cancelled.`
-        : `${agent.name} revoked this computer's access. Restoring it lets ${agent.name} work on folders of this computer again.`,
+        ? `${agent.name} (${hostOf(agent)}) revoked this computer's access. Restoring it lets the chats on these folders work here again:\n${folders.map((folder) => `• ${shownPath(folder)}`).join("\n")}\nWork that was cancelled stays cancelled.`
+        : `${agent.name} (${hostOf(agent)}) revoked this computer's access. Restoring it lets ${agent.name} work on folders of this computer again.`,
       buttons: ["Restore access", "Cancel"], defaultId: 0, cancelId: 1, noLink: true,
     });
     // Signed out while the user was asked: nothing to restore with.
@@ -1485,7 +1493,7 @@ async function signIn(agent: Agent): Promise<void> {
     if (previous && (previous.orgId !== who.orgId || previous.userId !== who.userId)) {
       const switching = await ask({
         type: "warning", message: `Sign in as ${who.email}?`,
-        detail: `This computer works for another account of ${agent.name}. Signing in as ${who.email} ends that account's access here, and forgets the folders it was given.${cutOff()}`,
+        detail: `This computer works for another account of ${agent.name} (${hostOf(agent)}). Signing in as ${who.email} ends that account's access here, and forgets the folders it was given.${cutOff()}`,
         buttons: ["Sign in", "Cancel"], defaultId: 1, cancelId: 1, noLink: true,
       });
       if (cancelled()) return;
@@ -1785,7 +1793,8 @@ async function openDeepLink(link: OpenLink): Promise<void> {
       if (refused) await ask({ type: "warning", message: `Surogate did not connect to ${host}`, detail: refused, buttons: ["OK"], noLink: true });
     } else if (agent.origin !== link.origin) {
       await ask({
-        type: "info", message: `Surogate works for ${agent.name}`,
+        // Two servers side by side: both by their addresses, which the user chooses between.
+        type: "info", message: `Surogate works for ${hostOf(agent)}`,
         detail: `This link is for ${host}. Remove ${agent.name} from Surogate to connect to another agent.`, buttons: ["OK"], noLink: true,
       });
     } else if (link.path !== "/") {
@@ -1800,7 +1809,8 @@ async function confirmAgent(agent: Agent, typed: string): Promise<boolean> {
   const redirected = typed === agent.origin ? "" : `${typed} sent Surogate to ${agent.origin}. `;
   const options = {
     type: "question" as const,
-    message: `Connect to ${agent.name}?`,
+    // By its address: the name is the server's own say, and the user decides here whether to trust that server.
+    message: `Connect to ${hostOf(agent)}?`,
     detail: `${redirected}You sign in to ${agent.origin} next, and this computer joins it. Connect only to servers you trust.`,
     buttons: ["Connect", "Cancel"],
     defaultId: 0,
@@ -1839,7 +1849,7 @@ function state() {
   const agent = agents.get();
   return {
     first: agent === null,
-    agent: agent && { name: agent.name, desktopSessions: agent.desktopSessions },
+    agent: agent && { name: agent.name, host: hostOf(agent), desktopSessions: agent.desktopSessions },
     device: agent && {
       text: deviceLine(agent),
       status: device?.status ?? (kept?.token === null ? "revoked" : null),
@@ -2305,7 +2315,8 @@ async function settingsState() {
       added: kept?.addedAt ?? null,
       // The app's own sign-in names it, before the web client reports and whatever it reports.
       organisation: signedIn?.account.orgName ?? null,
-      agents: agent ? [agent.name] : [],
+      // By its address: where the user checks which server this computer works for.
+      agents: agent ? [hostOf(agent)] : [],
     },
     links: { usage: "usage" in links() },
     sandbox: sandboxLine(lacking, deliveryState(), boot),

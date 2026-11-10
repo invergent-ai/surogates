@@ -203,6 +203,8 @@ export interface AuthConfigResponse {
   // Chats can work on a folder of the user's computer through Surogate Desktop. Absent on an
   // older backend: there is no local folder to offer, and the desktop says so.
   desktop_sessions?: boolean;
+  // The agent's name as its operator gave it. Absent or null on an older backend: its address stands in.
+  display_name?: string | null;
   // Active messaging channels an end-user can link their identity to
   // (subset of slack/teams/telegram). Empty/absent hides "Connected
   // Channels" — there is nothing to pair against.

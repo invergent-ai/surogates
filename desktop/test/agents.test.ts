@@ -142,6 +142,24 @@ describe("connecting to the agent", () => {
     expect(store.get()?.origin).toBe("https://agents.example.org");
   });
 
+  it("names the agent as its operator did, on one line, and by its host where the server names none", async () => {
+    const named = async (displayName: unknown): Promise<string | undefined> => {
+      const { get } = answering({ ...CONFIG, display_name: displayName });
+      return (await connectAgent("agent.example.com", { get, store, confirm: () => Promise.resolve(true) }))?.name;
+    };
+    expect(await named("  Support Agent ")).toBe("Support Agent");
+    expect(await named("Support\nAgent")).toBe("Support Agent");
+    // One that would turn the text after it around, shown for what it is.
+    expect(await named("Support\u202eAgent")).toBe("SupportU+202EAgent");
+    expect(await named("A".repeat(100))).toBe(`${"A".repeat(79)}…`);
+    // Cut before its hidden characters are shown, so no U+ label is cut in half.
+    expect(await named(`${"A".repeat(75)}\u202e${"B".repeat(10)}`)).toBe(`${"A".repeat(75)}U+202EBBB…`);
+    expect(await named(`${"A".repeat(78)}😀😀😀`)).toBe(`${"A".repeat(78)}😀…`);
+    expect(await named(null)).toBe("agent.example.com");
+    expect(await named("   ")).toBe("agent.example.com");
+    expect(await named(7)).toBe("agent.example.com");
+  });
+
   it("reads an older server's missing desktop_sessions as no local folders, and a single conversation as such", async () => {
     const { get } = answering({ agent_id: "agent-1", multi_session: false });
     const agent = await connectAgent("agent.example.com", { get, store, confirm: () => Promise.resolve(true) });
