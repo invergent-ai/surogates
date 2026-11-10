@@ -27,6 +27,8 @@ export type CapabilitiesSlice = {
   // Surogate Desktop. ``null`` = not read yet, or the read failed; ``false`` = this server has
   // none, or says nothing of them, as an older one.
   desktopSessions: boolean | null;
+  // The agent's name as its operator gave it; null where it names none, or before the read.
+  agentName: string | null;
   // Messaging channels an end-user can link their identity to. ``null`` =
   // unknown (not loaded); an array (possibly empty) is authoritative — an
   // empty array hides "Connected Channels".
@@ -46,6 +48,7 @@ export const createCapabilitiesSlice: StateCreator<
   multiSession: null,
   browserEnabled: null,
   desktopSessions: null,
+  agentName: null,
   linkableChannels: null,
 
   fetchCapabilities: async () => {
@@ -58,6 +61,7 @@ export const createCapabilitiesSlice: StateCreator<
       multiSession: config.multi_session ?? null,
       browserEnabled: config.browser_enabled ?? null,
       desktopSessions: desktopSessionsOf(config),
+      agentName: config.display_name || null,
       linkableChannels: config.linkable_channels ?? null,
     });
   },

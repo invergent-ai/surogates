@@ -8,6 +8,7 @@ import { createHash } from "node:crypto";
 import { rmSync } from "node:fs";
 import type { LinkStatus } from "../link/client.js";
 import { readState, writeState } from "./state-file.js";
+import { asShown } from "./text.js";
 
 const CONFIG_PATH = "/api/v1/auth/config";
 // How long the agent has to answer, and how many redirects it may send Surogate through.
@@ -17,7 +18,7 @@ const MAX_HOPS = 5;
 export interface Agent {
   origin: string;
   agentId: string;
-  name: string; // the server names no agent: its host does
+  name: string; // as its operator named it; its host where the server names none
   desktopSessions: boolean; // the server can bind a chat to a folder of this computer
   multiSession: boolean; // false: one conversation, which stays in the cloud
   consoleUrl: string | null; // the console the agent names for its users' usage and billing: an origin
@@ -75,6 +76,20 @@ function isAgent(value: unknown): value is Agent {
   if (typeof desktopSessions !== "boolean" || typeof multiSession !== "boolean") return false;
   return originOf(origin) === origin && (consoleUrl === null || consoleOf(consoleUrl, origin) === consoleUrl);
 }
+
+// The name an agent's operator gave it, as the server says it: on one line, its hidden characters shown (asShown), at
+// most NAME_MAX characters; null for none.
+const NAME_MAX = 80;
+function displayNameOf(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  // By characters, not UTF-16 units, so an emoji is not cut in half; and before asShown, so none of its U+ labels is.
+  const characters = [...value.replace(/\s+/g, " ").trim()];
+  if (characters.length === 0) return null;
+  return asShown(characters.length > NAME_MAX ? `${characters.slice(0, NAME_MAX - 1).join("").trimEnd()}…` : characters.join(""));
+}
+
+/** *agent*'s address, without its scheme: what the user checks before trusting the server, whatever it calls itself. */
+export const hostOf = (agent: Agent): string => new URL(agent.origin).host;
 
 export class AgentStore {
   constructor(private readonly path: string) {}
@@ -158,7 +173,7 @@ export async function readAgent(origin: string, get: Get, timeoutMs = CONFIG_TIM
   return {
     origin: final,
     agentId,
-    name: new URL(final).host,
+    name: displayNameOf(config?.display_name) ?? new URL(final).host,
     // An older server says nothing, and has no local folders.
     desktopSessions: config?.desktop_sessions === true,
     multiSession: config?.multi_session !== false,

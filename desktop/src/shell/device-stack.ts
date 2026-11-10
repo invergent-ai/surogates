@@ -73,6 +73,7 @@ export interface DeviceStackOptions {
   url: string;
   token: string;
   agent: string; // the agent's name, as the prompts show it
+  agentHost?: string; // the agent's address, which names its new chats' folders (binder.ts, newFolder)
   identity: Identity; // who every welcome must name
   // *changed*: what the tools' live() names may have changed.
   // *waiting*: tell an operation starts ("folder") or stops (null) waiting for its chat's folder.
@@ -211,7 +212,11 @@ function deviceOn(journal: OperationJournal, options: DeviceStackOptions, made: 
     bindings: journal.bindings,
     prompts: options.prompts,
     guards: tools.guards(),
-    agent: options.agent,
+    // Read at each prompt: the agent's name can change while the device runs (main.ts, refreshAgent).
+    get agent() {
+      return options.agent;
+    },
+    agentHost: options.agentHost,
     hosts: counted,
     keepsCopies,
     inUse: (dev, ino) => tools.folderInUse?.(dev, ino) === true,

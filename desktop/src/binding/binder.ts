@@ -113,6 +113,9 @@ export interface BinderOptions {
   // The page a session's next browser operation acts in, for its prompt; for an upload, the frame of the file input
   // that asked, *of* being the upload's operation; *root*, the chat that asks.
   address?(session: string, upload?: boolean, of?: string, root?: string): Promise<string | { refused: string }>;
+  // The agent's address (its host), which names the folder its new chats' own folders are made in: its name, which its
+  // operator may change or share with another agent, does not. The name where none is given.
+  agentHost?: string;
   notComing?(of: string): void; // an upload the browser was asked about, by its operation, that got no leave
   // Whether something in a chat's sandbox listens on a port of its own loopback now: asked before its browser is sent there.
   listening?(root: string, port: number): Promise<boolean | "busy">;
@@ -214,9 +217,19 @@ export class Binder implements Executor {
   // Built on the binder's own bindings, so the two cannot read different journals.
   readonly approvals: Approvals;
 
+  // The folder new chats' own folders are made in, ~/Surogate/<agent>: by the agent's address, which its operator
+  // cannot change or share with another agent, not by its name.
+  private get folderParent(): string {
+    return this.options.agentHost ?? this.options.agent;
+  }
+
   constructor(private readonly options: BinderOptions) {
     this.approvals = new Approvals({
-      bindings: options.bindings, prompts: options.approvalPrompts, agent: options.agent, address: options.address,
+      bindings: options.bindings, prompts: options.approvalPrompts, address: options.address,
+      // Read at each prompt: the agent's name can change while the device runs.
+      get agent() {
+        return options.agent;
+      },
       notComing: options.notComing, refusal: options.refusal, listening: options.listening, onError: options.onError,
     });
   }
@@ -236,7 +249,7 @@ export class Binder implements Executor {
     // Every folder made for this chat, here and at New folder on the sheet: gone again unless the user takes it, even
     // when the sheet fails.
     const made: string[] = [];
-    const first = usable === null && choice !== "pick" && !signal.aborted ? newFolder(guards, this.options.agent) : null;
+    const first = usable === null && choice !== "pick" && !signal.aborted ? newFolder(guards, this.folderParent) : null;
     if (first !== null) made.push(first);
     let prepared: Prepared | null = null;
     try {
@@ -424,7 +437,7 @@ export class Binder implements Executor {
       if (answer === null || signal.aborted) return null;
       if (answer === "new") {
         // None can be made: the dialog opens, as at Browse.
-        const fresh = newFolder(guards, this.options.agent);
+        const fresh = newFolder(guards, this.folderParent);
         if (fresh !== null) {
           made.push(fresh);
           folder = fresh;

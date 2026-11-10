@@ -56,7 +56,7 @@ interface Version {
 
 interface State {
   first: boolean; // no agent yet: the first run fills the window
-  agent: { name: string; desktopSessions: boolean } | null; // desktopSessions: its web client lists this computer in Settings → Devices
+  agent: { name: string; host: string; desktopSessions: boolean } | null; // desktopSessions: its web client lists this computer in Settings → Devices
   view: { kind: "web" } | { kind: "projects" } | { kind: "project"; id: string; name: string; thread: { id: string; title: string } | null };
   projects: ProjectRow[]; // as the page listed them
   // The agent's chats in no project, newest first, whether more come, and the one the centre shows; null where the
@@ -694,7 +694,9 @@ function draw(state: State): void {
   byId("quitting-text").textContent = state.quitting === null ? ""
     : `Quitting once ${state.quitting === 1 ? "1 thread working on this computer finishes" : `${state.quitting} threads working on this computer finish`}.`;
   byId("unreachable").hidden = state.unreachable === null;
-  byId("headline").textContent = state.agent ? `Couldn't connect to ${state.agent.name}` : "";
+  // By its address too: what the user checks, or tells whoever runs the server.
+  byId("headline").textContent = !state.agent ? ""
+    : `Couldn't connect to ${state.agent.name === state.agent.host ? state.agent.host : `${state.agent.name} (${state.agent.host})`}`;
   byId("why").textContent = state.unreachable ?? "";
 }
 

@@ -217,6 +217,20 @@ async def test_the_server_names_its_console_only_once_the_operator_does(api):
     assert (await api.client.get("/v1/auth/config")).json()["console_url"] == "https://ops.acme.local"
 
 
+async def test_the_server_names_the_agent_as_its_operator_did(api):
+    assert (await api.client.get("/v1/auth/config")).json()["display_name"] is None
+    api.app.dependency_overrides[agent_runtime_context_dep] = lambda: build_agent_runtime_context({
+        "agent_id": AGENT_ID,
+        "org_id": str(api.org_id),
+        "project_id": "test-project",
+        "enabled": True,
+        "version": 1,
+        "storage_key_prefix": "",
+        "display_name": "  Agent\u2028Admin\u202estrativ ",
+    })
+    assert (await api.client.get("/v1/auth/config")).json()["display_name"] == "Agent Adminstrativ"
+
+
 async def is_bound(api, session_id: str) -> bool:
     return (await binding(api, session_id)).state == "bound"
 

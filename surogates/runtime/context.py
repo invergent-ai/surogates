@@ -207,6 +207,11 @@ class AgentRuntimeContext:
     # sessions.
     multi_session: bool = True
 
+    # The agent's name as its operator gave it in Studio ("Support Agent"),
+    # shown to its users in place of its address.  None
+    # where a payload predates the field or names none.
+    display_name: str | None = None
+
     # Active messaging channels an end-user can link their identity to
     # (subset of slack/teams/telegram).  Empty by default so a payload
     # predating this field hides the web app's "Connected Channels"

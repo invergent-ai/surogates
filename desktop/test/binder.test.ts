@@ -244,6 +244,20 @@ describe("preparing a new chat's folder", () => {
     expect(user.sheets[0]?.refusal).toBeNull();
   });
 
+  it("makes the new folder under the agent's address, not its name, which its operator may change", async () => {
+    const user = new User([], [null]);
+    await binder(user, { agent: "Support Agent", agentHost: "agent.example.com" }).prepareFolder("last", WINDOW, never());
+    expect(user.sheets[0]?.folder.startsWith(`${join(base, "home", "Surogate", "agent.example.com")}/`)).toBe(true);
+    expect(user.sheets[0]?.agent).toBe("Support Agent");
+  });
+
+  it("makes the folder New folder offers under the agent's address too", async () => {
+    const user = new User([], ["new", null]);
+    await binder(user, { agent: "Support Agent", agentHost: "agent.example.com", inUse: () => true }).prepareFolder("last", WINDOW, never());
+    const parent = `${join(base, "home", "Surogate", "agent.example.com")}/`;
+    expect(user.sheets.map((sheet) => sheet.folder.startsWith(parent))).toEqual([true, true]);
+  });
+
   it("opens the dialog where the last folder was when no new folder can be made", async () => {
     writeFileSync(join(base, "home", "Surogate"), "not a folder");
     const user = new User([notes], [{ mode: "free" }]);
