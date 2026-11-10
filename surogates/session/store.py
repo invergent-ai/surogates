@@ -496,10 +496,11 @@ class SessionStore:
     ) -> None:
         self._sf = session_factory
         self._redis = redis
-        # Session channel cache: session_id → (channel, config, relayed
-        # from a scheduled run).
-        # Populated lazily when a deliverable event is emitted.
-        self._channel_cache: dict[UUID, tuple[str, dict, bool]] = {}
+        # Session delivery cache: session_id → (id of the row holding the
+        # delivery config, channel, relayed from a scheduled run, gets outbox
+        # rows at all). Populated lazily when a deliverable event is emitted.
+        # Only what is fixed for the session's life: the config is re-read.
+        self._channel_cache: dict[UUID, tuple[UUID, str, bool, bool]] = {}
 
     async def answer_file_waits(self, session_id: UUID, *, before: int) -> int:
         """Retire *session_id*'s waits on you over its files raised before event *before*; how many.
@@ -1898,19 +1899,19 @@ class SessionStore:
     ) -> None:
         """Enqueue a deliverable event to the outbox for non-web channels.
 
-        Looks up the session's channel and config (cached after first lookup).
+        Looks up the session's channel once, and its config on every call.
         Web sessions are skipped — they use SSE polling, not the outbox.
         """
         try:
-            # Look up session channel (cached).
+            # Which row carries the delivery config, and whether the session
+            # delivers at all, are fixed for its life and cached.
             if session_id not in self._channel_cache:
                 async with self._sf() as db:
                     row = await db.get(SessionRow, session_id)
                     if row is None:
                         return
-                    channel = row.channel or "web"
-                    config = row.config or {}
-                    scheduled = channel == "scheduled"
+                    source = row
+                    scheduled = (row.channel or "web") == "scheduled"
                     # Scheduled/loop runs carry channel="scheduled" and do not
                     # hold the origin channel's routing config, so their
                     # deliverable events would strand under the "scheduled"
@@ -1922,21 +1923,53 @@ class SessionStore:
                         parent_id = getattr(row, "parent_id", None)
                         if parent_id is None:
                             return
-                        parent = await db.get(SessionRow, parent_id)
-                        if parent is None:
+                        source = await db.get(SessionRow, parent_id)
+                        if source is None:
                             return
-                        channel = parent.channel or "web"
-                        config = parent.config or {}
-                    self._channel_cache[session_id] = (channel, config, scheduled)
+                    channel = source.channel or "web"
+                    # Only channels with a registered delivery adapter get
+                    # outbox rows. Everything else (web/website SSE,
+                    # api/task/delegation/worker consumers, ambient's gated
+                    # mate_ambient_post path) has no claimer — rows for those
+                    # channels would sit "pending" forever.
+                    delivers = channel in ADAPTER_CHANNELS or outbound_dm(
+                        channel, source.config or {},
+                    )
+                    self._channel_cache[session_id] = (
+                        source.id, channel, scheduled, delivers,
+                    )
 
-            channel, config, scheduled = self._channel_cache[session_id]
-
-            # Only channels with a registered delivery adapter get outbox rows.
-            # Everything else (web/website SSE, api/task/delegation/worker
-            # consumers, ambient's gated mate_ambient_post path) has no claimer
-            # — rows for those channels would sit "pending" forever.
-            if channel not in ADAPTER_CHANNELS and not outbound_dm(channel, config):
+            source_id, channel, scheduled, delivers = self._channel_cache[session_id]
+            if not delivers:
                 return
+
+            # Build payload: extract the user-facing content from the event.
+            payload = _build_channel_payload(event_type, data, channel)
+            if not payload:
+                return  # Nothing to deliver (e.g., tool-call-only LLM_RESPONSE).
+            # Nobody is waiting on a scheduled run, so there is no inbound
+            # placeholder to edit: every narration line and coding heartbeat
+            # would land as its own post. The cron prompt promises only the
+            # final response is delivered.
+            if scheduled and (
+                payload.get("intermediate")
+                or event_type == EventType.CODE_RUN_CHANNEL_UPDATE
+            ):
+                return
+
+            # The config is read fresh for every delivery, never cached: the
+            # channels process rewrites it as inbound arrives (the message to
+            # reply to, a collapsed conversation's current thread, Teams'
+            # conversation id and serviceUrl, and the routing identifier when
+            # an operator repoints the channel at another number). A copy
+            # primed at the first delivery would address every later reply to
+            # what was true then — after a number switch, to a deactivated
+            # identifier that delivery drops as "channel deprovisioned".
+            async with self._sf() as db:
+                source = await db.get(SessionRow, source_id)
+            if source is None:
+                return
+            config = source.config or {}
 
             # Build channel-specific destination from session config.
             destination: dict[str, Any] = {}
@@ -1981,68 +2014,11 @@ class SessionStore:
                     "channel_identifier": config.get("channel_identifier", ""),
                 }
 
-            # Build payload: extract the user-facing content from the event.
-            payload = _build_channel_payload(event_type, data, channel)
-            if not payload:
-                return  # Nothing to deliver (e.g., tool-call-only LLM_RESPONSE).
-            # Nobody is waiting on a scheduled run, so there is no inbound
-            # placeholder to edit: every narration line and coding heartbeat
-            # would land as its own post. The cron prompt promises only the
-            # final response is delivered.
-            if scheduled and (
-                payload.get("intermediate")
-                or event_type == EventType.CODE_RUN_CHANNEL_UPDATE
-            ):
-                return
-
             # Enqueue to the delivery outbox.
             from surogates.db.models import DeliveryOutbox
             dedupe_key = f"{channel}:{event_id}"
 
             async with self._sf() as db:
-                # Two destination fields track the *latest* inbound message in
-                # session config (written by the channels process) and must be
-                # read fresh — the per-session config cache above is primed
-                # once and would pin every reply to the first message:
-                # ``<channel>_reply_to_message_id`` (reply threading) and, for
-                # collapsed single-session conversations that span every
-                # thread of a chat, the ``*_thread_key`` reply destination.
-                # Teams' conversation id and serviceUrl move too (inbound
-                # refreshes them when Microsoft does), so they are always read
-                # fresh.  Gated on the cached config carrying the marker/key
-                # at all, so ordinary sessions pay no extra query.
-                # Best-effort: a read failure falls back to the cached values
-                # rather than dropping the delivery.
-                reply_key = f"{channel}_reply_to_message_id"
-                needs_fresh_reply = (
-                    channel in ("telegram", "discord") and reply_key in config
-                )
-                needs_fresh_thread = bool(config.get("single_session"))
-                needs_fresh_teams = channel == "teams"
-                if needs_fresh_reply or needs_fresh_thread or needs_fresh_teams:
-                    try:
-                        fresh = await db.get(SessionRow, session_id)
-                        fresh_config = (
-                            fresh.config or {} if fresh is not None else config
-                        )
-                        if needs_fresh_reply:
-                            destination["reply_to_message_id"] = (
-                                fresh_config.get(reply_key)
-                            )
-                        if needs_fresh_thread and thread_dest is not None:
-                            destination[thread_dest] = fresh_config.get(thread_key)
-                        if needs_fresh_teams:
-                            destination["conversation_id"] = (
-                                fresh_config.get("teams_conversation_id")
-                                or fresh_config.get("teams_channel_id")
-                                or destination["conversation_id"]
-                            )
-                            destination["service_url"] = (
-                                fresh_config.get("teams_service_url")
-                                or destination["service_url"]
-                            )
-                    except Exception:
-                        pass
                 outbox = DeliveryOutbox(
                     session_id=session_id,
                     event_id=event_id,
