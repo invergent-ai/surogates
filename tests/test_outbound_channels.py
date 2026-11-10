@@ -139,6 +139,38 @@ async def test_a_teams_reply_goes_to_the_service_url_inbound_last_recorded(sf):
     ]
 
 
+async def test_a_reply_goes_to_the_number_the_channel_was_repointed_at(sf):
+    """An operator repoints the agent's WhatsApp channel at a new number and
+    the old one is deactivated; a returning contact's session resumes and its
+    row is refreshed to the new number. The worker that delivered to this
+    session before must address the next reply to the new number, or delivery
+    drops it as "channel deprovisioned"."""
+    from surogates.db.models import DeliveryOutbox, Session as SessionRow
+    from surogates.session.store import SessionStore
+
+    sid = uuid4()
+    async with sf() as db:
+        db.add(SessionRow(id=sid, org_id=uuid4(), agent_id="agent-1", channel="whatsapp", config={
+            "whatsapp_channel_id": "40746148303", "channel_identifier": "1462821516907000",
+        }))
+        await db.commit()
+    store = SessionStore(sf)
+    reply = {"message": {"role": "assistant", "content": "Bună!"}}
+    await store._enqueue_channel_delivery(sid, 1, EventType.LLM_RESPONSE, reply)
+    async with sf() as db:
+        row = await db.get(SessionRow, sid)
+        row.config = {**row.config, "channel_identifier": "1478814925311524"}
+        await db.commit()
+    await store._enqueue_channel_delivery(sid, 2, EventType.LLM_RESPONSE, reply)
+
+    async with sf() as db:
+        rows = (await db.execute(sa.select(DeliveryOutbox).order_by(DeliveryOutbox.event_id))).scalars().all()
+    assert [(r.destination["phone_number_id"], r.destination["channel_identifier"]) for r in rows] == [
+        ("1462821516907000", "1462821516907000"),
+        ("1478814925311524", "1478814925311524"),
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Fakes
 # ---------------------------------------------------------------------------
