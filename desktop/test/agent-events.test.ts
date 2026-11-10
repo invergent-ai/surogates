@@ -7,10 +7,13 @@ class FakeAgent {
   readonly streams: Array<{ path: string; send(text: string): void; end(): void; signal: AbortSignal }> = [];
   readonly items = new Map<number, Record<string, unknown>>();
   readonly titles = new Map<string, string>();
+  readonly openQuestions = new Set<string>(); // the chats whose question to their user the agent holds open
   readonly trees = new Map<string, string[]>(); // each chat's tree's statuses, the chat's own first
   status = 200; // what the next stream opens with
   itemFailure: number | "throw" | null = null; // how the next item's read fails: an HTTP status, or no answer at all
   readonly api: Api = async (path, init) => {
+    const asks = /^\/api\/v1\/inbox\?session_id=([^&]+)&kind=input_required&status=pending&limit=1&agent_id=a$/.exec(path);
+    if (asks) return Response.json({ items: this.openQuestions.has(asks[1]!) ? [{ id: 1 }] : [], next_cursor: null });
     const item = /^\/api\/v1\/inbox\/(\d+)\?agent_id=a$/.exec(path);
     if (item) {
       const failure = this.itemFailure;
@@ -350,10 +353,14 @@ describe("a chat's turns, followed", () => {
   it("says a chat that waits on its user's answer is at rest, unless a helper under it works", async () => {
     const agent = new FakeAgent();
     agent.trees.set("asks", ["active"]).set("asks-helped", ["active", "active"]).set("asks-helped-done", ["active", "completed"]);
+    agent.openQuestions.add("asks").add("asks-helped").add("asks-helped-done");
     const said = await Promise.all(["asks", "asks-helped", "asks-helped-done"].map((id) => restOf(agent.api, "a", id, true)));
     expect(said).toEqual([true, false, true]);
     // Not told it waits on its user: active is a turn under way.
     expect(await restOf(agent.api, "a", "asks")).toBe(false);
+    // Told so, but the agent holds no question open any more (nobody answered in time): its turn goes on.
+    agent.openQuestions.delete("asks");
+    expect(await restOf(agent.api, "a", "asks", true)).toBe(false);
   });
 
   it("says a chat is at rest between its turns, done or failed, in a turn while active, and nothing of one it cannot tell", async () => {

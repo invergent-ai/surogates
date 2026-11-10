@@ -128,6 +128,14 @@ export async function titleOf(api: Api, agentId: string, sessionId: string): Pro
   return typeof title === "string" && title !== "" ? title : "A chat";
 }
 
+// Whether the agent holds a question of chat *sessionId* to its user open, waiting for the answer.
+async function waitsOnItsUser(api: Api, agentId: string, sessionId: string): Promise<boolean> {
+  const query = `session_id=${encodeURIComponent(sessionId)}&kind=input_required&status=pending&limit=1`;
+  const response = await api(`/api/v1/inbox?${query}&agent_id=${encodeURIComponent(agentId)}`);
+  const { items } = response.ok ? (parsed(await response.text()) ?? {}) : {};
+  return Array.isArray(items) && items.length > 0;
+}
+
 // The server lists at most this many sessions of a chat's tree (_MAX_TREE_NODES): a full list may leave some out.
 const TREE_CAP = 200;
 
@@ -137,8 +145,13 @@ const TREE_CAP = 200;
  * undefined where it says neither (paused), cannot be read, or lists too many to be sure it named every helper.
  * A helper stopped, deleted or archived works no more.
  */
-export async function restOf(api: Api, agentId: string, sessionId: string, asking = false): Promise<boolean | undefined> {
-  const { nodes } = await chatRead(api, agentId, sessionId, "/tree");
+export async function restOf(api: Api, agentId: string, sessionId: string, asked = false): Promise<boolean | undefined> {
+  // Its stream said it asked its user something: believed only while the agent still holds that question open. A
+  // question nobody answered in time is closed there with no event on the stream, and the turn goes on.
+  const [{ nodes }, asking] = await Promise.all([
+    chatRead(api, agentId, sessionId, "/tree"),
+    asked ? waitsOnItsUser(api, agentId, sessionId) : false,
+  ]);
   if (!Array.isArray(nodes)) return undefined;
   const sessions = nodes as Array<{ id?: unknown; status?: unknown }>;
   const own = sessions.find((node) => node?.id === sessionId)?.status;
