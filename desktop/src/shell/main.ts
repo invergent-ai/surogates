@@ -1005,7 +1005,8 @@ function startStack(agent: Agent, credential: LiveCredential): Promise<DeviceSta
           }).stop;
         },
         // And whether its chat is at rest, asked of the agent on the app's sign-in where another chat waits for the
-        // folder: with nobody signed in, or no answer, nobody can say, and the idle time lets the folder go.
+        // folder: with nobody signed in, or no answer, nobody can say. A turn heard of then keeps the folder, at most
+        // HOLD_IDLE_TIMES idle times (tool-hosts.ts, idleOut); anything else lets it go at its idle time.
         atRest: (chatId, asking) => {
           const session = signedIn;
           return session ? restOf((path, init) => session.api(path, init), credential.agentId, chatId, asking) : Promise.resolve(undefined);

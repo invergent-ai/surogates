@@ -66,7 +66,8 @@ export const HOLD_IDLE_TIMES = 15;
 // How long a landing's host waits for the folder (spec, Section 13, "Waits"): a chat's host lets it go IDLE_MS after
 // its last operation, and another landing's once that landing is forgotten, or IDLE_MS after its last step.
 export const LAND_WAIT_MS = IDLE_MS + 30_000;
-// How long a chat waits for the folder while another chat's host is on it: the other lets it go at its turn's end.
+// How long a chat waits for the folder while another chat's host is on it: the other lets it go at its turn's end,
+// or while it waits on its user. A turn the agent cannot be asked about can hold it longer (HOLD_IDLE_TIMES).
 export const FOLDER_WAIT_MS = 10 * 60_000;
 // How long the app's quit waits for a step a landing's helper runs (files/land.ts). Past it the host is stopped: the
 // step's record, written before each of its moves, names what it was doing, and it is put back as this computer's tools
@@ -1215,7 +1216,8 @@ class Host {
   // stale, an operation begun or a turn's start or end; one asked before is not heeded.
   private answering = false;
   private looking = false;
-  // Its chat waits on its user's answer to a question (askUser), until a turn starts again or an operation begins.
+  // Its chat waits on its user's answer to a question (waitOnUser, its stream's inbox.input_required), until a turn
+  // starts again or an operation begins.
   private waitingOnUser = false;
   private seen = 0;
   // Since when nothing of it has run: what bounds how long a turn under way keeps the folder past its idle time.
@@ -1370,9 +1372,11 @@ class Host {
    * alive now have ended. Told while an operation of it runs, the end is an earlier turn's, told again as a stream that
    * came back replays it, and is not heeded: the idle time lets go of a turn that did end with one running.
    */
-  endTurn(): void {
+  endTurn(asking = false): void {
     this.seen += 1;
     this.answering = false;
+    // A question to its user pauses the turn; any other end ends the wait on its user too.
+    this.waitingOnUser = asking;
     if (this.running > 0) return;
     this.turnEnded = true;
     this.endedWith = new Set(this.handles.map((handle) => handle.id));
@@ -1388,6 +1392,7 @@ class Host {
     this.answering = true;
     this.waitingOnUser = false;
     this.turnEnded = false;
+    this.quietSince = undefined;
   }
 
   /**
@@ -1396,9 +1401,7 @@ class Host {
    * waits its turn like any other.
    */
   waitOnUser(): void {
-    // Set first: the turn's end asks the agent at once, and must say the chat waits on its user.
-    this.waitingOnUser = true;
-    this.endTurn();
+    this.endTurn(true);
   }
 
   /**
@@ -1443,6 +1446,8 @@ class Host {
     if (!this.readied) return;
     this.handles = "gone" in change ? lostWith(this.handles) : change.handles;
     this.live = "gone" in change ? 0 : change.live;
+    // Something of it runs here: its quiet, which bounds its hold, starts again once that ends.
+    if (this.live > 0) this.quietSince = undefined;
     if (this.handles.some((handle) => !this.endedWith.has(handle.id))) this.turnEnded = false;
     this.send({ type: "handles", handles: this.handles, live: this.live });
     this.idle();
@@ -1524,6 +1529,7 @@ class Host {
     };
     // Something of it began since the timer was set: its end sets another.
     if (!this.free) return;
+    this.quietSince ??= Date.now();
     if (!this.atRest || left() <= 0) return go();
     // Nobody waits: the folder matters to no one yet, so the agent is not asked. A turn its stream says goes on keeps
     // it, looked at again on the same beat, so a chat that comes to wait is answered within restRecheckMs.
@@ -1531,10 +1537,16 @@ class Host {
     // Asked even where its stream said a turn started: at rest, the agent is believed, as a turn's end can go unheard
     // (a stream that stopped), and a waiting chat would otherwise wait out the whole hold. The agent marks a chat active
     // before its turn sends anything, so its "at rest" is never a turn's start not yet seen.
+    // askRest looks already: its answer is this look's too.
+    if (this.looking) return keep();
+    this.looking = true;
     void this.look().then(({ rest, stale }) => {
-      // Something of it began meanwhile, or it went: that has its own time.
-      if (stale || !this.free) return;
-      if (rest === false || (rest === undefined && this.answering)) keep();
+      this.looking = false;
+      // Something of it began meanwhile, or it went: an operation's end sets its own time, anything else looks again.
+      if (!this.free) return;
+      // Unknown keeps it where its stream said a turn goes on, or that it waits on its user: a question can end
+      // unheard, its turn going on.
+      if (stale || rest === false || (rest === undefined && (this.answering || this.waitingOnUser))) keep();
       else go();
     });
   }
@@ -1560,7 +1572,7 @@ class Host {
     void this.look().then(({ rest, stale }) => {
       this.looking = false;
       if (stale) this.askRest();
-      else if (rest === true || (rest === undefined && this.turnEnded)) {
+      else if (rest === true || (rest === undefined && this.turnEnded && !this.waitingOnUser)) {
         if (this.free && this.othersWait()) this.finish();
       } else {
         this.unsure = this.seen;
@@ -1577,7 +1589,7 @@ class Host {
   // or a turn of it started or ended, by the time the answer came.
   private look(): Promise<{ rest: boolean | undefined; stale: boolean }> {
     const asked = this.seen;
-    return (this.atRest?.(this.waitingOnUser) ?? Promise.resolve(undefined))
+    return this.atRest!(this.waitingOnUser)
       .catch(() => undefined)
       .then((rest) => ({ rest, stale: this.seen !== asked }));
   }

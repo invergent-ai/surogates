@@ -1100,6 +1100,65 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
     expect(asked).toBeGreaterThan(0);
   });
 
+  it("looks again where a turn started while the agent was asked past its idle time, so its hold still ends", async () => {
+    folders[ROOT_B] = folders[ROOT_A] ?? "";
+    const { follows, following } = followed();
+    let asks = 0;
+    const executor = toolHosts({
+      idleMs: 50, restRecheckMs: 20, folderWaitMs: 5_000, following, spawnHost: fakeSpawn(answering),
+      atRest: async () => {
+        asks += 1;
+        // The first look past the idle time is overtaken by another turn's start; no end is ever heard.
+        if (asks === 1) follows[0]?.turnStarted();
+        await new Promise((r) => setTimeout(r, 10));
+        return asks > 1;
+      },
+    });
+    await executor.run(resolve(), signal());
+    // In a turn: a chat that comes to wait is not asked about, only looked at past the idle time.
+    follows[0]?.turnStarted();
+    const second = executor.run(resolveOf(ROOT_B), signal());
+    expect(await second).toMatchObject({ ok: expect.any(String) });
+    expect(asks).toBeGreaterThan(1);
+  });
+
+  it("keeps the folder while its chat waits on its user and the agent cannot be asked: the question may end unheard", async () => {
+    folders[ROOT_B] = folders[ROOT_A] ?? "";
+    const { follows, following } = followed();
+    const executor = toolHosts({
+      idleMs: 60_000, restRecheckMs: 20, folderWaitMs: 5_000, following, spawnHost: fakeSpawn(answering),
+      atRest: async () => undefined,
+    });
+    await executor.run(resolve(), signal());
+    follows[0]?.turnStarted();
+    follows[0]?.asking();
+    const second = executor.run(resolveOf(ROOT_B), signal());
+    expect(await pendingAfter(second, 200)).toBe(true);
+    expect(sent(0, "stop")).toBe(0);
+    follows[0]?.turnEnded();
+    expect(await second).toMatchObject({ ok: expect.any(String) });
+  });
+
+  it("counts a new turn's hold from its start, not from the quiet before it", async () => {
+    folders[ROOT_B] = folders[ROOT_A] ?? "";
+    const { follows, following } = followed();
+    let rest = false;
+    const executor = toolHosts({
+      idleMs: 20, restRecheckMs: 20, folderWaitMs: 5_000, following, spawnHost: fakeSpawn(answering),
+      atRest: async () => rest,
+    });
+    await executor.run(resolve(), signal());
+    follows[0]?.turnStarted();
+    // Most of a hold (15 idle times: 300 ms) spent quiet in one turn, then another starts.
+    await new Promise((r) => setTimeout(r, 250));
+    follows[0]?.turnStarted();
+    const second = executor.run(resolveOf(ROOT_B), signal());
+    expect(await pendingAfter(second, 150)).toBe(true);
+    rest = true;
+    follows[0]?.turnEnded();
+    expect(await second).toMatchObject({ ok: expect.any(String) });
+  });
+
   it("keeps the folder past its idle time while the agent says the chat is in a turn, and gives it once it is not", async () => {
     folders[ROOT_B] = folders[ROOT_A] ?? "";
     const { following } = followed();
@@ -1170,6 +1229,8 @@ describe("ToolHosts, when hosts misbehave", { timeout: 5_000 }, () => {
     const second = executor.run(resolveOf(ROOT_B), signal());
     expect(await pendingAfter(second, 400)).toBe(true);
     follows[0]?.turnEnded();
+    // Its hold ends (15 idle times) and the other chat has the folder: nothing of this test outlives it.
+    expect(await second).toMatchObject({ ok: expect.any(String) });
   });
 
   it("keeps the folder while its chat waits on its user's answer where a helper of the chat still works", async () => {

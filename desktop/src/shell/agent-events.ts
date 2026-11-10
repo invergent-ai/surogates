@@ -151,15 +151,15 @@ const TREE_CAP = 200;
 export async function restOf(api: Api, agentId: string, sessionId: string, asked = false): Promise<boolean | undefined> {
   // Its stream said it asked its user something: believed only while the agent still holds that question open. A
   // question nobody answered in time is closed there with no event on the stream, and the turn goes on.
-  const [{ nodes }, held] = await Promise.all([
-    chatRead(api, agentId, sessionId, "/tree"),
-    asked ? waitsOnItsUser(api, agentId, sessionId) : false,
-  ]);
+  const { nodes } = await chatRead(api, agentId, sessionId, "/tree");
   if (!Array.isArray(nodes)) return undefined;
   const sessions = nodes as Array<{ id?: unknown; status?: unknown }>;
   const own = sessions.find((node) => node?.id === sessionId)?.status;
   // *held*: the chat waits on its user's answer, its question still open, which the agent counts as active; only a helper at work then is.
   const helping = sessions.some((node) => node?.id !== sessionId && node?.status === "active");
+  // Asked of the agent only where the tree leaves it open: the chat itself active, no helper at work.
+  const held = asked && !helping && own === "active" && sessions.length < TREE_CAP
+    && (await waitsOnItsUser(api, agentId, sessionId));
   if (helping || (own === "active" && !held)) return false;
   const done = own === "completed" || own === "failed" || (held && own === "active");
   return sessions.length < TREE_CAP && done ? true : undefined;
