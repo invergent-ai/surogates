@@ -23,16 +23,25 @@ pytestmark = pytest.mark.asyncio
 ALL = ["list_resources", "read_resource", "list_prompts", "get_prompt"]
 
 
+class MethodNotFound(Exception):
+    """As mcp's McpError for JSON-RPC -32601."""
+
+    error = SimpleNamespace(code=-32601, message="Method not found")
+
+
 class Session:
     """A client session's list calls, with what the server has."""
 
-    def __init__(self, resources=(), templates=(), prompts=(), fails=()):
+    def __init__(self, resources=(), templates=(), prompts=(), fails=(), unknown=()):
         self._lists = {"resources": list(resources), "resourceTemplates": list(templates), "prompts": list(prompts)}
         self._fails = set(fails)
+        self._unknown = set(unknown)
 
     async def _list(self, field):
         if field in self._fails:
             raise RuntimeError(f"cannot list {field}")
+        if field in self._unknown:  # the server implements no such list
+            raise MethodNotFound()
         return SimpleNamespace(**{field: self._lists[field]})
 
     async def list_resources(self):
@@ -86,6 +95,13 @@ async def test_a_declared_kind_with_nothing_in_it_is_not_offered():
 
 async def test_resource_templates_count_as_resources():
     assert await _offered(caps(resources=True), Session(templates=["file://{path}"])) == ["list_resources", "read_resource"]
+
+
+async def test_a_server_without_a_templates_list_and_no_resources_is_offered_none():
+    """A low-level server that implements resources/list only: an empty list, and no templates method."""
+    assert await _offered(caps(resources=True), Session(unknown={"resourceTemplates"})) == []
+    assert await _offered(caps(resources=True), Session(resources=["r"], unknown={"resourceTemplates"})) == [
+        "list_resources", "read_resource"]
 
 
 async def test_a_list_that_cannot_be_read_keeps_its_tools():

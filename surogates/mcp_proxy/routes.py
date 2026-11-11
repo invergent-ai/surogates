@@ -380,7 +380,15 @@ async def _execute_call(
             if utility is not None:
                 # A resource / prompt utility runs as its MCP method
                 # (resources/read, prompts/get, ...), not as tools/call.
-                text = await call_utility(session, utility, arguments)
+                # The server answering with an error (an unknown URI) is the
+                # tool's error, not a transport failure.
+                try:
+                    text = await call_utility(session, utility, arguments)
+                except Exception as exc:  # noqa: BLE001 — answered as the tool's error
+                    return (
+                        json.dumps({"error": _sanitize_error(f"MCP call failed: {type(exc).__name__}: {exc}")}),
+                        _OUTCOME_TOOL_ERROR,
+                    )
                 return text, (_OUTCOME_TOOL_ERROR if _looks_like_error_envelope(text) else _OUTCOME_SUCCESS)
             # The stdio MCP server only knows its own tools by their
             # original (unprefixed) names -- the ``mcp__<server>__``

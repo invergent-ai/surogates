@@ -114,9 +114,6 @@ class PoolEntry:
     # (``list_resources``, ``read_resource``, ``list_prompts``,
     # ``get_prompt``), called as that MCP method, never as ``tools/call``.
     utility_index: dict[str, str] = field(default_factory=dict)
-    # The utility tools of servers that offer no resources / prompts of
-    # that kind: left out of the list unless a session asks for all.
-    idle_utilities: frozenset[str] = frozenset()
 
 
 class ConnectionPool:
@@ -221,9 +218,21 @@ class ConnectionPool:
         ``"all"`` keeps them for every server, as releases before did.
         """
         entry = self._entries.get((org_id, user_id, agent_id))
-        if entry is None or utility_tools == "all" or not entry.idle_utilities:
+        if entry is None or utility_tools == "all" or not entry.utility_index:
             return schemas
-        return [s for s in schemas if s.get("name") not in entry.idle_utilities]
+        # Read from the live connections: a reconnect reads a server's offers anew.
+        with _lock:
+            idle = {
+                name for name, utility in entry.utility_index.items()
+                if not self._offers(entry.tool_index.get(name, ("", ""))[0], utility)
+            }
+        return [s for s in schemas if s.get("name") not in idle]
+
+    @staticmethod
+    def _offers(server_key: str, utility: str) -> bool:
+        """Whether the connected server *server_key* offers what *utility* needs (call under ``_lock``)."""
+        server = _servers.get(server_key)
+        return bool((getattr(server, "offers", None) or {}).get(_UTILITY_OFFER[utility]))
 
     def utility_of(
         self, org_id: UUID, user_id: UUID, agent_id: str, tool_name: str,
@@ -336,7 +345,6 @@ class ConnectionPool:
             clean_schemas: list[dict[str, Any]] = []
             tool_index: dict[str, tuple[str, str]] = {}
             utility_index: dict[str, str] = {}
-            idle_utilities: set[str] = set()
 
             # Per-tenant MCPGovernance — fingerprints are keyed by
             # (server, tool) within this instance, never shared with
@@ -362,7 +370,6 @@ class ConnectionPool:
                 owning_server_key: str | None = None
                 original_tool: str = ""
                 utility: str | None = None
-                offered = True
                 with _lock:
                     for server_key, server in _servers.items():
                         if hasattr(server, "_registered_tool_names") and raw_name in server._registered_tool_names:
@@ -371,8 +378,6 @@ class ConnectionPool:
                             original_tool = raw_name[len(prefix):] if raw_name.startswith(prefix) else raw_name
                             owning_server_key = server_key
                             utility = (getattr(server, "_utility_names", None) or {}).get(raw_name)
-                            if utility is not None:
-                                offered = bool((getattr(server, "offers", None) or {}).get(_UTILITY_OFFER[utility]))
                             break
                 if owning_server_key is not None:
                     # A description the harness wrote (a utility's, or the
@@ -434,8 +439,6 @@ class ConnectionPool:
                     tool_index[clean_name] = (owning_server_key, original_tool)
                 if utility is not None:
                     utility_index[clean_name] = utility
-                    if not offered:
-                        idle_utilities.add(clean_name)
 
             entry = PoolEntry(
                 org_id=org_id,
@@ -450,7 +453,6 @@ class ConnectionPool:
                 sanitized_prefix=tenant_pfx,
                 governance=tenant_governance,
                 utility_index=utility_index,
-                idle_utilities=frozenset(idle_utilities),
             )
             self._entries[key] = entry
 

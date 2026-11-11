@@ -30,6 +30,13 @@ COMPOSIO_TOOL_ROUTER_PREFIXES: tuple[str, ...] = (
 )
 
 
+def utility_tools_mode(config: dict | None) -> str:
+    """What a session asks the proxy for of the MCP resource / prompt tools:
+    ``all`` (every server's, as before; config ``mcp_utility_tools: all``) or
+    ``offered`` (those of servers that have resources / prompts, the default)."""
+    return "all" if (config or {}).get("mcp_utility_tools") == "all" else "offered"
+
+
 def is_composio_router_name(name: str) -> bool:
     """True if *name* is an MCP tool advertised by the Composio tool-router."""
     return name.startswith(COMPOSIO_TOOL_ROUTER_PREFIXES)

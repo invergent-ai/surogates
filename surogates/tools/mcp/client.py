@@ -818,9 +818,9 @@ class MCPServerTask:
     def _make_message_handler(self):
         """Build a ``message_handler`` callback for ``ClientSession``.
 
-        Dispatches on notification type.  ``ToolListChangedNotification``
-        triggers a refresh; a prompt or resource change refreshes the tools
-        when it changes whether the server has any to offer.
+        Dispatches on notification type.  Only ``ToolListChangedNotification``
+        triggers a refresh; prompt and resource change notifications are
+        logged as stubs for future work.
         """
         async def _handler(message):
             try:
@@ -835,14 +835,10 @@ class MCPServerTask:
                                 self.name,
                             )
                             await self._refresh_tools()
-                        case PromptListChangedNotification() | ResourceListChangedNotification():
-                            # The server's resources or prompts changed: offer
-                            # the utility tools anew if it now has, or no
-                            # longer has, any.
-                            before = dict(self.offers)
-                            await self._discover_offers()
-                            if self.offers != before:
-                                await self._refresh_tools()
+                        case PromptListChangedNotification():
+                            logger.debug("MCP server '%s': prompts/list_changed (ignored)", self.name)
+                        case ResourceListChangedNotification():
+                            logger.debug("MCP server '%s': resources/list_changed (ignored)", self.name)
                         case _:
                             pass
             except Exception:
@@ -1018,29 +1014,33 @@ class MCPServerTask:
         templates) is not empty.  Without this the ``read_resource`` /
         ``get_prompt`` tools were offered for every server, since every client
         session has those methods, and a model guessed names a server without
-        resources could never serve.  A list that cannot be read keeps the
-        kind offered, as before.
+        resources could never serve.  Read once per connection (a reconnect
+        reads again; list_changed notifications are not followed).  A list
+        the server does not implement (method not found) holds nothing; one
+        that cannot be read otherwise keeps the kind offered, as before.
         """
         caps = self._server_capabilities
-        offers: dict[str, bool] = {}
-        for kind, listers in _OFFER_LISTERS.items():
+
+        async def offered(kind: str) -> bool:
             if caps is None or getattr(caps, kind, None) is None:
-                offers[kind] = False
-                continue
-            offered = False
-            try:
-                for method, field in listers:
+                return False
+            for method, field in _OFFER_LISTERS[kind]:
+                try:
                     listed = await asyncio.wait_for(
                         getattr(self.session, method)(), timeout=_OFFER_LIST_TIMEOUT,
                     )
-                    if getattr(listed, field, None):
-                        offered = True
-                        break
-            except Exception as exc:
-                logger.debug("MCP server '%s': could not list %s (%s); offering them", self.name, kind, exc)
-                offered = True
-            offers[kind] = offered
-        self.offers = offers
+                except Exception as exc:
+                    if _method_not_found(exc):
+                        continue
+                    logger.debug("MCP server '%s': could not list %s (%s); offering them", self.name, kind, exc)
+                    return True
+                if getattr(listed, field, None):
+                    return True
+            return False
+
+        kinds = list(_OFFER_LISTERS)
+        results = await asyncio.gather(*(offered(kind) for kind in kinds))
+        self.offers = dict(zip(kinds, results))
 
     async def run(self, config: dict):
         """Long-lived coroutine: connect, discover tools, wait, disconnect.
@@ -1595,6 +1595,15 @@ _OFFER_LISTERS = {
 
 #: How long one list call may take while a server's offers are found out.
 _OFFER_LIST_TIMEOUT = 10.0
+
+#: JSON-RPC "method not found": the server implements no such list.
+_METHOD_NOT_FOUND = -32601
+
+
+def _method_not_found(exc: BaseException) -> bool:
+    """Whether an MCP call failed because the server has no such method."""
+    error = getattr(exc, "error", None)
+    return getattr(error, "code", None) == _METHOD_NOT_FOUND
 
 
 def _build_utility_schemas(server_name: str) -> List[dict]:

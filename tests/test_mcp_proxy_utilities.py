@@ -15,7 +15,7 @@ import pytest
 from surogates.mcp_proxy import pool as pool_module
 from surogates.mcp_proxy import routes as routes_module
 from surogates.mcp_proxy.pool import ConnectionPool
-from surogates.orchestrator.mcp_client import McpProxyClient
+from surogates.orchestrator.mcp_client import McpProxyClient, utility_tools_mode
 from surogates.tools.mcp import client as mcp_client
 from surogates.tools.mcp.client import MCPServerTask
 from surogates.tools.registry import ToolRegistry
@@ -124,9 +124,21 @@ async def test_descriptions_name_the_server_not_its_tenant_key(connected):
     assert lookup["description"] == "MCP tool lookup from world"
 
 
+async def test_a_reconnect_that_finds_resources_shows_their_tools(connected):
+    """Visibility follows the connected server's offers, read anew at each connection."""
+    pool = ConnectionPool()
+    tenant, schemas = await _connect(pool)
+    key = next(k for k in mcp_client._servers if k.endswith("__world"))
+    mcp_client._servers[key].offers = {"resources": True, "prompts": False}
+    seen = {s["name"] for s in pool.visible_schemas(*tenant, schemas)}
+    assert {"mcp__world__list_resources", "mcp__world__read_resource"} <= seen
+
+
 async def test_a_resource_is_read_with_resources_read_not_tools_call(connected):
     pool = ConnectionPool()
     tenant, _ = await _connect(pool)
+    assert pool.utility_of(*tenant, "mcp__docs__read_resource") == "read_resource"
+    assert pool.utility_of(*tenant, "mcp__world__lookup") is None
     answer = await pool.call_tool(*tenant, "mcp__docs__read_resource", {"uri": "rules://world"})
     assert json.loads(answer) == {"result": "the rules"}
     assert connected["docs"].asked == [("resources/read", "rules://world")]
@@ -157,6 +169,35 @@ async def test_a_stdio_servers_prompt_is_got_with_prompts_get_in_its_call_sandbo
     assert session.asked == [("prompts/get", "brief")]
     assert json.loads(text)["messages"] == [{"role": "user", "content": "brief me"}]
     assert outcome == "success"
+
+
+async def test_a_stdio_servers_error_answer_is_the_tools_error_not_a_transport_failure(monkeypatch):
+    class Unknown(Session):
+        async def read_resource(self, uri):
+            raise RuntimeError("Unknown resource: ws_rules.md")
+
+    class Sandbox:
+        def __init__(self, **kwargs):
+            pass
+
+        @asynccontextmanager
+        async def mcp_session(self):
+            yield Unknown()
+
+    monkeypatch.setattr(routes_module, "MCPCallSandbox", Sandbox)
+    text, outcome = await routes_module._execute_call(
+        pool=SimpleNamespace(utility_of=lambda *args: "read_resource"), org_id=uuid4(), user_id=uuid4(),
+        agent_id="a", server_config={"transport": "stdio", "command": "srv"},
+        clean_tool_name="mcp__docs__read_resource", original_tool="read_resource",
+        arguments={"uri": "ws_rules.md"}, meta=None,
+    )
+    assert outcome == "tool_error" and "Unknown resource" in json.loads(text)["error"]
+
+
+@pytest.mark.parametrize("config, mode", [(None, "offered"), ({}, "offered"), ({"mcp_utility_tools": "all"}, "all"),
+                                          ({"mcp_utility_tools": "everything"}, "offered")])
+def test_a_sessions_config_picks_the_mode(config, mode):
+    assert utility_tools_mode(config) == mode
 
 
 @pytest.mark.parametrize("mode, sent", [("offered", None), ("all", "all")])

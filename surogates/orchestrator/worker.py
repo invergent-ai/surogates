@@ -1557,7 +1557,7 @@ async def run_worker(settings: Settings) -> None:
             "tools.  Set ``mcp_proxy_url`` in the worker config (see "
             "k8s/surogates-runtime/production/30-runtime-configmap.yaml).",
         )
-    from surogates.orchestrator.mcp_client import McpProxyClient
+    from surogates.orchestrator.mcp_client import McpProxyClient, utility_tools_mode
 
     mcp_proxy_client = McpProxyClient(
         base_url=settings.mcp_proxy_url,
@@ -1732,10 +1732,7 @@ async def run_worker(settings: Settings) -> None:
                             cache_ttl=300 if session.channel in REALTIME_CHANNELS else 0,
                             # ``all``: every server's resource / prompt tools,
                             # whether it has any (as before); for comparing.
-                            utility_tools=(
-                                "all" if (session.config or {}).get("mcp_utility_tools") == "all"
-                                else "offered"
-                            ),
+                            utility_tools=utility_tools_mode(session.config),
                         )
                     )
                     composio_mcp_tools = mcp_proxy_client.composio_tool_names_for_agent(
