@@ -1730,6 +1730,12 @@ async def run_worker(settings: Settings) -> None:
                             is_service_account=is_service_account,
                             # a call wakes once per caller turn; reuse its tool list
                             cache_ttl=300 if session.channel in REALTIME_CHANNELS else 0,
+                            # ``all``: every server's resource / prompt tools,
+                            # whether it has any (as before); for comparing.
+                            utility_tools=(
+                                "all" if (session.config or {}).get("mcp_utility_tools") == "all"
+                                else "offered"
+                            ),
                         )
                     )
                     composio_mcp_tools = mcp_proxy_client.composio_tool_names_for_agent(

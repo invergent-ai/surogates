@@ -69,8 +69,12 @@ class McpProxyClient:
         agent_id: str,
         is_service_account: bool = False,
         cache_ttl: float = 0,
+        utility_tools: str = "offered",
     ) -> list[str]:
         """Discover *agent_id*'s MCP tools via the proxy and register them.
+
+        ``utility_tools`` is ``offered`` (a server's resource / prompt tools
+        only when it has resources / prompts) or ``all`` (for every server).
 
         Returns the FULL set of MCP tool names available to *agent_id*
         (not just names registered on this call), so the caller can
@@ -98,10 +102,13 @@ class McpProxyClient:
         headers = {"Authorization": f"Bearer {token}"}
         known = self._discovered_by_agent.setdefault(agent_id, set())
 
+        params = {"agent_id": agent_id}
+        if utility_tools != "offered":
+            params["utility_tools"] = utility_tools
         resp = await self._client.post(
             "/mcp/v1/tools/list",
             headers=headers,
-            params={"agent_id": agent_id},
+            params=params,
         )
         if resp.status_code != 200:
             logger.warning(

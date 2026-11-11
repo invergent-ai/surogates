@@ -32,9 +32,11 @@ from surogates.mcp_proxy.loader import (
 )
 from surogates.tools.mcp.client import (
     _MCP_AVAILABLE,
+    _UTILITY_OFFER,
     _lock,
     _servers,
     _sanitize_error,
+    call_utility,
     discover_mcp_tools,
     sanitize_mcp_name_component,
 )
@@ -108,6 +110,13 @@ class PoolEntry:
     sanitized_prefix: str = ""
     last_used: float = field(default_factory=time.monotonic)
     governance: MCPGovernance | None = None
+    # The MCP utility tools among the clean names: name -> what it runs
+    # (``list_resources``, ``read_resource``, ``list_prompts``,
+    # ``get_prompt``), called as that MCP method, never as ``tools/call``.
+    utility_index: dict[str, str] = field(default_factory=dict)
+    # The utility tools of servers that offer no resources / prompts of
+    # that kind: left out of the list unless a session asks for all.
+    idle_utilities: frozenset[str] = frozenset()
 
 
 class ConnectionPool:
@@ -201,6 +210,28 @@ class ConnectionPool:
         entry.last_used = time.monotonic()
         return entry.tool_schemas
 
+    def visible_schemas(
+        self, org_id: UUID, user_id: UUID, agent_id: str,
+        schemas: list[dict[str, Any]], *, utility_tools: str = "offered",
+    ) -> list[dict[str, Any]]:
+        """*schemas* as a session sees them.
+
+        ``utility_tools="offered"`` (the default) leaves out the resource /
+        prompt tools of servers that have no resources / prompts;
+        ``"all"`` keeps them for every server, as releases before did.
+        """
+        entry = self._entries.get((org_id, user_id, agent_id))
+        if entry is None or utility_tools == "all" or not entry.idle_utilities:
+            return schemas
+        return [s for s in schemas if s.get("name") not in entry.idle_utilities]
+
+    def utility_of(
+        self, org_id: UUID, user_id: UUID, agent_id: str, tool_name: str,
+    ) -> str | None:
+        """The MCP utility a clean tool name runs, or None for a server's own tool."""
+        entry = self._entries.get((org_id, user_id, agent_id))
+        return None if entry is None else entry.utility_index.get(tool_name)
+
     def resolve_call_target(
         self, org_id: UUID, user_id: UUID, agent_id: str, tool_name: str,
     ) -> tuple[str, str, dict[str, Any]] | None:
@@ -266,12 +297,15 @@ class ConnectionPool:
                 entry.last_used = time.monotonic()
                 return entry.tool_schemas
 
-            # Prefix each server name for tenant isolation.
+            # Prefix each server name for tenant isolation.  The resource /
+            # prompt utility tools are registered for every server here, and
+            # those a server does not offer are marked, so each session can
+            # be shown what it asks for (``visible_schemas``).
             prefixed: dict[str, dict[str, Any]] = {}
             original_names: list[str] = []
             for name, cfg in configs.items():
                 pname = _prefixed_name(org_id, user_id, agent_id, name)
-                prefixed[pname] = cfg
+                prefixed[pname] = {**cfg, "tools": {**(cfg.get("tools") or {}), "utilities": "all"}}
                 original_names.append(name)
 
             from surogates.tools.registry import ToolRegistry
@@ -301,6 +335,8 @@ class ConnectionPool:
             )
             clean_schemas: list[dict[str, Any]] = []
             tool_index: dict[str, tuple[str, str]] = {}
+            utility_index: dict[str, str] = {}
+            idle_utilities: set[str] = set()
 
             # Per-tenant MCPGovernance — fingerprints are keyed by
             # (server, tool) within this instance, never shared with
@@ -325,6 +361,8 @@ class ConnectionPool:
                 # Find which prefixed server owns this tool.
                 owning_server_key: str | None = None
                 original_tool: str = ""
+                utility: str | None = None
+                offered = True
                 with _lock:
                     for server_key, server in _servers.items():
                         if hasattr(server, "_registered_tool_names") and raw_name in server._registered_tool_names:
@@ -332,7 +370,18 @@ class ConnectionPool:
                             prefix = f"mcp__{safe_key}__"
                             original_tool = raw_name[len(prefix):] if raw_name.startswith(prefix) else raw_name
                             owning_server_key = server_key
+                            utility = (getattr(server, "_utility_names", None) or {}).get(raw_name)
+                            if utility is not None:
+                                offered = bool((getattr(server, "offers", None) or {}).get(_UTILITY_OFFER[utility]))
                             break
+                if owning_server_key is not None:
+                    # A description the harness wrote (a utility's, or the
+                    # stand-in for a tool the server left undescribed) names
+                    # the server by the name the agent knows, not by the
+                    # tenant-scoped key with its org / user / agent ids.
+                    expected = f"{_tenant_prefix(org_id, user_id, agent_id)}__"
+                    plain = owning_server_key[len(expected):] if owning_server_key.startswith(expected) else owning_server_key
+                    clean["description"] = str(clean.get("description", "")).replace(owning_server_key, plain)
 
                 # Governance scan — run before adding the tool to the
                 # advertised schema set so unsafe tools never reach the
@@ -383,6 +432,10 @@ class ConnectionPool:
                 clean_schemas.append(clean)
                 if owning_server_key is not None:
                     tool_index[clean_name] = (owning_server_key, original_tool)
+                if utility is not None:
+                    utility_index[clean_name] = utility
+                    if not offered:
+                        idle_utilities.add(clean_name)
 
             entry = PoolEntry(
                 org_id=org_id,
@@ -396,6 +449,8 @@ class ConnectionPool:
                 },
                 sanitized_prefix=tenant_pfx,
                 governance=tenant_governance,
+                utility_index=utility_index,
+                idle_utilities=frozenset(idle_utilities),
             )
             self._entries[key] = entry
 
@@ -544,9 +599,38 @@ class ConnectionPool:
                 "error": f"MCP server for tool '{tool_name}' is not connected.",
             })
 
+        utility = entry.utility_index.get(tool_name)
+        if utility is not None:
+            return await self._execute_utility_call(server, utility, arguments)
         return await self._execute_tool_call(
             server, original_tool, arguments, meta=meta,
         )
+
+    @staticmethod
+    async def _execute_utility_call(server: Any, utility: str, arguments: dict[str, Any]) -> str:
+        """Run an MCP utility (resources / prompts) on the server's long-lived session.
+
+        As its MCP method (``resources/read``, ``prompts/get``, ...): a
+        ``tools/call`` of ``read_resource`` reaches no server's resources.
+        Bridged to the MCP loop as :meth:`_execute_tool_call` is.
+        """
+        from surogates.tools.mcp import client as _mcp_client_module
+
+        try:
+            coro = call_utility(server.session, utility, arguments)
+            loop = _mcp_client_module._mcp_loop  # type: ignore[attr-defined]
+            if loop is None or not loop.is_running():
+                return await coro
+            future = asyncio.run_coroutine_threadsafe(coro, loop)
+            try:
+                return await asyncio.wrap_future(future)
+            except BaseException:
+                future.cancel()
+                raise
+        except Exception as exc:
+            return json.dumps({
+                "error": _sanitize_error(f"MCP call failed: {type(exc).__name__}: {exc}"),
+            })
 
     @staticmethod
     async def _execute_tool_call(

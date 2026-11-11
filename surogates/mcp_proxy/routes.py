@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
@@ -30,7 +30,7 @@ from surogates.runtime import (
     agent_runtime_context_dep,
     rate_limit_dep,
 )
-from surogates.tools.mcp.client import _sanitize_error
+from surogates.tools.mcp.client import _sanitize_error, call_utility
 
 logger = logging.getLogger(__name__)
 
@@ -154,14 +154,23 @@ async def list_tools(
     request: Request,
     auth: ProxyAuthContext = Depends(get_proxy_auth),
     ctx: AgentRuntimeContext = Depends(agent_runtime_context_dep),
+    utility_tools: Literal["offered", "all"] = "offered",
 ) -> ToolListResponse:
-    """Discover the MCP tools available to the requesting agent."""
+    """Discover the MCP tools available to the requesting agent.
+
+    A server's resource / prompt tools are listed when it has resources /
+    prompts (``utility_tools=offered``, the default), or for every server
+    (``all``, as before: a session's ``mcp_utility_tools`` asks for it).
+    """
     _bind_agent(auth, ctx)
     pool: ConnectionPool = request.app.state.pool
     schemas = await _ensure_tenant_connected(
         pool, auth, request,
         agent_id=ctx.agent_id,
         allowed_ids=frozenset(ctx.mcp_server_ids),
+    )
+    schemas = pool.visible_schemas(
+        auth.org_id, auth.user_id, ctx.agent_id, schemas, utility_tools=utility_tools,
     )
 
     return ToolListResponse(
@@ -364,9 +373,15 @@ async def _execute_call(
         args=list(server_config.get("args", []) or []),
         env=dict(server_config.get("env", {}) or {}),
     )
+    utility = pool.utility_of(org_id, user_id, agent_id, clean_tool_name)
 
     try:
         async with sandbox.mcp_session() as session:
+            if utility is not None:
+                # A resource / prompt utility runs as its MCP method
+                # (resources/read, prompts/get, ...), not as tools/call.
+                text = await call_utility(session, utility, arguments)
+                return text, (_OUTCOME_TOOL_ERROR if _looks_like_error_envelope(text) else _OUTCOME_SUCCESS)
             # The stdio MCP server only knows its own tools by their
             # original (unprefixed) names -- the ``mcp__<server>__``
             # prefix is a proxy-side namespace marker, not part of the

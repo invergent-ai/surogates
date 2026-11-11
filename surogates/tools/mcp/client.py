@@ -741,6 +741,7 @@ class MCPServerTask:
         "_circuit_open_until", "_circuit_failure_threshold",
         "_circuit_cooldown_seconds", "_auth_recovery_lock",
         "_last_auth_recovery_at", "_server_capabilities", "offers",
+        "_utility_names",
     )
 
     def __init__(self, name: str):
@@ -770,6 +771,9 @@ class MCPServerTask:
         # utility tools are offered to the model only for what it has.
         self._server_capabilities: Optional[Any] = None
         self.offers: dict[str, bool] = {}
+        # The utility tools registered for this server: registered name ->
+        # what it does (``list_resources``, ``read_resource``, ...).
+        self._utility_names: dict[str, str] = {}
 
     def _is_http(self) -> bool:
         """Check if this server uses HTTP transport."""
@@ -1370,188 +1374,128 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
     return _handler
 
 
-def _make_list_resources_handler(server_name: str, tool_timeout: float):
-    """Return a sync handler that lists resources from an MCP server."""
+async def call_utility(session: Any, handler_key: str, args: dict) -> str:
+    """Run one MCP utility (``list_resources``, ``read_resource``, ``list_prompts``,
+    ``get_prompt``) on *session* with the tool-call *args*; the result as JSON.
 
-    def _handler(args: dict, **kwargs) -> str:
-        with _lock:
-            server = _servers.get(server_name)
-        if not server or not server.session:
-            return json.dumps({
-                "error": f"MCP server '{server_name}' is not connected"
-            })
+    The MCP methods themselves (``resources/list``, ``resources/read``,
+    ``prompts/list``, ``prompts/get``), never ``tools/call``.  Shared by the
+    in-process handlers and the MCP proxy.  A missing argument is answered
+    with an error; a failing call raises.
+    """
+    if handler_key == "list_resources":
+        result = await session.list_resources()
+        resources = []
+        for r in (result.resources if hasattr(result, "resources") else []):
+            entry = {}
+            if hasattr(r, "uri"):
+                entry["uri"] = str(r.uri)
+            if hasattr(r, "name"):
+                entry["name"] = r.name
+            if hasattr(r, "description") and r.description:
+                entry["description"] = r.description
+            if hasattr(r, "mimeType") and r.mimeType:
+                entry["mimeType"] = r.mimeType
+            resources.append(entry)
+        return json.dumps({"resources": resources})
 
-        async def _call():
-            result = await server.session.list_resources()
-            resources = []
-            for r in (result.resources if hasattr(result, "resources") else []):
-                entry = {}
-                if hasattr(r, "uri"):
-                    entry["uri"] = str(r.uri)
-                if hasattr(r, "name"):
-                    entry["name"] = r.name
-                if hasattr(r, "description") and r.description:
-                    entry["description"] = r.description
-                if hasattr(r, "mimeType") and r.mimeType:
-                    entry["mimeType"] = r.mimeType
-                resources.append(entry)
-            return json.dumps({"resources": resources})
-
-        try:
-            return _run_on_mcp_loop(_call(), timeout=tool_timeout)
-        except Exception as exc:
-            logger.error(
-                "MCP %s/list_resources failed: %s", server_name, exc,
-            )
-            return json.dumps({
-                "error": _sanitize_error(
-                    f"MCP call failed: {type(exc).__name__}: {exc}"
-                )
-            })
-
-    return _handler
-
-
-def _make_read_resource_handler(server_name: str, tool_timeout: float):
-    """Return a sync handler that reads a resource by URI from an MCP server."""
-
-    def _handler(args: dict, **kwargs) -> str:
-        with _lock:
-            server = _servers.get(server_name)
-        if not server or not server.session:
-            return json.dumps({
-                "error": f"MCP server '{server_name}' is not connected"
-            })
-
+    if handler_key == "read_resource":
         uri = args.get("uri")
         if not uri:
             return json.dumps({"error": "Missing required parameter 'uri'"})
+        result = await session.read_resource(uri)
+        # read_resource returns ReadResourceResult with .contents list
+        parts: List[str] = []
+        contents = result.contents if hasattr(result, "contents") else []
+        for block in contents:
+            if hasattr(block, "text"):
+                parts.append(block.text)
+            elif hasattr(block, "blob"):
+                parts.append(f"[binary data, {len(block.blob)} bytes]")
+        return json.dumps({"result": "\n".join(parts) if parts else ""})
 
-        async def _call():
-            result = await server.session.read_resource(uri)
-            # read_resource returns ReadResourceResult with .contents list
-            parts: List[str] = []
-            contents = result.contents if hasattr(result, "contents") else []
-            for block in contents:
-                if hasattr(block, "text"):
-                    parts.append(block.text)
-                elif hasattr(block, "blob"):
-                    parts.append(f"[binary data, {len(block.blob)} bytes]")
-            return json.dumps({"result": "\n".join(parts) if parts else ""})
+    if handler_key == "list_prompts":
+        result = await session.list_prompts()
+        prompts = []
+        for p in (result.prompts if hasattr(result, "prompts") else []):
+            entry = {}
+            if hasattr(p, "name"):
+                entry["name"] = p.name
+            if hasattr(p, "description") and p.description:
+                entry["description"] = p.description
+            if hasattr(p, "arguments") and p.arguments:
+                entry["arguments"] = [
+                    {
+                        "name": a.name,
+                        **({"description": a.description} if hasattr(a, "description") and a.description else {}),
+                        **({"required": a.required} if hasattr(a, "required") else {}),
+                    }
+                    for a in p.arguments
+                ]
+            prompts.append(entry)
+        return json.dumps({"prompts": prompts})
 
-        try:
-            return _run_on_mcp_loop(_call(), timeout=tool_timeout)
-        except Exception as exc:
-            logger.error(
-                "MCP %s/read_resource failed: %s", server_name, exc,
-            )
-            return json.dumps({
-                "error": _sanitize_error(
-                    f"MCP call failed: {type(exc).__name__}: {exc}"
-                )
-            })
-
-    return _handler
-
-
-def _make_list_prompts_handler(server_name: str, tool_timeout: float):
-    """Return a sync handler that lists prompts from an MCP server."""
-
-    def _handler(args: dict, **kwargs) -> str:
-        with _lock:
-            server = _servers.get(server_name)
-        if not server or not server.session:
-            return json.dumps({
-                "error": f"MCP server '{server_name}' is not connected"
-            })
-
-        async def _call():
-            result = await server.session.list_prompts()
-            prompts = []
-            for p in (result.prompts if hasattr(result, "prompts") else []):
-                entry = {}
-                if hasattr(p, "name"):
-                    entry["name"] = p.name
-                if hasattr(p, "description") and p.description:
-                    entry["description"] = p.description
-                if hasattr(p, "arguments") and p.arguments:
-                    entry["arguments"] = [
-                        {
-                            "name": a.name,
-                            **({"description": a.description} if hasattr(a, "description") and a.description else {}),
-                            **({"required": a.required} if hasattr(a, "required") else {}),
-                        }
-                        for a in p.arguments
-                    ]
-                prompts.append(entry)
-            return json.dumps({"prompts": prompts})
-
-        try:
-            return _run_on_mcp_loop(_call(), timeout=tool_timeout)
-        except Exception as exc:
-            logger.error(
-                "MCP %s/list_prompts failed: %s", server_name, exc,
-            )
-            return json.dumps({
-                "error": _sanitize_error(
-                    f"MCP call failed: {type(exc).__name__}: {exc}"
-                )
-            })
-
-    return _handler
-
-
-def _make_get_prompt_handler(server_name: str, tool_timeout: float):
-    """Return a sync handler that gets a prompt by name from an MCP server."""
-
-    def _handler(args: dict, **kwargs) -> str:
-        with _lock:
-            server = _servers.get(server_name)
-        if not server or not server.session:
-            return json.dumps({
-                "error": f"MCP server '{server_name}' is not connected"
-            })
-
+    if handler_key == "get_prompt":
         name = args.get("name")
         if not name:
             return json.dumps({"error": "Missing required parameter 'name'"})
         arguments = args.get("arguments", {})
+        result = await session.get_prompt(name, arguments=arguments)
+        # GetPromptResult has .messages list
+        messages = []
+        for msg in (result.messages if hasattr(result, "messages") else []):
+            entry = {}
+            if hasattr(msg, "role"):
+                entry["role"] = msg.role
+            if hasattr(msg, "content"):
+                content = msg.content
+                if hasattr(content, "text"):
+                    entry["content"] = content.text
+                elif isinstance(content, str):
+                    entry["content"] = content
+                else:
+                    entry["content"] = str(content)
+            messages.append(entry)
+        resp = {"messages": messages}
+        if hasattr(result, "description") and result.description:
+            resp["description"] = result.description
+        return json.dumps(resp)
 
-        async def _call():
-            result = await server.session.get_prompt(name, arguments=arguments)
-            # GetPromptResult has .messages list
-            messages = []
-            for msg in (result.messages if hasattr(result, "messages") else []):
-                entry = {}
-                if hasattr(msg, "role"):
-                    entry["role"] = msg.role
-                if hasattr(msg, "content"):
-                    content = msg.content
-                    if hasattr(content, "text"):
-                        entry["content"] = content.text
-                    elif isinstance(content, str):
-                        entry["content"] = content
-                    else:
-                        entry["content"] = str(content)
-                messages.append(entry)
-            resp = {"messages": messages}
-            if hasattr(result, "description") and result.description:
-                resp["description"] = result.description
-            return json.dumps(resp)
+    raise ValueError(f"unknown MCP utility {handler_key!r}")
 
-        try:
-            return _run_on_mcp_loop(_call(), timeout=tool_timeout)
-        except Exception as exc:
-            logger.error(
-                "MCP %s/get_prompt failed: %s", server_name, exc,
-            )
-            return json.dumps({
-                "error": _sanitize_error(
-                    f"MCP call failed: {type(exc).__name__}: {exc}"
+
+def _make_utility_handler(handler_key: str):
+    """The factory of the in-process handler for one MCP utility."""
+
+    def factory(server_name: str, tool_timeout: float):
+        def _handler(args: dict, **kwargs) -> str:
+            with _lock:
+                server = _servers.get(server_name)
+            if not server or not server.session:
+                return json.dumps({
+                    "error": f"MCP server '{server_name}' is not connected"
+                })
+            try:
+                return _run_on_mcp_loop(call_utility(server.session, handler_key, args), timeout=tool_timeout)
+            except Exception as exc:
+                logger.error(
+                    "MCP %s/%s failed: %s", server_name, handler_key, exc,
                 )
-            })
+                return json.dumps({
+                    "error": _sanitize_error(
+                        f"MCP call failed: {type(exc).__name__}: {exc}"
+                    )
+                })
 
-    return _handler
+        return _handler
+
+    return factory
+
+
+_make_list_resources_handler = _make_utility_handler("list_resources")
+_make_read_resource_handler = _make_utility_handler("read_resource")
+_make_list_prompts_handler = _make_utility_handler("list_prompts")
+_make_get_prompt_handler = _make_utility_handler("get_prompt")
 
 
 # ---------------------------------------------------------------------------
@@ -1728,6 +1672,9 @@ def _select_utility_schemas(server_name: str, server: MCPServerTask, config: dic
     tools_filter = config.get("tools") or {}
     resources_enabled = _parse_boolish(tools_filter.get("resources"), default=True)
     prompts_enabled = _parse_boolish(tools_filter.get("prompts"), default=True)
+    # ``utilities: all`` registers them whatever the server offers (the MCP
+    # proxy does, and marks which a server does not offer).
+    every_server = tools_filter.get("utilities") == "all"
 
     selected: List[dict] = []
     for entry in _build_utility_schemas(server_name):
@@ -1749,7 +1696,7 @@ def _select_utility_schemas(server_name: str, server: MCPServerTask, config: dic
             )
             continue
         kind = _UTILITY_OFFER[handler_key]
-        if not getattr(server, "offers", {}).get(kind, False):
+        if not every_server and not getattr(server, "offers", {}).get(kind, False):
             logger.debug(
                 "MCP server '%s': skipping utility '%s' (it offers no %s)",
                 server_name,
@@ -1839,6 +1786,7 @@ def _register_server_tools(
         "list_prompts": _make_list_prompts_handler,
         "get_prompt": _make_get_prompt_handler,
     }
+    server._utility_names = {}
     for entry in _select_utility_schemas(name, server, config):
         schema_dict = entry["schema"]
         handler_key = entry["handler_key"]
@@ -1866,6 +1814,7 @@ def _register_server_tools(
             is_async=False,
         )
         registered_names.append(util_name)
+        server._utility_names[util_name] = handler_key
 
     return registered_names
 
