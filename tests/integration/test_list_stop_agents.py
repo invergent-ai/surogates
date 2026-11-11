@@ -235,3 +235,25 @@ async def test_a_users_pause_during_an_agents_stop_brings_no_second_notice(chats
     assert await chats.status(child.id) == "paused"
     notes = await chats.store.get_events(chat, types=[EventType.AGENT_NOTIFICATION])
     assert [n.data["status"] for n in notes] == ["killed"]
+
+
+async def test_an_agents_stop_counts_for_the_run_until_the_session_is_resumed():
+    from types import SimpleNamespace
+
+    from surogates.harness.subagents import stopped_by_an_agent_this_run
+
+    class Store:
+        def __init__(self, events):
+            self.events = events
+
+        async def get_events(self, session_id, types=None):
+            return [e for e in self.events if types is None or e.type in {t.value for t in types}]
+
+    def event(kind, **data):
+        return SimpleNamespace(type=kind.value, data=data)
+
+    agents_stop, users_pause = event(EventType.SESSION_PAUSE, stopped_by="a-1"), event(EventType.SESSION_PAUSE)
+    resume = event(EventType.SESSION_RESUME)
+    assert await stopped_by_an_agent_this_run(Store([agents_stop, users_pause]), None)
+    assert not await stopped_by_an_agent_this_run(Store([agents_stop, resume, users_pause]), None)
+    assert not await stopped_by_an_agent_this_run(Store([users_pause]), None)
