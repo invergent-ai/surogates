@@ -100,10 +100,23 @@ class DockerSandbox:
         self._entries: dict[str, _Entry] = {}
         self._next_offset = 0
         self._lock = asyncio.Lock()
+        #: This worker, on its containers' ``surogates.worker`` label, and who says whether another worker lives
+        #: (``claim_as``).  Unset: one worker, whose sweeps of a session take all its containers.
+        self._worker: str | None = None
+        self._worker_alive: Any = None
 
     # ------------------------------------------------------------------
     # Sandbox protocol
     # ------------------------------------------------------------------
+
+    def claim_as(self, worker: str, alive: Any) -> None:
+        """Label this worker's containers *worker*; a sweep of a session's containers (at a provision, or a turn's
+        end) then spares those of another worker *alive* (an async callable of a worker's label) says lives.
+
+        With several workers, a session's turns, and its sub-agents', run on any of them, each in that worker's
+        own container for the session: a sweep by one must never take another's container in mid-task.
+        """
+        self._worker, self._worker_alive = worker, alive
 
     async def provision(self, spec: SandboxSpec) -> str:
         if "PROJECT_DIR" in spec.env:
@@ -115,7 +128,7 @@ class DockerSandbox:
         token = secrets.token_urlsafe(32)
 
         # Reap stale containers left by a previous worker for this root
-        # session before claiming a new one.
+        # session before claiming a new one: a live worker's are its own.
         if spec.session_id:
             await self.destroy_for_session(spec.session_id)
 
@@ -151,6 +164,8 @@ class DockerSandbox:
             ]
             if spec.session_id:
                 args += ["--label", f"surogates.session_id={spec.session_id}"]
+            if self._worker:
+                args += ["--label", f"surogates.worker={self._worker}"]
             if mode == "s3fs":
                 # geesefs needs FUSE inside the container.
                 args += [
@@ -272,6 +287,9 @@ class DockerSandbox:
             )
             return
         for container_id in stdout.decode().split():
+            if not await self._sweepable(container_id):
+                # Another worker's, that lives: a turn of the session, or of one of its sub-agents, runs in it.
+                continue
             # Drop any in-memory entry pointing at this container.
             for sid, entry in list(self._entries.items()):
                 if entry.container_id == container_id:
@@ -282,6 +300,25 @@ class DockerSandbox:
                 "Destroyed sandbox container %s for session %s",
                 container_id, session_id,
             )
+
+    async def _sweepable(self, container_id: str) -> bool:
+        """Whether a sweep of its session may take *container_id*: this worker's, one of no worker's, or one of
+        a worker that is gone.  Unsure, it is spared."""
+        if self._worker is None:
+            return True
+        code, stdout, _ = await self._docker.run(
+            ["inspect", "--format", '{{index .Config.Labels "surogates.worker"}}', container_id],
+        )
+        if code != 0:
+            return True  # gone already
+        owner = stdout.decode().strip()
+        if not owner or owner == "<no value>" or owner == self._worker:
+            return True
+        try:
+            return not await self._worker_alive(owner)
+        except Exception:
+            logger.warning("Could not tell whether worker %s lives; its container %s is spared", owner, container_id)
+            return False
 
     async def aclose(self) -> None:
         await self._client.aclose()

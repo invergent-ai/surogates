@@ -115,15 +115,15 @@ async def test_a_stop_from_another_session_is_refused_on_every_worker(api, two_w
     assert json.loads(await agents_module._list_agents_handler({}, **second.tool_kwargs(stranger)))["background_commands"] == []
 
 
-async def test_a_turn_end_on_another_worker_leaves_the_held_sandbox_alone(api, two_workers):  # noqa: F811
+async def test_each_worker_knows_whether_another_lives(api, two_workers):  # noqa: F811
     first, second = two_workers
     chat = await a_session(api)
-    await first.starts(chat, "sleep 3")
-    assert first.watch.holds(str(chat))
-    # The second worker holds nothing of the session's: its turn end takes down its own sandbox, and only that.
-    assert not second.watch.holds(str(chat))
-    assert await second.watch.held_elsewhere(str(chat))
-    assert not await first.watch.held_elsewhere(str(chat))
+    await first.starts(chat, "sleep 1")
+    # The heartbeat the Docker backend asks before it sweeps a session's containers (``DockerSandbox.claim_as``).
+    assert await second.watch.worker_alive(first.watch.id)
+    await first.watch.close()
+    assert not await second.watch.worker_alive(first.watch.id)
+    assert await second.watch.worker_alive(second.watch.id)
 
 
 async def test_a_sessions_monitors_are_counted_and_rated_on_every_worker(api, two_workers, monkeypatch):  # noqa: F811

@@ -31,11 +31,12 @@ One watch per worker process; the watches of all workers share their state
 in Redis (``_Shared``).  The watch that started a command reads it to its end:
 the executor's token of the sandbox it runs in is that worker's alone.  A later
 turn of the session on another worker sees it all the same: ``list_agents``
-lists it, ``stop_agent`` asks its watch to kill it, the monitors' count and
-rate are the session's, and that worker's turn end leaves the sandbox the
-first one holds alone.  A worker that dies stops renewing its heartbeat; the
-next sweep of another worker's watch tells each session it watched that its
-command can no longer be watched.
+lists it, ``stop_agent`` asks its watch to kill it, and the monitors' count and
+rate are the session's.  A worker that dies stops renewing its heartbeat
+(``alive``, which also tells the Docker backend whose sandboxes a sweep of a
+session's containers must spare: ``DockerSandbox.claim_as``); the next sweep
+of another worker's watch tells each session it watched that its command can
+no longer be watched.
 """
 
 from __future__ import annotations
@@ -88,11 +89,9 @@ _STOPPED = ("paused", "archived")
 #: The Redis keys the watches of all workers share (``_Shared``).
 SHARED_PREFIX = "surogates:bgwatch"
 #: Seconds a watch's heartbeat lives: it renews it at every poll and sweep.
-ALIVE_SECONDS = 30
+ALIVE_SECONDS = 60
 #: Seconds between two sweeps for the commands of a watch whose worker is gone.
 SWEEP_SECONDS = 15.0
-#: Seconds a watch's hold of a sandbox stands unless it renews it.
-HOLD_SECONDS = 60.0
 #: Why a session hears that a command another worker watched cannot be watched any more.
 WATCH_LOST = "the worker that watched it stopped; it may still be running"
 
@@ -257,9 +256,9 @@ class _Shared:
     watch's alone (one worker).
 
     Keys, under ``SHARED_PREFIX``: ``cmd:<proc>`` (a watched command: its sandbox key, session, command, monitor
-    description, and the watch that reads it), ``session:<id>`` and ``all`` (sets of commands), ``holds:<owner>``
-    (watch -> when it last renewed its hold of that sandbox), ``alive:<watch>`` (its heartbeat), ``stop:<watch>``
-    (commands another worker asked it to stop), ``rate:<session>`` (its monitor notes of the last minute).
+    description, and the watch that reads it), ``session:<id>`` and ``all`` (sets of commands), ``alive:<watch>``
+    (its heartbeat), ``stop:<watch>`` (commands another worker asked it to stop), ``rate:<session>`` (its monitor
+    notes of the last minute).
     """
 
     def __init__(self, redis: Any, me: str) -> None:
@@ -321,33 +320,16 @@ class _Shared:
         if self.redis is not None:
             await self.redis.delete(self.key("alive", self.me))
 
-    async def hold(self, owner: str) -> None:
-        if self.redis is not None:
-            await self.redis.hset(self.key("holds", owner), self.me, str(time.time()))
-            await self.redis.expire(self.key("holds", owner), int(HOLD_SECONDS * 2))
-
-    async def let_go(self, owner: str) -> None:
-        if self.redis is not None:
-            await self.redis.hdel(self.key("holds", owner), self.me)
-
-    async def held_elsewhere(self, owner: str) -> bool:
-        """Whether another worker's watch holds a sandbox of *owner* now."""
+    async def is_alive(self, watch: str) -> bool:
+        """Whether the worker of *watch* lives (its heartbeat stands); with no Redis, only this one."""
         if self.redis is None:
-            return False
-        now = time.time()
-        for watch, at in (await self.redis.hgetall(self.key("holds", owner))).items():
-            try:
-                fresh = now - float(_text(at)) < HOLD_SECONDS
-            except ValueError:
-                fresh = False
-            if _text(watch) != self.me and fresh:
-                return True
-        return False
+            return watch == self.me
+        return watch == self.me or bool(await self.redis.exists(self.key("alive", watch)))
 
     async def ask_stop(self, watch: str, proc_id: str) -> None:
         if self.redis is not None:
             await self.redis.rpush(self.key("stop", watch), proc_id)
-            await self.redis.expire(self.key("stop", watch), int(HOLD_SECONDS * 2))
+            await self.redis.expire(self.key("stop", watch), 120)
 
     async def stop_requests(self) -> list[str]:
         if self.redis is None:
@@ -375,7 +357,7 @@ class _Shared:
             if entry is None:
                 await self.redis.srem(self.key("all"), proc_id)
                 continue
-            if entry.get("watch") == self.me or await self.redis.exists(self.key("alive", entry.get("watch"))):
+            if await self.is_alive(str(entry.get("watch"))):
                 continue
             if await self.redis.set(self.key("claim", proc_id), self.me, nx=True, ex=600):
                 found.append(entry)
@@ -422,13 +404,13 @@ class BackgroundWatch:
         its last one just ended and the turn its end gives may want it.  Never a project thread's."""
         return self._holdable.get(owner, True) and (bool(self._owners.get(owner)) or owner in self._releases)
 
-    async def held_elsewhere(self, owner: str) -> bool:
-        """Whether another worker's watch holds a sandbox of *owner*: a turn's end here takes down its own sandbox
-        and nothing else of the session's (``SandboxPool.destroy_released(alone=True)``)."""
+    async def worker_alive(self, watch: str) -> bool:
+        """Whether the worker whose watch is *watch* lives.  Unsure (Redis did not answer), it does: what it owns
+        is spared."""
         try:
-            return await self._shared.held_elsewhere(owner)
+            return await self._shared.is_alive(watch)
         except Exception:
-            logger.warning("Could not read who holds the sandbox of %s", owner, exc_info=True)
+            logger.warning("Could not read whether worker %s lives", watch, exc_info=True)
             return True
 
     async def running_for(self, session_id: UUID) -> list[dict]:
@@ -494,8 +476,6 @@ class BackgroundWatch:
             self._tasks[owner] = asyncio.create_task(self._poll(owner), name=f"background-watch-{owner or 'here'}")
         try:
             await self._shared.add(proc_id, owner, session_id, command, monitor[0] if monitor is not None else None)
-            if owner != HERE and self._holdable.get(owner, True):
-                await self._shared.hold(owner)
         except Exception:
             logger.warning("Could not share background command %s with the other workers", proc_id, exc_info=True)
 
@@ -603,12 +583,10 @@ class BackgroundWatch:
                 self._tasks.pop(owner, None)
 
     async def _share_state(self, owner: str) -> None:
-        """Renew this watch's heartbeat and its hold of *owner*'s sandbox, and kill what another worker asked it
-        to stop there: their ends come with the next drain, as a stop's here does."""
+        """Renew this watch's heartbeat, and kill what another worker asked it to stop in *owner*'s sandbox: their
+        ends come with the next drain, as a stop's here does."""
         try:
             await self._shared.alive()
-            if owner != HERE and self._holdable.get(owner, True) and (self._owners.get(owner) or owner in self._releases):
-                await self._shared.hold(owner)
             self._stop_asked.update(await self._shared.stop_requests())
         except Exception:
             logger.warning("Could not share the watch's state with the other workers", exc_info=True)
@@ -643,7 +621,6 @@ class BackgroundWatch:
     async def _sweep(self, every: float) -> None:
         """Tell the sessions of commands whose watch's worker is gone that they cannot be watched any more."""
         while True:
-            await asyncio.sleep(every)
             try:
                 await self._shared.alive()
                 for entry in await self._shared.orphans():
@@ -661,6 +638,7 @@ class BackgroundWatch:
                 raise
             except Exception:
                 logger.warning("The sweep for commands of gone workers failed", exc_info=True)
+            await asyncio.sleep(every)
 
     async def _drain(self, owner: str) -> tuple[list[tuple[str, dict | None]], dict[str, dict]]:
         """The watched commands of *owner* that ended since the last ask, each with its completion
@@ -785,12 +763,6 @@ class BackgroundWatch:
                 logger.exception("Told session %s, but could not wake it", session_id)
         return event_id if isinstance(event_id, int) else None
 
-    async def _let_go_shared(self, owner: str) -> None:
-        try:
-            await self._shared.let_go(owner)
-        except Exception:
-            logger.debug("Could not drop the hold of %s", owner, exc_info=True)
-
     async def _maybe_let_go(self, owner: str) -> None:
         """Let the sandbox *owner* keys go once its tree rests and the turns its commands' ends gave have ended,
         or once ``GRACE_SECONDS`` have passed.  A turn's end that takes it down first leaves nothing to do."""
@@ -799,7 +771,6 @@ class BackgroundWatch:
         if sandbox_id is None:
             self._releases.pop(owner, None)
             self._holdable.pop(owner, None)
-            await self._let_go_shared(owner)
             return
         # The grace is a cap: past it the sandbox goes, whatever of its tree still runs.
         if time.monotonic() - release.since < GRACE_SECONDS:
@@ -823,7 +794,6 @@ class BackgroundWatch:
             return
         self._releases.pop(owner, None)
         self._holdable.pop(owner, None)
-        await self._let_go_shared(owner)
         released = await self._sandbox_pool.release_for_session(owner, only=sandbox_id)
         if released is not None:
             try:

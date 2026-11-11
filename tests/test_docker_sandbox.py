@@ -47,6 +47,11 @@ class FakeDocker:
                 if all(st.get("labels", {}).get(k) == v for k, v in wanted)
             ]
             return 0, ("\n".join(matches) + ("\n" if matches else "")).encode(), b""
+        if args[0] == "inspect" and "--format" in args and "surogates.worker" in args[args.index("--format") + 1]:
+            cid = args[-1]
+            if cid not in self._containers:
+                return 1, b"", b"No such object"
+            return 0, (self._containers[cid]["labels"].get("surogates.worker") or "<no value>").encode() + b"\n", b""
         if args[0] == "inspect":
             cid = args[-1]
             running = self._containers.get(cid, {}).get("running", False)
@@ -437,3 +442,63 @@ async def test_a_threads_copy_is_refused_before_any_container_starts(healthz_tra
     with pytest.raises(SandboxUnavailableError, match="Kubernetes"):
         await backend.provision(spec)
     assert not [c for c in docker.calls if c[:1] == ["run"]]
+
+
+class TestSeveralWorkers:
+    """A session's turns and sub-agents run on any worker, each in that worker's own container for the session:
+    a sweep by one worker never takes another live worker's container."""
+
+    @staticmethod
+    def _worker(docker, healthz_transport, name, alive):
+        backend = _backend(docker, healthz_transport)
+
+        async def lives(worker):
+            return worker in alive
+
+        backend.claim_as(name, lives)
+        return backend
+
+    async def test_a_provision_on_another_worker_leaves_the_live_workers_container(self, healthz_transport):
+        docker = FakeDocker()
+        alive = {"a", "b"}
+        first, second = (self._worker(docker, healthz_transport, n, alive) for n in ("a", "b"))
+        await first.provision(SandboxSpec(session_id="root-1"))
+        [parents] = list(docker._containers)
+        assert docker._containers[parents]["labels"]["surogates.worker"] == "a"
+        # A sub-agent of the session runs on the second worker: its sandbox is a container of its own.
+        await second.provision(SandboxSpec(session_id="root-1"))
+        assert parents in docker._containers and len(docker._containers) == 2
+        # Nor does that worker's turn end take it.
+        await second.destroy_for_session("root-1")
+        assert list(docker._containers) == [parents]
+        await first.aclose()
+        await second.aclose()
+
+    async def test_a_gone_workers_container_is_swept_and_one_of_no_worker_too(self, healthz_transport):
+        docker = FakeDocker()
+        alive = {"b"}
+        second = self._worker(docker, healthz_transport, "b", alive)
+        docker._containers["left-by-a"] = {"running": True, "labels": {
+            "app": "surogates-sandbox", "surogates.session_id": "root-1", "surogates.worker": "a",
+        }}
+        docker._containers["from-before"] = {"running": True, "labels": {
+            "app": "surogates-sandbox", "surogates.session_id": "root-1",
+        }}
+        await second.provision(SandboxSpec(session_id="root-1"))
+        assert "left-by-a" not in docker._containers and "from-before" not in docker._containers
+        await second.aclose()
+
+    async def test_a_container_whose_worker_cannot_be_told_is_spared(self, healthz_transport):
+        docker = FakeDocker()
+        second = _backend(docker, healthz_transport)
+
+        async def unsure(worker):
+            raise ConnectionError("redis is down")
+
+        second.claim_as("b", unsure)
+        docker._containers["of-a"] = {"running": True, "labels": {
+            "app": "surogates-sandbox", "surogates.session_id": "root-1", "surogates.worker": "a",
+        }}
+        await second.destroy_for_session("root-1")
+        assert "of-a" in docker._containers
+        await second.aclose()
