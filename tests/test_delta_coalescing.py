@@ -425,5 +425,25 @@ async def test_writes_slower_than_the_window_still_join_chunks():
         items += [0.005, _chunk(content=f"{i} ")]
     message, _ = await _stream_call(store, Stream(items), coalesce_ms=20)
     deltas = store.deltas()
-    assert len(deltas) <= 12 < 60
+    assert len(deltas) <= 30 < 60  # ~9 on an idle box; the old window gave one per chunk
     assert "".join(d["content"] for d in deltas) == message["content"]
+
+
+async def test_no_delta_follows_the_response_once_the_loop_runs_on():
+    """Slow writes and a timer due at the call's end: after the call returns, nothing of it is written any more."""
+    class SlowStore(Recorder):
+        async def emit_event(self, session_id, event_type, data, **kwargs):
+            if event_type == EventType.LLM_DELTA:
+                await asyncio.sleep(0.03)
+            return await super().emit_event(session_id, event_type, data, **kwargs)
+
+    store = SlowStore()
+    items = []
+    for i in range(20):
+        items += [0.004, _chunk(content=f"{i} ")]
+    message, _ = await _stream_call(store, Stream(items), coalesce_ms=20)
+    await store.emit_event(None, EventType.LLM_RESPONSE, {"message": message})
+    await asyncio.sleep(0.2)  # any timer still due would have written by now
+    kinds = [kind for kind, _ in store.events]
+    assert kinds[-1] == EventType.LLM_RESPONSE.value
+    assert "".join(d["content"] for d in store.deltas()) == message["content"]

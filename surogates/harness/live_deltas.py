@@ -132,7 +132,8 @@ class LiveDeltas:
             return
         if self._lock.locked():
             # The timer is writing: the stream reads on, and what gathers
-            # meanwhile leaves one window after that write.
+            # meanwhile leaves with the next timer, a window from now or as
+            # soon as that write ends, whichever is later.
             if self._timer is None:
                 self._timer = asyncio.get_running_loop().create_task(self._later(self._window))
             return
@@ -158,7 +159,10 @@ class LiveDeltas:
     def _stop_timer(self) -> None:
         timer, self._timer = self._timer, None
         if timer is not None:
-            timer.cancel()  # still asleep: one that woke has cleared ``_timer`` itself
+            # Asleep or waiting for the lock: it ends there, and the caller
+            # writes what it held.  One that holds the lock has cleared
+            # ``_timer`` itself and is not cancelled.
+            timer.cancel()
 
     async def _later(self, wait: float) -> None:
         await asyncio.sleep(wait)
@@ -169,7 +173,7 @@ class LiveDeltas:
                 self._timer = None
                 await self._drain()
         except Exception:  # best-effort, as the stream's own flush on its way out
-            logger.debug("Delta flush failed for session %s", self._session_id, exc_info=True)
+            logger.warning("Delta write failed for session %s", self._session_id, exc_info=True)
 
     async def _drain(self) -> None:
         if self._parts:

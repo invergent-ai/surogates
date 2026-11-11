@@ -1635,7 +1635,7 @@ async def call_llm_streaming_inner(
         try:
             await live_deltas.flush()
         except Exception:
-            logger.debug("Delta flush failed for session %s", session.id, exc_info=True)
+            logger.warning("Delta flush failed for session %s", session.id, exc_info=True)
 
     # Some SDK iterators respond to ``aclose`` by returning cleanly
     # (StopAsyncIteration) rather than raising.  When the watchdog
