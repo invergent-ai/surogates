@@ -127,7 +127,22 @@ def _record_read(name: str, args: dict, workspace: str, result: str) -> None:
 
 def runs_in_daemon(name: str, args: dict) -> bool:
     """Whether the call *name* with *args* runs in the daemon, where background commands live, and not in a fork."""
-    return name in ("process", "_background") or (name == "terminal" and bool(args.get("background")))
+    return name in ("process", "_background", "_monitor") or (name == "terminal" and bool(args.get("background")))
+
+
+def start_monitor(args: dict, workspace: str) -> str:
+    """``_monitor``: start a background command whose output lines are kept for the drain (``drain_background``)."""
+    from surogates.tools.workspace_io.local import LocalWorkspaceIO
+    from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
+
+    try:
+        started = asyncio.run(LocalWorkspaceIO(workspace_path=workspace).start(
+            str(args.get("command") or ""), workdir=args.get("workdir"), task_id="monitor", pty=False,
+            notify_on_complete=True, watcher_interval=None, watch_lines=True,
+        ))
+    except WorkspaceSandboxError as exc:
+        return json.dumps({"error": str(exc)})
+    return json.dumps(started)
 
 
 def drain_background() -> str:
@@ -148,8 +163,9 @@ def drain_background() -> str:
             events.append(process_registry.completion_queue.get_nowait())
         except queue.Empty:
             break
+    lines = process_registry.drain_lines()
     known = [entry["session_id"] for entry in process_registry.list_sessions()]
-    return json.dumps({"events": events, "known": known})
+    return json.dumps({"events": events, "known": known, "lines": lines})
 
 
 def init_registry() -> Any:
@@ -336,6 +352,8 @@ def run_tool(
         return _run_file(args, workspace)
     if name == "_background":
         return drain_background()
+    if name == "_monitor":
+        return start_monitor(args, workspace)
     if name == "_code":
         # The payload may carry a credential on launch; never log args.
         from surogates.coding_agents.pod_runner import dispatch as code_dispatch

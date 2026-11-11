@@ -41,8 +41,10 @@ STANDS_IN_FOR: dict[str, tuple[str, ...]] = {
 
 #: The tools that go with ``agent``: offered to a session that may start agents, and to every agent it started.
 COMPANION_TOOLS: frozenset[str] = frozenset({"send_message", "list_agents", "stop_agent"})
+#: Offered with the companions where the session runs commands (``terminal``), never on the user's computer.
+MONITOR_TOOL = "monitor"
 #: The tools of the family, offered only with parity on.
-PARITY_TOOLS: frozenset[str] = frozenset({"agent"}) | COMPANION_TOOLS
+PARITY_TOOLS: frozenset[str] = frozenset({"agent", MONITOR_TOOL}) | COMPANION_TOOLS
 #: The tool ``agent`` stands in for; with parity on it is no longer offered, but still callable.
 REPLACED_TOOL = "delegate_task"
 
@@ -81,10 +83,12 @@ def apply_parity(tools: set[str], config: dict | None) -> set[str]:
     if "agent" in result or isinstance(config.get(DISPATCH_KEY), dict):
         allowed = config.get("allowed_tools")
         excluded = set(config.get("excluded_tools") or ())
-        result |= {
-            name for name in COMPANION_TOOLS
-            if name not in excluded and (not allowed or name in allowed)
-        }
+        from surogates.devices.binding import device_of
+
+        companions = set(COMPANION_TOOLS)
+        if "terminal" in result and device_of(config) is None:
+            companions.add(MONITOR_TOOL)
+        result |= {name for name in companions if name not in excluded and (not allowed or name in allowed)}
     return result
 
 

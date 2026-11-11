@@ -67,6 +67,7 @@ CHECKPOINT_PATH = _SUROGATES_HOME / "processes.json"
 MAX_OUTPUT_CHARS = 200_000      # 200KB rolling output buffer
 FINISHED_TTL_SECONDS = 1800     # Keep finished processes for 30 minutes
 MAX_PROCESSES = 64              # Max concurrent tracked processes (LRU pruning)
+MAX_PENDING_LINES = 1000        # Lines a watched process keeps for its next drain
 
 
 # ---------------------------------------------------------------------------
@@ -155,6 +156,10 @@ class ProcessSession:
     watcher_thread_id: str = ""
     watcher_interval: int = 0                   # 0 = no watcher configured
     notify_on_complete: bool = False             # Queue agent notification on exit
+    watch_lines: bool = False                    # Keep each output line for drain_lines (a monitor)
+    pending_lines: List[str] = field(default_factory=list, repr=False)
+    dropped_lines: int = 0                       # Lines past MAX_PENDING_LINES since the last drain
+    _partial_line: str = field(default="", repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock)
     _reader_thread: Optional[threading.Thread] = field(default=None, repr=False)
     _pty: Any = field(default=None, repr=False)  # ptyprocess handle (when use_pty=True)
@@ -267,6 +272,7 @@ class ProcessRegistry:
         env_vars: dict | None = None,
         use_pty: bool = False,
         notify_on_complete: bool = False,
+        watch_lines: bool = False,
     ) -> ProcessSession:
         """Spawn a background process locally.
 
@@ -282,6 +288,8 @@ class ProcessRegistry:
             notify_on_complete: Queue the completion on ``completion_queue``.
                 Set before the reader thread starts, so a command that ends
                 at once is not missed.
+            watch_lines: Keep each complete output line for
+                :meth:`drain_lines` (a monitor reports them).
         """
         session = ProcessSession(
             id=f"proc_{uuid.uuid4().hex[:12]}",
@@ -291,6 +299,7 @@ class ProcessRegistry:
             cwd=cwd or os.getcwd(),
             started_at=time.time(),
             notify_on_complete=notify_on_complete,
+            watch_lines=watch_lines,
         )
 
         if use_pty:
@@ -399,8 +408,11 @@ class ProcessRegistry:
                         session.output_buffer = session.output_buffer[
                             -session.max_output_chars :
                         ]
+                    self._keep_lines(session, chunk)
         except Exception as e:
             logger.debug("Process stdout reader ended: %s", e)
+        with session._lock:
+            self._keep_lines(session, "", final=True)
 
         # Process exited
         try:
@@ -434,12 +446,15 @@ class ProcessRegistry:
                                 session.output_buffer = session.output_buffer[
                                     -session.max_output_chars :
                                 ]
+                            self._keep_lines(session, text)
                 except EOFError:
                     break
                 except Exception:
                     break
         except Exception as e:
             logger.debug("PTY stdout reader ended: %s", e)
+        with session._lock:
+            self._keep_lines(session, "", final=True)
 
         # Process exited
         try:
@@ -451,6 +466,37 @@ class ProcessRegistry:
             pty.exitstatus if hasattr(pty, "exitstatus") else -1
         )
         self._move_to_finished(session)
+
+    @staticmethod
+    def _keep_lines(session: ProcessSession, text: str, *, final: bool = False) -> None:
+        """Keep the complete lines of *text* for a watched process's next drain; with *final*, the last
+        partial line too.  Called under the session's lock."""
+        if not session.watch_lines:
+            return
+        text = session._partial_line + strip_ansi(text).replace("\r\n", "\n")
+        lines = text.split("\n")
+        session._partial_line = "" if final else lines.pop()
+        for line in lines:
+            if not line.strip():
+                continue
+            if len(session.pending_lines) >= MAX_PENDING_LINES:
+                session.dropped_lines += 1
+            else:
+                session.pending_lines.append(line[:2000])
+
+    def drain_lines(self) -> dict[str, dict]:
+        """The lines each watched process printed since the last drain, and how many were dropped."""
+        with self._lock:
+            sessions = list(self._running.values()) + list(self._finished.values())
+        out: dict[str, dict] = {}
+        for session in sessions:
+            if not session.watch_lines:
+                continue
+            with session._lock:
+                if session.pending_lines or session.dropped_lines:
+                    out[session.id] = {"lines": session.pending_lines, "dropped": session.dropped_lines}
+                    session.pending_lines, session.dropped_lines = [], 0
+        return out
 
     def _move_to_finished(self, session: ProcessSession) -> None:
         """Move a session from running to finished."""

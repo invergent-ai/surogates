@@ -83,6 +83,8 @@ TOOL_LOCATIONS: dict[str, ToolLocation] = {
     "send_message": ToolLocation.HARNESS,
     "list_agents": ToolLocation.HARNESS,
     "stop_agent": ToolLocation.HARNESS,
+    # It starts its command in the sandbox itself, and hands it to the worker's watch.
+    "monitor": ToolLocation.HARNESS,
     "consult_expert": ToolLocation.HARNESS,
     "run_coding_agent": ToolLocation.HARNESS,
     "github": ToolLocation.HARNESS,
