@@ -204,6 +204,9 @@ async def _build_session_sandbox_spec(
     sandbox_spec.env["SUROGATES_IS_SERVICE_ACCOUNT"] = (
         "1" if is_service_account else "0"
     )
+    from surogates.simulation.side_effects import is_simulated
+
+    sandbox_spec.simulated = is_simulated(session.config)
     await _apply_ssh_access(session, tenant, sandbox_spec, credential_vault)
     return sandbox_spec
 
@@ -236,6 +239,24 @@ def _noted(content: str, note: str) -> str:
         said = answer.get("note")
         return json.dumps({**answer, "note": f"{said} {note}" if said else note}, ensure_ascii=False)
     return f"{content}\n\n[{note}]"
+
+
+async def _simulation_changes(
+    tool_name: str, tool_args: Any, session: Any, tools: Any, summary_llm_client: Any, summary_model: str | None,
+) -> bool | None:
+    """Whether a simulated session's MCP call would change something; ``None`` outside a simulation."""
+    from surogates.simulation.side_effects import decide, is_simulated, summary_judge
+
+    if not tool_name.startswith("mcp__") or not is_simulated(session.config):
+        return None
+    entry = tools.get(tool_name)
+    return await decide(
+        tool_name,
+        entry.schema.annotations if entry else None,
+        llm=summary_judge(summary_llm_client, summary_model),
+        args=tool_args,
+        description=entry.schema.description if entry else "",
+    )
 
 
 async def _refused_open_document(tool_name: str, tool_args: Any, session: Any, session_factory: Any) -> str | None:
@@ -1949,6 +1970,8 @@ async def _run_single_tool(
     # helpers' files the copy then kept its own version of.
     handed_on: list[bool] = []
     not_taken: list[str] = []
+    simulated: dict[str, str] | None = None
+    simulation_changes: bool | None = None
     try:
         from surogates.tools.router import TOOL_LOCATIONS, ToolLocation
         from surogates.sandbox.pool import sandbox_session_key
@@ -2024,6 +2047,13 @@ async def _run_single_tool(
             # tool also acts off it (it creates an artifact, it pays for a
             # model call), and running it again would do that again.
             result_content = interrupted(tool_name)
+        elif (simulation_changes := await _simulation_changes(
+            tool_name, tool_args, session, tools, summary_llm_client, summary_model,
+        )):
+            from surogates.simulation.side_effects import fake_result, would_have
+
+            result_content = fake_result(tool_name, tool_args)
+            simulated = {"would_have": would_have(tool_name, tool_args)}
         elif device_call is not None and location == ToolLocation.SANDBOX:
             result_content = await device_call.dispatch(tool_name, tool_args)
         elif location == ToolLocation.SANDBOX and sandbox_pool is not None:
@@ -2130,6 +2160,8 @@ async def _run_single_tool(
                     interrupt_check=interrupt_check,
                     task_id=sandbox_session_key(session),
                     offered_tools=offered_tools,
+                    # The proxy fakes what it cannot tell is a read; this call was judged one here.
+                    **({"simulation_read": True} if simulation_changes is False else {}),
                 )
     except KeyError:
         tool_failed = True
@@ -2305,6 +2337,7 @@ async def _run_single_tool(
                 "name": tool_name,
                 "content": sanitized_content,
                 "elapsed_ms": elapsed_ms,
+                **({"simulated": simulated} if simulated else {}),
             },
             **fence,
         )

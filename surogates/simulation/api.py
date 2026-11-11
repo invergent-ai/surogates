@@ -12,15 +12,18 @@ import logging
 
 import secrets
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Literal, Optional
 from urllib.parse import urlencode
 
+import sqlalchemy as sa
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from surogates.api.routes.ask_user_question import AskUserQuestionResponseRequest
+from surogates.db.models import ProgramInvitationRow, ProgramScheduleRow
 from surogates.simulation import store
-from surogates.simulation import discord, slack, teams, voice
+from surogates.simulation import discord, slack, teams, voice, website
 from surogates.simulation.webhook import (
     post_slack,
     post_teams_activity,
@@ -41,27 +44,33 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/internal", dependencies=[Depends(_require_internal_token)])
 
 
-class OtherPerson(BaseModel):
+class PlanPerson(BaseModel):
     name: str = Field(min_length=1, max_length=80)
-    persona: str = Field(min_length=1, max_length=4000)
+    about: str = Field(min_length=1, max_length=1000)
+    test: str = Field(min_length=1, max_length=500)
+    #: A team member this person stands in for (their real user id); their rights come with it.
+    member_id: Optional[uuid.UUID] = None
+    #: False: the user plays them by hand (voice always).
+    autopilot: bool = True
 
 
 class StartRun(BaseModel):
     org_id: uuid.UUID
     agent_id: str
     created_by: str
-    person_name: str = Field(min_length=1, max_length=80)
+    batch_id: uuid.UUID
+    channel: Literal["whatsapp", "telegram", "slack", "teams", "discord", "website", "voice"] = "whatsapp"
+    people: list[PlanPerson] = Field(min_length=1, max_length=8)
     routing_config: dict[str, Any] = Field(default_factory=dict)
     templates: list[dict[str, Any]] = Field(default_factory=list)
     flows: list[dict[str, Any]] = Field(default_factory=list)
-    channel: Literal["whatsapp", "telegram", "slack", "teams", "discord", "website", "voice"] = "whatsapp"
-    #: Who the AI plays; none and the user types as the person.
-    persona: Optional[str] = Field(default=None, max_length=4000)
-    #: More customers in the same run, every one played by Autopilot.
-    others: list[OtherPerson] = Field(default_factory=list, max_length=5)
-    #: What a team member's stand-in asks the agent on their own, by member id.
-    team_tasks: dict[str, str] = Field(default_factory=dict)
     via: Optional[Literal["copilot"]] = None
+
+
+class QuestionAnswer(AskUserQuestionResponseRequest):
+    """A website visitor's answers to one ``ask_user_question`` call."""
+
+    tool_call_id: str = Field(min_length=1, max_length=200)
 
 
 class PersonMessage(BaseModel):
@@ -79,6 +88,8 @@ class PersonMessage(BaseModel):
     #: A Slack modal: ``{"id", "values": {block_id: answer}}`` submits it,
     #: ``{"id", "cancel": true}`` closes it.
     view: Optional[dict[str, Any]] = None
+    #: A website visitor answering the agent's questions.
+    answer: Optional[QuestionAnswer] = None
 
 
 def _message(m) -> dict[str, Any]:
@@ -87,40 +98,61 @@ def _message(m) -> dict[str, Any]:
 
 
 async def _detail(sf, run) -> dict[str, Any]:
+    return (await _details(sf, [run]))[0]
+
+
+async def _details(sf, runs) -> list[dict[str, Any]]:
+    """Each run as Studio shows it; Studio polls a whole simulation every 2 s, so
+    every query here covers all *runs* at once."""
     from surogates.followup.store import get_settings, member_permissions
 
     now = datetime.now(timezone.utc)
-    people, user_ids = [], []
-    found = await store.people(sf, run.id)
-    settings = (await get_settings(sf, org_id=run.org_id, agent_id=run.agent_id)
-                if any(p.stands_for for p in found) else None)
-    for person in found:
-        if person.user_id:
-            user_ids.append(person.user_id)
-        messages = await store.thread(sf, person.id)
-        rights = member_permissions(settings, person.stands_for) if person.stands_for else None
-        people.append({"id": str(person.id), "name": person.name, "channel": person.channel,
-                       "team": person.stands_for is not None,
-                       "user_id": str(person.user_id) if person.user_id else None,
-                       "task": person.task,
-                       "stands_for": str(person.stands_for) if person.stands_for else None,
-                       "permissions": rights and {"receives": sorted(rights["receives"]),
-                                                  "can": sorted(rights["can"]),
-                                                  "handles": rights["handles"]},
-                       "address": person.address, "persona": person.persona,
-                       "driver": person.driver, "ai_state": person.ai_state,
-                       "ai_note": person.ai_note,
-                       "window_open": store.window_open(messages, now),
-                       "agent_typing": store.is_typing(person, now),
-                       "messages": [_message(m) for m in messages]})
-    return {"id": str(run.id), "agent_id": run.agent_id, "status": run.status,
-            "channel": run.channel,
+    everyone = await store.people_of(sf, [r.id for r in runs])
+    users = {r.id: [p.user_id for p in everyone[r.id] if p.user_id] for r in runs}
+    threads = await store.threads(sf, [p.id for r in runs for p in everyone[r.id]])
+    team = await store.team_messages_by_subject(sf, [u for r in runs for u in users[r.id]])
+    settings, enrolled = {}, {}
+    for key in {(r.org_id, r.agent_id) for r in runs}:
+        group = [r for r in runs if (r.org_id, r.agent_id) == key]
+        if any(p.stands_for for r in group for p in everyone[r.id]):
+            settings[key] = await get_settings(sf, org_id=key[0], agent_id=key[1])
+        enrolled[key] = await store.enrolled(sf, group[0], [u for r in group for u in users[r.id]])
+    details = []
+    for run in runs:
+        key, people = (run.org_id, run.agent_id), []
+        for person in everyone[run.id]:
+            messages = threads[person.id]
+            rights = member_permissions(settings.get(key), person.stands_for) if person.stands_for else None
+            people.append({"id": str(person.id), "name": person.name, "channel": person.channel,
+                           "team": person.stands_for is not None,
+                           "user_id": str(person.user_id) if person.user_id else None,
+                           "task": person.task,
+                           "stands_for": str(person.stands_for) if person.stands_for else None,
+                           "member_id": str(person.stands_for) if person.stands_for else None,
+                           "about": person.about, "test": person.test,
+                           "enrolled": person.user_id in enrolled[key] if person.user_id else False,
+                           "permissions": rights and {"receives": sorted(rights["receives"]),
+                                                      "can": sorted(rights["can"]),
+                                                      "handles": rights["handles"]},
+                           # A visitor's address holds their widget session's cookie.
+                           "address": "visitor" if person.channel == "website" else person.address,
+                           "persona": person.persona,
+                           "driver": person.driver, "ai_state": person.ai_state,
+                           "ai_note": person.ai_note,
+                           "window_open": store.window_open(messages, now),
+                           "agent_typing": store.is_typing(person, now),
+                           "messages": [_message(m) for m in messages]})
+        mine = set(users[run.id])
+        details.append({
+            "id": str(run.id), "agent_id": run.agent_id, "status": run.status,
+            "channel": run.channel, "batch_id": str(run.batch_id) if run.batch_id else None,
             "phone_number_id": run.phone_number_id, "created_by": run.created_by,
             "via": run.via, "created_at": run.created_at.isoformat(),
             "ended_at": run.ended_at.isoformat() if run.ended_at else None, "people": people,
             "flows": run.flows or [],
             "review": run.review,
-            "team": await store.team_messages(sf, user_ids)}
+            "team": [m for subject, m in team if subject in mine]})
+    return details
 
 
 async def _run_in_org(request: Request, run_id: uuid.UUID, org_id: uuid.UUID):
@@ -130,20 +162,57 @@ async def _run_in_org(request: Request, run_id: uuid.UUID, org_id: uuid.UUID):
     return run
 
 
+@router.get("/channels")
+async def channels(request: Request):
+    """The channels a run can be started on here: a disabled adapter would never answer."""
+    settings = request.app.state.settings
+    found = ["whatsapp", "website"]
+    found += [k for k in ("telegram", "slack", "teams", "discord")
+              if getattr(settings.channels, k).enabled]
+    if settings.voice.livekit_api_key:
+        found.append("voice")
+    return {"channels": found}
+
+
 @router.post("/runs", status_code=201)
 async def start_run(body: StartRun, request: Request):
+    from surogates.followup.store import get_settings
+
     state = request.app.state
-    persona = (body.persona or "").strip() or None
-    if (persona or body.others) and body.channel not in AI_CHANNELS:
-        raise HTTPException(status_code=422, detail="Autopilot writes on chat channels only")
+    named = [p.member_id for p in body.people if p.member_id]
+    if len(named) != len(set(named)):
+        raise HTTPException(status_code=422, detail="A team member can stand in only once per run")
+    members = set(named)
+    if members:
+        if body.channel not in AI_CHANNELS or body.channel == "website":
+            raise HTTPException(status_code=422, detail="Team members chat with the agent on chat channels only")
+        settings = await get_settings(state.session_factory, org_id=body.org_id, agent_id=body.agent_id)
+        team = {str(m) for m in (settings.alert_recipient_user_ids or [])} if settings else set()
+        if not {str(m) for m in members} <= team:
+            raise HTTPException(status_code=422, detail="Someone in the plan is not on this agent's team")
+    autopilot = body.channel in AI_CHANNELS
     run = await store.create_run(
         state.session_factory, state.vault, org_id=body.org_id, agent_id=body.agent_id,
-        created_by=body.created_by, routing_config=body.routing_config,
-        person_name=body.person_name.strip(), provision=state.provision,
-        templates=body.templates, flows=body.flows, channel=body.channel, persona=persona,
-        others=[o.model_dump() for o in body.others], team_tasks=body.team_tasks, via=body.via,
+        created_by=body.created_by, routing_config=body.routing_config, provision=state.provision,
+        templates=body.templates, flows=body.flows, channel=body.channel, batch_id=body.batch_id,
+        people=[{**p.model_dump(), "name": p.name.strip(), "autopilot": p.autopilot and autopilot}
+                for p in body.people],
+        via=body.via,
     )
     return await _detail(state.session_factory, run)
+
+
+def _changes(run, people) -> list[dict[str, Any]]:
+    """What the run's review changed in the agent, each with its finding's index for Undo."""
+    tests = {str(p.id): p.test for p in people}
+    return [
+        {"run_id": str(run.id), "index": index, "title": f.get("title"),
+         "target": (f.get("proposal") or {}).get("target"),
+         "name": (f.get("proposal") or {}).get("name"), "person_id": f.get("person_id"),
+         "test": tests.get(f.get("person_id") or ""), "applied_at": f.get("applied_at")}
+        for index, f in enumerate((run.review or {}).get("findings") or [])
+        if f.get("state") == "applied"
+    ]
 
 
 @router.get("/runs")
@@ -151,12 +220,14 @@ async def list_runs(org_id: uuid.UUID, agent_id: str, request: Request):
     sf = request.app.state.session_factory
     runs = await store.list_runs(sf, org_id=org_id, agent_id=agent_id)
     counts = await store.message_counts(sf, [r.id for r in runs])
+    everyone = await store.people_of(sf, [r.id for r in runs])
     summaries = []
     for r in runs:
-        people = await store.people(sf, r.id)
+        people = everyone[r.id]
         first = people[0] if people else None
         summaries.append({
             "id": str(r.id), "status": r.status, "channel": r.channel,
+            "batch_id": str(r.batch_id) if r.batch_id else None,
             "created_by": r.created_by, "via": r.via,
             "created_at": r.created_at.isoformat(),
             "ended_at": r.ended_at.isoformat() if r.ended_at else None,
@@ -167,13 +238,72 @@ async def list_runs(org_id: uuid.UUID, agent_id: str, request: Request):
             "ai_note": first.ai_note if first else None,
             "messages": counts.get(r.id, 0),
             "verdict": (r.review or {}).get("verdict"),
-            "changes": [
-                {"title": f.get("title"), "target": (f.get("proposal") or {}).get("target"),
-                 "name": (f.get("proposal") or {}).get("name"), "applied_at": f.get("applied_at")}
-                for f in (r.review or {}).get("findings") or [] if f.get("state") == "applied"
-            ],
+            "changes": _changes(r, people),
         })
     return summaries
+
+
+@router.get("/batches")
+async def list_batches(org_id: uuid.UUID, agent_id: str, request: Request):
+    """Simulations newest first: the runs one plan started, grouped, with each person's grade."""
+    sf = request.app.state.session_factory
+    # ponytail: batches come from the newest 200 runs; page by batch if plans grow past that.
+    runs = await store.list_runs(sf, org_id=org_id, agent_id=agent_id, limit=200)
+    everyone = await store.people_of(sf, [r.id for r in runs])
+    batches: dict[uuid.UUID, list] = {}
+    for r in runs:
+        batches.setdefault(r.batch_id or r.id, []).append(r)
+    listed = []
+    for batch_id, group in list(batches.items())[:50]:
+        group.reverse()
+        people, changes = [], []
+        for r in group:
+            grades = {g.get("person_id"): g for g in (r.review or {}).get("grades") or []}
+            changes += _changes(r, everyone[r.id])
+            for p in everyone[r.id]:
+                grade = grades.get(str(p.id))
+                people.append({
+                    "name": p.name, "channel": p.channel, "about": p.about, "test": p.test,
+                    "member_id": str(p.stands_for) if p.stands_for else None,
+                    "ai_state": p.ai_state,
+                    "grade": grade and {"passed": bool(grade.get("passed")),
+                                        "reason": grade.get("reason"),
+                                        "message_id": grade.get("message_id")},
+                })
+        graded = [p["grade"] for p in people if p["grade"]]
+        listed.append({
+            "id": str(batch_id), "created_at": group[-1].created_at.isoformat(),
+            "status": "running" if any(r.status == "running" for r in group) else "ended",
+            "channels": list(dict.fromkeys(r.channel for r in group)),
+            "people": people, "passed": sum(g["passed"] for g in graded), "graded": len(graded),
+            "total": len(people), "via": group[0].via, "changes": changes,
+        })
+    return listed
+
+
+async def _batch(request: Request, batch_id: uuid.UUID, org_id: uuid.UUID, agent_id: str):
+    runs = await store.batch_runs(request.app.state.session_factory, org_id=org_id,
+                                  agent_id=agent_id, batch_id=batch_id)
+    if not runs:
+        raise HTTPException(status_code=404, detail="Simulation not found")
+    return runs
+
+
+@router.get("/batches/{batch_id}")
+async def get_batch(batch_id: uuid.UUID, org_id: uuid.UUID, agent_id: str, request: Request):
+    sf = request.app.state.session_factory
+    runs = await _batch(request, batch_id, org_id, agent_id)
+    return {"id": str(batch_id), "runs": await _details(sf, runs)}
+
+
+@router.post("/batches/{batch_id}/end")
+async def end_batch(batch_id: uuid.UUID, org_id: uuid.UUID, agent_id: str, request: Request):
+    state = request.app.state
+    runs = await _batch(request, batch_id, org_id, agent_id)
+    for r in runs:
+        if r.status == "running":
+            await store.finish_run(state, r.id)
+    return await get_batch(batch_id, org_id, agent_id, request)
 
 
 @router.get("/runs/{run_id}")
@@ -222,6 +352,8 @@ async def set_driver(run_id: uuid.UUID, person_id: uuid.UUID, org_id: uuid.UUID,
     person = await _running_person(state, run, person_id)
     if not person.persona:
         raise HTTPException(status_code=422, detail="Autopilot needs to know who this person is")
+    if body.driver == "ai" and run.channel not in AI_CHANNELS:
+        raise HTTPException(status_code=422, detail="Autopilot writes on chat channels only")
     values: dict[str, Any] = {"driver": body.driver}
     if body.driver == "ai":
         # Handing back restarts the AI, whatever stopped it.
@@ -230,14 +362,20 @@ async def set_driver(run_id: uuid.UUID, person_id: uuid.UUID, org_id: uuid.UUID,
     return await _detail(state.session_factory, run)
 
 
-#: The channels the AI can write on: a widget and a phone call need a browser and a voice.
-AI_CHANNELS = ("whatsapp", "telegram", "slack", "teams", "discord")
+#: The channels the AI can write on: a phone call needs a voice.
+AI_CHANNELS = ("whatsapp", "telegram", "slack", "teams", "discord", "website")
 
 
 async def write(state, run, person, body: PersonMessage) -> dict[str, Any]:
     """The person's message or tap, delivered as their platform would."""
     if run.channel == "website":
-        raise HTTPException(status_code=422, detail="On a website the visitor writes in the widget")
+        given = body.model_dump(exclude_none=True).keys()
+        if given == {"answer"}:
+            return await website.answer(state, run, person, body.answer.tool_call_id,
+                                        [r.model_dump() for r in body.answer.responses])
+        if given != {"text"} or not body.text.strip():
+            raise HTTPException(status_code=422, detail="On a website the visitor writes text or answers a question")
+        return await website.send(state, run, person, body.text)
     if run.channel == "voice":
         raise HTTPException(status_code=422, detail="On a phone line the caller speaks: place a call")
     if run.channel == "telegram":
@@ -479,16 +617,87 @@ async def call_as_person(run_id: uuid.UUID, person_id: uuid.UUID, org_id: uuid.U
     return voice.call_token(state.settings, run, person)
 
 
+@router.post("/runs/{run_id}/people/{person_id}/next-step")
+async def next_step(run_id: uuid.UUID, person_id: uuid.UUID, org_id: uuid.UUID, request: Request):
+    """The person's next program check-in, sent now rather than when it falls due.
+
+    The only way a check-in reaches a simulated person: the scheduled ticker
+    leaves them out.  Each call moves on past the step it sent, as time would.
+    """
+    from surogates.followup import store as followup_store
+    from surogates.followup.context import in_person_zone
+    from surogates.followup.eligibility import next_contact
+    from surogates.programs.materialize import (
+        already_reached,
+        identity_lookup_from,
+        last_inbound_for,
+        materialize_occurrence,
+    )
+
+    state = request.app.state
+    sf = state.session_factory
+    run = await _run_in_org(request, run_id, org_id)
+    person = await _running_person(state, run, person_id)
+    enrolled = person.user_id and await followup_store.enrollments(
+        sf, org_id=run.org_id, agent_id=run.agent_id, user_id=person.user_id, status="active",
+    )
+    if not enrolled:
+        raise HTTPException(status_code=409, detail="Not enrolled in a program")
+    now = datetime.now(timezone.utc)
+    after = max(now, person.next_after + timedelta(seconds=1)) if person.next_after else now
+    lookup = identity_lookup_from(sf)
+    async with sf() as db:
+        schedules = (await db.execute(
+            sa.select(ProgramScheduleRow)
+            .where(ProgramScheduleRow.org_id == run.org_id)
+            .where(ProgramScheduleRow.agent_id == run.agent_id)
+            .where(ProgramScheduleRow.active.is_(True))
+        )).scalars().all()
+    due = []
+    for schedule in schedules:
+        last = await last_inbound_for(schedule, person.user_id, session_factory=sf,
+                                      identity_lookup=lookup)
+        for e in enrolled:
+            found = next_contact(
+                in_person_zone([schedule.config or {}], e), protocol=e.protocol,
+                start_date=e.start_date, phase=e.phase, enrolled_at=e.created_at,
+                last_inbound_at=last, now=after,
+            )
+            if found:
+                due.append((found[0], schedule))
+    if not due:
+        raise HTTPException(status_code=409, detail="No program step is ahead for this person")
+    at, schedule = min(due, key=lambda d: d[0])
+    # Recorded now, not at the due slot: that slot's occurrence belongs to
+    # everyone else on the roster, and taking it would skip them.
+    occurrence_id = await materialize_occurrence(
+        schedule, session_factory=sf, identity_lookup=lookup,
+        now=at, only=person.user_id, run=run, sent_at=now,
+    )
+    await store.update_person(sf, person.id, next_after=at)
+    async with sf() as db:
+        row = (await db.execute(
+            sa.select(ProgramInvitationRow)
+            .where(ProgramInvitationRow.occurrence_id == occurrence_id)
+            .where(ProgramInvitationRow.user_id == person.user_id)
+        )).scalars().first()
+    sent = row is not None and row.delivery_state == "queued"
+    if sent:
+        reason = None
+    elif row is not None:
+        reason = row.reason
+    elif (schedule.config or {}).get("once_per_person") and person.user_id in await already_reached(
+        sf, schedule.program_id, [person.user_id],
+    ):
+        reason = "Already reached in this program"
+    else:
+        reason = "Not due at that step"
+    return {"sent": sent, "due_at": at.isoformat(), "reason": reason}
+
+
 @router.post("/runs/{run_id}/end")
 async def end_run(run_id: uuid.UUID, org_id: uuid.UUID, request: Request):
     await _run_in_org(request, run_id, org_id)
     state = request.app.state
-    run = await store.end_run(state.session_factory, state.vault, run_id)
-    if run.channel == "discord":
-        await discord.GATEWAYS.close(run.id)
-    if run.channel == "voice" and state.settings.voice.livekit_api_key:
-        try:
-            await voice.hang_up_all(state.settings, run)
-        except Exception:  # noqa: BLE001 - the run is ended; a call left ringing ends at its own limit
-            logger.warning("could not hang up the calls of simulation %s", run.id, exc_info=True)
+    run = await store.finish_run(state, run_id)
     return await _detail(state.session_factory, run)

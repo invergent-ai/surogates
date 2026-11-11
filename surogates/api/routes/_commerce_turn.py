@@ -20,6 +20,7 @@ from surogates.runtime.platform_client import (
     CommercePaymentRequiredError,
 )
 from surogates.session.store import SessionStore
+from surogates.simulation.side_effects import is_simulated
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +54,7 @@ async def authorize_commerce_turn(
     (``{"code", "buy_url"}``) so the widget can render a paywall
     instead of a generic error.
     """
-    if (session.config or {}).get("simulation_run_id"):
+    if is_simulated(session.config):
         # The agent's builder writing as a visitor: no buyer to charge, as on
         # every other channel a simulation runs on.  Only a running run's own
         # key stamps this, at bootstrap.

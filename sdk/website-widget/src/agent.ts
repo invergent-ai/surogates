@@ -50,6 +50,8 @@ import { Observable } from 'rxjs';
 
 import {
   type BootstrapResult,
+  type QuestionAnswer,
+  answerQuestion,
   bootstrap,
   endSession,
   openEventStream,
@@ -190,6 +192,17 @@ export class WebsiteAgent extends AbstractAgent {
     this.bootstrapResult = undefined;
     this.cursor = 0;
     await endSession(this.apiUrl, current.sessionId, current.csrfToken, this.agentId);
+  }
+
+  /**
+   * Answer the agent's pending ``ask_user_question`` call.  No new run:
+   * the run that asked is still open on its stream and carries the reply.
+   * Never bootstraps: a fresh session has no such question to answer.
+   */
+  async answerQuestion(toolCallId: string, responses: QuestionAnswer[]): Promise<void> {
+    const boot = this.bootstrapResult;
+    if (!boot) throw new SurogatesAuthError('Answer question: no session');
+    await answerQuestion(this.apiUrl, boot.sessionId, boot.csrfToken, toolCallId, responses, this.agentId);
   }
 
   /**

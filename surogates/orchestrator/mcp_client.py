@@ -17,6 +17,7 @@ from uuid import UUID
 
 import httpx
 
+from surogates.simulation.side_effects import is_simulated
 from surogates.tenant.auth.jwt import create_sandbox_token
 from surogates.tools.mcp.names import mcp_toolset
 from surogates.tools.registry import ToolRegistry, ToolSchema
@@ -138,6 +139,7 @@ class McpProxyClient:
                 name=name,
                 description=tool.get("description", ""),
                 parameters=tool.get("parameters", {}),
+                annotations=tool.get("annotations") or None,
             )
             # The registry is process-wide; another agent may have
             # already registered this exact tool name.  An unchanged
@@ -201,12 +203,17 @@ class McpProxyClient:
             # Bind the token to this agent so the proxy can reject a
             # ``?agent_id=`` that disagrees with the minted identity.
             handler_agent_id = kwargs.get("agent_id")
+            simulated = is_simulated(kwargs.get("session_config"))
             token = create_sandbox_token(
                 tenant.org_id,
                 principal_user_id,
                 session_id,
+                # One call's token: a claim it carries must not outlive it.
+                expires_minutes=2 if simulated else 60,
                 agent_id=str(handler_agent_id) if handler_agent_id else None,
                 is_service_account=tenant.user_id is None,
+                simulated=simulated,
+                simulation_read=tool_name if simulated and kwargs.get("simulation_read") else None,
             )
             headers = {"Authorization": f"Bearer {token}"}
 

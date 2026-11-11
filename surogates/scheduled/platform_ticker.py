@@ -545,10 +545,45 @@ async def main(
             claim_limit=claim_limit,
         )
 
+    # Simulations: end runs left running, delete old ones.
+    simulation_stop = asyncio.Event()
+    simulation_sweeps = None
+    if not _run_one_injected and getattr(settings, "encryption_key", ""):
+        from types import SimpleNamespace
+
+        from surogates.simulation.store import sweep as simulation_sweep
+        from surogates.tenant.credentials import CredentialVault
+
+        try:
+            _simulation_state = SimpleNamespace(
+                session_factory=_session_factory(), settings=settings,
+                vault=CredentialVault(
+                    _session_factory(),
+                    encryption_key=settings.encryption_key.encode("utf-8"),
+                ),
+            )
+        except Exception:
+            # A malformed key costs the sweep, not the ticker (as for Programs).
+            logger.warning("[simulation] invalid encryption_key; runs are not swept")
+        else:
+            # ponytail: no leader lock; every replica sweeps. Ending and deleting
+            # are idempotent, so the cost is duplicate work every ten minutes.
+            async def simulation_sweeps():  # pragma: no cover - prod path
+                while not simulation_stop.is_set():
+                    try:
+                        await simulation_sweep(_simulation_state, _program_now())
+                    except Exception:
+                        logger.exception("[simulation] sweep failed")
+                    try:
+                        await asyncio.wait_for(simulation_stop.wait(), timeout=600)
+                    except asyncio.TimeoutError:
+                        pass
+
     if install_signal_handlers:
         loop = asyncio.get_running_loop()
 
         def _stop_all() -> None:
+            simulation_stop.set()
             ticker.request_stop()
             if ambient_ticker is not None:
                 ambient_ticker.request_stop()
@@ -567,6 +602,8 @@ async def main(
             runners.append(ambient_ticker.run())
         if program_ticker is not None:
             runners.append(program_ticker.run())
+        if simulation_sweeps is not None:
+            runners.append(simulation_sweeps())
         await asyncio.gather(*runners)
     finally:
         close = getattr(redis, "aclose", None) or getattr(

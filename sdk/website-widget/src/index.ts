@@ -16,6 +16,7 @@
 
 export { WebsiteAgent } from './agent.js';
 export type { WebsiteAgentConfig } from './agent.js';
+export type { QuestionAnswer } from './protocol.js';
 
 export { Translator } from './translator.js';
 export type { SurogatesFrame } from './translator.js';

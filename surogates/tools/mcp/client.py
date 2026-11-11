@@ -1558,7 +1558,15 @@ def _convert_mcp_schema(server_name: str, mcp_tool) -> dict:
         "name": mcp_tool_name(server_name, mcp_tool.name),
         "description": mcp_tool.description or f"MCP tool {mcp_tool.name} from {server_name}",
         "parameters": _normalize_mcp_input_schema(mcp_tool.inputSchema),
+        "annotations": _annotations(mcp_tool),
     }
+
+
+def _annotations(mcp_tool) -> dict | None:
+    hints = getattr(mcp_tool, "annotations", None)
+    if hints is None:
+        return None
+    return hints.model_dump(exclude_none=True) if hasattr(hints, "model_dump") else dict(hints)
 
 
 def _normalize_name_filter(value: Any, label: str) -> set[str]:
@@ -1794,6 +1802,7 @@ def _register_server_tools(
                 name=tool_name_prefixed,
                 description=schema_dict["description"],
                 parameters=schema_dict["parameters"],
+                annotations=schema_dict["annotations"],
             ),
             handler=_make_tool_handler(name, mcp_tool.name, server.tool_timeout),
             toolset=toolset_name,

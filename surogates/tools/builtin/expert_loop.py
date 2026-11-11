@@ -67,6 +67,7 @@ async def run_expert_loop(
     session_store: Any | None = None,
     api_key: str | None = None,
     client: Any | None = None,
+    session_config: dict[str, Any] | None = None,
 ) -> tuple[str, int]:
     """Run a scoped agent loop using the expert's configured model.
 
@@ -200,6 +201,8 @@ async def run_expert_loop(
                         arguments=tc.function.arguments,
                         tenant=tenant,
                         session_id=session_id,
+                        # A simulation's expert is simulated too: the MCP proxy reads it from here.
+                        session_config=session_config,
                     )
 
                 # Truncate large tool results to avoid blowing the expert's context.

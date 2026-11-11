@@ -1466,3 +1466,16 @@ ALTER TABLE IF EXISTS simulation_runs
 -- Who started a simulation, and what a team stand-in asks the agent unprompted.
 ALTER TABLE IF EXISTS simulation_runs ADD COLUMN IF NOT EXISTS via text;
 ALTER TABLE IF EXISTS simulation_people ADD COLUMN IF NOT EXISTS task text;
+
+-- A simulation's plan: who each person is and what they check; runs of one plan share a batch.
+ALTER TABLE IF EXISTS simulation_people ADD COLUMN IF NOT EXISTS about text;
+ALTER TABLE IF EXISTS simulation_people ADD COLUMN IF NOT EXISTS test text;
+ALTER TABLE IF EXISTS simulation_runs ADD COLUMN IF NOT EXISTS batch_id uuid;
+CREATE INDEX IF NOT EXISTS ix_simulation_runs_batch_id ON simulation_runs (batch_id);
+
+-- Where a simulated person's program steps have got to when sent ahead of time.
+ALTER TABLE IF EXISTS simulation_people ADD COLUMN IF NOT EXISTS next_after timestamptz;
+
+-- A website simulation message is its session event, logged once whoever reads it first.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_simulation_messages_web_wamid
+    ON simulation_messages (run_id, wamid) WHERE wamid LIKE 'web:%';

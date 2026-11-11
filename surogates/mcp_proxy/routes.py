@@ -30,6 +30,7 @@ from surogates.runtime import (
     agent_runtime_context_dep,
     rate_limit_dep,
 )
+from surogates.simulation.side_effects import decide, fake_result, would_have
 from surogates.tools.mcp.client import _sanitize_error, call_utility
 
 logger = logging.getLogger(__name__)
@@ -66,6 +67,7 @@ class ToolSchema(BaseModel):
     name: str
     description: str
     parameters: dict[str, Any]
+    annotations: dict[str, Any] | None = None
     # The MCP server the tool belongs to: a shortened name may hold only
     # part of it, and the worker's entitlement filter reads it from here.
     server: str | None = None
@@ -178,6 +180,7 @@ async def list_tools(
                 name=s.get("name", ""),
                 description=s.get("description", ""),
                 parameters=s.get("parameters", {}),
+                annotations=s.get("annotations"),
                 server=s.get("server"),
             )
             for s in schemas
@@ -232,7 +235,16 @@ async def call_tool(
     audit_store: AuditStore | None = getattr(
         request.app.state, "audit_store", None,
     )
-    audit_user_id = None if auth.is_service_account else auth.user_id
+
+    if auth.simulated and auth.simulation_read != body.name:
+        hints = next((s.get("annotations") for s in schemas if s.get("name") == body.name), None)
+        if await decide(body.name, hints, llm=None, args=body.arguments):
+            await _audit_call(
+                audit_store, auth, ctx, server_name, original_tool, "simulated", 0,
+                would_have=would_have(body.name, body.arguments),
+            )
+            return ToolCallResponse(result=fake_result(body.name, body.arguments))
+
     call_start = time.monotonic()
     outcome = "success"
     result_text = ""
@@ -257,29 +269,7 @@ async def call_tool(
         raise
     finally:
         duration_ms = int((time.monotonic() - call_start) * 1000)
-        if audit_store is not None:
-            try:
-                # POLICY_MCP_CALL fires per call
-                # with the per-request ctx.agent_id so compliance can
-                # answer 'which agent invoked tool X on server Y,
-                # when, with what outcome' from the audit log alone.
-                await audit_store.emit(
-                    org_id=auth.org_id,
-                    agent_id=ctx.agent_id,
-                    user_id=audit_user_id,
-                    type=AuditType.POLICY_MCP_CALL,
-                    data={
-                        "server": server_name,
-                        "tool": original_tool,
-                        "outcome": outcome,
-                        "duration_ms": duration_ms,
-                    },
-                )
-            except Exception:  # noqa: BLE001 — emit is best-effort
-                logger.warning(
-                    "Failed to emit POLICY_MCP_CALL audit",
-                    exc_info=True,
-                )
+        await _audit_call(audit_store, auth, ctx, server_name, original_tool, outcome, duration_ms)
 
     # Strip the Composio brand from the router's tool output too, so the
     # model never reads (and echoes) it. ``debrand_composio_text`` leaves
@@ -293,6 +283,43 @@ async def call_tool(
         return ToolCallResponse(error=_sanitize_error(envelope_error))
 
     return ToolCallResponse(result=_sanitize_error(result_text))
+
+
+async def _audit_call(
+    audit_store: AuditStore | None,
+    auth: ProxyAuthContext,
+    ctx: AgentRuntimeContext,
+    server_name: str,
+    tool: str,
+    outcome: str,
+    duration_ms: int,
+    **extra: Any,
+) -> None:
+    if audit_store is None:
+        return
+    try:
+        # POLICY_MCP_CALL fires per call
+        # with the per-request ctx.agent_id so compliance can
+        # answer 'which agent invoked tool X on server Y,
+        # when, with what outcome' from the audit log alone.
+        await audit_store.emit(
+            org_id=auth.org_id,
+            agent_id=ctx.agent_id,
+            user_id=None if auth.is_service_account else auth.user_id,
+            type=AuditType.POLICY_MCP_CALL,
+            data={
+                "server": server_name,
+                "tool": tool,
+                "outcome": outcome,
+                "duration_ms": duration_ms,
+                **extra,
+            },
+        )
+    except Exception:  # noqa: BLE001 — emit is best-effort
+        logger.warning(
+            "Failed to emit POLICY_MCP_CALL audit",
+            exc_info=True,
+        )
 
 
 # Outcome strings emitted on POLICY_MCP_CALL.audit_log rows.  Kept

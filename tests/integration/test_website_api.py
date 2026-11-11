@@ -528,6 +528,127 @@ async def test_actual_response_echoes_origin(
 
 
 # ---------------------------------------------------------------------------
+# Answering the agent's question
+# ---------------------------------------------------------------------------
+
+
+async def _ask(session_store, sid, tool_call_id="tc-q"):
+    await session_store.emit_event(
+        sid,
+        EventType.INBOX_INPUT_REQUIRED,
+        {
+            "tool_call_id": tool_call_id,
+            "questions": [{"prompt": "Which plan?", "choices": [{"label": "Pro"}]}],
+            "context": "",
+        },
+    )
+
+
+_ANSWER = {"responses": [{"question": "Which plan?", "answer": "Pro"}]}
+
+
+def _answers(events):
+    return [e for e in events if e.type == EventType.ASK_USER_QUESTION_RESPONSE.value]
+
+
+async def test_visitor_answers_the_agents_question(
+    app, client: AsyncClient, session_factory, session_store,
+):
+    csrf, sid, origin = await _bootstrap(app, client, session_factory)
+    await _ask(session_store, sid)
+    url = f"/v1/website/sessions/{sid}/ask_user_question/tc-q/respond"
+    headers = {"Origin": origin, CSRF_HEADER_NAME: csrf}
+
+    resp = await client.post(url, json=_ANSWER, headers={"Origin": origin})
+    assert resp.status_code == 403
+
+    resp = await client.post(url, json=_ANSWER, headers=headers)
+    assert resp.status_code == 201, resp.text
+    answers = _answers(await session_store.get_events(sid))
+    assert len(answers) == 1
+    assert answers[0].data["tool_call_id"] == "tc-q"
+    assert answers[0].data["responses"] == [
+        {"question": "Which plan?", "answer": "Pro", "is_other": False},
+    ]
+
+    resp = await client.post(url, json=_ANSWER, headers=headers)
+    assert resp.status_code == 409
+    # The same id padded is the same question, already answered.
+    resp = await client.post(f"{url[:-len('/respond')]}%20/respond", json=_ANSWER, headers=headers)
+    assert resp.status_code == 409
+    resp = await client.post(
+        f"/v1/website/sessions/{sid}/ask_user_question/tc%0Aq/respond", json=_ANSWER, headers=headers,
+    )
+    assert resp.status_code == 400
+    assert len(_answers(await session_store.get_events(sid))) == 1
+
+
+async def test_visitor_cannot_answer_a_call_that_asked_nothing(
+    app, client: AsyncClient, session_factory, session_store,
+):
+    csrf, sid, origin = await _bootstrap(app, client, session_factory)
+    await session_store.emit_event(
+        sid, EventType.TOOL_CALL, {"tool_call_id": "tc-web", "name": "web_search", "arguments": {}},
+    )
+    resp = await client.post(
+        f"/v1/website/sessions/{sid}/ask_user_question/tc-web/respond",
+        json=_ANSWER,
+        headers={"Origin": origin, CSRF_HEADER_NAME: csrf},
+    )
+    assert resp.status_code == 409
+    assert _answers(await session_store.get_events(sid)) == []
+
+
+async def test_visitor_answer_after_the_question_closed_is_refused(
+    app, client: AsyncClient, session_factory, session_store,
+):
+    csrf, sid, origin = await _bootstrap(app, client, session_factory)
+    await _ask(session_store, sid)
+    await session_store.emit_event(
+        sid,
+        EventType.TOOL_RESULT,
+        {"tool_call_id": "tc-q", "name": "ask_user_question", "content": '{"cancelled": true}'},
+    )
+    resp = await client.post(
+        f"/v1/website/sessions/{sid}/ask_user_question/tc-q/respond",
+        json=_ANSWER,
+        headers={"Origin": origin, CSRF_HEADER_NAME: csrf},
+    )
+    assert resp.status_code == 409
+    assert _answers(await session_store.get_events(sid)) == []
+
+
+async def test_signed_in_visitor_answer_claims_the_inbox_row(
+    app, client: AsyncClient, session_factory, session_store,
+):
+    from sqlalchemy import text as _text
+
+    from .conftest import create_user
+
+    csrf, sid, origin = await _bootstrap(app, client, session_factory)
+    session = await session_store.get_session(sid)
+    user_id = await create_user(session_factory, session.org_id)
+    async with session_factory() as db:
+        await db.execute(_text("UPDATE sessions SET user_id = :u WHERE id = :id"), {"u": user_id, "id": sid})
+        await db.commit()
+    await _ask(session_store, sid)
+
+    resp = await client.post(
+        f"/v1/website/sessions/{sid}/ask_user_question/tc-q/respond",
+        json=_ANSWER,
+        headers={"Origin": origin, CSRF_HEADER_NAME: csrf},
+    )
+    assert resp.status_code == 201, resp.text
+    assert len(_answers(await session_store.get_events(sid))) == 1
+    async with session_factory() as db:
+        row = await db.execute(
+            _text("SELECT status FROM inbox_items WHERE session_id = :id AND kind = 'input_required'"),
+            {"id": sid},
+        )
+        assert row.scalar_one() == "responded"
+
+
+# ---------------------------------------------------------------------------
 # End session
 # ---------------------------------------------------------------------------
 

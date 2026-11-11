@@ -20,7 +20,7 @@ from surogates.simulation import api, discord, store
 from surogates.simulation.ids import new_discord_bot_token, new_discord_id
 from tests.test_simulation_api import TOKEN
 from tests.test_simulation_models import rsf  # noqa: F401
-from tests.test_simulation_store import FakeVault, make_org, provision_into
+from tests.test_simulation_store import FakeVault, line, make_org, provision_into
 
 
 def test_only_a_simulation_token_reaches_the_world(monkeypatch):
@@ -117,7 +117,8 @@ async def test_discord_run(rsf, monkeypatch):  # noqa: F811
     try:
         await _until(lambda: asyncio.sleep(0, server.started))
         run = (await client.post("/internal/runs", json={
-            "org_id": str(org_id), "agent_id": "a1", "created_by": "u1", "person_name": "Ana",
+            "org_id": str(org_id), "agent_id": "a1", "created_by": "u1",
+            "batch_id": str(uuid.uuid4()), "people": [line("Ana")],
             "channel": "discord",
         })).json()
         org, person, app_id = {"org_id": str(org_id)}, run["people"][0], run["phone_number_id"]
@@ -175,3 +176,47 @@ async def test_discord_run(rsf, monkeypatch):  # noqa: F811
         server.should_exit = True
         await serving
         await client.aclose()
+
+
+async def test_an_ended_runs_gateway_closes_on_its_next_heartbeat(rsf):  # noqa: F811
+    """Ended in another process (the ticker), the run's socket can't be closed
+    from there: the bot's next heartbeat closes it."""
+    from fastapi import WebSocketDisconnect
+
+    org_id = await make_org(rsf)
+    vault = FakeVault()
+    run = await store.create_run(rsf, vault, org_id=org_id, agent_id="a1", created_by="u1",
+                                 routing_config={}, people=[line("Ana")], provision=provision_into(rsf),
+                                 channel="discord")
+
+    class Socket:
+        app = SimpleNamespace(state=SimpleNamespace(
+            session_factory=rsf, settings=SimpleNamespace(simulation=SimpleNamespace(url="http://s"))))
+
+        def __init__(self):
+            self.sent, self.closed = [], None
+            self.frames = [{"op": 2, "d": {"token": run.access_token}}, {"op": 1}, "end", {"op": 1}]
+
+        async def accept(self):
+            pass
+
+        async def send_json(self, data):
+            self.sent.append(data.get("op"))
+
+        async def receive_json(self):
+            frame = self.frames.pop(0) if self.frames else None
+            if frame == "end":
+                await store.end_run(rsf, vault, run.id)
+                frame = self.frames.pop(0)
+            if frame is None:
+                raise WebSocketDisconnect()
+            return frame
+
+        async def close(self, code=1000):
+            self.closed = code
+
+    ws = Socket()
+    await asyncio.wait_for(discord.gateway(ws), 5)
+    assert ws.sent == [10, 0, 11]  # HELLO, READY, one heartbeat ACK while running
+    assert ws.closed == discord.AUTHENTICATION_FAILED
+    assert run.id not in discord.GATEWAYS._sockets

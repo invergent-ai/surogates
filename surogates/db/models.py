@@ -2945,6 +2945,8 @@ class SimulationRun(Base):
     review: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONB, nullable=True)
     #: ``copilot`` when the platform Copilot started it for the user; None from Studio.
     via: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    #: The plan this run is one channel of; its sibling runs share it.
+    batch_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
 
 
 class SimulationPerson(Base):
@@ -2969,6 +2971,11 @@ class SimulationPerson(Base):
     #: What a team stand-in asks the agent on their own, writing first; None to only answer it.
     task: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     persona: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    #: Who they are and what they check, from the plan; the judge grades them on *test*.
+    about: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    test: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    #: The slot of the last program step sent to them early; the next one comes after it.
+    next_after: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
     #: ``ai`` while the AI writes as them, ``human`` while the user does.
     driver: Mapped[str] = mapped_column(Text, nullable=False, default="human", server_default="human")
     #: ``talking`` until the AI stops: ``done``, ``gave_up``, ``no_reply`` or ``failed``.
@@ -2983,6 +2990,12 @@ class SimulationMessage(Base):
     """One message in a world, in Meta's own shape."""
 
     __tablename__ = "simulation_messages"
+    __table_args__ = (
+        # A website message is logged by whoever reads the session first: the
+        # actor or a Studio write. Its event id makes the second log a no-op.
+        Index("uq_simulation_messages_web_wamid", "run_id", "wamid", unique=True,
+              postgresql_where=text("wamid LIKE 'web:%'"), sqlite_where=text("wamid LIKE 'web:%'")),
+    )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     run_id: Mapped[uuid.UUID] = mapped_column(

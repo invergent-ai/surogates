@@ -456,6 +456,7 @@ class K8sSandbox:
                 # proxy trusts the query param, as before).
                 agent_id=spec.env.get("SUROGATES_AGENT_ID") or None,
                 is_service_account=spec.env.get("SUROGATES_IS_SERVICE_ACCOUNT") == "1",
+                simulated=spec.simulated,
             )
             env_vars.append(client.V1EnvVar(
                 name="MCP_PROXY_TOKEN", value=sandbox_token,

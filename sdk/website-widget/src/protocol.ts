@@ -18,6 +18,7 @@
 
 import {
   CSRF_HEADER,
+  PATH_ANSWER,
   PATH_BOOTSTRAP,
   PATH_END,
   PATH_EVENTS,
@@ -278,6 +279,35 @@ export async function sendMessage(
   }
   const body = (await response.json().catch(() => ({}))) as { event_id?: number };
   return { eventId: Number(body.event_id ?? 0) };
+}
+
+/** One answer to one question of an ``ask_user_question`` call. */
+export interface QuestionAnswer {
+  question: string;
+  answer: string;
+  is_other: boolean;
+}
+
+/** ``POST /v1/website/sessions/{id}/ask_user_question/{tool_call_id}/respond``. */
+export async function answerQuestion(
+  apiUrl: string,
+  sessionId: string,
+  csrfToken: string,
+  toolCallId: string,
+  responses: QuestionAnswer[],
+  agentId?: string,
+): Promise<void> {
+  const response = await doFetch(apiUrl + withAgentId(PATH_ANSWER(sessionId, toolCallId), agentId), {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      [CSRF_HEADER]: csrfToken,
+    },
+    body: JSON.stringify({ responses }),
+  });
+  if (!response.ok) {
+    await raiseForStatus(response, 'Answer question');
+  }
 }
 
 /** ``POST /v1/website/sessions/{id}/end``.  Best-effort; swallows errors. */
