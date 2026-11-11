@@ -18,9 +18,10 @@ writing, editing, and declaring an answer are.
 
 Also consult it:
 
-- When you believe the task is complete. Make your deliverable durable first
-  — write the file, save the result — because the call takes time and an
-  unwritten result does not survive the session ending.
+- When you believe the task is complete. If the deliverable is a file, make
+  it durable first — write the file, save the result — because the call
+  takes time and an unwritten result does not survive the session ending.
+  An answer the user asked for in the chat is not written to a file for this.
 - When stuck: errors recurring, an approach not converging, results that do
   not fit.
 - When considering a change of approach.
