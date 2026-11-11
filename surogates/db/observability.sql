@@ -1472,3 +1472,6 @@ ALTER TABLE IF EXISTS simulation_people ADD COLUMN IF NOT EXISTS about text;
 ALTER TABLE IF EXISTS simulation_people ADD COLUMN IF NOT EXISTS test text;
 ALTER TABLE IF EXISTS simulation_runs ADD COLUMN IF NOT EXISTS batch_id uuid;
 CREATE INDEX IF NOT EXISTS ix_simulation_runs_batch_id ON simulation_runs (batch_id);
+
+-- Where a simulated person's program steps have got to when sent ahead of time.
+ALTER TABLE IF EXISTS simulation_people ADD COLUMN IF NOT EXISTS next_after timestamptz;

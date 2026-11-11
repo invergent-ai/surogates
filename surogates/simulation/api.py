@@ -12,7 +12,7 @@ import logging
 
 import secrets
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Literal, Optional
 from urllib.parse import urlencode
 
@@ -584,11 +584,20 @@ async def call_as_person(run_id: uuid.UUID, person_id: uuid.UUID, org_id: uuid.U
 
 @router.post("/runs/{run_id}/people/{person_id}/next-step")
 async def next_step(run_id: uuid.UUID, person_id: uuid.UUID, org_id: uuid.UUID, request: Request):
-    """The person's next program check-in, sent now rather than when it falls due."""
+    """The person's next program check-in, sent now rather than when it falls due.
+
+    The only way a check-in reaches a simulated person: the scheduled ticker
+    leaves them out.  Each call moves on past the step it sent, as time would.
+    """
     from surogates.followup import store as followup_store
     from surogates.followup.context import in_person_zone
     from surogates.followup.eligibility import next_contact
-    from surogates.programs.materialize import identity_lookup_from, materialize_occurrence
+    from surogates.programs.materialize import (
+        already_reached,
+        identity_lookup_from,
+        last_inbound_for,
+        materialize_occurrence,
+    )
 
     state = request.app.state
     sf = state.session_factory
@@ -600,9 +609,8 @@ async def next_step(run_id: uuid.UUID, person_id: uuid.UUID, org_id: uuid.UUID, 
     if not enrolled:
         raise HTTPException(status_code=409, detail="Not enrolled in a program")
     now = datetime.now(timezone.utc)
-    last = (await followup_store.last_inbound_by_person(
-        sf, org_id=run.org_id, user_ids=[person.user_id],
-    )).get(person.user_id)
+    after = max(now, person.next_after + timedelta(seconds=1)) if person.next_after else now
+    lookup = identity_lookup_from(sf)
     async with sf() as db:
         schedules = (await db.execute(
             sa.select(ProgramScheduleRow)
@@ -610,24 +618,28 @@ async def next_step(run_id: uuid.UUID, person_id: uuid.UUID, org_id: uuid.UUID, 
             .where(ProgramScheduleRow.agent_id == run.agent_id)
             .where(ProgramScheduleRow.active.is_(True))
         )).scalars().all()
-    due = [
-        (found[0], schedule)
-        for schedule in schedules for e in enrolled
-        if (found := next_contact(
-            in_person_zone([schedule.config or {}], e), protocol=e.protocol,
-            start_date=e.start_date, phase=e.phase, enrolled_at=e.created_at,
-            last_inbound_at=last, now=now,
-        ))
-    ]
+    due = []
+    for schedule in schedules:
+        last = await last_inbound_for(schedule, person.user_id, session_factory=sf,
+                                      identity_lookup=lookup)
+        for e in enrolled:
+            found = next_contact(
+                in_person_zone([schedule.config or {}], e), protocol=e.protocol,
+                start_date=e.start_date, phase=e.phase, enrolled_at=e.created_at,
+                last_inbound_at=last, now=after,
+            )
+            if found:
+                due.append((found[0], schedule))
     if not due:
         raise HTTPException(status_code=409, detail="No program step is ahead for this person")
     at, schedule = min(due, key=lambda d: d[0])
-    # Stamped now, not at the due slot: that slot's occurrence belongs to
+    # Recorded now, not at the due slot: that slot's occurrence belongs to
     # everyone else on the roster, and taking it would skip them.
     occurrence_id = await materialize_occurrence(
-        schedule, session_factory=sf, identity_lookup=identity_lookup_from(sf),
-        now=at, only=person.user_id, stamped_at=now,
+        schedule, session_factory=sf, identity_lookup=lookup,
+        now=at, only=person.user_id, run=run, sent_at=now,
     )
+    await store.update_person(sf, person.id, next_after=at)
     async with sf() as db:
         row = (await db.execute(
             sa.select(ProgramInvitationRow)
@@ -635,8 +647,17 @@ async def next_step(run_id: uuid.UUID, person_id: uuid.UUID, org_id: uuid.UUID, 
             .where(ProgramInvitationRow.user_id == person.user_id)
         )).scalars().first()
     sent = row is not None and row.delivery_state == "queued"
-    return {"sent": sent, "due_at": at.isoformat(),
-            "reason": None if sent else (row.reason if row else "Not due at that step")}
+    if sent:
+        reason = None
+    elif row is not None:
+        reason = row.reason
+    elif (schedule.config or {}).get("once_per_person") and person.user_id in await already_reached(
+        sf, schedule.program_id, [person.user_id],
+    ):
+        reason = "Already reached in this program"
+    else:
+        reason = "Not due at that step"
+    return {"sent": sent, "due_at": at.isoformat(), "reason": reason}
 
 
 @router.post("/runs/{run_id}/end")

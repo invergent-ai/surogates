@@ -2974,6 +2974,8 @@ class SimulationPerson(Base):
     #: Who they are and what they check, from the plan; the judge grades them on *test*.
     about: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     test: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    #: The slot of the last program step sent to them early; the next one comes after it.
+    next_after: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
     #: ``ai`` while the AI writes as them, ``human`` while the user does.
     driver: Mapped[str] = mapped_column(Text, nullable=False, default="human", server_default="human")
     #: ``talking`` until the AI stops: ``done``, ``gave_up``, ``no_reply`` or ``failed``.

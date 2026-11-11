@@ -23,6 +23,8 @@ from surogates.db.models import (
     FollowupEnrollmentRow,
     Mission,
     OutreachMessageRow,
+    ProgramInvitationRow,
+    ProgramOccurrenceRow,
     ScheduledSession,
     Session,
     SessionLease,
@@ -637,6 +639,14 @@ async def delete_run(sf, run_id: uuid.UUID) -> None:
         await db.execute(sa.delete(ScheduledSession).where(ScheduledSession.user_id.in_(users)))
         await db.execute(sa.delete(OutreachMessageRow).where(
             OutreachMessageRow.user_id.in_(users) | OutreachMessageRow.subject_user_id.in_(users)))
+        # Program rows name people by id with no foreign key: nothing else clears them.
+        theirs = (ProgramInvitationRow.user_id.in_(users)
+                  | ProgramInvitationRow.person_user_id.in_(users))
+        occurrences = sa.select(ProgramInvitationRow.occurrence_id).where(theirs).scalar_subquery()
+        await db.execute(sa.delete(ProgramOccurrenceRow).where(
+            ProgramOccurrenceRow.id.in_(occurrences), ProgramOccurrenceRow.status == "simulated"))
+        await db.execute(sa.delete(ProgramInvitationRow).where(theirs))
+        await db.execute(sa.delete(FollowupEnrollmentRow).where(FollowupEnrollmentRow.user_id.in_(users)))
         # Whatever else names a stand-in: emptied where it may be, deleted where
         # it must name someone (channel identities, devices...).
         for table in User.metadata.tables.values():

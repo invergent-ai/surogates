@@ -23,8 +23,11 @@ from surogates.db.models import (
     Base,
     ChannelIdentity,
     Event,
+    FollowupEnrollmentRow,
     Mission,
     OutreachMessageRow,
+    ProgramInvitationRow,
+    ProgramOccurrenceRow,
     ScheduledSession,
     Session,
     SessionLease,
@@ -96,6 +99,19 @@ async def _run(sf, vault, org_id, *, created, status="ended"):
         db.add(OutreachMessageRow(org_id=org_id, agent_id="a1", user_id=person.user_id,
                                   subject_user_id=person.user_id, kind="alert", platform="whatsapp", channel_identifier="x",
                                   text="t"))
+        # A program step sent to them ahead of time: program rows have no foreign keys.
+        occurrence = ProgramOccurrenceRow(program_id=uuid.uuid4(), org_id=org_id, agent_id="a1",
+                                          scheduled_for=datetime.now(timezone.utc), skill_ref="s",
+                                          status="simulated")
+        db.add(occurrence)
+        db.add(FollowupEnrollmentRow(org_id=org_id, agent_id="a1", user_id=person.user_id,
+                                     protocol="post-op", enrolled_by="operator"))
+        await db.flush()
+        db.add(ProgramInvitationRow(occurrence_id=occurrence.id, program_id=occurrence.program_id,
+                                    org_id=org_id, agent_id="a1", user_id=person.user_id,
+                                    person_user_id=person.user_id, platform="whatsapp",
+                                    platform_user_id=person.address, delivery_state="queued",
+                                    response_state="not_started", escalation_state="none"))
         await db.flush()
         await db.execute(sa.update(Session).where(Session.id == child_id).values(task_id=task.id))
         db.add(Event(session_id=session_id, type="user.message", data={}))
@@ -141,6 +157,9 @@ async def test_sweep_ends_stale_runs_and_deletes_old_ones(pg):
     assert await _count(sf, Mission, Mission.user_id == old_person.user_id) == 0
     assert await _count(sf, ScheduledSession, ScheduledSession.user_id == old_person.user_id) == 0
     assert await _count(sf, OutreachMessageRow, OutreachMessageRow.user_id == old_person.user_id) == 0
+    assert await _count(sf, FollowupEnrollmentRow, FollowupEnrollmentRow.user_id == old_person.user_id) == 0
+    assert await _count(sf, ProgramInvitationRow, ProgramInvitationRow.user_id == old_person.user_id) == 0
+    assert await _count(sf, ProgramOccurrenceRow) == 2  # the two runs still here keep theirs
 
     assert (await store.get_run(sf, recent.id)).status == "ended"
     assert await _count(sf, SimulationMessage, SimulationMessage.run_id == recent.id) == 1

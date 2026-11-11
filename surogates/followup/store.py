@@ -32,7 +32,6 @@ from surogates.db.models import (
     OutreachMessageRow,
     ProgramScheduleRow,
     Session as SessionRow,
-    SimulationRun,
     User,
 )
 from surogates.followup.eligibility import Audience
@@ -173,7 +172,6 @@ async def enrollments(
     enrolled_by: str | None = None,
     payer_user_id: uuid.UUID | None = None,
     simulation_run_id: uuid.UUID | None = None,
-    include_running_simulations: bool = False,
 ) -> list[FollowupEnrollmentRow]:
     """An agent's enrollments, narrowed by whichever filters are given.
 
@@ -183,8 +181,6 @@ async def enrollments(
     roster leaves out simulated people, or, given *simulation_run_id*, is
     that run's people only; one person asked for by *user_id* is found
     either way, or a run could never see whom it just enrolled.
-    *include_running_simulations* keeps the people of runs still running in
-    a roster, so the check-ins they are enrolled in reach them too.
     Ordered oldest first, which is the order a roster and a history read.
     """
     query = (
@@ -200,12 +196,10 @@ async def enrollments(
         .order_by(FollowupEnrollmentRow.created_at)
     )
     if user_id is None and simulation_run_id is None:
-        simulated = [User.id == FollowupEnrollmentRow.user_id, User.simulation_run_id.isnot(None)]
-        if include_running_simulations:
-            simulated.append(User.simulation_run_id.notin_(
-                sa.select(SimulationRun.id).where(SimulationRun.status == "running")
-            ))
-        query = query.where(~sa.exists().where(*simulated))
+        query = query.where(~sa.exists().where(
+            User.id == FollowupEnrollmentRow.user_id,
+            User.simulation_run_id.isnot(None),
+        ))
     elif user_id is None:
         query = query.where(FollowupEnrollmentRow.user_id.in_(
             sa.select(User.id).where(User.simulation_run_id == simulation_run_id)

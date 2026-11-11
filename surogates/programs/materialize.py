@@ -29,6 +29,7 @@ from surogates.db.models import (
     ProgramInvitationRow,
     ProgramOccurrenceRow,
     ProgramScheduleRow,
+    User,
 )
 from surogates.followup import store as followup_store
 from surogates.followup.eligibility import Audience, as_utc, ineligibility
@@ -140,7 +141,7 @@ async def _is_open(db, schedule, person, configs: dict, seen: dict) -> bool:
     return seen[person]
 
 
-async def _already_reached(
+async def already_reached(
     session_factory: Any, program_id: uuid.UUID, people: list[uuid.UUID],
 ) -> set[uuid.UUID]:
     """Who of *people* this Program already sent their own step to, to them
@@ -170,12 +171,15 @@ async def materialize_occurrence(
     identity_lookup: Any,
     now: datetime,
     only: uuid.UUID | None = None,
-    stamped_at: datetime | None = None,
+    run: Any = None,
+    sent_at: datetime | None = None,
 ) -> uuid.UUID:
     """Create the occurrence and one invitation per user.
 
-    *only* narrows the roster to one person, as due at *now*; *stamped_at*
-    records the occurrence at another instant than *now*.
+    *only* narrows the roster to one person, as due at *now*.  Given a
+    simulation *run* too, that person is sent the step ahead of its slot:
+    recorded at *sent_at* as ``simulated``, and written from the run's own
+    account, never one of the business's real senders.
 
     Idempotent at both levels — ``(program_id, scheduled_for)`` and
     ``(occurrence_id, user_id)`` — so a crashed or retried tick is harmless
@@ -197,7 +201,7 @@ async def materialize_occurrence(
         with_last_inbound=pause is not None, only=only,
     )
     if config.get("once_per_person"):
-        reached = await _already_reached(
+        reached = await already_reached(
             session_factory, schedule.program_id, [user_id for user_id, *_ in roster],
         )
         roster = [entry for entry in roster if entry[0] not in reached]
@@ -221,9 +225,17 @@ async def materialize_occurrence(
     first: dict[uuid.UUID, tuple] = {}
     for copy in copies:
         first.setdefault(copy[0], copy)
-    copies = list(first.values())
+    # A simulated person's step stays inside their run, and nobody's step
+    # reaches a simulated contact from outside it.
+    run_of = await _simulation_runs_of(session_factory, list(first))
+    copies = [c for c in first.values() if run_of.get(c[0]) == run_of.get(c[3] or c[0])]
     chosen: dict[uuid.UUID, Any] = {}
-    if per_person:
+    if run is not None:
+        per_person = True
+        for user_id, *_ in copies:
+            identity = await identity_lookup(schedule.org_id, run.channel, user_id)
+            chosen[user_id] = identity and (run.channel, identity, run.phone_number_id, [])
+    elif per_person:
         for user_id, _identity, enrollment, _person in copies:
             chosen[user_id] = await choose_channel(
                 config, org_id=schedule.org_id, user_id=user_id,
@@ -259,18 +271,18 @@ async def materialize_occurrence(
             program_id=schedule.program_id,
             org_id=schedule.org_id,
             agent_id=schedule.agent_id,
-            scheduled_for=stamped_at or now,
+            scheduled_for=sent_at or now,
             skill_ref=config.get("skill_ref", ""),
             template_name=config.get("template_name"),
             template_language=config.get("template_language"),
-            status="fired",
+            status="fired" if run is None else "simulated",
         )
         db.add(occ)
         try:
             await db.flush()
         except IntegrityError:
             await db.rollback()
-            return await _existing_occurrence(db, schedule.program_id, stamped_at or now)
+            return await _existing_occurrence(db, schedule.program_id, sent_at or now)
 
         open_configs: dict = {}
         open_people: dict[uuid.UUID, bool] = {}
@@ -327,6 +339,52 @@ async def materialize_occurrence(
         return occ.id
 
 
+async def _simulation_runs_of(
+    session_factory: Any, user_ids: list[uuid.UUID],
+) -> dict[uuid.UUID, uuid.UUID]:
+    """The simulation run of each of *user_ids* that is a simulated person."""
+    if not user_ids:
+        return {}
+    async with session_factory() as db:
+        return dict((await db.execute(
+            sa.select(User.id, User.simulation_run_id)
+            .where(User.id.in_(user_ids))
+            .where(User.simulation_run_id.isnot(None))
+        )).all())
+
+
+async def _last_inbound_by(
+    schedule: Any, config: dict, platform: str, session_factory: Any, identities: dict,
+) -> dict[uuid.UUID, datetime]:
+    """When each person of *identities* (user id to identity) last wrote, as
+    this Program's silence filter and pause read it."""
+    if journey_of(config):
+        return await followup_store.last_inbound_by_person(
+            session_factory, org_id=schedule.org_id, user_ids=list(identities),
+        )
+    by_phone = await followup_store.last_inbound_by_user(
+        session_factory, org_id=schedule.org_id, platform=platform,
+        channel_identifier=str(config.get("channel_identifier") or ""),
+        platform_user_ids=[i.platform_user_id for i in identities.values() if i is not None],
+    )
+    return {
+        uid: by_phone[i.platform_user_id]
+        for uid, i in identities.items() if i is not None and i.platform_user_id in by_phone
+    }
+
+
+async def last_inbound_for(
+    schedule: Any, user_id: uuid.UUID, *, session_factory: Any, identity_lookup: Any,
+) -> datetime | None:
+    """When *user_id* last wrote, read exactly as materialize reads it for *schedule*."""
+    config = schedule.config or {}
+    platform = own_channel(config)
+    identity = await identity_lookup(schedule.org_id, platform, user_id)
+    return (await _last_inbound_by(
+        schedule, config, platform, session_factory, {user_id: identity},
+    )).get(user_id)
+
+
 async def _roster(
     schedule: Any,
     config: dict,
@@ -352,22 +410,8 @@ async def _roster(
     silence filter or the caller (*with_last_inbound*, for the pause) needs
     it, else empty.
     """
-    sender = str(config.get("channel_identifier") or "")
-
     async def _last_inbound(identities: dict) -> dict[uuid.UUID, datetime]:
-        if journey_of(config):
-            return await followup_store.last_inbound_by_person(
-                session_factory, org_id=schedule.org_id, user_ids=list(identities),
-            )
-        by_phone = await followup_store.last_inbound_by_user(
-            session_factory, org_id=schedule.org_id, platform=platform,
-            channel_identifier=sender,
-            platform_user_ids=[i.platform_user_id for i in identities.values() if i is not None],
-        )
-        return {
-            uid: by_phone[i.platform_user_id]
-            for uid, i in identities.items() if i is not None and i.platform_user_id in by_phone
-        }
+        return await _last_inbound_by(schedule, config, platform, session_factory, identities)
 
     if config.get("audience") is None:
         roster = []
@@ -395,7 +439,7 @@ async def _roster(
 
     enrollments = await followup_store.enrollments(
         session_factory, org_id=schedule.org_id, agent_id=schedule.agent_id,
-        protocol=audience.protocol, status="active", include_running_simulations=True,
+        protocol=audience.protocol, status="active",
         user_id=only,
     )
     zones = {e.user_id: person_zone(e, config) for e in enrollments}
@@ -467,25 +511,31 @@ async def send_queued_openers(
     async with session_factory() as db:
         rows = (
             await db.execute(
-                sa.select(ProgramInvitationRow, ProgramOccurrenceRow.scheduled_for)
+                sa.select(
+                    ProgramInvitationRow, ProgramOccurrenceRow.scheduled_for,
+                    User.simulation_run_id,
+                )
                 .join(
                     ProgramOccurrenceRow,
                     ProgramOccurrenceRow.id == ProgramInvitationRow.occurrence_id,
                 )
+                .outerjoin(User, User.id == ProgramInvitationRow.user_id)
                 .where(ProgramInvitationRow.delivery_state == "queued")
                 .where(ProgramInvitationRow.outbox_id.is_(None))
                 .where(ProgramInvitationRow.response_state == "not_started")
                 .order_by(ProgramInvitationRow.created_at)
             )
         ).all()
-        configs = await _configs_by_program(db, {row.program_id for row, _ in rows})
+        configs = await _configs_by_program(db, {row.program_id for row, *_ in rows})
 
-    for pending, scheduled_for in rows:
+    # A simulation's person is sent what the builder asks for when they ask:
+    # no night to wait out, and no consent to record in a world of its own.
+    for pending, scheduled_for, simulated in rows:
         config = configs.get(pending.program_id) or {}
         window = timedelta(
             hours=int(config.get("response_deadline_hours") or _DEFAULT_DEADLINE_HOURS),
         )
-        if journey_of(config).get("quiet_hours") and in_quiet_hours(
+        if not simulated and journey_of(config).get("quiet_hours") and in_quiet_hours(
             config, await _zone_of(session_factory, pending, config), now,
         ):
             continue  # held until the person's quiet hours are over
@@ -512,7 +562,9 @@ async def send_queued_openers(
                 )
                 continue
 
-            if identity is None or followup_store.permission_status(identity) != "granted":
+            if identity is None or (
+                not simulated and followup_store.permission_status(identity) != "granted"
+            ):
                 withdrawn = await db.execute(_unsent(pending.id).values(
                     delivery_state="canceled",
                     reason="Permission withdrawn before the opener was sent",
@@ -580,7 +632,8 @@ async def wake_at_deadlines(session_factory: Any, *, now: datetime, wake: Any) -
     async with session_factory() as db:
         rows = (
             await db.execute(
-                sa.select(ProgramInvitationRow)
+                sa.select(ProgramInvitationRow, User.simulation_run_id)
+                .outerjoin(User, User.id == ProgramInvitationRow.user_id)
                 .where(ProgramInvitationRow.response_state == "no_reply_by_deadline")
                 .where(ProgramInvitationRow.deadline_woken_at.is_(None))
                 .where(ProgramInvitationRow.deadline_at.isnot(None))
@@ -589,17 +642,17 @@ async def wake_at_deadlines(session_factory: Any, *, now: datetime, wake: Any) -
                 .order_by(ProgramInvitationRow.deadline_at)
                 .limit(200)
             )
-        ).scalars().all()
-        configs = await _configs_by_program(db, {row.program_id for row in rows})
+        ).all()
+        configs = await _configs_by_program(db, {row.program_id for row, _ in rows})
 
     woken = 0
-    for row in rows:
+    for row, simulated in rows:
         if row.program_id not in configs:
             continue  # the step is gone; nobody to decide for it
         config = configs[row.program_id]
         enrollment = await _enrollment_of(session_factory, row, config)
         active = enrollment is None or enrollment.status == "active"
-        if active and journey_of(config).get("quiet_hours") and in_quiet_hours(
+        if active and not simulated and journey_of(config).get("quiet_hours") and in_quiet_hours(
             config, person_zone(enrollment, config), now,
         ):
             continue
