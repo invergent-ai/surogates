@@ -1503,14 +1503,36 @@ _make_get_prompt_handler = _make_utility_handler("get_prompt")
 # ---------------------------------------------------------------------------
 
 def _normalize_mcp_input_schema(schema: dict | None) -> dict:
-    """Normalize MCP input schemas for LLM tool-calling compatibility."""
-    if not schema:
-        return {"type": "object", "properties": {}}
+    """Normalize MCP input schemas for LLM tool-calling compatibility.
 
-    if schema.get("type") == "object" and "properties" not in schema:
-        return {**schema, "properties": {}}
+    An object schema that declares no properties and nothing else that
+    shapes its arguments is a tool that takes no arguments: FastMCP /
+    pydantic emit ``{"type": "object", "properties": {}}`` for every such
+    tool.  It is closed (``additionalProperties: false``), which is what it
+    means and what the MCP proxy's security scan asks of a no-argument
+    schema.  A schema with any other keyword (``additionalProperties``,
+    ``patternProperties``, ``$ref`` / ``$defs``, ``anyOf`` / ``oneOf`` /
+    ``allOf``, ...) is left as it is, and the scan judges it as before.
+    """
+    if not schema:
+        return _no_arguments()
+
+    if schema.get("type") == "object":
+        if schema.get("properties") is None:
+            schema = {**schema, "properties": {}}
+        if not schema["properties"] and set(schema) <= _NO_ARGUMENT_KEYS:
+            schema = {**schema, "additionalProperties": False}
 
     return schema
+
+
+#: The keywords a no-argument object schema may carry and still be closed.
+_NO_ARGUMENT_KEYS = frozenset({"type", "properties", "required", "title", "description", "$schema"})
+
+
+def _no_arguments() -> dict:
+    """The input schema of a tool that takes no arguments (a fresh one each time)."""
+    return {"type": "object", "properties": {}, "additionalProperties": False}
 
 
 def sanitize_mcp_name_component(value: str) -> str:
@@ -1617,10 +1639,7 @@ def _build_utility_schemas(server_name: str) -> List[dict]:
             "schema": {
                 "name": f"mcp__{safe_name}__list_resources",
                 "description": f"List available resources from MCP server '{server_name}'",
-                "parameters": {
-                    "type": "object",
-                    "properties": {},
-                },
+                "parameters": _no_arguments(),
             },
             "handler_key": "list_resources",
         },
@@ -1645,10 +1664,7 @@ def _build_utility_schemas(server_name: str) -> List[dict]:
             "schema": {
                 "name": f"mcp__{safe_name}__list_prompts",
                 "description": f"List available prompts from MCP server '{server_name}'",
-                "parameters": {
-                    "type": "object",
-                    "properties": {},
-                },
+                "parameters": _no_arguments(),
             },
             "handler_key": "list_prompts",
         },
