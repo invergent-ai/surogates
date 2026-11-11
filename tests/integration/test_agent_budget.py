@@ -102,13 +102,11 @@ async def test_an_agents_own_agents_get_at_most_what_it_has_left(chats):  # noqa
     assert 0 < inner.config[AGENT_BUDGET_KEY]["tokens"] < 10
 
 
-async def test_the_iteration_cap_of_an_agent_without_a_token_budget_is_no_budget_stop(chats, monkeypatch):  # noqa: F811
-    from surogates.tools.builtin import delegate
-
-    monkeypatch.setattr(delegate, "_CHILD_MAX_ITERATIONS", 1)
+async def test_the_iteration_cap_of_an_agent_without_a_token_budget_is_no_budget_stop(chats):  # noqa: F811
     chat = await a_chat(chats, {PARITY_KEY: True})
     child = await a_background_agent(chats, chat)
-    chats.replies = [TODO_CALL, _final_response("Two items so far.")]
+    # The test worker's iteration budget is 10: the eleventh step asks for a summary and ends there.
+    chats.replies = [TODO_CALL] * 10 + [_final_response("Two items so far.")]
     await chats.wake(child.id)
     [end] = await chats.store.get_events(child.id, types=[EventType.SESSION_COMPLETE])
     assert end.data["reason"] == "budget_exhausted"
