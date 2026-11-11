@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import weakref
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -213,6 +214,19 @@ def register(registry: ToolRegistry) -> None:
     registry.register(name="monitor", schema=_MONITOR_SCHEMA, handler=_monitor_handler, toolset="core")
 
 
+#: One lock per session for its monitors' count and start; an entry lives while a call holds or waits for it.
+_MONITOR_LOCKS: "weakref.WeakValueDictionary[UUID, asyncio.Lock]" = weakref.WeakValueDictionary()
+
+
+def _lock_of(locks: Any, key: Any) -> asyncio.Lock:
+    """The lock *locks* keeps for *key*: one while any call holds or waits for it (a weak map), never two."""
+    lock = locks.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        locks[key] = lock
+    return lock
+
+
 def _bounded(value: Any, default: int, low: int, high: int) -> int:
     try:
         number = int(value) if value is not None else default
@@ -224,9 +238,8 @@ def _bounded(value: Any, default: int, low: int, high: int) -> int:
 async def _monitor_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
     """Start *command* where the session's commands run, with its lines kept, and hand it to the worker's watch."""
     from surogates.devices.binding import device_of
-    from surogates.harness.background_watch import HERE, MAX_MONITORS_PER_SESSION, background_watch, monitor_task
+    from surogates.harness.background_watch import MAX_MONITORS_PER_SESSION, background_watch
     from surogates.harness.subagents import monitor_allowed
-    from surogates.sandbox.pool import SandboxPool, sandbox_session_key
 
     session_store = kwargs.get("session_store")
     me_id = kwargs.get("session_id")
@@ -246,12 +259,22 @@ async def _monitor_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
         return _error("monitor is for the main session; here, use terminal and wait for the command")
     if not background_watch.configured:
         return _error("this worker cannot watch commands")
-    if await background_watch.monitors_running(me.id) >= MAX_MONITORS_PER_SESSION:
-        # Counted for all workers: monitors a turn on another worker started are the session's too.
-        return _error(
-            f"the monitor could not start: {MAX_MONITORS_PER_SESSION} monitors already run: stop one with "
-            "stop_agent before you start another",
-        )
+    # Counted and started under one lock per session: the calls of one response run at once.
+    async with _lock_of(_MONITOR_LOCKS, me.id):
+        if await background_watch.monitors_running(me.id) >= MAX_MONITORS_PER_SESSION:
+            # Counted for all workers: monitors a turn on another worker started are the session's too.
+            return _error(
+                f"the monitor could not start: {MAX_MONITORS_PER_SESSION} monitors already run: stop one with "
+                "stop_agent before you start another",
+            )
+        return await _start_monitor(me, command, description, timeout, cap, kwargs)
+
+
+async def _start_monitor(me: Any, command: str, description: str, timeout: int, cap: int, kwargs: dict) -> str:
+    """Start the checked monitor where the session's commands run, and hand it to the worker's watch."""
+    from surogates.harness.background_watch import HERE, MAX_MONITORS_PER_SESSION, background_watch, monitor_task
+    from surogates.sandbox.pool import SandboxPool, sandbox_session_key
+
     sandbox_pool = kwargs.get("sandbox_pool")
     if isinstance(sandbox_pool, SandboxPool):
         from surogates.harness.tool_exec import _build_session_sandbox_spec
@@ -263,8 +286,7 @@ async def _monitor_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
         spec = await _build_session_sandbox_spec(me, kwargs.get("tenant"), owner, credential_vault=kwargs.get("credential_vault"))
         await sandbox_pool.ensure(owner, spec)
         try:
-            # Counted where the commands run, the sandbox's registry: whichever worker runs a turn, a session
-            # has at most ``MAX_MONITORS_PER_SESSION`` running.
+            # Counted again where the commands run: the sandbox's own registry.
             started = json.loads(await sandbox_pool.execute(owner, "_monitor", json.dumps({
                 "command": command, "task_id": monitor_task(me.id), "max_running": MAX_MONITORS_PER_SESSION,
             })))
@@ -453,9 +475,12 @@ async def _stop_process(proc_id: str, **kwargs: Any) -> str:
     me = await session_store.get_session(UUID(str(kwargs["session_id"])))
     if not background_watch.started_by(proc_id, me.id):
         # Watched by another worker's watch, which a turn of this session started: it kills it there.
-        if await background_watch.stop_elsewhere(proc_id, me.id):
+        elsewhere = await background_watch.stop_elsewhere(proc_id, me.id)
+        if elsewhere == "stopping":
             return json.dumps({"status": "stopping", "agent_id": proc_id,
-                               "note": "It runs on another worker, which stops it. Its end reaches you as a notification."})
+                               "note": "It is being stopped. Its end reaches you as a notification."})
+        if elsewhere == "gone":
+            return _error(f"background command {proc_id} can no longer be stopped: it may have ended, or may still be running")
         return _error(f"no background command {proc_id} that you started and that still runs")
     sandbox_pool = kwargs.get("sandbox_pool")
     args = json.dumps({"action": "kill", "session_id": proc_id})

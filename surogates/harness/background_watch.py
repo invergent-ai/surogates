@@ -93,7 +93,7 @@ ALIVE_SECONDS = 60
 #: Seconds between two sweeps for the commands of a watch whose worker is gone.
 SWEEP_SECONDS = 15.0
 #: Why a session hears that a command another worker watched cannot be watched any more.
-WATCH_LOST = "the worker that watched it stopped; it may still be running"
+WATCH_LOST = "the worker that watched it stopped; it may have stopped with it, or may still be running"
 
 #: Adds a send to a session's minute of monitor notes if it has room: atomic, for the watches of all workers.
 _RATE_SCRIPT = """
@@ -255,14 +255,17 @@ class _Shared:
     """The state the watches of all workers share, in Redis; see the module.  With no Redis, each answer is this
     watch's alone (one worker).
 
-    Keys, under ``SHARED_PREFIX``: ``cmd:<proc>`` (a watched command: its sandbox key, session, command, monitor
-    description, and the watch that reads it), ``session:<id>`` and ``all`` (sets of commands), ``alive:<watch>``
-    (its heartbeat), ``stop:<watch>`` (commands another worker asked it to stop), ``rate:<session>`` (its monitor
-    notes of the last minute).
+    Keys, under ``SHARED_PREFIX``: ``cmd:<session>:<proc>`` (a watched command: its sandbox key, session, command,
+    monitor description, and the watch that reads it), ``session:<id>`` and ``all`` (sets of ``<session>:<proc>``),
+    ``alive:<watch>`` (its heartbeat), ``stop:<watch>`` (``<session>:<proc>`` another worker asked it to stop),
+    ``rate:<session>`` (its monitor notes of the last minute).  A command is always named with its session: the
+    process id comes from the sandbox, and one session's id never reaches another session's command.
     """
 
     def __init__(self, redis: Any, me: str) -> None:
         self.redis, self.me = redis, me
+        #: When this process first found each other watch's heartbeat missing (``presumed_dead``).
+        self._missing_since: dict[str, float] = {}
 
     def key(self, *parts: Any) -> str:
         return ":".join([SHARED_PREFIX, *(str(p) for p in parts)])
@@ -271,72 +274,86 @@ class _Shared:
         if self.redis is None:
             return
         ttl = int(MAX_WATCH_SECONDS + GRACE_SECONDS + 600)
+        name = f"{session_id}:{proc_id}"
         entry = json.dumps({
-            "proc_id": proc_id, "owner": owner, "session_id": str(session_id), "command": command[:2000],
+            # The command line, cut as ``list_agents`` shows it: what it may hold stays out of Redis.
+            "proc_id": proc_id, "owner": owner, "session_id": str(session_id), "command": command[:200],
             "monitor": monitor, "watch": self.me,
         })
-        await self.redis.set(self.key("cmd", proc_id), entry, ex=ttl)
-        await self.redis.sadd(self.key("session", session_id), proc_id)
+        await self.redis.set(self.key("cmd", name), entry, ex=ttl)
+        await self.redis.sadd(self.key("session", session_id), name)
         await self.redis.expire(self.key("session", session_id), ttl)
-        await self.redis.sadd(self.key("all"), proc_id)
+        await self.redis.sadd(self.key("all"), name)
         await self.alive()
 
     async def remove(self, proc_id: str, session_id: Any) -> None:
         if self.redis is None:
             return
-        await self.redis.delete(self.key("cmd", proc_id))
-        await self.redis.srem(self.key("session", session_id), proc_id)
-        await self.redis.srem(self.key("all"), proc_id)
+        name = f"{session_id}:{proc_id}"
+        await self.redis.delete(self.key("cmd", name))
+        await self.redis.srem(self.key("session", session_id), name)
+        await self.redis.srem(self.key("all"), name)
 
-    async def entry(self, proc_id: str) -> dict | None:
+    async def entry(self, name: str) -> dict | None:
+        """The command ``<session>:<proc>`` names, if a watch still reads it and it is that session's."""
         if self.redis is None:
             return None
-        raw = await self.redis.get(self.key("cmd", proc_id))
+        raw = await self.redis.get(self.key("cmd", name))
         try:
             entry = json.loads(_text(raw)) if raw is not None else None
         except ValueError:
             return None
-        return entry if isinstance(entry, dict) else None
+        if not isinstance(entry, dict) or f"{entry.get('session_id')}:{entry.get('proc_id')}" != name:
+            return None
+        return entry
 
     async def of_session(self, session_id: UUID) -> list[dict] | None:
         """The commands session *session_id* started that a watch still reads; None with no Redis."""
         if self.redis is None:
             return None
         found = []
-        for proc_id in sorted(_text(p) for p in await self.redis.smembers(self.key("session", session_id))):
-            entry = await self.entry(proc_id)
+        for name in sorted(_text(p) for p in await self.redis.smembers(self.key("session", session_id))):
+            entry = await self.entry(name) if name.startswith(f"{session_id}:") else None
             if entry is None:
-                await self.redis.srem(self.key("session", session_id), proc_id)
+                await self.redis.srem(self.key("session", session_id), name)
             else:
                 found.append(entry)
         return found
 
     async def alive(self) -> None:
         if self.redis is not None:
-            await self.redis.set(self.key("alive", self.me), "1", ex=ALIVE_SECONDS)
+            await self.redis.set(self.key("alive", self.me), "1", px=int(ALIVE_SECONDS * 1000))
 
     async def gone(self) -> None:
         """This watch stops: the next sweep of another reports what it read."""
         if self.redis is not None:
             await self.redis.delete(self.key("alive", self.me))
 
-    async def is_alive(self, watch: str) -> bool:
-        """Whether the worker of *watch* lives (its heartbeat stands); with no Redis, only this one."""
+    async def presumed_dead(self, watch: str) -> bool:
+        """Whether the worker of *watch* is gone: its heartbeat has been missing for ``ALIVE_SECONDS`` as this
+        process has looked.  A heartbeat a Redis restart or flush lost is back within a sweep, long before."""
+        if watch == self.me:
+            return False
         if self.redis is None:
-            return watch == self.me
-        return watch == self.me or bool(await self.redis.exists(self.key("alive", watch)))
+            return True
+        now = time.monotonic()
+        if await self.redis.exists(self.key("alive", watch)):
+            self._missing_since.pop(watch, None)
+            return False
+        return now - self._missing_since.setdefault(watch, now) >= ALIVE_SECONDS
 
-    async def ask_stop(self, watch: str, proc_id: str) -> None:
+    async def ask_stop(self, watch: str, session_id: Any, proc_id: str) -> None:
         if self.redis is not None:
-            await self.redis.rpush(self.key("stop", watch), proc_id)
+            await self.redis.rpush(self.key("stop", watch), f"{session_id}:{proc_id}")
             await self.redis.expire(self.key("stop", watch), 120)
 
     async def stop_requests(self) -> list[str]:
+        """The ``<session>:<proc>`` other workers asked this watch to stop."""
         if self.redis is None:
             return []
         asked = []
-        while (proc_id := await self.redis.lpop(self.key("stop", self.me))) is not None:
-            asked.append(_text(proc_id))
+        while (name := await self.redis.lpop(self.key("stop", self.me))) is not None:
+            asked.append(_text(name))
         return asked
 
     async def rate_ok(self, session_id: UUID) -> bool:
@@ -352,14 +369,14 @@ class _Shared:
         if self.redis is None:
             return []
         found = []
-        for proc_id in [_text(p) for p in await self.redis.smembers(self.key("all"))]:
-            entry = await self.entry(proc_id)
+        for name in [_text(p) for p in await self.redis.smembers(self.key("all"))]:
+            entry = await self.entry(name)
             if entry is None:
-                await self.redis.srem(self.key("all"), proc_id)
+                await self.redis.srem(self.key("all"), name)
                 continue
-            if await self.is_alive(str(entry.get("watch"))):
+            if not await self.presumed_dead(str(entry.get("watch"))):
                 continue
-            if await self.redis.set(self.key("claim", proc_id), self.me, nx=True, ex=600):
+            if await self.redis.set(self.key("claim", name), self.me, nx=True, ex=600):
                 found.append(entry)
         return found
 
@@ -405,41 +422,61 @@ class BackgroundWatch:
         return self._holdable.get(owner, True) and (bool(self._owners.get(owner)) or owner in self._releases)
 
     async def worker_alive(self, watch: str) -> bool:
-        """Whether the worker whose watch is *watch* lives.  Unsure (Redis did not answer), it does: what it owns
-        is spared."""
+        """Whether the worker whose watch is *watch* lives: its heartbeat stands, or has been missing for less than
+        ``ALIVE_SECONDS``.  Unsure (Redis did not answer), it does: what it owns is spared."""
         try:
-            return await self._shared.is_alive(watch)
+            return not await self._shared.presumed_dead(watch)
         except Exception:
             logger.warning("Could not read whether worker %s lives", watch, exc_info=True)
             return True
 
     async def running_for(self, session_id: UUID) -> list[dict]:
-        """The commands session *session_id* started that a watch still waits on, on any worker."""
-        shared = await self._shared.of_session(session_id) if self.configured else None
-        if shared is not None:
-            return [
-                {"id": e["proc_id"], "command": str(e.get("command") or "")[:200], "status": "running",
-                 **({"monitor": e["monitor"]} if e.get("monitor") else {})}
-                for e in shared
-            ]
-        return [
-            {"id": proc_id, "command": item.command[:200], "status": "running",
-             **({"monitor": item.monitor.description} if item.monitor is not None else {})}
+        """The commands session *session_id* started that a watch still waits on: this worker's, and those of all
+        workers that Redis knows."""
+        found = {
+            proc_id: {"id": proc_id, "command": item.command[:200], "status": "running",
+                      **({"monitor": item.monitor.description} if item.monitor is not None else {})}
             for watched in self._owners.values() for proc_id, item in watched.items() if item.session_id == session_id
-        ]
+        }
+        try:
+            shared = await self._shared.of_session(session_id) if self.configured else None
+        except Exception:
+            logger.warning("Could not read the commands other workers watch for %s", session_id, exc_info=True)
+            shared = None
+        for e in shared or []:
+            found.setdefault(str(e["proc_id"]), {
+                "id": str(e["proc_id"]), "command": str(e.get("command") or "")[:200], "status": "running",
+                **({"monitor": e["monitor"]} if e.get("monitor") else {}),
+            })
+        return [found[proc_id] for proc_id in sorted(found)]
 
     async def monitors_running(self, session_id: UUID) -> int:
         """How many monitors session *session_id* runs, on any worker."""
         return sum(1 for command in await self.running_for(session_id) if command.get("monitor"))
 
-    async def stop_elsewhere(self, proc_id: str, session_id: UUID) -> bool:
+    async def stop_elsewhere(self, proc_id: str, session_id: UUID) -> str | None:
         """Ask the watch of another worker that reads command *proc_id*, one session *session_id* started, to kill
-        it; whether there is such a watch.  Its end reaches the session as a notification."""
-        entry = await self._shared.entry(proc_id) if self.configured else None
-        if entry is None or entry.get("session_id") != str(session_id) or entry.get("watch") == self.id:
-            return False
-        await self._shared.ask_stop(str(entry.get("watch")), proc_id)
-        return True
+        it: ``stopping``, its end then reaching the session as a notification; ``gone`` when that worker is gone;
+        None when no other worker watches such a command."""
+        try:
+            entry = await self._shared.entry(f"{session_id}:{proc_id}") if self.configured else None
+            if entry is None or entry.get("watch") == self.id:
+                return None
+            if await self._shared.presumed_dead(str(entry.get("watch"))):
+                return "gone"
+            await self._shared.ask_stop(str(entry.get("watch")), session_id, proc_id)
+        except Exception:
+            logger.warning("Could not ask another worker to stop %s", proc_id, exc_info=True)
+            return None
+        return "stopping"
+
+    async def stop_session_elsewhere(self, session_id: UUID) -> None:
+        """Ask the watches of other workers to kill every command session *session_id* started there: its user
+        stopped it, or cleared it.  This worker's go with the sandbox the stop takes down, as before; another
+        worker's sandbox is that worker's to stop.  Their ends reach the session as notifications."""
+        for command in await self.running_for(session_id):
+            if not self.started_by(command["id"], session_id):
+                await self.stop_elsewhere(command["id"], session_id)
 
     def owner_of(self, proc_id: str) -> str | None:
         """The registry key of watched command *proc_id*: a sandbox's key, ``HERE``, or None for one not watched."""
@@ -572,10 +609,12 @@ class BackgroundWatch:
                     if owner != HERE:
                         # Before anyone is told: a turn's end meanwhile must keep the sandbox for the woken turn.
                         release = self._releases[owner] = _Release(since=time.monotonic(), told=[])
+                told = [(item.session_id, await self._tell(item.session_id, payload)) for item, payload in payloads]
+                # Once told: a worker that dies before it has told keeps the command in the shared state, for the
+                # sweep of another to tell.
                 for item, payload in payloads:
                     if payload.get("status") != "output":
                         await self._unshare(str(payload.get("agent_id")), item.session_id)
-                told = [(item.session_id, await self._tell(item.session_id, payload)) for item, payload in payloads]
                 if release is not None:
                     release.told = told
         finally:
@@ -590,11 +629,14 @@ class BackgroundWatch:
             self._stop_asked.update(await self._shared.stop_requests())
         except Exception:
             logger.warning("Could not share the watch's state with the other workers", exc_info=True)
-        for proc_id in [p for p in self._stop_asked if p in self._owners.get(owner, {})]:
-            self._stop_asked.discard(proc_id)
-            await self._kill(owner, proc_id)
+        here = self._owners.get(owner, {})
+        # Each ask names its session: only the command that session started is killed.
+        for name in [n for n in self._stop_asked if (item := here.get(n.partition(":")[2])) is not None
+                     and n.partition(":")[0] == str(item.session_id)]:
+            self._stop_asked.discard(name)
+            await self._kill(owner, name.partition(":")[2])
         # Asked of a command that ended meanwhile, or of no command of this watch's: nothing to do.
-        watched = {p for each in self._owners.values() for p in each}
+        watched = {f"{item.session_id}:{p}" for each in self._owners.values() for p, item in each.items()}
         self._stop_asked &= watched
 
     async def _unshare(self, proc_id: str, session_id: UUID) -> None:
@@ -632,8 +674,8 @@ class BackgroundWatch:
                         payload = monitor_end(proc_id, item, None, status="lost", reason=WATCH_LOST)
                     else:
                         payload = completion_payload(proc_id, item, None, reason=WATCH_LOST, status="lost")
-                    await self._shared.remove(proc_id, session_id)
-                    await self._tell(session_id, payload)
+                    if await self._tell(session_id, payload) is not None:
+                        await self._shared.remove(proc_id, session_id)
             except asyncio.CancelledError:
                 raise
             except Exception:
