@@ -12,11 +12,14 @@ import json
 import logging
 import time
 from typing import Any
+from uuid import UUID
 
+import sqlalchemy as sa
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
 
 from surogates.audit import AuditStore, AuditType
+from surogates.db.models import Session
 from surogates.mcp_proxy.auth import ProxyAuthContext, get_proxy_auth
 from surogates.mcp_proxy.loader import (
     COMPOSIO_SERVER_NAME,
@@ -30,6 +33,7 @@ from surogates.runtime import (
     agent_runtime_context_dep,
     rate_limit_dep,
 )
+from surogates.simulation.side_effects import decide, fake_result, is_simulated
 from surogates.tools.mcp.client import _sanitize_error
 
 logger = logging.getLogger(__name__)
@@ -222,6 +226,13 @@ async def call_tool(
         )
     server_name, original_tool, server_config = target
 
+    if auth.simulation_read != body.name and await _simulated_session(
+        request.app.state.session_factory, auth.session_id,
+    ):
+        hints = next((s.get("annotations") for s in schemas if s.get("name") == body.name), None)
+        if await decide(body.name, hints, llm=None, args=body.arguments):
+            return ToolCallResponse(result=fake_result(body.name, body.arguments))
+
     audit_store: AuditStore | None = getattr(
         request.app.state, "audit_store", None,
     )
@@ -286,6 +297,31 @@ async def call_tool(
         return ToolCallResponse(error=_sanitize_error(envelope_error))
 
     return ToolCallResponse(result=_sanitize_error(result_text))
+
+
+# session id -> part of a simulation.  ponytail: cleared wholesale when full.
+_simulated_sessions: dict[UUID, bool] = {}
+_SIMULATED_SESSIONS_CAP = 50_000
+
+
+async def _simulated_session(session_factory: Any, session_id: UUID) -> bool:
+    """Whether the caller's session plays in a simulation, so its changes are faked.
+
+    Every caller passes here: the worker's harness and experts name their own
+    session, a sandbox script its sandbox's root session.  A simulated
+    session, and every sub-agent under it, carries the run in its config.  A
+    session id with no row is not simulated: nothing ties it to a run (a
+    sandbox token minted before tokens named their root session).
+    """
+    known = _simulated_sessions.get(session_id)
+    if known is not None:
+        return known
+    async with session_factory() as db:
+        config = await db.scalar(sa.select(Session.config).where(Session.id == session_id))
+    if len(_simulated_sessions) >= _SIMULATED_SESSIONS_CAP:
+        _simulated_sessions.clear()
+    _simulated_sessions[session_id] = is_simulated(config)
+    return _simulated_sessions[session_id]
 
 
 # Outcome strings emitted on POLICY_MCP_CALL.audit_log rows.  Kept

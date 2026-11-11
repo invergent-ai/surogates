@@ -39,6 +39,14 @@ from surogates.sandbox.base import (
 
 logger = logging.getLogger(__name__)
 
+
+def _session_uuid(value: str) -> uuid.UUID | None:
+    try:
+        return uuid.UUID(value) if value else None
+    except ValueError:
+        return None
+
+
 # Safety: max lifetime for a sandbox pod (seconds).
 _DEFAULT_ACTIVE_DEADLINE = 3600  # 1 hour
 
@@ -450,7 +458,9 @@ class K8sSandbox:
             sandbox_token = create_sandbox_token(
                 org_id=uuid.UUID(spec.env.get("ORG_ID", "00000000-0000-0000-0000-000000000000")),
                 user_id=uuid.UUID(spec.env.get("USER_ID", "00000000-0000-0000-0000-000000000000")),
-                session_id=uuid.UUID(sandbox_id),
+                # The root session, as Docker does: the proxy reads its config
+                # to tell a simulated conversation's calls from real ones.
+                session_id=_session_uuid(spec.session_id) or uuid.UUID(sandbox_id),
                 # Binds the sandbox token to its agent so the proxy can
                 # reject a spoofed ``?agent_id=``.  Absent → unbound (the
                 # proxy trusts the query param, as before).

@@ -237,17 +237,22 @@ def _noted(content: str, note: str) -> str:
     return f"{content}\n\n[{note}]"
 
 
-async def _simulation_fakes(
+async def _simulation_changes(
     tool_name: str, tool_args: Any, session: Any, tools: Any, summary_llm_client: Any, summary_model: str | None,
-) -> bool:
+) -> bool | None:
+    """Whether a simulated session's MCP call would change something; ``None`` outside a simulation."""
     from surogates.simulation.side_effects import decide, is_simulated, summary_judge
 
-    if not is_simulated(session.config):
-        return False
-    entry = tools.get(tool_name) if hasattr(tools, "get") else None
-    schema = getattr(entry, "schema", None)
-    judge = summary_judge(summary_llm_client, summary_model, {tool_name: getattr(schema, "description", "")})
-    return await decide(tool_name, getattr(schema, "annotations", None), llm=judge, args=tool_args)
+    if not tool_name.startswith("mcp__") or not is_simulated(session.config):
+        return None
+    entry = tools.get(tool_name)
+    return await decide(
+        tool_name,
+        entry.schema.annotations if entry else None,
+        llm=summary_judge(summary_llm_client, summary_model),
+        args=tool_args,
+        description=entry.schema.description if entry else "",
+    )
 
 
 async def _refused_open_document(tool_name: str, tool_args: Any, session: Any, session_factory: Any) -> str | None:
@@ -1997,6 +2002,10 @@ async def _run_single_tool(
                     )
                     image_dispatched = True
 
+        simulation_changes = await _simulation_changes(
+            tool_name, tool_args, session, tools, summary_llm_client, summary_model,
+        )
+
         if image_dispatched:
             pass  # result_content already set by the image branch.
         elif (refused := thread_refuses(tool_name, tool_args, session.config)) is not None:
@@ -2010,9 +2019,7 @@ async def _run_single_tool(
             # tool also acts off it (it creates an artifact, it pays for a
             # model call), and running it again would do that again.
             result_content = interrupted(tool_name)
-        elif tool_name.startswith("mcp__") and await _simulation_fakes(
-            tool_name, tool_args, session, tools, summary_llm_client, summary_model,
-        ):
+        elif simulation_changes:
             from surogates.simulation.side_effects import fake_result, would_have
 
             result_content = fake_result(tool_name, tool_args)
@@ -2123,6 +2130,8 @@ async def _run_single_tool(
                     interrupt_check=interrupt_check,
                     task_id=sandbox_session_key(session),
                     offered_tools=offered_tools,
+                    # The proxy fakes what it cannot tell is a read; this call was judged one here.
+                    **({"simulation_read": True} if simulation_changes is False else {}),
                 )
     except KeyError:
         tool_failed = True

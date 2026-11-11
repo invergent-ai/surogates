@@ -195,6 +195,7 @@ class McpProxyClient:
                 session_id,
                 agent_id=str(handler_agent_id) if handler_agent_id else None,
                 is_service_account=tenant.user_id is None,
+                simulation_read=tool_name if kwargs.get("simulation_read") else None,
             )
             headers = {"Authorization": f"Bearer {token}"}
 

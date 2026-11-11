@@ -211,6 +211,7 @@ def create_sandbox_token(
     *,
     agent_id: str | None = None,
     is_service_account: bool = False,
+    simulation_read: str | None = None,
 ) -> str:
     """Create a short-lived token for sandbox-to-MCP-proxy authentication.
 
@@ -243,6 +244,9 @@ def create_sandbox_token(
         payload["agent_id"] = agent_id
     if is_service_account:
         payload["is_service_account"] = True
+    if simulation_read:
+        # Only a worker mints this: the harness judged this MCP call a read in a simulation.
+        payload["simulation_read"] = simulation_read
     return jwt.encode(payload, _get_secret(), algorithm=_ALGORITHM)
 
 

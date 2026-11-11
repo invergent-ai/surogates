@@ -35,6 +35,8 @@ class ProxyAuthContext:
     # different agent's MCP servers than its token was minted for.  ``None``
     # for tokens minted before this claim existed (query param trusted).
     agent_id: str | None = None
+    # The one MCP tool the worker's harness judged a read for a simulated session.
+    simulation_read: str | None = None
 
 
 async def get_proxy_auth(request: Request) -> ProxyAuthContext:
@@ -77,4 +79,5 @@ async def get_proxy_auth(request: Request) -> ProxyAuthContext:
         session_id=UUID(session_id_str),
         is_service_account=bool(payload.get("is_service_account", False)),
         agent_id=payload.get("agent_id"),
+        simulation_read=payload.get("simulation_read"),
     )
