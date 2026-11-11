@@ -43,8 +43,8 @@ logger = logging.getLogger(__name__)
 
 #: The session that makes a model call (``llm.session_headers``).
 SESSION_HEADER = "x-surogates-session"
-#: The root of that session's tree: the session itself, or the session
-#: that started the sub-agent chain it belongs to.
+#: The root of that session's tree: the top of its ``parent_id`` chain (the
+#: session itself, or the session its sub-agent chain started from).
 ROOT_HEADER = "x-surogates-root"
 
 

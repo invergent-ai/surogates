@@ -54,7 +54,7 @@ from surogates.browser.registry import BrowserRegistry
 from surogates.memory.manager import MemoryManager
 from surogates.memory.store import MemoryStore
 from surogates.orchestrator.dispatcher import Orchestrator
-from surogates.session.store import SessionStore
+from surogates.session.store import SessionNotFoundError, SessionStore
 from surogates.tenant.context import TenantContext
 from surogates.tenant.credentials import CredentialVault
 from surogates.sandbox.pool import SandboxPool
@@ -1324,14 +1324,16 @@ _SESSION_TREE_MAX_DEPTH = 64
 
 
 async def _session_tree_root(session_store: Any, session: Any) -> UUID:
-    """The id of the root of *session*'s tree: its ancestor with no parent.
+    """The id of the root of *session*'s tree: the top of its ``parent_id``
+    chain, the root the API's session tree shows.
 
-    A root session is its own root and costs no read.  A parent that
-    cannot be read (deleted) ends the walk at its id, so the sessions under
-    it still share one root.
+    A root session is its own root and costs no read; a child costs one read
+    per level.  Defences only (``parent_id`` is a foreign key the runtime
+    never changes): a parent that cannot be found ends the walk at its id, so
+    the sessions under it still share one root, and a loop or a chain deeper
+    than ``_SESSION_TREE_MAX_DEPTH`` ends it where it stands.  Any other
+    store error fails the wake, as the reads after it would.
     """
-    from surogates.session.store import SessionNotFoundError
-
     seen = {session.id}
     current = session
     for _ in range(_SESSION_TREE_MAX_DEPTH):

@@ -124,7 +124,27 @@ async def test_every_slot_names_the_session_and_sends_the_same_body(sent, stream
     # Nothing else in the headers moved.
     for a, b in zip(without, with_):
         rest = {k: v for k, v in b.headers.items() if k not in (SESSION_HEADER, ROOT_HEADER)}
-        assert rest.keys() == dict(a.headers).keys()
+        assert rest == dict(a.headers.items())
+
+
+async def test_the_image_slot_from_settings_names_the_session_too(sent):
+    payload = _payload()
+    del payload["llm_image"]
+    ctx = build_agent_runtime_context(payload)
+    settings = SimpleNamespace(llm=SimpleNamespace(
+        image_model="img", image_api_key="k", api_key="", image_base_url="https://images.invalid/v1", base_url="",
+    ))
+    named = await build_session_llm_clients(
+        ctx, vault=_Vault(), settings=settings, request_headers=session_request_headers("s", "r"),
+    )
+    try:
+        assert named.image.model == "img"
+        await named.image.client.chat.completions.create(**REQUEST)
+    finally:
+        await named.aclose()
+    assert sent[-1].url.host == "images.invalid"
+    assert sent[-1].headers[SESSION_HEADER] == "s"
+    assert sent[-1].headers[ROOT_HEADER] == "r"
 
 
 async def test_a_per_call_header_keeps_the_session_headers(sent):
@@ -175,7 +195,7 @@ async def test_children_and_grandchildren_name_the_tree_root():
     assert await worker._session_tree_root(store, grandchild) == root.id
 
 
-async def test_a_deleted_parent_ends_the_walk_at_its_id():
+async def test_a_parent_that_cannot_be_found_ends_the_walk_at_its_id():
     gone = _session()
     child = _session(gone)
     grandchild = _session(child)
@@ -189,6 +209,16 @@ async def test_a_parent_loop_ends_the_walk():
     store = _Store(a, b)
     assert await worker._session_tree_root(store, a) in (a.id, b.id)
     assert store.reads <= 2
+
+
+async def test_a_chain_deeper_than_the_limit_ends_the_walk(monkeypatch):
+    monkeypatch.setattr(worker, "_SESSION_TREE_MAX_DEPTH", 3)
+    chain = [_session()]
+    for _ in range(5):
+        chain.append(_session(chain[-1]))
+    store = _Store(*chain)
+    assert await worker._session_tree_root(store, chain[-1]) == chain[-4].id
+    assert store.reads == 3
 
 
 async def test_the_headers_follow_the_setting():
