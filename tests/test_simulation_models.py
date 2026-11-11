@@ -65,3 +65,27 @@ async def test_run_people_messages_media_round_trip(rsf):
     assert stored.status == "running" and stored.ended_at is None
     assert message.id is not None and message.created_at.tzinfo is not None
     assert user.simulation_run_id == stored.id
+
+
+@pytest.mark.asyncio
+async def test_people_carry_about_and_test_and_runs_a_batch(rsf):
+    org_id, batch_id = uuid.uuid4(), uuid.uuid4()
+    async with rsf() as db:
+        db.add(Org(id=org_id, name="Org"))
+        await db.flush()
+        run = SimulationRun(org_id=org_id, agent_id="a1", created_by="u1", phone_number_id="999b",
+                            access_token="t", app_secret="s", batch_id=batch_id)
+        loose = SimulationRun(org_id=org_id, agent_id="a1", created_by="u1", phone_number_id="999c",
+                              access_token="t", app_secret="s")
+        db.add_all([run, loose])
+        await db.flush()
+        db.add(SimulationPerson(run_id=run.id, name="Ana", channel="whatsapp", address="1",
+                                about="A mother of two", test="Books a slot"))
+        db.add(SimulationPerson(run_id=loose.id, name="Bo", channel="whatsapp", address="2"))
+        await db.commit()
+    async with rsf() as db:
+        runs = {r.phone_number_id: r for r in (await db.execute(select(SimulationRun))).scalars()}
+        people = {p.name: p for p in (await db.execute(select(SimulationPerson))).scalars()}
+    assert runs["999b"].batch_id == batch_id and runs["999c"].batch_id is None
+    assert (people["Ana"].about, people["Ana"].test) == ("A mother of two", "Books a slot")
+    assert people["Bo"].about is None and people["Bo"].test is None
