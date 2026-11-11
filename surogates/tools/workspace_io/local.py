@@ -659,8 +659,10 @@ class LocalWorkspaceIO:
                 fd = os.open(tmp, flags, 0o666)
             with os.fdopen(fd, "wb") as fh:
                 fh.write(data)
-            with contextlib.suppress(OSError):
-                os.chmod(tmp, stat_module.S_IMODE(os.stat(key).st_mode))
+                # Through the open file, not its name: the name could be
+                # swapped for a link before a chmod by name reached it.
+                with contextlib.suppress(OSError):
+                    os.fchmod(fh.fileno(), stat_module.S_IMODE(os.stat(key).st_mode))
             os.replace(tmp, key)
         except Exception:
             with contextlib.suppress(OSError):

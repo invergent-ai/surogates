@@ -157,3 +157,13 @@ async def test_a_new_file_keeps_the_usual_mode(places):
     umask = os.umask(0)
     os.umask(umask)
     assert (root / "plain.txt").stat().st_mode & 0o777 == 0o666 & ~umask
+
+
+async def test_an_overwritten_file_keeps_its_mode(places):
+    root, _ = places
+    target = root / "script.sh"
+    target.write_text("old", encoding="utf-8")
+    target.chmod(0o750)
+    await LocalWorkspaceIO(str(root)).write(str(target), b"new")
+    assert target.stat().st_mode & 0o777 == 0o750
+    assert target.read_text(encoding="utf-8") == "new"
