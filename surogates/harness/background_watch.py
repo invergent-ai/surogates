@@ -27,8 +27,15 @@ for all of a session's monitors (the rest wait, ``MAX_BUFFERED_LINES`` of them;
 more are counted and left out), until the command ends, its timeout passes
 (it is killed), it is stopped, or its session is stopped (it is killed).
 
-One watch per worker process.  A worker that dies takes its watch along:
-the commands' ends are then never told.
+One watch per worker process; the watches of all workers share their state
+in Redis (``_Shared``).  The watch that started a command reads it to its end:
+the executor's token of the sandbox it runs in is that worker's alone.  A later
+turn of the session on another worker sees it all the same: ``list_agents``
+lists it, ``stop_agent`` asks its watch to kill it, the monitors' count and
+rate are the session's, and that worker's turn end leaves the sandbox the
+first one holds alone.  A worker that dies stops renewing its heartbeat; the
+next sweep of another worker's watch tells each session it watched that its
+command can no longer be watched.
 """
 
 from __future__ import annotations
@@ -40,7 +47,7 @@ import queue
 import time
 from dataclasses import dataclass, field
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from surogates.harness.agent_news import MAX_RESULT_CHARS
 from surogates.session.events import EventType
@@ -77,6 +84,26 @@ MAX_NOTES_PER_SESSION_MINUTE = 30
 MAX_MONITORS_PER_SESSION = 4
 #: A session in one of these is not sent its monitors' lines: they are killed.
 _STOPPED = ("paused", "archived")
+
+#: The Redis keys the watches of all workers share (``_Shared``).
+SHARED_PREFIX = "surogates:bgwatch"
+#: Seconds a watch's heartbeat lives: it renews it at every poll and sweep.
+ALIVE_SECONDS = 30
+#: Seconds between two sweeps for the commands of a watch whose worker is gone.
+SWEEP_SECONDS = 15.0
+#: Seconds a watch's hold of a sandbox stands unless it renews it.
+HOLD_SECONDS = 60.0
+#: Why a session hears that a command another worker watched cannot be watched any more.
+WATCH_LOST = "the worker that watched it stopped; it may still be running"
+
+#: Adds a send to a session's minute of monitor notes if it has room: atomic, for the watches of all workers.
+_RATE_SCRIPT = """
+redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', ARGV[1] - 60)
+if redis.call('ZCARD', KEYS[1]) >= tonumber(ARGV[2]) then return 0 end
+redis.call('ZADD', KEYS[1], ARGV[1], ARGV[3])
+redis.call('EXPIRE', KEYS[1], 120)
+return 1
+"""
 
 #: An executor too old to keep background commands answers the drain so.
 _UNKNOWN_DRAIN = f"Unknown tool: {DRAIN}"
@@ -221,6 +248,140 @@ def monitor_end(proc_id: str, item: _Watched, entry: dict | None, *, status: str
     return monitor_payload(proc_id, monitor, status=status, lines=lines, dropped=dropped, reason=reason)
 
 
+def _text(value: Any) -> str:
+    return value.decode() if isinstance(value, bytes) else str(value)
+
+
+class _Shared:
+    """The state the watches of all workers share, in Redis; see the module.  With no Redis, each answer is this
+    watch's alone (one worker).
+
+    Keys, under ``SHARED_PREFIX``: ``cmd:<proc>`` (a watched command: its sandbox key, session, command, monitor
+    description, and the watch that reads it), ``session:<id>`` and ``all`` (sets of commands), ``holds:<owner>``
+    (watch -> when it last renewed its hold of that sandbox), ``alive:<watch>`` (its heartbeat), ``stop:<watch>``
+    (commands another worker asked it to stop), ``rate:<session>`` (its monitor notes of the last minute).
+    """
+
+    def __init__(self, redis: Any, me: str) -> None:
+        self.redis, self.me = redis, me
+
+    def key(self, *parts: Any) -> str:
+        return ":".join([SHARED_PREFIX, *(str(p) for p in parts)])
+
+    async def add(self, proc_id: str, owner: str, session_id: UUID, command: str, monitor: str | None) -> None:
+        if self.redis is None:
+            return
+        ttl = int(MAX_WATCH_SECONDS + GRACE_SECONDS + 600)
+        entry = json.dumps({
+            "proc_id": proc_id, "owner": owner, "session_id": str(session_id), "command": command[:2000],
+            "monitor": monitor, "watch": self.me,
+        })
+        await self.redis.set(self.key("cmd", proc_id), entry, ex=ttl)
+        await self.redis.sadd(self.key("session", session_id), proc_id)
+        await self.redis.expire(self.key("session", session_id), ttl)
+        await self.redis.sadd(self.key("all"), proc_id)
+        await self.alive()
+
+    async def remove(self, proc_id: str, session_id: Any) -> None:
+        if self.redis is None:
+            return
+        await self.redis.delete(self.key("cmd", proc_id))
+        await self.redis.srem(self.key("session", session_id), proc_id)
+        await self.redis.srem(self.key("all"), proc_id)
+
+    async def entry(self, proc_id: str) -> dict | None:
+        if self.redis is None:
+            return None
+        raw = await self.redis.get(self.key("cmd", proc_id))
+        try:
+            entry = json.loads(_text(raw)) if raw is not None else None
+        except ValueError:
+            return None
+        return entry if isinstance(entry, dict) else None
+
+    async def of_session(self, session_id: UUID) -> list[dict] | None:
+        """The commands session *session_id* started that a watch still reads; None with no Redis."""
+        if self.redis is None:
+            return None
+        found = []
+        for proc_id in sorted(_text(p) for p in await self.redis.smembers(self.key("session", session_id))):
+            entry = await self.entry(proc_id)
+            if entry is None:
+                await self.redis.srem(self.key("session", session_id), proc_id)
+            else:
+                found.append(entry)
+        return found
+
+    async def alive(self) -> None:
+        if self.redis is not None:
+            await self.redis.set(self.key("alive", self.me), "1", ex=ALIVE_SECONDS)
+
+    async def gone(self) -> None:
+        """This watch stops: the next sweep of another reports what it read."""
+        if self.redis is not None:
+            await self.redis.delete(self.key("alive", self.me))
+
+    async def hold(self, owner: str) -> None:
+        if self.redis is not None:
+            await self.redis.hset(self.key("holds", owner), self.me, str(time.time()))
+            await self.redis.expire(self.key("holds", owner), int(HOLD_SECONDS * 2))
+
+    async def let_go(self, owner: str) -> None:
+        if self.redis is not None:
+            await self.redis.hdel(self.key("holds", owner), self.me)
+
+    async def held_elsewhere(self, owner: str) -> bool:
+        """Whether another worker's watch holds a sandbox of *owner* now."""
+        if self.redis is None:
+            return False
+        now = time.time()
+        for watch, at in (await self.redis.hgetall(self.key("holds", owner))).items():
+            try:
+                fresh = now - float(_text(at)) < HOLD_SECONDS
+            except ValueError:
+                fresh = False
+            if _text(watch) != self.me and fresh:
+                return True
+        return False
+
+    async def ask_stop(self, watch: str, proc_id: str) -> None:
+        if self.redis is not None:
+            await self.redis.rpush(self.key("stop", watch), proc_id)
+            await self.redis.expire(self.key("stop", watch), int(HOLD_SECONDS * 2))
+
+    async def stop_requests(self) -> list[str]:
+        if self.redis is None:
+            return []
+        asked = []
+        while (proc_id := await self.redis.lpop(self.key("stop", self.me))) is not None:
+            asked.append(_text(proc_id))
+        return asked
+
+    async def rate_ok(self, session_id: UUID) -> bool:
+        """Count a monitor note to *session_id* if its minute has room: ``MAX_NOTES_PER_SESSION_MINUTE``, all
+        workers' watches together."""
+        now = time.time()
+        return bool(await self.redis.eval(
+            _RATE_SCRIPT, 1, self.key("rate", session_id), now, MAX_NOTES_PER_SESSION_MINUTE, f"{now}:{uuid4().hex}",
+        ))
+
+    async def orphans(self) -> list[dict]:
+        """Commands whose watch's worker is gone, each claimed by this watch once: their sessions are told."""
+        if self.redis is None:
+            return []
+        found = []
+        for proc_id in [_text(p) for p in await self.redis.smembers(self.key("all"))]:
+            entry = await self.entry(proc_id)
+            if entry is None:
+                await self.redis.srem(self.key("all"), proc_id)
+                continue
+            if entry.get("watch") == self.me or await self.redis.exists(self.key("alive", entry.get("watch"))):
+                continue
+            if await self.redis.set(self.key("claim", proc_id), self.me, nx=True, ex=600):
+                found.append(entry)
+        return found
+
+
 class BackgroundWatch:
     """Polls the registries of the background commands this worker started; see the module."""
 
@@ -230,15 +391,27 @@ class BackgroundWatch:
         self._holdable: dict[str, bool] = {}
         self._releases: dict[str, _Release] = {}
         self._tasks: dict[str, asyncio.Task[None]] = {}
-        #: When each session was last sent its monitors' lines, within the last minute.
+        #: When each session was last sent its monitors' lines, within the last minute (with no Redis).
         self._session_sent: dict[UUID, list[float]] = {}
         self._store: Any = None
         self._redis: Any = None
         self._sandbox_pool: Any = None
+        #: This watch, among the watches of all workers.
+        self.id = uuid4().hex
+        self._shared = _Shared(None, self.id)
+        self._sweeper: asyncio.Task[None] | None = None
+        #: Commands another worker asked this watch to stop, until the poll of their sandbox kills them.
+        self._stop_asked: set[str] = set()
 
     def configure(self, *, store: Any, redis: Any, sandbox_pool: Any) -> None:
         """Give the watch what it tells sessions through and polls sandboxes with."""
         self._store, self._redis, self._sandbox_pool = store, redis, sandbox_pool
+        self._shared = _Shared(redis, self.id)
+
+    def start_sweeping(self, *, every: float = SWEEP_SECONDS) -> None:
+        """Look, every *every* seconds, for commands whose watch's worker is gone, and tell their sessions."""
+        if self._redis is not None and (self._sweeper is None or self._sweeper.done()):
+            self._sweeper = asyncio.create_task(self._sweep(every), name="background-watch-sweep")
 
     @property
     def configured(self) -> bool:
@@ -249,12 +422,42 @@ class BackgroundWatch:
         its last one just ended and the turn its end gives may want it.  Never a project thread's."""
         return self._holdable.get(owner, True) and (bool(self._owners.get(owner)) or owner in self._releases)
 
-    def running_for(self, session_id: UUID) -> list[dict]:
-        """The commands session *session_id* started that this watch still waits on."""
+    async def held_elsewhere(self, owner: str) -> bool:
+        """Whether another worker's watch holds a sandbox of *owner*: a turn's end here takes down its own sandbox
+        and nothing else of the session's (``SandboxPool.destroy_released(alone=True)``)."""
+        try:
+            return await self._shared.held_elsewhere(owner)
+        except Exception:
+            logger.warning("Could not read who holds the sandbox of %s", owner, exc_info=True)
+            return True
+
+    async def running_for(self, session_id: UUID) -> list[dict]:
+        """The commands session *session_id* started that a watch still waits on, on any worker."""
+        shared = await self._shared.of_session(session_id) if self.configured else None
+        if shared is not None:
+            return [
+                {"id": e["proc_id"], "command": str(e.get("command") or "")[:200], "status": "running",
+                 **({"monitor": e["monitor"]} if e.get("monitor") else {})}
+                for e in shared
+            ]
         return [
-            {"id": proc_id, "command": item.command[:200], "status": "running"}
+            {"id": proc_id, "command": item.command[:200], "status": "running",
+             **({"monitor": item.monitor.description} if item.monitor is not None else {})}
             for watched in self._owners.values() for proc_id, item in watched.items() if item.session_id == session_id
         ]
+
+    async def monitors_running(self, session_id: UUID) -> int:
+        """How many monitors session *session_id* runs, on any worker."""
+        return sum(1 for command in await self.running_for(session_id) if command.get("monitor"))
+
+    async def stop_elsewhere(self, proc_id: str, session_id: UUID) -> bool:
+        """Ask the watch of another worker that reads command *proc_id*, one session *session_id* started, to kill
+        it; whether there is such a watch.  Its end reaches the session as a notification."""
+        entry = await self._shared.entry(proc_id) if self.configured else None
+        if entry is None or entry.get("session_id") != str(session_id) or entry.get("watch") == self.id:
+            return False
+        await self._shared.ask_stop(str(entry.get("watch")), proc_id)
+        return True
 
     def owner_of(self, proc_id: str) -> str | None:
         """The registry key of watched command *proc_id*: a sandbox's key, ``HERE``, or None for one not watched."""
@@ -267,7 +470,7 @@ class BackgroundWatch:
             for watched in self._owners.values()
         )
 
-    def watch(
+    async def watch(
         self, *, owner: str, proc_id: str, session_id: UUID, command: str,
         monitor: tuple[str, float, int] | None = None,
     ) -> None:
@@ -289,13 +492,25 @@ class BackgroundWatch:
         task = self._tasks.get(owner)
         if task is None or task.done():
             self._tasks[owner] = asyncio.create_task(self._poll(owner), name=f"background-watch-{owner or 'here'}")
+        try:
+            await self._shared.add(proc_id, owner, session_id, command, monitor[0] if monitor is not None else None)
+            if owner != HERE and self._holdable.get(owner, True):
+                await self._shared.hold(owner)
+        except Exception:
+            logger.warning("Could not share background command %s with the other workers", proc_id, exc_info=True)
 
     async def close(self) -> None:
-        """Stop polling: the worker is going."""
-        tasks = list(self._tasks.values())
+        """Stop polling: the worker is going.  The commands it read are told by the next sweep of another
+        worker's watch."""
+        tasks = list(self._tasks.values()) + ([self._sweeper] if self._sweeper is not None else [])
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        try:
+            await self._shared.gone()
+        except Exception:
+            logger.debug("Could not end this watch's heartbeat", exc_info=True)
+        self._sweeper = None
         self._tasks.clear()
         self._owners.clear()
         self._releases.clear()
@@ -307,6 +522,7 @@ class BackgroundWatch:
         try:
             while self._owners.get(owner) or owner in self._releases:
                 await asyncio.sleep(self._poll_seconds)
+                await self._share_state(owner)
                 if not self._owners.get(owner):
                     await self._maybe_let_go(owner)
                     continue
@@ -357,9 +573,7 @@ class BackgroundWatch:
                     monitor = item.monitor
                     if monitor is None or not (monitor.buffered or monitor.dropped) or not monitor.may_send(now):
                         continue
-                    sent = self._session_sent.setdefault(item.session_id, [])
-                    sent[:] = [t for t in sent if now - t < 60.0]
-                    if len(sent) >= MAX_NOTES_PER_SESSION_MINUTE:
+                    if not await self._session_has_room(item.session_id, now):
                         continue
                     # As many as one note holds: the rest wait for the next.
                     count = _fitting(monitor.buffered[:MAX_LINES_PER_NOTE]) or 1
@@ -367,7 +581,6 @@ class BackgroundWatch:
                     payloads.append((item, monitor_payload(proc_id, monitor, lines=sending, dropped=monitor.dropped)))
                     monitor.dropped = 0
                     monitor.sent.append(now)
-                    sent.append(now)
                 live = {item.session_id for each in self._owners.values() for item in each.values()}
                 for session_id in [sid for sid in self._session_sent if sid not in live]:
                     self._session_sent.pop(session_id, None)
@@ -379,12 +592,75 @@ class BackgroundWatch:
                     if owner != HERE:
                         # Before anyone is told: a turn's end meanwhile must keep the sandbox for the woken turn.
                         release = self._releases[owner] = _Release(since=time.monotonic(), told=[])
+                for item, payload in payloads:
+                    if payload.get("status") != "output":
+                        await self._unshare(str(payload.get("agent_id")), item.session_id)
                 told = [(item.session_id, await self._tell(item.session_id, payload)) for item, payload in payloads]
                 if release is not None:
                     release.told = told
         finally:
             if self._tasks.get(owner) is asyncio.current_task():
                 self._tasks.pop(owner, None)
+
+    async def _share_state(self, owner: str) -> None:
+        """Renew this watch's heartbeat and its hold of *owner*'s sandbox, and kill what another worker asked it
+        to stop there: their ends come with the next drain, as a stop's here does."""
+        try:
+            await self._shared.alive()
+            if owner != HERE and self._holdable.get(owner, True) and (self._owners.get(owner) or owner in self._releases):
+                await self._shared.hold(owner)
+            self._stop_asked.update(await self._shared.stop_requests())
+        except Exception:
+            logger.warning("Could not share the watch's state with the other workers", exc_info=True)
+        for proc_id in [p for p in self._stop_asked if p in self._owners.get(owner, {})]:
+            self._stop_asked.discard(proc_id)
+            await self._kill(owner, proc_id)
+        # Asked of a command that ended meanwhile, or of no command of this watch's: nothing to do.
+        watched = {p for each in self._owners.values() for p in each}
+        self._stop_asked &= watched
+
+    async def _unshare(self, proc_id: str, session_id: UUID) -> None:
+        try:
+            await self._shared.remove(proc_id, session_id)
+        except Exception:
+            logger.warning("Could not tell the other workers that %s ended", proc_id, exc_info=True)
+
+    async def _session_has_room(self, session_id: UUID, now: float) -> bool:
+        """Whether session *session_id* may get one more monitor note this minute, counted for all workers'
+        watches in Redis, or for this one's alone."""
+        if self._redis is not None:
+            try:
+                return await self._shared.rate_ok(session_id)
+            except Exception:
+                logger.warning("Could not count the monitor notes of session %s", session_id, exc_info=True)
+        sent = self._session_sent.setdefault(session_id, [])
+        sent[:] = [t for t in sent if now - t < 60.0]
+        if len(sent) >= MAX_NOTES_PER_SESSION_MINUTE:
+            return False
+        sent.append(now)
+        return True
+
+    async def _sweep(self, every: float) -> None:
+        """Tell the sessions of commands whose watch's worker is gone that they cannot be watched any more."""
+        while True:
+            await asyncio.sleep(every)
+            try:
+                await self._shared.alive()
+                for entry in await self._shared.orphans():
+                    session_id = UUID(str(entry["session_id"]))
+                    item = _Watched(session_id=session_id, command=str(entry.get("command") or ""))
+                    proc_id = str(entry["proc_id"])
+                    if entry.get("monitor"):
+                        item.monitor = _Monitor(description=str(entry["monitor"]), deadline=0.0, cap=1)
+                        payload = monitor_end(proc_id, item, None, status="lost", reason=WATCH_LOST)
+                    else:
+                        payload = completion_payload(proc_id, item, None, reason=WATCH_LOST, status="lost")
+                    await self._shared.remove(proc_id, session_id)
+                    await self._tell(session_id, payload)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning("The sweep for commands of gone workers failed", exc_info=True)
 
     async def _drain(self, owner: str) -> tuple[list[tuple[str, dict | None]], dict[str, dict]]:
         """The watched commands of *owner* that ended since the last ask, each with its completion
@@ -509,6 +785,12 @@ class BackgroundWatch:
                 logger.exception("Told session %s, but could not wake it", session_id)
         return event_id if isinstance(event_id, int) else None
 
+    async def _let_go_shared(self, owner: str) -> None:
+        try:
+            await self._shared.let_go(owner)
+        except Exception:
+            logger.debug("Could not drop the hold of %s", owner, exc_info=True)
+
     async def _maybe_let_go(self, owner: str) -> None:
         """Let the sandbox *owner* keys go once its tree rests and the turns its commands' ends gave have ended,
         or once ``GRACE_SECONDS`` have passed.  A turn's end that takes it down first leaves nothing to do."""
@@ -517,6 +799,7 @@ class BackgroundWatch:
         if sandbox_id is None:
             self._releases.pop(owner, None)
             self._holdable.pop(owner, None)
+            await self._let_go_shared(owner)
             return
         # The grace is a cap: past it the sandbox goes, whatever of its tree still runs.
         if time.monotonic() - release.since < GRACE_SECONDS:
@@ -540,6 +823,7 @@ class BackgroundWatch:
             return
         self._releases.pop(owner, None)
         self._holdable.pop(owner, None)
+        await self._let_go_shared(owner)
         released = await self._sandbox_pool.release_for_session(owner, only=sandbox_id)
         if released is not None:
             try:

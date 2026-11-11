@@ -6573,8 +6573,11 @@ class AgentHarness(
             except Exception:
                 logger.debug("Sandbox detach failed for %s", session.id, exc_info=True)
             else:
+                # Another worker's watch may hold a sandbox of the session for a command it runs: only this one goes.
                 self._spawn_background(
-                    self._destroy_sandbox_quietly(sandbox_id, str(session.id)),
+                    self._destroy_sandbox_quietly(
+                        sandbox_id, str(session.id), alone=await background_watch.held_elsewhere(str(session.id)),
+                    ),
                     name=f"sandbox-teardown-{session.id}",
                 )
         nothing_spent = SessionCostTracker()

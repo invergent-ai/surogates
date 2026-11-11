@@ -1465,6 +1465,8 @@ async def run_worker(settings: Settings) -> None:
     from surogates.harness.background_watch import background_watch
 
     background_watch.configure(store=session_store, redis=redis_client, sandbox_pool=sandbox_pool)
+    # The commands a worker that died was watching: their sessions are told by the next sweep.
+    background_watch.start_sweeping()
 
     # 4b. Browser pool -- one browser per session, lazily provisioned.
     browser_backend = _build_browser_backend(

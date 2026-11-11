@@ -246,6 +246,12 @@ async def _monitor_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
         return _error("monitor is for the main session; here, use terminal and wait for the command")
     if not background_watch.configured:
         return _error("this worker cannot watch commands")
+    if await background_watch.monitors_running(me.id) >= MAX_MONITORS_PER_SESSION:
+        # Counted for all workers: monitors a turn on another worker started are the session's too.
+        return _error(
+            f"the monitor could not start: {MAX_MONITORS_PER_SESSION} monitors already run: stop one with "
+            "stop_agent before you start another",
+        )
     sandbox_pool = kwargs.get("sandbox_pool")
     if isinstance(sandbox_pool, SandboxPool):
         from surogates.harness.tool_exec import _build_session_sandbox_spec
@@ -289,7 +295,7 @@ async def _monitor_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
         elif "monitors already run" in error:
             error += ": stop one with stop_agent before you start another"
         return _error(f"the monitor could not start: {error}")
-    background_watch.watch(owner=owner, proc_id=proc_id, session_id=me.id, command=command,
+    await background_watch.watch(owner=owner, proc_id=proc_id, session_id=me.id, command=command,
                            monitor=(description, float(timeout), cap))
     return json.dumps({
         "monitor_id": proc_id, "status": "watching", "description": description, "timeout_seconds": timeout,
@@ -369,7 +375,7 @@ async def _list_agents_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
             if relation == "yours" and row["parent_id"] != me.id:
                 entry["started_by"] = str(row["parent_id"])
         agents.append(entry)
-    return json.dumps({"agents": agents, "background_commands": background_watch.running_for(me.id)})
+    return json.dumps({"agents": agents, "background_commands": await background_watch.running_for(me.id)})
 
 
 #: What the interrupt of an agent's stop says: a fixed word, never the model's, which the dispatcher reads.
@@ -446,6 +452,10 @@ async def _stop_process(proc_id: str, **kwargs: Any) -> str:
     session_store = kwargs["session_store"]
     me = await session_store.get_session(UUID(str(kwargs["session_id"])))
     if not background_watch.started_by(proc_id, me.id):
+        # Watched by another worker's watch, which a turn of this session started: it kills it there.
+        if await background_watch.stop_elsewhere(proc_id, me.id):
+            return json.dumps({"status": "stopping", "agent_id": proc_id,
+                               "note": "It runs on another worker, which stops it. Its end reaches you as a notification."})
         return _error(f"no background command {proc_id} that you started and that still runs")
     sandbox_pool = kwargs.get("sandbox_pool")
     args = json.dumps({"action": "kill", "session_id": proc_id})

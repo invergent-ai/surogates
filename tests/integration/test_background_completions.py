@@ -212,7 +212,7 @@ async def test_a_session_hears_only_the_ends_of_its_own_commands(api):  # noqa: 
         started = await wio.start(
             "sleep 0.2; exit 0", workdir=None, task_id="t", pty=False, notify_on_complete=True, watcher_interval=None,
         )
-        watch.watch(owner=HERE, proc_id=started["session_id"], session_id=mine, command="sleep 0.2; exit 0")
+        await watch.watch(owner=HERE, proc_id=started["session_id"], session_id=mine, command="sleep 0.2; exit 0")
         [ended] = await until(lambda: notifications(store, mine))
         assert ended["agent_id"] == started["session_id"] and ended["status"] == "completed"
         assert await notifications(store, theirs) == []
@@ -264,7 +264,7 @@ async def test_a_command_whose_sandbox_is_gone_or_cannot_tell_is_reported_so(api
     watch = BackgroundWatch(poll_seconds=QUICK)
     watch.configure(store=store, redis=redis, sandbox_pool=Pool(sandbox))
     try:
-        watch.watch(owner=str(chat), proc_id="proc_gone", session_id=chat, command="make serve")
+        await watch.watch(owner=str(chat), proc_id="proc_gone", session_id=chat, command="make serve")
         [ended] = await until(lambda: notifications(store, chat))
         assert ended == {
             "agent_id": "proc_gone", "kind": "process", "status": status, "summary": "make serve",
@@ -285,7 +285,7 @@ async def test_a_sandbox_that_fails_to_answer_a_while_is_no_end_until_it_gives_u
     watch = BackgroundWatch(poll_seconds=QUICK)
     watch.configure(store=store, redis=redis, sandbox_pool=pool)
     try:
-        watch.watch(owner=str(chat), proc_id="proc_x", session_id=chat, command="make serve")
+        await watch.watch(owner=str(chat), proc_id="proc_x", session_id=chat, command="make serve")
         await until(lambda: asyncio.sleep(0, result=pool.asked >= 3))
         # A few failed asks tell nobody anything.
         assert await notifications(store, chat) == [] and watch.holds(str(chat))
@@ -306,7 +306,7 @@ async def test_a_command_is_watched_for_at_most_its_limit_then_killed(api, monke
         "sleep 30", workdir=None, task_id="t", pty=False, notify_on_complete=True, watcher_interval=None,
     )
     try:
-        watch.watch(owner=HERE, proc_id=started["session_id"], session_id=chat, command="sleep 30")
+        await watch.watch(owner=HERE, proc_id=started["session_id"], session_id=chat, command="sleep 30")
         [ended] = await until(lambda: notifications(store, chat))
         assert ended["status"] == "killed"
         assert ended["reason"].startswith("it ran longer than 0 minutes")
@@ -323,8 +323,8 @@ async def test_a_threads_pod_is_never_kept_past_its_turn(api):  # noqa: F811
     watch = BackgroundWatch(poll_seconds=60)
     watch.configure(store=store, redis=redis, sandbox_pool=Pool("error", copy=True))
     try:
-        watch.watch(owner=str(chat), proc_id="proc_t", session_id=chat, command="make serve")
+        await watch.watch(owner=str(chat), proc_id="proc_t", session_id=chat, command="make serve")
         assert not watch.holds(str(chat))
-        assert watch.running_for(chat) == [{"id": "proc_t", "command": "make serve", "status": "running"}]
+        assert await watch.running_for(chat) == [{"id": "proc_t", "command": "make serve", "status": "running"}]
     finally:
         await watch.close()

@@ -543,7 +543,7 @@ SIBLING_ABORT_TOOLS: frozenset[str] = frozenset({
 })
 
 
-def _watch_background(result_content: str, session: Any, tool_args: Any, *, in_sandbox: bool) -> None:
+async def _watch_background(result_content: str, session: Any, tool_args: Any, *, in_sandbox: bool) -> None:
     """Hand the background command a ``terminal`` call started to the worker's watch (``background_watch``)."""
     from surogates.harness.background_watch import HERE, background_watch
     from surogates.sandbox.pool import sandbox_session_key
@@ -561,7 +561,7 @@ def _watch_background(result_content: str, session: Any, tool_args: Any, *, in_s
         except (TypeError, ValueError):
             tool_args = {}
     command = tool_args.get("command") if isinstance(tool_args, dict) else None
-    background_watch.watch(
+    await background_watch.watch(
         owner=sandbox_session_key(session) if in_sandbox else HERE,
         proc_id=proc_id, session_id=session.id, command=str(command or ""),
     )
@@ -2204,7 +2204,9 @@ async def _run_single_tool(
     # before any note is added to it.  Not one on the user's computer, which
     # keeps its own processes.
     if tool_name == "terminal" and not tool_failed and device_call is None and starts_notified_work(tool_name, tool_args):
-        _watch_background(result_content, session, tool_args, in_sandbox=location == ToolLocation.SANDBOX and sandbox_pool is not None)
+        await _watch_background(
+            result_content, session, tool_args, in_sandbox=location == ToolLocation.SANDBOX and sandbox_pool is not None,
+        )
 
     # --- Saga step commit / fail ---
     if saga_step is not None and _active_saga_id is not None:

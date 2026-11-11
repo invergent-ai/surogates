@@ -361,11 +361,12 @@ class ArtifactCompletionMixin:
         task.add_done_callback(self._background_tasks.discard)
 
     async def _destroy_sandbox_quietly(
-        self, sandbox_id: str | None, session_id: str,
+        self, sandbox_id: str | None, session_id: str, *, alone: bool = False,
     ) -> None:
-        """Delete a detached sandbox; never raise into the drain."""
+        """Delete a detached sandbox; never raise into the drain.  *alone*: that sandbox and nothing else of the
+        session's (``SandboxPool.destroy_released``)."""
         try:
-            await self._sandbox_pool.destroy_released(sandbox_id, session_id)
+            await self._sandbox_pool.destroy_released(sandbox_id, session_id, alone=alone)
         except Exception:
             logger.debug(
                 "Sandbox cleanup failed for %s", session_id, exc_info=True,
@@ -1281,8 +1282,11 @@ class ArtifactCompletionMixin:
                 if sandbox_id is not None and landing is not None and landing["state"] == "completed" and landing.get("commit"):
                     prunes = sandbox_id
                 else:
+                    # Another worker's watch may hold a sandbox of the session for a command it runs: only this one goes.
                     self._spawn_background(
-                        self._destroy_sandbox_quietly(sandbox_id, str(session.id)),
+                        self._destroy_sandbox_quietly(
+                            sandbox_id, str(session.id), alone=await background_watch.held_elsewhere(str(session.id)),
+                        ),
                         name=f"sandbox-teardown-{session.id}",
                     )
 
