@@ -253,3 +253,18 @@ async def test_the_docker_sweep_of_a_session_spares_a_live_worker_and_takes_a_cr
     await backend.destroy_for_session(str(chat))
     assert "parents" not in docker._containers
     await backend.aclose()
+
+
+async def test_a_stop_naming_another_sessions_command_kills_nothing(api, two_workers):  # noqa: F811
+    first, second = two_workers
+    store = api.app.state.session_store
+    chat, stranger = await a_session(api), await a_session(api)
+    proc = await first.starts(chat, "sleep 2")
+    # Through the tool path: the stranger's session names the command, and no watch has it under that session.
+    assert await second.watch.stop_elsewhere(proc, stranger) is None
+    # A forged ask straight into the first watch's list, naming the command under the stranger's session.
+    await second.watch._shared.ask_stop(first.watch.id, stranger, proc)
+    await asyncio.sleep(0.5)
+    assert await notes(store, chat) == []
+    [end] = await until(lambda: notes(store, chat))
+    assert end["agent_id"] == proc and end["status"] == "completed"
