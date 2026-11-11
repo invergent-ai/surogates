@@ -85,20 +85,25 @@ def fit_tool_name(server_part: str, tool_part: str) -> str:
     return f"{_PREFIX}{s}{_SEPARATOR}{t}{_DIGEST_MARK}{digest}"
 
 
-def configured_tool_name(name: str) -> str:
-    """The name a tool rule written with *name* applies to.
+def configured_tool_names(name: str) -> set[str]:
+    """The names a tool rule written with *name* applies to.
 
     A full MCP name too long for an engine (``mcp__<server>__<tool>``, as an
-    admin reads it off the server) is the shortened name the tool is
-    offered under; any other name is unchanged.
+    admin reads it off the server) stands for the shortened name the tool
+    is offered under.  Where the server's own name holds ``__`` the split is
+    not known, so every split is taken: the digest, of the full name, is the
+    same in each, and only the true one names a tool.  Any other name is
+    itself.
     """
     name = str(name)
     if TOOL_NAME_RE.match(name) or not name.startswith(_PREFIX):
-        return name
-    server_part, sep, tool_part = name[len(_PREFIX):].partition(_SEPARATOR)
-    if not sep:
-        return name
-    return fit_tool_name(sanitize_mcp_name_component(server_part), sanitize_mcp_name_component(tool_part))
+        return {name}
+    body = sanitize_mcp_name_component(name[len(_PREFIX):])
+    names = {
+        fit_tool_name(body[:i], body[i + len(_SEPARATOR):])
+        for i in range(len(body)) if body.startswith(_SEPARATOR, i)
+    }
+    return names or {name}
 
 
 def mcp_toolset(server: str) -> str:

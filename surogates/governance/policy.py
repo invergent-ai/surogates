@@ -100,14 +100,14 @@ class GovernanceGate:
         self._enabled: bool = enabled
         # A rule written with an MCP tool's full name, too long for an
         # engine, applies to the shortened name the tool is offered under.
-        from surogates.tools.mcp.names import configured_tool_name
+        from surogates.tools.mcp.names import configured_tool_names
 
         if allowed_tools is not None:
-            allowed_tools = {configured_tool_name(t) for t in allowed_tools}
+            allowed_tools = {n for t in allowed_tools for n in configured_tool_names(t)}
         if denied_tools is not None:
-            denied_tools = [configured_tool_name(t) for t in denied_tools]
+            denied_tools = [n for t in denied_tools for n in sorted(configured_tool_names(t))]
         if require_approval is not None:
-            require_approval = {configured_tool_name(t) for t in require_approval}
+            require_approval = {n for t in require_approval for n in configured_tool_names(t)}
         # Tools a human must approve before they run.  Checked beside the
         # deny-list fast path -- above the open-policy/``mcp__`` early
         # return -- because open policy is the production default and MCP

@@ -25,7 +25,7 @@ from surogates.tools.mcp import client as mcp_client
 from surogates.tools.mcp.client import MCPServerTask, _register_server_tools
 from surogates.tools.mcp.names import (
     TOOL_NAME_RE,
-    configured_tool_name,
+    configured_tool_names,
     mcp_tool_name,
     mcp_tool_server,
     mcp_toolset,
@@ -261,9 +261,13 @@ def test_a_rule_written_with_the_full_long_name_applies_to_the_tool():
 
     full = f"mcp__{LONG_SERVER.replace('-', '_')}__{LONG_TOOL}"
     short = mcp_tool_name(LONG_SERVER, LONG_TOOL)
-    assert configured_tool_name(full) == short
-    assert configured_tool_name("mcp__github__create_issue") == "mcp__github__create_issue"
-    assert configured_tool_name("read_file") == "read_file"
+    assert short in configured_tool_names(full)
+    assert configured_tool_names("mcp__github__create_issue") == {"mcp__github__create_issue"}
+    assert configured_tool_names("read_file") == {"read_file"}
+    # A server whose own name holds "__" ("crm--prod..."): every split is taken.
+    dashed = "crm--prod-europe-west-customer-relationship-management"
+    full_dashed = f"mcp__{dashed.replace('-', '_')}__{LONG_TOOL}"
+    assert mcp_tool_name(dashed, LONG_TOOL) in configured_tool_names(full_dashed)
     assert not GovernanceGate(denied_tools={full}).check(short, {}).allowed
     assert GovernanceGate(denied_tools={full}).check("mcp__github__create_issue", {}).allowed
     assert GovernanceGate(require_approval={full}).check(short, {}).overridable
