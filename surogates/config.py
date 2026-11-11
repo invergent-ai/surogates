@@ -286,6 +286,11 @@ class WorkerSettings(BaseSettings):
     # cap used by TurnConcurrencyGate.  ``ctx.governance`` may override
     # per tenant in a later plan; until then this is the uniform cap.
     max_concurrent_turns_default: int = 10
+    # The most often one streamed model call writes an ``llm.delta`` event of
+    # one kind (``content``, ``reasoning``); the chunks in between are joined
+    # into it.  The first chunk of a call is written at once.  0 writes one
+    # event per streamed chunk, as before this setting existed.
+    delta_coalesce_ms: int = 100
 
 
 class BoardSettings(BaseSettings):

@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from surogates.db.engine import async_engine_from_settings
 from surogates.harness.budget import IterationBudget
 from surogates.harness.context import ContextCompressor
+from surogates.harness.live_deltas import DeltaPolicy
 from surogates.harness.loop import AgentHarness
 from surogates.harness.model_metadata import get_model_info
 from surogates.harness.procedure_tools import gate_skill_step
@@ -2287,6 +2288,7 @@ async def run_worker(settings: Settings) -> None:
             # with the rest of the bundle, so the harness swaps to a
             # client it already owns instead of minting one mid-call.
             fallback_chain=llm_bundle.fallbacks,
+            delta_policy=DeltaPolicy(coalesce_ms=settings.worker.delta_coalesce_ms),
             media_gen=media_gen_config,
             turn_summarizer=turn_summarizer,
             # Share the per-session bundle with

@@ -31,6 +31,7 @@ from surogates.harness.message_utils import (
 from surogates.harness.error_classifier import FailoverReason, classify_api_error
 from surogates.harness.expert_routing import model_supports_thinking_toggle
 from surogates.harness.image_shrink import shrink_image_parts_in_messages
+from surogates.harness.live_deltas import DeltaPolicy, LiveDeltas
 from surogates.harness.model_metadata import (
     get_next_probe_tier,
     parse_context_limit_from_error,
@@ -597,6 +598,7 @@ async def call_llm_with_retry(
     rate_limit_guard: Any | None = None,
     turn_id: str | None = None,
     iteration_index: int | None = None,
+    delta_policy: DeltaPolicy | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Call the LLM with retry, backoff, rate-limit and failover handling.
 
@@ -623,6 +625,10 @@ async def call_llm_with_retry(
         Used by :class:`~surogates.harness.streaming_executor.StreamingToolExecutor`
         to start executing concurrency-safe tools before the full LLM
         response has finished streaming.
+    delta_policy:
+        How often at most a streamed call writes an ``llm.delta`` event of
+        one kind (:class:`~surogates.harness.live_deltas.DeltaPolicy`; the
+        default policy when None).
 
     Returns ``(assistant_message_dict, usage_data_dict)``.
     """
@@ -640,6 +646,14 @@ async def call_llm_with_retry(
     # the provider we just moved off, and the one now serving us is not the
     # one being throttled.
     rate_limit_fallback_active = False
+
+    # One writer of the call's deltas across its attempts: a retry's deltas
+    # follow the ``reconnect`` delta that tells viewers to drop the partial
+    # text before it.
+    live_deltas = LiveDeltas(
+        store, session.id, policy=delta_policy,
+        iteration=iteration, turn_id=turn_id, iteration_index=iteration_index,
+    )
 
     for attempt in range(1, MAX_LLM_RETRIES + 1):
         # A stopped turn never starts another full call (a retry after a backoff used to).
@@ -681,6 +695,7 @@ async def call_llm_with_retry(
                     on_tool_call_complete=active_on_tool_call_complete,
                     turn_id=turn_id,
                     iteration_index=iteration_index,
+                    live_deltas=live_deltas,
                 )
             else:
                 result = await call_llm_non_streaming(
@@ -791,9 +806,7 @@ async def call_llm_with_retry(
             if isinstance(exc, PartialToolCallStreamError):
                 if not classified.retryable or attempt >= MAX_LLM_RETRIES:
                     raise
-                await store.emit_event(
-                    session.id,
-                    EventType.LLM_DELTA,
+                await live_deltas.send(
                     _stamp_turn_meta(
                         {
                             "iteration": iteration,
@@ -1153,6 +1166,7 @@ async def call_llm_streaming(
     on_tool_call_complete: Callable[[dict[str, Any]], None] | None = None,
     turn_id: str | None = None,
     iteration_index: int | None = None,
+    live_deltas: LiveDeltas | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Call the LLM with ``stream=True``, emit deltas, return full message + usage.
 
@@ -1170,6 +1184,7 @@ async def call_llm_streaming(
             on_tool_call_complete=on_tool_call_complete,
             turn_id=turn_id,
             iteration_index=iteration_index,
+            live_deltas=live_deltas,
         )
     except (PartialToolCallStreamError, StreamStalledError):
         raise
@@ -1225,12 +1240,15 @@ async def call_llm_streaming_inner(
     on_tool_call_complete: Callable[[dict[str, Any]], None] | None = None,
     turn_id: str | None = None,
     iteration_index: int | None = None,
+    live_deltas: LiveDeltas | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Inner streaming implementation.
 
-    Iterates over the async stream, emitting ``LLM_DELTA`` events for
-    every text chunk.  Accumulates tool call deltas into a complete
-    tool_calls list.  Emits the full reconstructed message at the end.
+    Iterates over the async stream, emitting ``LLM_DELTA`` events for the
+    text chunks through *live_deltas*, which coalesces them in time (one
+    with the default policy when none is given).  Accumulates tool call
+    deltas into a complete tool_calls list.  Emits the full reconstructed
+    message at the end.
 
     If *interrupt_check* is provided and returns ``True`` during streaming,
     the HTTP stream is cancelled via ``response.close()`` and whatever has
@@ -1244,6 +1262,12 @@ async def call_llm_streaming_inner(
     to start executing concurrency-safe tools before the full response
     is available.
     """
+    if live_deltas is None:
+        live_deltas = LiveDeltas(
+            store, session.id,
+            iteration=iteration, turn_id=turn_id, iteration_index=iteration_index,
+        )
+
     # Inject prompt cache extra_body for cacheable models.
     final_kwargs = dict(create_kwargs)
     model_id = final_kwargs.get("model", "")
@@ -1448,6 +1472,9 @@ async def call_llm_streaming_inner(
                 await _close_stream()
                 interrupted = True
                 break
+            # Text gathered for a coalesced delta leaves once its window
+            # closes, whatever this chunk carries.
+            await live_deltas.tick()
             reported_reasoning_tokens = _extract_reasoning_tokens(
                 getattr(chunk, "usage", None),
             )
@@ -1457,16 +1484,7 @@ async def call_llm_streaming_inner(
                 and reported_reasoning_tokens != reasoning_tokens
             ):
                 reasoning_tokens = reported_reasoning_tokens
-                await store.emit_event(
-                    session.id,
-                    EventType.LLM_DELTA,
-                    _stamp_turn_meta(
-                        {"reasoning_tokens": reasoning_tokens, "iteration": iteration},
-                        iteration=iteration,
-                        turn_id=turn_id,
-                        iteration_index=iteration_index,
-                    ),
-                )
+                await live_deltas.reasoning_tokens(reasoning_tokens)
 
             if not chunk.choices:
                 # Final chunk may carry usage without choices.
@@ -1508,17 +1526,9 @@ async def call_llm_streaming_inner(
             if reasoning_text:
                 reasoning_parts.append(reasoning_text)
                 # Emit LLM_DELTA event for reasoning so the frontend can
-                # stream reasoning content incrementally (same as text deltas).
-                await store.emit_event(
-                    session.id,
-                    EventType.LLM_DELTA,
-                    _stamp_turn_meta(
-                        {"reasoning": reasoning_text, "iteration": iteration},
-                        iteration=iteration,
-                        turn_id=turn_id,
-                        iteration_index=iteration_index,
-                    ),
-                )
+                # stream reasoning content incrementally (same as text
+                # deltas), coalesced in time (surogates.harness.live_deltas).
+                await live_deltas.text("reasoning", reasoning_text)
 
             # Text content delta.
             text_delta = getattr(delta, "content", None)
@@ -1528,17 +1538,8 @@ async def call_llm_streaming_inner(
                 )
                 if visible_delta:
                     content_parts.append(visible_delta)
-                    # Emit LLM_DELTA event.
-                    await store.emit_event(
-                        session.id,
-                        EventType.LLM_DELTA,
-                        _stamp_turn_meta(
-                            {"content": visible_delta, "iteration": iteration},
-                            iteration=iteration,
-                            turn_id=turn_id,
-                            iteration_index=iteration_index,
-                        ),
-                    )
+                    # Emit LLM_DELTA event, coalesced in time.
+                    await live_deltas.text("content", visible_delta)
 
             # Tool call deltas.
             # Ollama-compatible endpoints reuse index 0 for every tool call
@@ -1547,6 +1548,9 @@ async def call_llm_streaming_inner(
             # call starting at the same index and redirect it to a fresh slot.
             tc_deltas = getattr(delta, "tool_calls", None)
             if tc_deltas:
+                # The text before a tool call is written before the call can
+                # start (a streamed tool's ``tool.call`` follows it).
+                await live_deltas.flush()
                 for tc_delta in tc_deltas:
                     raw_idx = tc_delta.index if tc_delta.index is not None else 0
                     delta_id = getattr(tc_delta, "id", None) or ""
@@ -1625,6 +1629,13 @@ async def call_llm_streaming_inner(
             await watchdog_task
         except (asyncio.CancelledError, Exception):
             pass
+        # Text gathered for a coalesced delta is written however the stream
+        # ended: at its end, on an interrupt, or on an error (whose own
+        # exception this must not hide).
+        try:
+            await live_deltas.flush()
+        except Exception:
+            logger.debug("Delta flush failed for session %s", session.id, exc_info=True)
 
     # Some SDK iterators respond to ``aclose`` by returning cleanly
     # (StopAsyncIteration) rather than raising.  When the watchdog
@@ -1640,16 +1651,10 @@ async def call_llm_streaming_inner(
     tail_delta = sentinel_scrubber.feed(tail_scrubbed) + sentinel_scrubber.flush()
     if tail_delta:
         content_parts.append(tail_delta)
-        await store.emit_event(
-            session.id,
-            EventType.LLM_DELTA,
-            _stamp_turn_meta(
-                {"content": tail_delta, "iteration": iteration},
-                iteration=iteration,
-                turn_id=turn_id,
-                iteration_index=iteration_index,
-            ),
-        )
+        await live_deltas.text("content", tail_delta)
+    # Every delta of the call is written before the caller writes its
+    # llm.thinking / llm.response.
+    await live_deltas.flush()
 
     partial_tool_names = _partial_tool_names_from_accumulator(tool_calls_acc)
 
