@@ -12,6 +12,7 @@ context to prevent collisions across organisations and users.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import time
@@ -44,9 +45,24 @@ from surogates.tools.mcp.client import (
 
 logger = logging.getLogger(__name__)
 
-#: How many tenants' approved tool fingerprints the pool keeps (least
-#: recently connected dropped first).  A tenant holds one SHA-256 per tool.
+#: How many tenants' approved tool fingerprints the pool keeps (the least
+#: recently used without a live connection dropped first).
 _MAX_TENANT_APPROVALS = 10_000
+#: How many tools one tenant may have approved; a new tool past it is left
+#: out (old approvals are never dropped to make room).
+_MAX_APPROVALS_PER_TENANT = 5_000
+
+
+def _server_identity(config: dict[str, Any] | None) -> str:
+    """What a server is, for its approvals: a digest of its transport, URL,
+    command and arguments.  Credentials (headers, env) are left out, so a
+    rotated token keeps the approvals; an admin who repoints the server
+    gets it approved anew."""
+    if not config:
+        return ""
+    ident = {k: config.get(k) for k in ("transport", "url", "command", "args")}
+    canonical = json.dumps(ident, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(canonical.encode()).hexdigest()[:16]
 
 
 def _tenant_prefix(org_id: UUID, user_id: UUID, agent_id: str) -> str:
@@ -137,10 +153,10 @@ class ConnectionPool:
         tracked for rug-pull mutations on reconnect.  The fingerprints
         approved at a tenant's first connection outlive its pool entry
         (``_approvals``), so a later connection whose tool definitions
-        changed is caught, audited and left without those tools.  An
-        invalidation of the agent (its MCP attachments or runtime config
-        changed by an admin) clears them: the next connection is approved
-        anew.  They live in this process only; a restart approves anew.
+        changed is caught, audited and left without those tools.  They are
+        kept per server identity (transport, URL, command, arguments): a
+        server an admin repoints is approved anew.  They live in this
+        process only; a restart, or another replica, approves anew.
         Unsafe tools are filtered out of the advertised schema set.
     audit_store:
         Optional :class:`AuditStore` that receives
@@ -312,6 +328,8 @@ class ConnectionPool:
             entry = self._entries.get(key)
             if entry is not None:
                 entry.last_used = time.monotonic()
+                if key in self._approvals:
+                    self._approvals.move_to_end(key)
                 return entry.tool_schemas
 
             # Prefix each server name for tenant isolation.  The resource /
@@ -429,6 +447,7 @@ class ConnectionPool:
                         tool_name=original_tool or clean_name,
                         schema=clean,
                         is_service_account=is_service_account,
+                        server_identity=_server_identity(configs.get(original_server)),
                     ):
                         continue  # unsafe or rug-pulled — exclude from advertised set
 
@@ -480,15 +499,18 @@ class ConnectionPool:
     def _tenant_approvals(self, key: tuple[UUID, UUID, str]) -> dict[str, str]:
         """The fingerprints approved for tenant *key*, kept across its connections.
 
-        At most ``_MAX_TENANT_APPROVALS`` tenants are kept, the least
-        recently connected dropped first: a dropped tenant is approved anew
-        at its next connection.
+        At most ``_MAX_TENANT_APPROVALS`` tenants are kept: past that, the
+        least recently used tenant without a live connection is dropped
+        first, and is approved anew at its next connection.  A tenant with
+        a live connection is never dropped.
         """
         approvals = self._approvals.get(key)
         if approvals is None:
             approvals = self._approvals[key] = {}
-            while len(self._approvals) > _MAX_TENANT_APPROVALS:
-                self._approvals.popitem(last=False)
+            excess = len(self._approvals) - _MAX_TENANT_APPROVALS
+            if excess > 0:
+                for old in [k for k in self._approvals if k != key and k not in self._entries][:excess]:
+                    del self._approvals[old]
         else:
             self._approvals.move_to_end(key)
         return approvals
@@ -503,11 +525,18 @@ class ConnectionPool:
         tool_name: str,
         schema: dict[str, Any],
         is_service_account: bool = False,
+        server_identity: str = "",
     ) -> bool:
         """Scan *schema* for safety + rug-pull; return True if tool is safe.
 
-        *governance* is tenant-scoped (one instance per :class:`PoolEntry`)
-        so fingerprints never leak between tenants.  Emits a
+        *server_identity* names what the server is (:func:`_server_identity`):
+        approvals are kept per identity, so a server an admin repoints (a new
+        URL, command or arguments) is approved anew, not held against the
+        definitions of the server it was.
+
+        *governance* is tenant-scoped (one instance per :class:`PoolEntry`,
+        over the tenant's approvals) so fingerprints never leak between
+        tenants.  Emits a
         ``policy.mcp_scan`` row for every scan and an additional
         ``policy.rug_pull`` row when a previously-registered tool's
         fingerprint has changed.  Unsafe or rug-pulled tools return
@@ -521,7 +550,10 @@ class ConnectionPool:
             "inputSchema": schema.get("parameters") or {},
             "_server_name": server_name,
         }
-        qualified_name = f"{server_name}.{tool_name}"
+        qualified_name = (
+            f"{server_name}@{server_identity}.{tool_name}" if server_identity
+            else f"{server_name}.{tool_name}"
+        )
 
         # The ``audit_log.user_id`` column FKs to ``users.id``; for
         # service-account sessions the JWT carries a ``service_accounts.id``
@@ -529,8 +561,8 @@ class ConnectionPool:
         # still scoping the row by ``org_id``.
         audit_user_id: UUID | None = None if is_service_account else user_id
 
-        # Rug-pull check — only meaningful when we've seen this tool
-        # before within the same tenant's governance instance.
+        # Rug-pull check — against the definition approved at one of this
+        # tenant's earlier connections to the same server.
         if governance.has_fingerprint(qualified_name):
             if not governance.check_rug_pull(qualified_name, tool_def):
                 if self._audit_store is not None:
@@ -580,6 +612,17 @@ class ConnectionPool:
             )
             return False
 
+        if (
+            not governance.has_fingerprint(qualified_name)
+            and governance.fingerprint_count() >= _MAX_APPROVALS_PER_TENANT
+        ):
+            # Old approvals are never dropped to make room: a server could
+            # otherwise flood new names until its own approvals went.
+            logger.warning(
+                "MCP tool %s from server %s not approved: the tenant holds %d approvals already",
+                tool_name, server_name, _MAX_APPROVALS_PER_TENANT,
+            )
+            return False
         governance.register_fingerprint(qualified_name, tool_def)
         return True
 
@@ -796,10 +839,10 @@ class ConnectionPool:
         scheduled on the running loop.
         """
         keys = [k for k in self._entries if k[2] == agent_id]
-        # An admin changed what the agent connects to: its next connection
-        # is approved anew, not held against the old definitions.
-        for key in [k for k in self._approvals if k[2] == agent_id]:
-            del self._approvals[key]
+        # The approvals stay: an invalidation follows any edit of the agent,
+        # and the next connection is held against them like any other.  A
+        # server an admin repoints has a new identity (``_server_identity``)
+        # and is approved anew.
         entries: list[PoolEntry] = []
         for key in keys:
             entry = self._entries.pop(key, None)

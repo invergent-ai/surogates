@@ -184,12 +184,12 @@ class MCPGovernance:
         """Store the SHA-256 fingerprint of *tool_def* for future comparison.
 
         This store is the rug-pull check (:meth:`check_rug_pull`).  Nothing
-        is registered with AGT's scanner: its registry is keyed by
-        ``server::tool`` and looked up by the bare tool name, so a
-        registration under the qualified name never matched a scan and its
-        own rug-pull check never fired; registered under the bare name, its
-        cross-server checks would refuse any tool whose name is within two
-        edits of another server's (``get_user`` / ``get_users``).
+        is registered with AGT's scanner.  Tools used to be registered there
+        under the qualified name (``server.tool``) and scanned under the bare
+        one, so AGT's own rug-pull check never matched, and its registry
+        never outlived a connection anyway.  Registered under the bare name,
+        its cross-server checks would refuse any tool whose name is within
+        two edits of another server's (``get_user`` / ``get_users``).
         """
         self._fingerprints[tool_name] = _fingerprint(tool_def)
 
@@ -204,6 +204,10 @@ class MCPGovernance:
         if stored is None:
             return False
         return stored == _fingerprint(tool_def)
+
+    def fingerprint_count(self) -> int:
+        """How many tools have an approved fingerprint."""
+        return len(self._fingerprints)
 
     def has_fingerprint(self, tool_name: str) -> bool:
         """Return True when *tool_name* has been previously registered."""
@@ -288,9 +292,26 @@ def _escalate(current: str, proposed: str) -> str:
 
 
 def _fingerprint(tool_def: dict) -> str:
-    """Compute a deterministic SHA-256 fingerprint for *tool_def*."""
-    canonical = json.dumps(tool_def, sort_keys=True, separators=(",", ":"))
+    """Compute a deterministic SHA-256 fingerprint for *tool_def*.
+
+    Key order never counts, nor the order of a schema's ``required`` names
+    (a server may build that list from a set, in a new order each start).
+    """
+    canonical = json.dumps(_canonical(tool_def), sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def _canonical(value):
+    """*value* with every ``required`` list of names sorted."""
+    if isinstance(value, dict):
+        return {
+            key: sorted(item) if key == "required" and isinstance(item, list)
+            and all(isinstance(name, str) for name in item) else _canonical(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_canonical(item) for item in value]
+    return value
 
 
 def _extract_text_fields(

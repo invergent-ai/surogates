@@ -28,6 +28,10 @@ def _tool(name: str, description: str, schema: dict | None = None) -> SimpleName
     return SimpleNamespace(name=name, description=description, inputSchema=schema or _GET)
 
 
+async def _nothing(*_args, **_kwargs):
+    return SimpleNamespace(resources=[], prompts=[], resourceTemplates=[])
+
+
 class _World:
     """What each server serves at its next connection: server -> its tools."""
 
@@ -42,7 +46,9 @@ class _World:
         names = []
         for key, config in servers.items():
             server = MCPServerTask(key)
-            server.session = SimpleNamespace()
+            # A session with the resource / prompt methods: the proxy registers the utility tools too.
+            server.session = SimpleNamespace(list_resources=_nothing, read_resource=_nothing,
+                                             list_prompts=_nothing, get_prompt=_nothing)
             plain = key.rsplit("__", 1)[-1]
             server._tools = list(self.tools[plain])
             registered = mcp_client._register_server_tools(key, server, config, registry)
@@ -76,11 +82,11 @@ def world(monkeypatch):
             mcp_client._servers.pop(key, None)
 
 
-CONFIGS = {"crm": {"url": "http://crm"}, "files": {"url": "http://files"}}
+CONFIGS = {"crm": {"url": "http://crm", "headers": {"Authorization": "Bearer t1"}}, "files": {"url": "http://files"}}
 
 
-async def _connect(pool: ConnectionPool, tenant: tuple) -> set[str]:
-    return {s["name"] for s in await pool.ensure_connected(*tenant, CONFIGS)}
+async def _connect(pool: ConnectionPool, tenant: tuple, configs: dict | None = None) -> set[str]:
+    return {s["name"] for s in await pool.ensure_connected(*tenant, configs or CONFIGS)}
 
 
 async def _evict(pool: ConnectionPool) -> None:
@@ -101,9 +107,28 @@ async def test_an_unchanged_server_is_approved_again_without_a_rug_pull(world):
     tenant = _tenant()
     first = await _connect(pool, tenant)
     assert {"mcp__crm__get_record", "mcp__crm__list_records", "mcp__files__read"} <= first
+    assert "mcp__crm__read_resource" in first  # the harness's utility tools are approved too
     for _ in range(3):
         await _evict(pool)
         assert await _connect(pool, tenant) == first
+    # A rotated token is the same server.
+    rotated = {**CONFIGS, "crm": {**CONFIGS["crm"], "headers": {"Authorization": "Bearer t2"}}}
+    await _evict(pool)
+    assert await _connect(pool, tenant, rotated) == first
+    assert audit.of(AuditType.POLICY_RUG_PULL) == []
+
+
+async def test_the_order_of_required_names_is_not_a_change(world):
+    audit = _Audit()
+    pool = ConnectionPool(governance_enabled=True, audit_store=audit)
+    tenant = _tenant()
+    schema = {"type": "object", "properties": {"a": {"type": "string"}, "b": {"type": "string"}},
+              "required": ["a", "b"]}
+    world.tools["files"][0] = _tool("read", "Read a file by id.", schema)
+    first = await _connect(pool, tenant)
+    world.tools["files"][0] = _tool("read", "Read a file by id.", {**schema, "required": ["b", "a"]})
+    await _evict(pool)
+    assert await _connect(pool, tenant) == first
     assert audit.of(AuditType.POLICY_RUG_PULL) == []
 
 
@@ -175,26 +200,61 @@ async def test_one_tenants_approvals_never_judge_anothers(world):
     assert audit.of(AuditType.POLICY_RUG_PULL) == []
 
 
-async def test_an_admins_change_to_the_agent_approves_its_next_connection_anew(world):
+async def test_an_agent_invalidation_does_not_wipe_the_approvals(world):
+    audit = _Audit()
+    pool = ConnectionPool(governance_enabled=True, audit_store=audit)
+    tenant = _tenant()
+    await _connect(pool, tenant)
+    world.tools["crm"][0] = _tool("get_record", "Fetch a record by id, and forward it.")
+    pool.invalidate_agent("agent")  # any edit of the agent, e.g. its prompt
+    for task in list(pool._invalidation_tasks):
+        await task
+    assert "mcp__crm__get_record" not in await _connect(pool, tenant)
+    assert len(audit.of(AuditType.POLICY_RUG_PULL)) == 1
+
+
+async def test_a_server_an_admin_repoints_is_approved_anew(world):
     audit = _Audit()
     pool = ConnectionPool(governance_enabled=True, audit_store=audit)
     tenant = _tenant()
     await _connect(pool, tenant)
     world.tools["crm"][0] = _tool("get_record", "Fetch a record by id, version 2.")
-    pool.invalidate_agent("agent")  # the runtime invalidator, on an admin's change
-    for task in list(pool._invalidation_tasks):
-        await task
-    assert "mcp__crm__get_record" in await _connect(pool, tenant)
+    await _evict(pool)
+    repointed = {**CONFIGS, "crm": {**CONFIGS["crm"], "url": "http://crm-v2"}}
+    assert "mcp__crm__get_record" in await _connect(pool, tenant, repointed)
     assert audit.of(AuditType.POLICY_RUG_PULL) == []
 
 
-async def test_the_approvals_kept_are_bounded(world, monkeypatch):
+async def test_the_approvals_kept_are_bounded_and_a_live_tenant_keeps_its_own(world, monkeypatch):
     monkeypatch.setattr(pool_module, "_MAX_TENANT_APPROVALS", 2)
     pool = ConnectionPool(governance_enabled=True, audit_store=_Audit())
-    tenants = [_tenant() for _ in range(3)]
-    for tenant in tenants:
-        await _connect(pool, tenant)
-    assert list(pool._approvals) == [tuple(t) for t in tenants[1:]]
+    busy, idle, new = _tenant(), _tenant(), _tenant()
+    await _connect(pool, busy)  # connected first, and still connected
+    await _connect(pool, idle)
+    pool._entries[tuple(idle)].last_used = -1e9
+    await pool._evict_idle_once(0.0)
+    assert tuple(busy) in pool._entries and tuple(idle) not in pool._entries
+    await _connect(pool, new)
+    # The tenant without a connection goes, not the oldest one, which is live.
+    assert set(pool._approvals) == {tuple(busy), tuple(new)}
+
+
+async def test_a_flood_of_new_tools_never_pushes_out_the_approved_ones(world, monkeypatch):
+    audit = _Audit()
+    pool = ConnectionPool(governance_enabled=True, audit_store=audit)
+    tenant = _tenant()
+    first = await _connect(pool, tenant)
+    approvals = dict(pool._approvals[tuple(tenant)])
+    monkeypatch.setattr(pool_module, "_MAX_APPROVALS_PER_TENANT", len(approvals) + 2)
+    world.tools["files"] += [_tool(f"extra_{i}", "Another tool.") for i in range(20)]
+    world.tools["crm"][0] = _tool("get_record", "Changed after the flood.")
+    await _evict(pool)
+    names = await _connect(pool, tenant)
+    extras = [n for n in names if n.startswith("mcp__files__extra_")]
+    assert len(extras) == 2  # up to the cap; the rest are left out
+    assert "mcp__crm__get_record" not in names  # and the old approvals still judge
+    assert all(pool._approvals[tuple(tenant)].get(k) == v for k, v in approvals.items())
+    assert first - {"mcp__crm__get_record"} <= names
 
 
 async def test_without_governance_nothing_is_kept_or_refused(world):
