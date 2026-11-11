@@ -26,7 +26,7 @@ import logging
 from typing import Any
 from uuid import UUID, uuid4
 
-from surogates.harness.subagents import DISPATCH_KEY, PARITY_KEY
+from surogates.harness.subagents import DISPATCH_KEY, PARITY_KEY, dispatch_of, may_message
 from surogates.runtime.turn_slots import turn_waiting
 from surogates.tools.registry import ToolRegistry, ToolSchema
 
@@ -58,7 +58,16 @@ _AGENT_DESCRIPTION = (
     "By default the call waits for the report. With run_in_background=true it returns the agent_id at once "
     "and you get a notification when the agent ends; work on meanwhile, never redo the work you handed it, "
     "and never state its result before the notification comes. Start several independent agents in one "
-    "response to run them in parallel."
+    "response to run them in parallel. To give an agent more work, a correction or a follow-up question, "
+    "use send_message with its agent_id: it keeps everything it has read, which a new agent would not."
+)
+
+_SEND_MESSAGE_DESCRIPTION = (
+    "Send a message to another agent: one you started (its agent_id), the agent that started you (to=\"parent\"), "
+    "or another agent your parent started. A running agent reads it before its next step. A finished or "
+    "stopped agent resumes with everything it had and the message, and its new report reaches the agent "
+    "that started it as a notification. Use it to continue, correct or redirect an agent instead of starting "
+    "a new one. The call does not wait for an answer: a reply comes later, as a message or a notification."
 )
 
 _AGENT_SCHEMA = ToolSchema(
@@ -100,9 +109,117 @@ _AGENT_SCHEMA = ToolSchema(
 )
 
 
+_SEND_MESSAGE_SCHEMA = ToolSchema(
+    name="send_message",
+    description=_SEND_MESSAGE_DESCRIPTION,
+    parameters={
+        "type": "object",
+        "properties": {
+            "to": {
+                "type": "string",
+                "description": "The agent_id of the agent to message, or \"parent\" for the agent that started you.",
+            },
+            "message": {
+                "type": "string",
+                "description": "The message. Self-contained: what to do, and what to send back.",
+            },
+            "summary": {
+                "type": "string",
+                "description": "A short summary of the message (5-10 words), shown with it.",
+            },
+        },
+        "required": ["to", "message", "summary"],
+        "additionalProperties": False,
+    },
+)
+
+
 def register(registry: ToolRegistry) -> None:
-    """Register the ``agent`` tool."""
+    """Register the ``agent`` tool family."""
     registry.register(name="agent", schema=_AGENT_SCHEMA, handler=_agent_handler, toolset="core")
+    registry.register(name="send_message", schema=_SEND_MESSAGE_SCHEMA, handler=_send_message_handler, toolset="core")
+
+
+#: The statuses of an agent that is not running: a message resumes it.
+_AT_REST = ("completed", "failed", "paused")
+
+
+async def _send_message_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
+    """Deliver a message to an agent of the caller's tree; see ``send_message``'s description.
+
+    It is written to the target as a ``coordinator.message``: a message
+    typed into the session by another agent, never by its user.  A running
+    target reads it at its next iteration (the harness's steering read), a
+    resting one is resumed and queued, and a replay reads it where the live
+    turn did.
+    """
+    from surogates.channels.constants import session_queue_priority
+    from surogates.config import enqueue_session
+    from surogates.session.events import EventType
+
+    session_store = kwargs.get("session_store")
+    sender_id = kwargs.get("session_id")
+    if session_store is None or sender_id is None:
+        return _error("send_message needs its session; none was given")
+    to = str(arguments.get("to") or "").strip()
+    message = str(arguments.get("message") or "").strip()
+    summary = " ".join(str(arguments.get("summary") or "").split())[:120]
+    if not to or not message:
+        return _error("to and message are required")
+    sender = await session_store.get_session(UUID(str(sender_id)))
+    if to.lower() == "parent":
+        if sender.parent_id is None:
+            return _error("you were not started by another agent: there is no parent to message")
+        target_id = sender.parent_id
+    else:
+        try:
+            target_id = UUID(to)
+        except ValueError:
+            return _error(f"{to!r} is not an agent_id")
+    try:
+        target = await session_store.get_session(target_id)
+    except Exception:
+        target = None
+    if target is None or not await may_message(session_store, sender, target):
+        # The same answer for an agent that does not exist and one that is not the caller's to reach.
+        return _error(f"no agent {to} that you can message: only your parent, the agents you started, and the agents your parent started")
+    if target.status == "archived":
+        return _error(f"agent {target.id} was deleted")
+
+    if target.id == sender.parent_id:
+        head = f"[Message from agent {sender.id}"
+        description = (dispatch_of(sender) or {}).get("description")
+        head += f" ({description})" if description else ""
+    elif sender.id == target.parent_id:
+        head = "[Message from the agent that started you"
+    else:
+        head = f"[Message from agent {sender.id}"
+    content = f"{head}: {summary}]\n{message}" if summary else f"{head}]\n{message}"
+
+    resumed = target.status in _AT_REST
+    if resumed:
+        dispatch = dispatch_of(target)
+        if dispatch is not None and dispatch.get("mode") != "background":
+            # Its first report was its call's result; a report of a later run has no call to return to.
+            await session_store.update_session_config_key(target.id, DISPATCH_KEY, {**dispatch, "mode": "background"})
+        await session_store.resume_session(target.id, source="agent_message")
+    await session_store.emit_event(target.id, EventType.COORDINATOR_MESSAGE, {
+        "content": content, "kind": "agent_message",
+        "from_agent": str(sender.id), "to_agent": str(target.id), "summary": summary,
+    })
+    redis = kwargs.get("redis")
+    if redis is not None:
+        await enqueue_session(
+            redis, org_id=str(target.org_id), agent_id=target.agent_id, session_id=target.id,
+            priority=session_queue_priority(target),
+        )
+    return json.dumps({
+        "status": "resumed" if resumed else "delivered", "to": str(target.id),
+        "note": (
+            "It was at rest: it resumes with the message." if resumed
+            else "It reads the message before its next step."
+        ),
+    })
 
 
 def _error(message: str) -> str:
