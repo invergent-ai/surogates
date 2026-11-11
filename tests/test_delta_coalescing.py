@@ -409,3 +409,21 @@ async def test_the_text_before_a_tool_call_is_written_before_the_call_can_start(
     await _stream_call(store, Stream(items),
                        on_tool_call_complete=lambda entry: at_start.append("".join(d["content"] for d in store.deltas())))
     assert at_start == ["Let me look it up.", "Let me look it up."]
+
+
+async def test_writes_slower_than_the_window_still_join_chunks():
+    """A loaded worker: each write outlasts the window.  The window runs from a write's end, so the chunks that
+    arrived during it leave together, not one event per chunk."""
+    class SlowStore(Recorder):
+        async def emit_event(self, session_id, event_type, data, **kwargs):
+            await asyncio.sleep(0.05)
+            return await super().emit_event(session_id, event_type, data, **kwargs)
+
+    store = SlowStore()
+    items = []
+    for i in range(60):
+        items += [0.005, _chunk(content=f"{i} ")]
+    message, _ = await _stream_call(store, Stream(items), coalesce_ms=20)
+    deltas = store.deltas()
+    assert len(deltas) <= 12 < 60
+    assert "".join(d["content"] for d in deltas) == message["content"]

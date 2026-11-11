@@ -130,6 +130,12 @@ class LiveDeltas:
         """Send what has gathered if the window has closed; called once per chunk."""
         if not self._parts and self._tokens is None:
             return
+        if self._lock.locked():
+            # The timer is writing: the stream reads on, and what gathers
+            # meanwhile leaves one window after that write.
+            if self._timer is None:
+                self._timer = asyncio.get_running_loop().create_task(self._later(self._window))
+            return
         wait = self._last_sent + self._window - _clock()
         if wait <= 0:
             await self.flush()
@@ -156,9 +162,11 @@ class LiveDeltas:
 
     async def _later(self, wait: float) -> None:
         await asyncio.sleep(wait)
-        self._timer = None
         try:
             async with self._lock:
+                # Cleared once the lock is held: until then a chunk arriving
+                # finds the timer still due and leaves the write to it.
+                self._timer = None
                 await self._drain()
         except Exception:  # best-effort, as the stream's own flush on its way out
             logger.debug("Delta flush failed for session %s", self._session_id, exc_info=True)
@@ -186,5 +194,9 @@ class LiveDeltas:
         if "iteration" not in data:
             data["iteration"] = iteration
         _stamp_turn_meta(data, iteration=iteration, turn_id=turn_id, iteration_index=iteration_index)
-        self._last_sent = _clock()
         await self._store.emit_event(self._session_id, EventType.LLM_DELTA, data)
+        # The window runs from the end of the write: on a loaded worker a
+        # write can outlast it, and a window from the write's start would be
+        # closed again by the next chunk, one event per chunk.  From the end,
+        # the chunks that arrived meanwhile wait and leave together.
+        self._last_sent = _clock()
