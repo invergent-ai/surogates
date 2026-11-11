@@ -642,6 +642,8 @@ async def _running_agents(session_factory: Any, parent_id: UUID) -> list[tuple[s
 #: Starts under way in this process, by parent, until their child is in the database: (mode, agent_type, mark).
 _STARTING: dict[UUID, list[tuple[str, str | None, str]]] = {}
 _START_LOCKS: dict[UUID, asyncio.Lock] = {}
+#: Tokens a sub-agent with a budget has handed to its agents still starting or running in this process, by its id.
+_BUDGET_HANDED: dict[UUID, int] = {}
 
 
 #: The most agents one session may have running in the background at once.
@@ -700,13 +702,40 @@ async def _agent_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
     if background and getattr(parent, "channel", None) == "delegation":
         # A helper's parent hears of its end once: work it left running would end after that.
         return _error("a sub-agent cannot start agents in the background: start it in the foreground")
-    # Its token budget: the deployment's, or its parent's key; a sub-agent's own agents get at most what it has left.
+    # Its token budget: the deployment's, or its parent's key.  A sub-agent with a budget hands each agent it
+    # starts at most half of what it has left, less what its agents still running were handed: the calls of
+    # one response run at once, and it needs tokens of its own to read their reports.
     child_tokens = budget_for_children(parent_config)
     left = await budget_left(session_store, parent)
+    handed = 0
     if left is not None:
-        if left <= 0:
+        share = (left - _BUDGET_HANDED.get(parent.id, 0)) // 2
+        if share <= 0:
             return _error("your token budget is used up: finish with what you have")
-        child_tokens = min(child_tokens, left) if child_tokens else left
+        child_tokens = handed = min(child_tokens, share) if child_tokens else share
+        _BUDGET_HANDED[parent.id] = _BUDGET_HANDED.get(parent.id, 0) + handed
+    try:
+        return await _start_agent(
+            kwargs, parent=parent, prompt=prompt, description=description, background=background,
+            fork=fork, agent_type=agent_type, model=model, depth=depth, budget=budget, child_tokens=child_tokens,
+        )
+    finally:
+        if handed:
+            _BUDGET_HANDED[parent.id] -= handed
+            if _BUDGET_HANDED[parent.id] <= 0:
+                _BUDGET_HANDED.pop(parent.id, None)
+
+
+async def _start_agent(
+    kwargs: dict[str, Any], *, parent: Any, prompt: str, description: str,
+    background: bool, fork: bool, agent_type: str | None, model: str | None, depth: int, budget: Any,
+    child_tokens: int,
+) -> str:
+    """Start the agent the checked call asks for, and wait for its report unless it runs in the background."""
+    from surogates.tools.builtin import delegate
+
+    session_store = kwargs.get("session_store")
+    tenant = kwargs.get("tenant")
     child_depth = depth + 1
     # Below the depth limit an agent may start agents of its own.
     role = "orchestrator" if child_depth < delegate._MAX_DELEGATION_DEPTH else "leaf"

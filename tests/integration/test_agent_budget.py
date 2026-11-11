@@ -98,8 +98,38 @@ async def test_an_agents_own_agents_get_at_most_what_it_has_left(chats):  # noqa
     finally:
         waker.cancel()
     [inner] = await children(chats, child.id)
-    # The sub-agent had used some of its 10 tokens when it started its own: that one gets the rest, no more.
-    assert 0 < inner.config[AGENT_BUDGET_KEY]["tokens"] < 10
+    # The sub-agent had used some of its 10 tokens when it started its own: that one gets half the rest.
+    assert 0 < inner.config[AGENT_BUDGET_KEY]["tokens"] < 5
+
+
+async def test_agents_started_at_once_share_what_their_parent_has_left(chats, monkeypatch):  # noqa: F811
+    import asyncio
+
+    from surogates.tools.builtin import agents as agents_module, delegate
+
+    handed: list[int] = []
+
+    async def run(**kwargs):
+        handed.append((kwargs["extra_config"].get(AGENT_BUDGET_KEY) or {}).get("tokens"))
+        await asyncio.sleep(0.2)
+        return "Done."
+
+    monkeypatch.setattr(delegate, "_run_single_delegation", run)
+    chat = await a_chat(chats, BUDGETED)
+    child = await a_background_agent(chats, chat)
+    await chats.store.update_session_config_key(child.id, AGENT_BUDGET_KEY, {"tokens": 100})
+
+    def call(n):
+        return agents_module._agent_handler(
+            {"description": f"Part {n}", "prompt": f"Read part {n} of the log."},
+            session_store=chats.store, session_id=str(child.id), tenant=object(), tool_call_id=f"call_{n}",
+        )
+
+    results = await asyncio.gather(call(1), call(2), call(3))
+    assert all(r.startswith("Done.") for r in results)
+    # Half of what was left for each, in turn: never more than the parent had.
+    assert sorted(handed, reverse=True) == [50, 25, 12] and sum(handed) <= 100
+    assert agents_module._BUDGET_HANDED == {}
 
 
 async def test_the_iteration_cap_of_an_agent_without_a_token_budget_is_no_budget_stop(chats):  # noqa: F811
@@ -112,4 +142,18 @@ async def test_the_iteration_cap_of_an_agent_without_a_token_budget_is_no_budget
     assert end.data["reason"] == "budget_exhausted"
     [note] = await chats.store.get_events(chat, types=[EventType.AGENT_NOTIFICATION])
     assert note.data["status"] == "completed" and "budget_tokens" not in note.data
+    chats.replies = []
+
+
+async def test_a_resumed_agent_that_runs_out_reports_this_runs_words_not_its_first_report(chats):  # noqa: F811
+    chat = await a_chat(chats, {PARITY_KEY: True, BUDGET_KEY: 5})
+    child = await a_background_agent(chats, chat)
+    chats.replies = [_final_response("First report: 12 open items.")]
+    await chats.wake(child.id)
+    assert (await send(chats, chat, child.id))["status"] == "resumed"
+    chats.replies = [TODO_CALL, TODO_CALL]
+    await chats.wake(child.id)
+    first, second = await chats.store.get_events(chat, types=[EventType.AGENT_NOTIFICATION])
+    assert first.data["result"] == "First report: 12 open items."
+    assert second.data["status"] == "budget" and "First report" not in second.data["result"]
     chats.replies = []
