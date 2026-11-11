@@ -67,6 +67,10 @@ from surogates.channels.website_session import (
     verify_csrf_token,
 )
 from surogates.config import Settings, enqueue_session
+from surogates.api.routes.ask_user_question import (
+    AskUserQuestionResponseReply,
+    AskUserQuestionResponseRequest,
+)
 from surogates.api.routes.events import session_event_stream
 from surogates.api.routes._commerce_turn import (
     authorize_allowance_turn,
@@ -81,6 +85,13 @@ from surogates.runtime.platform_client import (
 from surogates.runtime.resolver import resolve_agent_id_soft
 from surogates.channels.constants import WEBSITE_CHANNEL, multi_session_disabled, session_queue_priority
 from surogates.session.events import EventType
+from surogates.session.interactive_input import (
+    asked_questions,
+    derive_is_other,
+    resolve_input_response,
+    response_event_exists,
+    wake_if_unattended,
+)
 from surogates.session.models import REUSABLE_SESSION_STATUSES
 from surogates.session.store import SessionNotFoundError, SessionStore
 from surogates.storage.tenant import agent_session_bucket
@@ -969,6 +980,64 @@ async def send_website_message(
         priority=session_queue_priority(session),
     )
     return SendMessageResponse(event_id=event_id)
+
+
+@router.post(
+    "/website/sessions/{session_id}/ask_user_question/{tool_call_id}/respond",
+    response_model=AskUserQuestionResponseReply,
+    status_code=status.HTTP_201_CREATED,
+)
+async def answer_website_question(
+    session_id: UUID,
+    tool_call_id: str,
+    body: AskUserQuestionResponseRequest,
+    request: Request,
+) -> AskUserQuestionResponseReply:
+    """The visitor's answers to the agent's ``ask_user_question`` call.
+
+    The tenant-authenticated ``/sessions/.../respond`` route is out of a
+    visitor's reach; this is its cookie + CSRF twin.
+    """
+    claims = await _load_and_authorize_session(request, session_id)
+    if not verify_csrf_token(claims.csrf_token, request.headers.get(CSRF_HEADER_NAME)):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Missing or mismatched {CSRF_HEADER_NAME} header.",
+        )
+    store = get_session_store(request)
+    try:
+        session = await store.get_session(session_id)
+    except SessionNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found.")
+    if session.org_id != claims.org_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found.")
+    await _enforce_website_rate_limit(request, str(session.org_id), session.agent_id)
+
+    responses = [r.model_dump() for r in body.responses]
+    event_id = await resolve_input_response(
+        store, session_id=session_id, tool_call_id=tool_call_id, responses=responses,
+    )
+    if event_id is None:
+        # An anonymous visitor's session has no principal to hold an inbox
+        # row, so there is nothing to claim: the ask in the event log, not
+        # yet answered, is what makes the answer valid.
+        questions = await asked_questions(store, session_id=session_id, tool_call_id=tool_call_id)
+        if not questions or await response_event_exists(
+            store, session_id=session_id, tool_call_id=tool_call_id,
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="This question is no longer waiting for an answer.",
+            )
+        event_id = await store.emit_event(
+            session_id,
+            EventType.ASK_USER_QUESTION_RESPONSE,
+            {"tool_call_id": tool_call_id, "responses": derive_is_other(questions, responses)},
+        )
+        await wake_if_unattended(
+            store, redis=getattr(request.app.state, "redis", None), session_id=session_id,
+        )
+    return AskUserQuestionResponseReply(event_id=event_id)
 
 
 @router.get("/website/sessions/{session_id}/events")

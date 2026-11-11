@@ -10,6 +10,7 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 
 import type { WebsiteAgent } from '../agent.js';
 import { SurogatesAuthError, SurogatesRateLimitError } from '../errors.js';
+import type { QuestionAnswer } from '../protocol.js';
 import { renderMarkdown } from './markdown.js';
 import { stripNextAction } from './next-action.js';
 import type { MountConfig } from './types.js';
@@ -23,6 +24,56 @@ interface ChatMessage {
   id: string;
   role: 'user' | 'assistant';
   content: string;
+}
+
+interface Question {
+  prompt: string;
+  choices: { label: string; description?: string }[];
+  allowOther: boolean;
+}
+
+/** An ``ask_user_question`` call, with the answers once it has them. */
+interface QuestionItem {
+  id: string;
+  role: 'question';
+  toolCallId: string;
+  intro: string[];
+  questions: Question[];
+  /** Absent while it waits; empty when it closed unanswered. */
+  answers?: QuestionAnswer[];
+}
+
+type ChatItem = ChatMessage | QuestionItem;
+
+type RawMessage = {
+  id?: string;
+  role?: string;
+  content?: unknown;
+  toolCallId?: string;
+  toolCalls?: { id: string; function?: { name?: string; arguments?: string } }[];
+};
+
+function parseJson(text: unknown): Record<string, unknown> | undefined {
+  try {
+    const value = JSON.parse(String(text));
+    return value && typeof value === 'object' ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function toQuestions(raw: unknown): Question[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((q): q is { prompt: string; choices?: unknown; allow_other?: unknown } =>
+      !!q && typeof q.prompt === 'string' && q.prompt.trim() !== '')
+    .map((q) => {
+      const choices = (Array.isArray(q.choices) ? q.choices : []).filter(
+        (c): c is { label: string; description?: string } => !!c && typeof c.label === 'string',
+      );
+      // An open question has nothing to pick, so typing is its only answer.
+      return { prompt: q.prompt.trim(), choices, allowOther: q.allow_other !== false || choices.length === 0 };
+    });
 }
 
 interface WidgetProps {
@@ -39,24 +90,45 @@ function uid(): string {
 }
 
 /**
- * Project ``agent.messages`` down to the renderable user/assistant turns,
- * assistant text with its ``<next_action>`` footer stripped.  An assistant
- * message with nothing left to show (one that only carries tool calls, or
- * only the footer) is dropped here, so it neither renders an empty bubble
- * nor counts as the reply that hides the typing indicator.
+ * Project ``agent.messages`` down to what the visitor sees: user/assistant
+ * turns, assistant text with its ``<next_action>`` footer stripped, and the
+ * agent's ``ask_user_question`` calls.  An assistant message with no text
+ * left (one that only carries tool calls, or only the footer) renders no
+ * bubble, so it neither shows empty nor counts as the reply that hides the
+ * typing indicator.
  */
-function snapshot(
-  messages: ReadonlyArray<{ id?: string; role?: string; content?: unknown }>,
-): ChatMessage[] {
-  const out: ChatMessage[] = [];
+function snapshot(messages: ReadonlyArray<RawMessage>): ChatItem[] {
+  const results = new Map<string, string>();
+  for (const m of messages) {
+    if (m.role === 'tool' && m.toolCallId) results.set(m.toolCallId, String(m.content ?? ''));
+  }
+  const out: ChatItem[] = [];
   for (const m of messages) {
     if (m.role !== 'user' && m.role !== 'assistant') continue;
     let content = typeof m.content === 'string' ? m.content : '';
-    if (m.role === 'assistant') {
-      content = stripNextAction(content);
-      if (content.trim() === '') continue;
+    if (m.role === 'assistant') content = stripNextAction(content);
+    if (content.trim() !== '' || m.role === 'user') {
+      out.push({ id: m.id ?? uid(), role: m.role, content });
     }
-    out.push({ id: m.id ?? uid(), role: m.role, content });
+    for (const call of m.toolCalls ?? []) {
+      if (call.function?.name !== 'ask_user_question') continue;
+      const args = parseJson(call.function.arguments) ?? {};
+      const questions = toQuestions(args.questions);
+      if (questions.length === 0) continue;
+      const intro = [args.message, args.context].filter(
+        (t): t is string => typeof t === 'string' && t.trim() !== '',
+      );
+      const result = results.get(call.id);
+      const responses = result === undefined ? undefined : parseJson(result)?.responses;
+      out.push({
+        id: `q-${call.id}`,
+        role: 'question',
+        toolCallId: call.id,
+        intro,
+        questions,
+        ...(result !== undefined && { answers: Array.isArray(responses) ? responses : [] }),
+      });
+    }
   }
   return out;
 }
@@ -124,10 +196,99 @@ const ICON_SEND = (
   </svg>
 );
 
+interface QuestionCardProps {
+  item: QuestionItem;
+  /** What this visitor sent, shown until the agent's result lands. */
+  sent?: QuestionAnswer[];
+  onAnswer: (answers: QuestionAnswer[]) => Promise<void>;
+}
+
+function QuestionCard({ item, sent, onAnswer }: QuestionCardProps) {
+  const [picks, setPicks] = useState<(QuestionAnswer | undefined)[]>([]);
+  const [sending, setSending] = useState(false);
+  const answers = item.answers ?? sent;
+  const closed = answers !== undefined || sending;
+  const shown = (i: number) =>
+    answers ? answers.find((a) => a.question === item.questions[i]!.prompt) : picks[i];
+
+  const submit = async (all: (QuestionAnswer | undefined)[]) => {
+    if (closed || all.length !== item.questions.length || all.some((a) => !a?.answer.trim())) return;
+    setSending(true);
+    try {
+      await onAnswer(all.map((a) => ({ ...a!, answer: a!.answer.trim() })));
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const pick = (i: number, answer: QuestionAnswer, now: boolean) => {
+    const next = item.questions.map((_, j) => (j === i ? answer : picks[j]));
+    setPicks(next);
+    if (now) void submit(next);
+  };
+
+  const single = item.questions.length === 1;
+  const needsSend = !single || item.questions.some((q) => q.allowOther);
+
+  return (
+    <div class="surg-bubble surg-assistant surg-question">
+      {item.intro.map((text) => (
+        <div class="surg-question-intro" dangerouslySetInnerHTML={{ __html: renderMarkdown(text) }} />
+      ))}
+      {item.questions.map((q, i) => {
+        const current = shown(i);
+        return (
+          <div class="surg-question-item">
+            <div class="surg-question-prompt">{q.prompt}</div>
+            {q.choices.map((c) => (
+              <button
+                type="button"
+                class={`surg-choice${current?.answer === c.label && !current.is_other ? ' surg-chosen' : ''}`}
+                disabled={closed}
+                aria-pressed={current?.answer === c.label}
+                onClick={() => pick(i, { question: q.prompt, answer: c.label, is_other: false }, single)}
+              >
+                {c.label}
+                {c.description && <span class="surg-choice-note">{c.description}</span>}
+              </button>
+            ))}
+            {q.allowOther && (
+              <input
+                class="surg-other"
+                type="text"
+                placeholder={q.choices.length ? 'Something else…' : 'Your answer…'}
+                disabled={closed}
+                value={current?.is_other || !q.choices.length ? current?.answer ?? '' : ''}
+                onInput={(e) =>
+                  pick(i, { question: q.prompt, answer: (e.target as HTMLInputElement).value, is_other: q.choices.length > 0 }, false)
+                }
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') void submit(picks);
+                }}
+              />
+            )}
+          </div>
+        );
+      })}
+      {needsSend && !answers && (
+        <button
+          type="button"
+          class="surg-question-send"
+          disabled={closed || item.questions.some((_, i) => !picks[i]?.answer.trim())}
+          onClick={() => void submit(picks)}
+        >
+          Send
+        </button>
+      )}
+    </div>
+  );
+}
+
 export function Widget({ agent, config, registerOpenControl, onOpenChange }: WidgetProps) {
   const inline = !!config.inline;
   const [open, setOpen] = useState(inline || !!config.openByDefault);
-  const [messages, setMessages] = useState<ChatMessage[]>(() => snapshot(agent.messages));
+  const [messages, setMessages] = useState<ChatItem[]>(() => snapshot(agent.messages));
+  const [sent, setSent] = useState<Record<string, QuestionAnswer[]>>({});
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [paywall, setPaywall] = useState<{ code: string; buyUrl?: string } | null>(null);
@@ -204,6 +365,16 @@ export function Widget({ agent, config, registerOpenControl, onOpenChange }: Wid
     });
   };
 
+  const answer = (toolCallId: string) => async (answers: QuestionAnswer[]) => {
+    try {
+      await agent.answerQuestion(toolCallId, answers);
+      setSent((prev) => ({ ...prev, [toolCallId]: answers }));
+      setError(null);
+    } catch (err) {
+      setError(friendlyError(err));
+    }
+  };
+
   const onKeyDown = (e: KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
@@ -221,7 +392,9 @@ export function Widget({ agent, config, registerOpenControl, onOpenChange }: Wid
   const welcomeText = config.welcomeMessage ?? DEFAULT_WELCOME;
   const hasAssistant = messages.some((m) => m.role === 'assistant');
   const showWelcome = !!welcomeText && !hasAssistant;
-  const showTyping = running && messages[messages.length - 1]?.role !== 'assistant';
+  // A question waiting on the visitor is the agent's turn paused, not working.
+  const awaitingVisitor = messages.some((m) => m.role === 'question' && !m.answers && !sent[m.toolCallId]);
+  const showTyping = running && !awaitingVisitor && messages[messages.length - 1]?.role !== 'assistant';
 
   if (!inline && !open) {
     return (
@@ -270,7 +443,9 @@ export function Widget({ agent, config, registerOpenControl, onOpenChange }: Wid
           />
         )}
         {messages.map((m) =>
-          m.role === 'assistant' ? (
+          m.role === 'question' ? (
+            <QuestionCard key={m.id} item={m} sent={sent[m.toolCallId]} onAnswer={answer(m.toolCallId)} />
+          ) : m.role === 'assistant' ? (
             <div
               key={m.id}
               class="surg-bubble surg-assistant"

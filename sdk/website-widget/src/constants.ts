@@ -28,6 +28,8 @@ export const PATH_EVENTS = (sessionId: string, after: number) =>
   `/v1/website/sessions/${sessionId}/events?after=${after}`;
 export const PATH_END = (sessionId: string) =>
   `/v1/website/sessions/${sessionId}/end`;
+export const PATH_ANSWER = (sessionId: string, toolCallId: string) =>
+  `/v1/website/sessions/${sessionId}/ask_user_question/${encodeURIComponent(toolCallId)}/respond`;
 
 // Pairing: a key-only embed first resolves its publishable key to the
 // owning ``(agent_id, api_web_url)`` so it knows which agent it is and where

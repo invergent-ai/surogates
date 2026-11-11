@@ -56,7 +56,7 @@ function makeResponse(status: number, body: unknown): Response {
 /** Bootstrap-then-send fetch stub: 201 on bootstrap, 202 on messages. */
 function happyFetch() {
   return vi.fn(async (url: unknown, init: RequestInit | undefined) => {
-    if (init?.method === 'POST' && !String(url).includes('/messages')) {
+    if (init?.method === 'POST' && /\/v1\/website\/sessions(\?|$)/.test(String(url))) {
       return makeResponse(201, {
         session_id: 'sess-1',
         csrf_token: 'csrf-1',
@@ -271,6 +271,104 @@ describe('mount() — send and stream', () => {
     await waitFor(() => replies().some((text) => text.includes('ships today')));
     expect(replies().every((text) => text.trim() !== '')).toBe(true);
     expect(sr.querySelector('.surg-typing')).toBeNull();
+    handle.destroy();
+  });
+});
+
+describe('mount() — the agent asks a question', () => {
+  async function startTurn(fetchStub: typeof fetch) {
+    globalThis.fetch = fetchStub;
+    const handle = mount({ apiUrl: 'https://a.test', publishableKey: 'surg_wk_x', inline: true });
+    const sr = shadowOf();
+    const input = sr.querySelector('.surg-input') as HTMLTextAreaElement;
+    input.value = 'I want to sign up';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    const sendBtn = sr.querySelector('.surg-send') as HTMLButtonElement;
+    await waitFor(() => !sendBtn.disabled);
+    sendBtn.click();
+    await waitFor(() => FakeEventSource.lastInstance !== undefined);
+    return { handle, sr, src: FakeEventSource.lastInstance as FakeEventSource };
+  }
+
+  const answerCalls = (stub: ReturnType<typeof vi.fn>) =>
+    stub.mock.calls.filter(([url]) => String(url).includes('/ask_user_question/'));
+
+  it('renders the question with its choices and posts the one clicked', async () => {
+    const stub = happyFetch() as unknown as ReturnType<typeof vi.fn>;
+    const { handle, sr, src } = await startTurn(stub as unknown as typeof fetch);
+
+    src.emit(
+      SURG_EVENT.TOOL_CALL,
+      {
+        tool_call_id: 'tc-q',
+        name: 'ask_user_question',
+        arguments: {
+          message: 'Happy to help.',
+          questions: [{ prompt: 'Which plan?', choices: [{ label: 'Basic' }, { label: 'Pro', description: 'Most popular' }] }],
+        },
+      },
+      2,
+    );
+
+    await waitFor(() => !!sr.querySelector('.surg-question'));
+    const card = sr.querySelector('.surg-question') as HTMLElement;
+    expect(card.textContent).toContain('Happy to help.');
+    expect(card.textContent).toContain('Which plan?');
+    const choices = Array.from(card.querySelectorAll('.surg-choice')) as HTMLButtonElement[];
+    expect(choices.map((b) => b.textContent)).toEqual(['Basic', 'ProMost popular']);
+    expect(card.querySelector('.surg-other')).toBeTruthy();
+    expect(sr.querySelector('.surg-typing')).toBeNull();
+
+    choices[1]!.click();
+    await waitFor(() => answerCalls(stub).length === 1);
+    const [url, init] = answerCalls(stub)[0] as [string, RequestInit];
+    expect(url.split('?')[0]).toBe('https://a.test/v1/website/sessions/sess-1/ask_user_question/tc-q/respond');
+    expect(init.method).toBe('POST');
+    expect((init.headers as Record<string, string>)['X-CSRF-Token']).toBe('csrf-1');
+    expect(JSON.parse(String(init.body))).toEqual({
+      responses: [{ question: 'Which plan?', answer: 'Pro', is_other: false }],
+    });
+
+    await waitFor(() => choices.every((b) => b.disabled));
+    expect(choices[1]!.classList.contains('surg-chosen')).toBe(true);
+    expect(choices[0]!.classList.contains('surg-chosen')).toBe(false);
+
+    src.emit(
+      SURG_EVENT.TOOL_RESULT,
+      {
+        tool_call_id: 'tc-q',
+        name: 'ask_user_question',
+        content: JSON.stringify({ cancelled: false, responses: [{ question: 'Which plan?', answer: 'Pro', is_other: false }] }),
+      },
+      3,
+    );
+    await waitFor(() => !!sr.querySelector('.surg-typing'));
+    expect(sr.querySelector('.surg-question .surg-chosen')?.textContent).toContain('Pro');
+    handle.destroy();
+  });
+
+  it('takes a typed answer to an open question', async () => {
+    const stub = happyFetch() as unknown as ReturnType<typeof vi.fn>;
+    const { handle, sr, src } = await startTurn(stub as unknown as typeof fetch);
+
+    src.emit(
+      SURG_EVENT.TOOL_CALL,
+      { tool_call_id: 'tc-o', name: 'ask_user_question', arguments: JSON.stringify({ questions: [{ prompt: 'Your email?' }] }) },
+      2,
+    );
+    await waitFor(() => !!sr.querySelector('.surg-other'));
+    const other = sr.querySelector('.surg-other') as HTMLInputElement;
+    other.value = 'ana@example.com';
+    other.dispatchEvent(new Event('input', { bubbles: true }));
+    const submit = sr.querySelector('.surg-question-send') as HTMLButtonElement;
+    await waitFor(() => !submit.disabled);
+    submit.click();
+
+    await waitFor(() => answerCalls(stub).length === 1);
+    expect(JSON.parse(String((answerCalls(stub)[0] as [string, RequestInit])[1].body))).toEqual({
+      responses: [{ question: 'Your email?', answer: 'ana@example.com', is_other: false }],
+    });
+    await waitFor(() => other.disabled);
     handle.destroy();
   });
 });

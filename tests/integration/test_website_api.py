@@ -528,6 +528,46 @@ async def test_actual_response_echoes_origin(
 
 
 # ---------------------------------------------------------------------------
+# Answering the agent's question
+# ---------------------------------------------------------------------------
+
+
+async def test_visitor_answers_the_agents_question(
+    app, client: AsyncClient, session_factory, session_store,
+):
+    csrf, sid, origin = await _bootstrap(app, client, session_factory)
+    await session_store.emit_event(
+        sid,
+        EventType.INBOX_INPUT_REQUIRED,
+        {
+            "tool_call_id": "tc-q",
+            "questions": [{"prompt": "Which plan?", "choices": [{"label": "Pro"}]}],
+            "context": "",
+        },
+    )
+    url = f"/v1/website/sessions/{sid}/ask_user_question/tc-q/respond"
+    body = {"responses": [{"question": "Which plan?", "answer": "Pro"}]}
+
+    resp = await client.post(url, json=body, headers={"Origin": origin})
+    assert resp.status_code == 403
+
+    resp = await client.post(url, json=body, headers={"Origin": origin, CSRF_HEADER_NAME: csrf})
+    assert resp.status_code == 201, resp.text
+    answers = [
+        e for e in await session_store.get_events(sid)
+        if e.type == EventType.ASK_USER_QUESTION_RESPONSE.value
+    ]
+    assert len(answers) == 1
+    assert answers[0].data["tool_call_id"] == "tc-q"
+    assert answers[0].data["responses"] == [
+        {"question": "Which plan?", "answer": "Pro", "is_other": False},
+    ]
+
+    resp = await client.post(url, json=body, headers={"Origin": origin, CSRF_HEADER_NAME: csrf})
+    assert resp.status_code == 409
+
+
+# ---------------------------------------------------------------------------
 # End session
 # ---------------------------------------------------------------------------
 
