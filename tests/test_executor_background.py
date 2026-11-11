@@ -124,9 +124,10 @@ async def test_a_drain_for_some_commands_leaves_the_others_for_their_own_watch(d
         mine = (await call(client, "terminal", command="exit 0", background=True, notify_on_complete=True))["session_id"]
         theirs = (await call(client, "terminal", command="exit 0", background=True, notify_on_complete=True))["session_id"]
         deadline = time.monotonic() + 5
-        while any((await call(client, "process", action="poll", session_id=p))["status"] == "running" for p in (mine, theirs)):
-            assert time.monotonic() < deadline
-            await asyncio.sleep(0.05)
+        for proc_id in (mine, theirs):
+            while (await call(client, "process", action="poll", session_id=proc_id))["status"] == "running":
+                assert time.monotonic() < deadline
+                await asyncio.sleep(0.05)
         await asyncio.sleep(0.2)
         # A worker that watches only its own command takes only its end.
         answer = await call(client, "_background", ids=[mine])
