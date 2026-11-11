@@ -264,8 +264,8 @@ class _Shared:
 
     def __init__(self, redis: Any, me: str) -> None:
         self.redis, self.me = redis, me
-        #: For each other watch whose heartbeat this process found missing: since when, and when it last looked.
-        self._missing_since: dict[str, tuple[float, float]] = {}
+        #: When this process first found each other watch's heartbeat missing (``presumed_dead``).
+        self._missing_since: dict[str, float] = {}
 
     def key(self, *parts: Any) -> str:
         return ":".join([SHARED_PREFIX, *(str(p) for p in parts)])
@@ -340,14 +340,10 @@ class _Shared:
         if await self.redis.exists(self.key("alive", watch)):
             self._missing_since.pop(watch, None)
             return False
-        since, looked = self._missing_since.get(watch, (now, now))
-        if now - looked > ALIVE_SECONDS:
-            since = now  # not looked at for a while: it may have beaten meanwhile, and the lapse starts again
-        self._missing_since[watch] = (since, now)
-        # Forget long-dead watches: one entry per worker that ever died would otherwise stay for good.
-        for old in [w for w, (_, at) in self._missing_since.items() if now - at > 3600]:
+        # Forget watches dead for a day: one entry per worker that ever died would otherwise stay for good.
+        for old in [w for w, at in self._missing_since.items() if now - at > 86400]:
             self._missing_since.pop(old, None)
-        return now - since >= ALIVE_SECONDS
+        return now - self._missing_since.setdefault(watch, now) >= ALIVE_SECONDS
 
     async def ask_stop(self, watch: str, session_id: Any, proc_id: str) -> None:
         if self.redis is not None:

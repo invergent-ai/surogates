@@ -226,7 +226,8 @@ async def test_list_and_stop_answer_from_this_worker_when_redis_does_not(api, tw
     monkeypatch.setattr(first.watch._shared, "of_session", down)
     monkeypatch.setattr(first.watch._shared, "entry", down)
     assert [c["id"] for c in await first.watch.running_for(chat)] == [proc]
-    assert await first.watch.stop_elsewhere("proc_000000000000", chat) is None
+    # It cannot tell, and says so: never that the command ended.
+    assert await first.watch.stop_elsewhere("proc_000000000000", chat) == "unknown"
 
 
 async def test_the_docker_sweep_of_a_session_spares_a_live_worker_and_takes_a_crashed_ones(api, two_workers, monkeypatch):  # noqa: F811
