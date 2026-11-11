@@ -48,6 +48,11 @@ _TAPS = {
         'field\'s answer in "form", by the field names listed below'
     ),
     "telegram": 'an inline button: {"callback": {"message_id": <the message id>, "data": <its callback_data>}}',
+    "website": (
+        'the agent\'s questions (kind "question", status not "answered"), all of one message at once: '
+        '{"answer": {"tool_call_id": <its tool_call_id>, "responses": [{"question": <the prompt>, '
+        '"answer": <one of its choices, or your own words where allow_other>}]}}, one response per question'
+    ),
     "slack": (
         'a button: {"action": {"ts": <the message id>, "action_id"}}; '
         'an open form (kind "view"): {"view": {"id": <its id>, "values": {block_id: answer}}}'
@@ -199,6 +204,13 @@ class Actor:
     async def run(self) -> None:
         while True:
             try:
+                for run, person in await store.visitors(self.state.session_factory):
+                    # What the agent says to a hand-played visitor reaches Studio's transcript only so.
+                    if (person.driver, person.ai_state) != ("ai", "talking"):
+                        try:
+                            await website.collect(self.state, run, person)
+                        except Exception:
+                            logger.exception("[simulation] couldn't read the agent's replies to %s", person.id)
                 for run, person in await store.ai_people(self.state.session_factory):
                     if person.id not in self.busy:
                         self.busy.add(person.id)

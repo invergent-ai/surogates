@@ -20,6 +20,7 @@ import sqlalchemy as sa
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from surogates.api.routes.ask_user_question import AskUserQuestionResponseRequest
 from surogates.db.models import ProgramInvitationRow, ProgramScheduleRow
 from surogates.simulation import store
 from surogates.simulation import discord, slack, teams, voice, website
@@ -66,6 +67,12 @@ class StartRun(BaseModel):
     via: Optional[Literal["copilot"]] = None
 
 
+class QuestionAnswer(AskUserQuestionResponseRequest):
+    """A website visitor's answers to one ``ask_user_question`` call."""
+
+    tool_call_id: str = Field(min_length=1, max_length=200)
+
+
 class PersonMessage(BaseModel):
     text: Optional[str] = None
     button_reply: Optional[dict[str, str]] = None
@@ -81,6 +88,8 @@ class PersonMessage(BaseModel):
     #: A Slack modal: ``{"id", "values": {block_id: answer}}`` submits it,
     #: ``{"id", "cancel": true}`` closes it.
     view: Optional[dict[str, Any]] = None
+    #: A website visitor answering the agent's questions.
+    answer: Optional[QuestionAnswer] = None
 
 
 def _message(m) -> dict[str, Any]:
@@ -343,8 +352,12 @@ AI_CHANNELS = ("whatsapp", "telegram", "slack", "teams", "discord", "website")
 async def write(state, run, person, body: PersonMessage) -> dict[str, Any]:
     """The person's message or tap, delivered as their platform would."""
     if run.channel == "website":
-        if body.model_dump(exclude_none=True).keys() != {"text"} or not body.text.strip():
-            raise HTTPException(status_code=422, detail="On a website the visitor writes text")
+        given = body.model_dump(exclude_none=True).keys()
+        if given == {"answer"}:
+            return await website.answer(state, run, person, body.answer.tool_call_id,
+                                        [r.model_dump() for r in body.answer.responses])
+        if given != {"text"} or not body.text.strip():
+            raise HTTPException(status_code=422, detail="On a website the visitor writes text or answers a question")
         return await website.send(state, run, person, body.text)
     if run.channel == "voice":
         raise HTTPException(status_code=422, detail="On a phone line the caller speaks: place a call")

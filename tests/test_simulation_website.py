@@ -10,7 +10,8 @@ from types import SimpleNamespace
 import httpx
 import pytest
 import sqlalchemy as sa
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from httpx import ASGITransport
 
 from surogates.api.app import build_channel_routing_cache
@@ -144,6 +145,21 @@ async def _visitor_world(rsf, *, autopilot=True):  # noqa: F811
     from unittest.mock import AsyncMock
 
     widget = FastAPI()
+    widget.state.answers, widget.state.answer_status = [], 201
+
+    # The real route needs Postgres (an advisory lock); this one checks what the widget sends.
+    @widget.post("/v1/website/sessions/{session_id}/ask_user_question/{tool_call_id}/respond")
+    async def respond(session_id: uuid.UUID, tool_call_id: str, request: Request):
+        widget.state.answers.append((tool_call_id, await request.json(), request.headers))
+        if widget.state.answer_status != 201:
+            return JSONResponse({"detail": "gone"}, status_code=widget.state.answer_status)
+        event = Event(session_id=session_id, type="ask_user_question.response",
+                      data={"tool_call_id": tool_call_id})
+        async with rsf() as db:
+            db.add(event)
+            await db.commit()
+        return JSONResponse({"event_id": event.id}, status_code=201)
+
     widget.include_router(website.router, prefix="/v1")
     widget.state.settings, widget.state.storage = _settings(), _Storage()
     widget.state.session_store = _Sessions(rsf)
@@ -160,6 +176,7 @@ async def _visitor_world(rsf, *, autopilot=True):  # noqa: F811
         people=[line("Ana", autopilot=autopilot)], provision=state.provision,
     )
     [person] = await store.people(rsf, run.id)
+    state.widget = widget
     return state, run, person
 
 
@@ -242,9 +259,126 @@ async def test_autopilot_plays_a_visitor_end_to_end(rsf, monkeypatch):  # noqa: 
 
 @pytest.mark.asyncio
 async def test_a_visitor_writes_text_only(rsf):  # noqa: F811
-    from fastapi import HTTPException
-
     state, run, person = await _visitor_world(rsf)
     with pytest.raises(HTTPException) as refused:
         await api.write(state, run, person, api.PersonMessage(button_reply={"id": "a", "title": "A"}))
     assert refused.value.status_code == 422
+
+
+async def _agent_asks(sf, session_id, tool_call_id, questions, **extra):
+    async with sf() as db:
+        db.add(Event(session_id=session_id, type="tool.call", data={
+            "tool_call_id": tool_call_id, "name": "ask_user_question",
+            "arguments": {"questions": questions, **extra}}))
+        db.add(Event(session_id=session_id, type="inbox.input_required",
+                     data={"tool_call_id": tool_call_id}))
+        await db.commit()
+
+
+_DAY = {"prompt": "Ce zi?", "choices": [{"label": "Luni"}, {"label": "Marți"}]}
+
+
+@pytest.mark.asyncio
+async def test_the_agents_questions_are_logged_and_answered_as_the_widget_answers(rsf):  # noqa: F811
+    state, run, person = await _visitor_world(rsf)
+    await simulation_website.send(state, run, person, "Vreau o programare")
+    [person] = await store.people(rsf, run.id)
+    session_id = uuid.UUID(simulation_website.visitor_session(person)[0])
+    await _agent_asks(rsf, session_id, "call_1", [_DAY], context="Avem locuri săptămâna asta.")
+    await simulation_website.collect(state, run, person)
+    await simulation_website.collect(state, run, person)
+    [asked] = [m for m in await store.thread(rsf, person.id) if m.direction == "out"]
+    assert (asked.kind, asked.status) == ("question", "")
+    assert asked.body == {"tool_call_id": "call_1", "context": "Avem locuri săptămâna asta.",
+                          "questions": [{"prompt": "Ce zi?", "choices": ["Luni", "Marți"],
+                                         "allow_other": True}]}
+    # The agent stays owed nothing while it waits on the visitor's answer.
+    assert not await store.agent_working(rsf, person)
+
+    # Studio's composer, for a visitor played by hand: the tap goes through the runs API.
+    client = httpx.AsyncClient(transport=ASGITransport(app=_internal(rsf, state)), base_url="http://s",
+                               headers={"Authorization": f"Bearer {TOKEN}"})
+    r = await client.post(f"/internal/runs/{run.id}/people/{person.id}/messages",
+                          params={"org_id": str(run.org_id)}, json={"answer": {
+                              "tool_call_id": "call_1",
+                              "responses": [{"question": "Ce zi?", "answer": "Marți"}]}})
+    assert r.json() == {"delivered": True, "channels_status": 201}
+    [(tool_call_id, sent, headers)] = state.widget.state.answers
+    assert tool_call_id == "call_1" and sent == {"responses": [
+        {"question": "Ce zi?", "answer": "Marți", "is_other": False}]}
+    assert headers["origin"] == _ORIGIN and headers["x-csrf-token"]
+    thread = await store.thread(rsf, person.id)
+    assert [(m.kind, m.status) for m in thread] == [("text", "delivered"), ("question", "answered"),
+                                                   ("answer", "delivered")]
+    assert thread[-1].body["text"] == "Ce zi?: Marți"
+
+    # Answered already elsewhere: no harm, no refusal.
+    state.widget.state.answer_status = 409
+    again = await api.write(state, run, person, api.PersonMessage(answer={
+        "tool_call_id": "call_1", "responses": [{"question": "Ce zi?", "answer": "Luni"}]}))
+    assert again["already_answered"]
+
+
+@pytest.mark.asyncio
+async def test_text_while_a_question_waits_is_its_answer_or_refused(rsf):  # noqa: F811
+    state, run, person = await _visitor_world(rsf)
+    await simulation_website.send(state, run, person, "Salut")
+    [person] = await store.people(rsf, run.id)
+    session_id = uuid.UUID(simulation_website.visitor_session(person)[0])
+    await _agent_asks(rsf, session_id, "call_1", [_DAY])
+    assert (await simulation_website.send(state, run, person, "Joi, dacă se poate"))["delivered"]
+    assert state.widget.state.answers[0][1] == {"responses": [{"question": "Ce zi?",
+                                                         "answer": "Joi, dacă se poate"}]}
+
+    await _agent_asks(rsf, session_id, "call_2", [_DAY, {"prompt": "Ce oră?"}])
+    with pytest.raises(HTTPException) as refused:
+        await simulation_website.send(state, run, person, "Luni la 10")
+    assert refused.value.status_code == 422 and "tap" in refused.value.detail
+
+
+@pytest.mark.asyncio
+async def test_autopilot_answers_the_agents_question_with_a_tap(rsf, monkeypatch):  # noqa: F811
+    state, run, _ = await _visitor_world(rsf)
+    moves = [actor.Move(action="write", text="Vreau o programare"),
+             actor.Move(action="tap", tap={"answer": {"tool_call_id": "call_1", "responses": [
+                 {"question": "Ce zi?", "answer": "Luni"}]}})]
+    prompts = []
+
+    async def generate(**kw):
+        prompts.append(kw["messages"])
+        return moves.pop(0)
+
+    class _LLM:
+        async def close(self):
+            pass
+
+    monkeypatch.setattr(actor, "generate_structured", generate)
+    monkeypatch.setattr(actor, "_client", lambda settings: (_LLM(), "m"))
+    monkeypatch.setattr(actor, "QUIET", timedelta(0))
+    ai = actor.Actor(state)
+    [(run, person)] = await store.ai_people(rsf)
+    await ai._move(run, person)
+    [(run, person)] = await store.ai_people(rsf)
+    await _agent_asks(rsf, uuid.UUID(simulation_website.visitor_session(person)[0]), "call_1", [_DAY])
+    await ai._move(run, person)
+    assert '"tool_call_id": "call_1"' in prompts[1][1]["content"]
+    assert "tool_call_id" in prompts[1][0]["content"]
+    assert [a[1] for a in state.widget.state.answers] == [{"responses": [
+        {"question": "Ce zi?", "answer": "Luni", "is_other": False}]}]
+
+
+@pytest.mark.asyncio
+async def test_a_hand_played_visitors_chat_is_logged_for_studio(rsf):  # noqa: F811
+    state, run, person = await _visitor_world(rsf, autopilot=False)
+    assert await store.visitors(rsf) == []
+    await api.write(state, run, person, api.PersonMessage(text="Salut"))
+    [(_, visitor)] = await store.visitors(rsf)
+    assert visitor.id == person.id and visitor.driver == "human"
+
+
+def _internal(rsf, state):  # noqa: F811
+    app = FastAPI()
+    app.include_router(api.router)
+    for key, value in vars(state).items():
+        setattr(app.state, key, value)
+    return app

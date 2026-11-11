@@ -209,6 +209,18 @@ async def ai_people(sf) -> Sequence[tuple[SimulationRun, SimulationPerson]]:
         return [tuple(r) for r in rows.all()]
 
 
+async def visitors(sf) -> Sequence[tuple[SimulationRun, SimulationPerson]]:
+    """The website people of running runs who have written, with their runs."""
+    async with sf() as db:
+        rows = await db.execute(
+            sa.select(SimulationRun, SimulationPerson)
+            .join(SimulationPerson, SimulationPerson.run_id == SimulationRun.id)
+            .where(SimulationRun.status == "running", SimulationRun.channel == "website",
+                   SimulationPerson.address != "visitor")
+        )
+        return [tuple(r) for r in rows.all()]
+
+
 async def update_person(sf, person_id: uuid.UUID, **values: Any) -> None:
     async with sf() as db:
         await db.execute(sa.update(SimulationPerson).where(SimulationPerson.id == person_id).values(**values))
