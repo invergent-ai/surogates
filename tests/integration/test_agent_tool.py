@@ -62,9 +62,14 @@ async def chats(workers, monkeypatch):  # noqa: F811
 
 
 async def a_chat(chats, config: dict | None = None) -> UUID:
-    created = await chats.api.client.post("/v1/sessions", json={"config": config or {}}, headers=chats.api.auth())
+    """A chat of the app's user whose config holds *config*: the family's keys are the server's to write (a
+    client's are dropped), so they are written as the deployment's setting would have them."""
+    created = await chats.api.client.post("/v1/sessions", json={}, headers=chats.api.auth())
     assert created.status_code == 201, created.text
-    return UUID(created.json()["id"])
+    chat = UUID(created.json()["id"])
+    for key, value in (config or {}).items():
+        await chats.store.update_session_config_key(chat, key, value)
+    return chat
 
 
 def calling(name: str, call_id: str, **arguments) -> tuple[dict, dict]:
@@ -230,3 +235,64 @@ async def test_an_agent_at_the_depth_limit_cannot_start_one(chats):
     chats.replies = [_final_response("Counted.")]
     await chats.wake(child.id)
     assert "agent" in chats.offered[-1]
+
+
+async def test_a_client_cannot_name_the_familys_keys_or_its_depth(chats):  # noqa: F811
+    created = await chats.api.client.post("/v1/sessions", json={"config": {
+        PARITY_KEY: True, DISPATCH_KEY: {"mode": "background", "parent": "x"}, "agent_token_budget": 9,
+        "agent_budget": {"tokens": 9}, "delegation_depth": -5, "keep": "me",
+    }}, headers=chats.api.auth())
+    config = (await chats.session(UUID(created.json()["id"]))).config
+    assert config["keep"] == "me"
+    assert not {PARITY_KEY, DISPATCH_KEY, "agent_token_budget", "agent_budget", "delegation_depth"} & set(config)
+
+
+async def test_a_sub_agent_starts_no_agent_in_the_background(chats):  # noqa: F811
+    chat = await a_chat(chats, PARITY)
+    parent = await chats.session(chat)
+    from surogates.session.provisioning import create_child_session
+
+    child = await create_child_session(
+        store=chats.store, parent=parent, channel="delegation", config={"delegation_depth": 1, PARITY_KEY: True},
+    )
+    answer = json.loads(await agents_module._agent_handler(
+        {"description": "Go on", "prompt": "Do more.", "run_in_background": True},
+        session_store=chats.store, tenant=object(), session_id=str(child.id), budget=None,
+    ))
+    assert "cannot start agents in the background" in answer["error"]
+
+
+async def test_a_session_runs_at_most_five_agents_in_the_background(chats, monkeypatch):  # noqa: F811
+    monkeypatch.setattr(agents_module, "MAX_RUNNING_IN_BACKGROUND", 2)
+    chat = await a_chat(chats, PARITY)
+    chats.replies = [
+        calling("agent", f"call_{i}", description=f"Task {i}", prompt=f"Do task {i}.", run_in_background=True)
+        for i in range(3)
+    ] + [_final_response("Started.")]
+    await chats.says(chat, "Start three.")
+    await chats.wake(chat)
+    started = [json.loads(await tool_result(chats, chat, f"call_{i}")) for i in range(3)]
+    assert [s.get("status") for s in started[:2]] == ["running", "running"]
+    assert "2 of your agents already run in the background" in started[2]["error"]
+    assert len(await children(chats, chat)) == 2
+
+
+async def test_a_background_agent_that_ends_early_says_why_and_closes_its_run_in_the_parents_log(chats):  # noqa: F811
+    from surogates.harness.subagents import tell_parent
+
+    chat = await a_chat(chats, PARITY)
+    chats.replies = [
+        calling("agent", "call_agent", description="Count open items", prompt="Count them.", run_in_background=True),
+        _final_response("Started."),
+    ]
+    await chats.says(chat, "Count them.")
+    await chats.wake(chat)
+    [child] = await children(chats, chat)
+    await tell_parent(store=chats.store, redis=None, session=child, status="completed", result="Partial.",
+                      reason="tool_loop_halt")
+    [note] = await chats.store.get_events(chat, types=[EventType.AGENT_NOTIFICATION])
+    assert notification_note(note.data)["content"] == (
+        f"[Agent {child.id} (Count open items) ended before it finished (tool_loop_halt)]\nPartial."
+    )
+    [closed] = await chats.store.get_events(chat, types=[EventType.DELEGATION_COMPLETE])
+    assert (closed.data["child_session_id"], closed.data["tool_call_id"]) == (str(child.id), "call_agent")

@@ -25,7 +25,7 @@ import logging
 from typing import Any
 from uuid import UUID
 
-from surogates.harness.subagents import DISPATCH_KEY, PARITY_KEY
+from surogates.harness.subagents import DISPATCH_KEY, PARITY_KEY, dispatch_of
 from surogates.runtime.turn_slots import turn_waiting
 from surogates.tools.registry import ToolRegistry, ToolSchema
 
@@ -108,7 +108,20 @@ def _error(message: str) -> str:
     return json.dumps({"error": message})
 
 
-async def fork_seed(session_store: Any, parent: Any, tool_call_id: str | None) -> list[dict]:
+async def _children(session_store: Any, parent_id: UUID) -> list[Any]:
+    """The sessions *parent_id* started, directly."""
+    children = []
+    for sid in await session_store.session_tree_ids(parent_id):
+        if sid != parent_id and (session := await session_store.get_session(sid)).parent_id == parent_id:
+            children.append(session)
+    return children
+
+
+#: The most agents one session may have running in the background at once.
+MAX_RUNNING_IN_BACKGROUND = 5
+
+
+async def fork_seed(session_store: Any, parent: Any, tool_call_id: str | None) -> list[dict] | None:
     """The parent's conversation up to the response that made call *tool_call_id*, as replay rebuilds it.
 
     That response, and anything after it, is left out: a fork starts where
@@ -123,7 +136,8 @@ async def fork_seed(session_store: Any, parent: Any, tool_call_id: str | None) -
         calls = messages[at].get("tool_calls") or [] if messages[at].get("role") == "assistant" else []
         if any(call.get("id") == tool_call_id for call in calls):
             return messages[:at]
-    return messages
+    # The call is in no response of the log: the copy would end on a call left open.
+    return None
 
 
 async def _agent_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
@@ -156,6 +170,23 @@ async def _agent_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
     parent_type = parent_config.get("agent_type") or ""
     if parent_type in delegate._NON_RECURSIVE_AGENT_TYPES and agent_type == parent_type:
         return _error(f"agent_type {parent_type!r} cannot start another of its own type.")
+    if background and parent.parent_id is not None:
+        # Its parent hears of its end once: work it left running would end after that.
+        return _error("a sub-agent cannot start agents in the background: start it in the foreground")
+    if background or agent_type in delegate._NON_RECURSIVE_AGENT_TYPES:
+        running = [
+            child for child in await _children(session_store, parent.id)
+            if child.status in ("active", "processing") and dispatch_of(child) is not None
+        ]
+        if background and sum(dispatch_of(c).get("mode") == "background" for c in running) >= MAX_RUNNING_IN_BACKGROUND:
+            return _error(
+                f"{MAX_RUNNING_IN_BACKGROUND} of your agents already run in the background: wait for their "
+                "reports, or stop one, before starting another",
+            )
+        if agent_type in delegate._NON_RECURSIVE_AGENT_TYPES and any(
+            (c.config or {}).get("agent_type") == agent_type for c in running
+        ):
+            return _error(f"an agent of type {agent_type!r} already runs: one at a time")
     child_depth = depth + 1
     # Below the depth limit an agent may start agents of its own.
     role = "orchestrator" if child_depth < delegate._MAX_DELEGATION_DEPTH else "leaf"
@@ -163,6 +194,8 @@ async def _agent_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
 
     tool_call_id = kwargs.get("tool_call_id")
     seed = await fork_seed(session_store, parent, tool_call_id) if fork else None
+    if fork and seed is None:
+        return _error("this call cannot be forked from: start the agent with a brief instead")
     dispatch = {
         "description": description,
         "mode": "background" if background else "foreground",

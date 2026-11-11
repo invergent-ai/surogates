@@ -86,8 +86,13 @@ def runs_in_background(session: Any) -> bool:
     return dispatch is not None and dispatch.get("mode") == "background" and getattr(session, "parent_id", None) is not None
 
 
+#: The reasons a turn ends with that are no early stop: it finished.
+_FINISHED = frozenset({"completed", "stop", "done", "complete"})
+
+
 async def tell_parent(
     *, store: Any, redis: Any, session: Any, status: str, result: str = "", error: str | None = None,
+    reason: str | None = None,
 ) -> None:
     """Write the end of background sub-agent *session* to its parent as an ``agent.notification``, and wake it.
 
@@ -105,9 +110,29 @@ async def tell_parent(
     }
     if error:
         payload["error"] = error[:2000]
+    if reason and status == "completed" and reason not in _FINISHED:
+        # Its turn ended early (a loop guard, a halted tool loop): said so, its words as they stand.
+        payload["reason"] = reason
     if dispatch.get("tool_call_id"):
         payload["tool_call_id"] = dispatch["tool_call_id"]
     try:
+        # The parent's log closes the agent's run as it closes a foreground one: what training and viewers join on.
+        if status in ("completed", "budget"):
+            from surogates.tools.builtin.delegate import _propagate_child_artifacts
+
+            await _propagate_child_artifacts(
+                session_store=store, parent_session_id=session.parent_id, child_session_id=session.id,
+                child_events=await store.get_events(session.id, types=[EventType.ARTIFACT_CREATED]),
+            )
+            await store.emit_event(session.parent_id, EventType.DELEGATION_COMPLETE, {
+                "child_session_id": str(session.id), "goal": payload["summary"], "agent": True,
+                "mode": "background", "tool_call_id": dispatch.get("tool_call_id"), "status": status,
+            })
+        elif status == "failed":
+            await store.emit_event(session.parent_id, EventType.DELEGATION_FAILED, {
+                "child_session_id": str(session.id), "goal": payload["summary"], "agent": True,
+                "reason": f"Child session failed: {error or 'unknown error'}", "tool_call_id": dispatch.get("tool_call_id"),
+            })
         await notify_parent_of_task_event(
             session_store=store, parent_session_id=session.parent_id,
             event_type=EventType.AGENT_NOTIFICATION, payload=payload, redis=redis,
