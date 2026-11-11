@@ -20,6 +20,7 @@ import os
 import sys
 import time
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -29,6 +30,7 @@ from redis.asyncio import Redis
 
 sys.path.insert(0, str(Path(__file__).parent))
 from caller import DID, Call, Reply  # noqa: E402
+from surogates.session.live import LiveFrame, decode_message
 from surogates.voice.text import fold
 
 UNROUTED = "+40371000000"
@@ -82,7 +84,7 @@ class DB:
         conn = await asyncpg.connect(self.urls["db"])
         try:
             return await conn.fetch(
-                "SELECT e.id, e.type, e.data, e.created_at FROM events e JOIN sessions s ON s.id = e.session_id "
+                "SELECT e.id, e.session_id, e.type, e.data, e.created_at FROM events e JOIN sessions s ON s.id = e.session_id "
                 "WHERE s.config->>'voice_call_id' = $1 ORDER BY e.id", room)
         finally:
             await conn.close()
@@ -105,22 +107,59 @@ def data(e) -> dict:
     return json.loads(d) if isinstance(d, str) else (d or {})
 
 
-def turns(events) -> list[dict]:
-    """Where each turn's time went, from the session's own events."""
+class Words:
+    """When the agent's words went out, per session: the live llm.delta frames carrying them are
+    written to no log (surogates.session.live), so they are timed as they cross Redis."""
+
+    def __init__(self, url: str) -> None:
+        self.url, self.at = url, {}
+
+    async def __aenter__(self) -> "Words":
+        self.redis = Redis.from_url(self.url)
+        self.pubsub = self.redis.pubsub()
+        await self.pubsub.psubscribe("surogates:session:*")  # by pattern: no live viewer of any chat
+        self.task = asyncio.create_task(self._listen())
+        return self
+
+    async def _listen(self) -> None:
+        while True:
+            m = await self.pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+            frame = decode_message(m)
+            if isinstance(frame, LiveFrame) and frame.data.get("content"):  # spoken words only
+                channel = m["channel"].decode() if isinstance(m["channel"], bytes) else m["channel"]
+                self.at.setdefault(channel.rsplit(":", 1)[-1], []).append(datetime.now(timezone.utc))
+
+    async def __aexit__(self, *exc) -> None:
+        self.task.cancel()
+        await self.pubsub.aclose()
+        await self.redis.aclose()
+
+
+def _utc(t: datetime) -> datetime:
+    return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
+
+
+def turns(events, words: dict[str, list[datetime]] | None = None) -> list[dict]:
+    """Where each turn's time went, from the session's own events and the times its words went out."""
     out = []
     for i, u in enumerate(events):
         if u["type"] != "user.message":
             continue
         after = events[i + 1:]
+        start = _utc(u["created_at"])
 
         def first(pred):
             e = next((e for e in after if pred(e)), None)
-            return round((e["created_at"] - u["created_at"]).total_seconds(), 2) if e else None
+            return round((_utc(e["created_at"]) - start).total_seconds(), 2) if e else None
 
+        # spoken words only (reasoning is never heard): the first llm.delta row with content when deltas
+        # go to the log, or else the first live frame with content as it crossed Redis
+        said = [t for t in (words or {}).get(str(u["session_id"]), []) if t > start]
+        first_token = first(lambda e: e["type"] == "llm.delta" and bool(data(e).get("content")))
         out.append({"said": data(u).get("content", "")[-60:],
                     "wake_s": first(lambda e: e["type"] == "llm.request"),
-                    # spoken words only: reasoning deltas are never heard
-                    "first_token_s": first(lambda e: e["type"] == "llm.delta" and bool(data(e).get("content"))),
+                    "first_token_s": first_token if first_token is not None
+                    else (round((said[0] - start).total_seconds(), 2) if said else None),
                     "answer_s": first(lambda e: e["type"] == "llm.response" and not (data(e).get("message") or {}).get("tool_calls"))})
     return out
 
@@ -264,8 +303,9 @@ async def run(name: str) -> Result:
         await redis.zadd("voice:call_slots", {f: time.time() + 120 for f in fillers})
     call = Call(called=called)
     r = Result(scenario=name, room=call.room_name)
+    words = Words(db.urls["redis"])
     try:
-        async with call:
+        async with words, call:
             await asyncio.wait_for(fn(call, r), 240)
     except Exception as e:  # a scenario that crashes is a failed scenario, not a dead suite
         r.error = f"{type(e).__name__}: {e}"
@@ -275,7 +315,7 @@ async def run(name: str) -> Result:
         if name == "busy":
             await redis.zrem("voice:call_slots", *fillers)
             await redis.aclose()
-    r.turns = turns(await db.events(call.room_name))
+    r.turns = turns(await db.events(call.room_name), words.at)
     return r
 
 

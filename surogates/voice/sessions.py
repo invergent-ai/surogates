@@ -22,6 +22,7 @@ from surogates.channels.memory_boundary import simulation_boundary
 from surogates.channels.constants import queue_priority
 from surogates.config import INTERRUPT_CHANNEL_PREFIX, enqueue_session
 from surogates.session.events import EventType
+from surogates.session.live import DeltaGate, LiveFrame, Notification, next_message, session_channel
 from surogates.session.interactive_input import try_resolve_text_answer
 from surogates.voice.lines import Lines, default_lines, language_name
 from surogates.voice.text import fold, words
@@ -174,59 +175,114 @@ class CallSession:
         a caller must never be left listening to silence.
         """
         pubsub = self.redis.pubsub()
-        await pubsub.subscribe(f"surogates:session:{self.session_id}")
+        await pubsub.subscribe(session_channel(self.session_id))
         loop = asyncio.get_running_loop()
         began = loop.time()
         cursor, started, said, announced, looking = after, False, "", False, False
+        # The words come as live llm.delta frames on the session's channel
+        # (surogates.session.live), taken in order with the events' notices:
+        # the log is read only up to the event a notice names, so the words
+        # of a reply are spoken before the events after it are acted on.
+        gate = DeltaGate(floor=after)
+        must_read, read_until = True, None
+        held: LiveFrame | None = None
+        # The call whose frames are being spoken: its words so far, and whether
+        # they came whole (no frame missed); once any frame was heard, a final
+        # answer speaks what of it was not (a frame lost, a channel that failed).
+        heard, call_after, call_said, call_whole, next_seq = False, None, "", False, 0
+        caught_up_to = -1
         try:
             while True:
-                for e in await self.store.get_events(self.session_id, after=cursor):
-                    cursor, data = e.id, e.data or {}
-                    if e.type == EventType.SESSION_FAIL.value:
-                        if said:  # the caller already has an answer, cut short
+                pieces: list[str] = []
+                if must_read:
+                    bound, must_read, read_until = read_until, False, None
+                    for e in await self.store.get_events(self.session_id, after=cursor, until=bound):
+                        cursor, data = e.id, e.data or {}
+                        gate.saw(e.type, e.id, synthetic=bool(data.get("synthetic")))
+                        if e.type == EventType.LLM_REQUEST.value:
+                            call_after, call_said = None, ""
+                        if e.type == EventType.SESSION_FAIL.value:
+                            if said:  # the caller already has an answer, cut short
+                                return
+                            raise TurnFailed(str(data.get("reason") or "session failed"))
+                        if not started:
+                            started = e.type == EventType.LLM_REQUEST.value
+                            continue
+                        if e.type == EventType.LLM_DELTA.value and data.get("content"):
+                            # a row an older release wrote: the same words as a live frame
+                            if looking:  # the answer resumes: the lookup is over
+                                looking = False
+                                self._lookup(False)
+                            said += data["content"]
+                            call_said += data["content"]
+                            yield data["content"]
+                        elif e.type == EventType.TOOL_CALL.value and data.get("name") == "ask_user_question":
+                            if question := question_text(data.get("arguments"), said, self.lines.choices):
+                                yield f" {question}" if said else question
                             return
-                        raise TurnFailed(str(data.get("reason") or "session failed"))
-                    if not started:
-                        started = e.type == EventType.LLM_REQUEST.value
-                        continue
-                    if e.type == EventType.LLM_DELTA.value and data.get("content"):
-                        if looking:  # the answer resumes: the lookup is over
-                            looking = False
-                            self._lookup(False)
-                        said += data["content"]
-                        yield data["content"]
-                    elif e.type == EventType.TOOL_CALL.value and data.get("name") == "ask_user_question":
-                        if question := question_text(data.get("arguments"), said, self.lines.choices):
-                            yield f" {question}" if said else question
-                        return
-                    elif e.type == EventType.TOOL_CALL.value and data.get("name") == "end_call":
-                        self.ending = True  # its goodbye follows; nothing to announce
-                    elif e.type == EventType.TOOL_CALL.value:
-                        if not looking:
-                            looking = True
-                            self._lookup(True)
-                        if not said and not announced:
-                            # a tool started in silence: the caller would hear only typing until it returns
-                            announced = True
-                            yield self.lines.filler + " "  # the space releases it from the sentence splitter now
-                    elif _final_answer(e):
-                        # an answer written without deltas (non-streaming fallback, budget summary) is still the answer
-                        if not said and (content := str((data.get("message") or {}).get("content") or "").strip()):
-                            yield content
-                        return  # after the final answer only summaries and completion follow: nothing to say
-                    elif e.type in TERMINAL:
-                        return
+                        elif e.type == EventType.TOOL_CALL.value and data.get("name") == "end_call":
+                            self.ending = True  # its goodbye follows; nothing to announce
+                        elif e.type == EventType.TOOL_CALL.value:
+                            if not looking:
+                                looking = True
+                                self._lookup(True)
+                            if not said and not announced:
+                                # a tool started in silence: the caller would hear only typing until it returns
+                                announced = True
+                                yield self.lines.filler + " "  # the space releases it from the sentence splitter now
+                        elif _final_answer(e):
+                            whole = str((data.get("message") or {}).get("content") or "")
+                            # the answer of a call with reasoning is stored stripped, one without as
+                            # streamed; the frames kept their leading whitespace
+                            spoken = next((s for s in (call_said, call_said.lstrip()) if whole.startswith(s)), None)
+                            if heard and spoken is not None and whole[len(spoken):].strip():
+                                # what of the answer its frames did not bring
+                                yield whole[len(spoken):] if spoken else whole.strip()
+                            # an answer written without deltas (non-streaming fallback, budget summary) is still the answer
+                            elif not said and (content := whole.strip()):
+                                yield content
+                            return  # after the final answer only summaries and completion follow: nothing to say
+                        elif e.type in TERMINAL:
+                            return
                 if loop.time() - began > (turn_timeout if started else start_timeout):
                     await self.interrupt()
                     yield self.lines.sorry_turn
                     return
-                try:
-                    if await pubsub.get_message(ignore_subscribe_messages=True, timeout=POLL_SECONDS):
-                        # one nudge per streamed delta: drain them, the next read gets all their events
-                        while await pubsub.get_message(ignore_subscribe_messages=True, timeout=0):
-                            pass
-                except Exception:
-                    await asyncio.sleep(POLL_SECONDS)
+                if held is not None:  # a frame that waited for the read just made
+                    message, held = held, None
+                else:
+                    try:
+                        message = await next_message(pubsub, POLL_SECONDS)
+                    except Exception:
+                        await asyncio.sleep(POLL_SECONDS)
+                        message = None
+                if isinstance(message, LiveFrame) and message.after > cursor and message.after != caught_up_to:
+                    # the events before the frame's call (a notice lost, or not read yet) are acted on first
+                    caught_up_to = message.after
+                    held, must_read, read_until = message, True, max(read_until or 0, message.after)
+                elif isinstance(message, LiveFrame):
+                    if started and gate.admits(message):
+                        heard = True
+                        if message.after != call_after:
+                            call_after, call_said, call_whole = message.after, "", message.seq == 0
+                        elif message.seq != next_seq:
+                            call_whole = False  # a frame went missing: the answer brings the rest
+                        next_seq = message.seq + 1
+                        # spoken words only: reasoning frames are never heard
+                        if call_whole and (content := message.data.get("content")):
+                            call_said += str(content)
+                            pieces.append(str(content))
+                elif isinstance(message, Notification):
+                    if message.event_id > cursor:
+                        must_read, read_until = True, max(read_until or 0, message.event_id)
+                else:  # quiet channel (poll fallback) or another message: read all there is
+                    must_read, read_until = True, None
+                for content in pieces:
+                    if looking:  # the answer resumes: the lookup is over
+                        looking = False
+                        self._lookup(False)
+                    said += content
+                    yield content
         finally:
             if looking:
                 self._lookup(False)

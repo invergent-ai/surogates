@@ -2288,7 +2288,11 @@ async def run_worker(settings: Settings) -> None:
             # with the rest of the bundle, so the harness swaps to a
             # client it already owns instead of minting one mid-call.
             fallback_chain=llm_bundle.fallbacks,
-            delta_policy=DeltaPolicy(coalesce_ms=settings.worker.delta_coalesce_ms),
+            delta_policy=DeltaPolicy(
+                coalesce_ms=settings.worker.delta_coalesce_ms,
+                enabled=settings.worker.live_deltas,
+                transport=settings.worker.delta_transport,
+            ),
             media_gen=media_gen_config,
             turn_summarizer=turn_summarizer,
             # Share the per-session bundle with

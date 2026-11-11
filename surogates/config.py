@@ -300,8 +300,21 @@ class WorkerSettings(BaseSettings):
     # The most often one streamed model call writes an ``llm.delta`` event of
     # one kind (``content``, ``reasoning``); the chunks in between are joined
     # into it.  The first chunk of a call is written at once.  0 writes one
-    # event per streamed chunk, as before this setting existed.
+    # event per streamed chunk, as before this setting existed.  A session may
+    # set its own window with ``config.delta_coalesce_ms``.
     delta_coalesce_ms: int = 100
+    # ``False`` sends no ``llm.delta`` at all: for workers whose sessions
+    # nobody watches live (headless benchmarks, training rollouts).  A session
+    # turns them off with ``config.live_deltas: false``.  Each reply still
+    # reaches every client whole, at its ``llm.response``.
+    live_deltas: bool = True
+    # Where the deltas go.  ``log`` (the default) writes them to the event
+    # log, as before.  ``redis`` writes none: they reach the api's streams as
+    # live frames over Redis pub/sub only (surogates.session.live), so the
+    # log keeps no row per piece of a reply.  Clients that read the event
+    # stream with their own parser must pass on frames whose id is negative
+    # (see docs/operations/keel-link.md) before this is switched on.
+    delta_transport: Literal["log", "redis"] = "log"
 
 
 class BoardSettings(BaseSettings):
