@@ -73,6 +73,19 @@ class PolicyDecision:
     policy_id: str | None = None
 
 
+def _with_stand_ins(names: set[str] | None, *, starting_work: bool = False) -> set[str] | None:
+    """*names* with the tools each stands for (``surogates.harness.subagents.STANDS_IN_FOR``) added; with
+    *starting_work*, only those that start work (``agent``, ``monitor``)."""
+    if not names:
+        return names
+    from surogates.harness.subagents import STANDS_IN_FOR
+
+    aliases = {alias for name in names for alias in STANDS_IN_FOR.get(name, ())}
+    if starting_work:
+        aliases &= {"agent", "monitor"}
+    return set(names) | aliases
+
+
 class GovernanceGate:
     """Wraps the AGT PolicyEngine for Surogates tool-call governance.
 
@@ -108,6 +121,14 @@ class GovernanceGate:
             denied_tools = [n for t in denied_tools for n in sorted(configured_tool_names(t))]
         if require_approval is not None:
             require_approval = {n for t in require_approval for n in configured_tool_names(t)}
+        # A name a policy gives stands for the tools that take its place
+        # (``subagents.STANDS_IN_FOR``): denying ``delegate_task`` denies
+        # ``agent``, allowing it allows ``agent``.
+        allowed_tools = _with_stand_ins(allowed_tools)
+        if denied_tools:
+            denied_tools = [*denied_tools, *sorted(_with_stand_ins(denied_tools) - set(denied_tools))]
+        # Of approvals, only the tools that start work: a list or a message needs none.
+        require_approval = _with_stand_ins(require_approval, starting_work=True)
         # Tools a human must approve before they run.  Checked beside the
         # deny-list fast path -- above the open-policy/``mcp__`` early
         # return -- because open policy is the production default and MCP

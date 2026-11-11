@@ -129,5 +129,5 @@ def starts_notified_work(name: Any, arguments: Any) -> bool:
     if not isinstance(arguments, dict):
         return False
     if name == "agent":
-        return bool(arguments.get("run_in_background"))
+        return arguments.get("run_in_background") is True
     return bool(arguments.get("background")) and bool(arguments.get("notify_on_complete"))

@@ -26,6 +26,19 @@ PARITY_KEY = "subagent_parity"
 #: A sub-agent's config key: how the ``agent`` tool started it.
 DISPATCH_KEY = "agent_dispatch"
 
+#: The config keys of the family only the server writes: a client naming one could switch the family on
+#: against the deployment's setting, pose as another agent's sub-agent, or lift its own depth or budget.
+SERVER_OWNED_KEYS: tuple[str, ...] = (
+    PARITY_KEY, DISPATCH_KEY, "agent_token_budget", "agent_budget", "delegation_depth",
+)
+
+#: Policy names that stand for the family's tools: a policy that names ``delegate_task`` names the
+#: tools that take its place, and one that names ``terminal`` names ``monitor``.
+STANDS_IN_FOR: dict[str, tuple[str, ...]] = {
+    "delegate_task": ("agent", "send_message", "list_agents", "stop_agent"),
+    "terminal": ("monitor",),
+}
+
 #: The tools of the family, offered only with parity on.
 PARITY_TOOLS: frozenset[str] = frozenset({"agent"})
 #: The tool ``agent`` stands in for; with parity on it is no longer offered, but still callable.
@@ -56,7 +69,8 @@ def apply_parity(tools: set[str], config: dict | None) -> set[str]:
     result = set(tools) - PARITY_TOOLS
     if parity_enabled(config) and REPLACED_TOOL in result:
         result.discard(REPLACED_TOOL)
-        result.add("agent")
+        if "agent" not in set((config or {}).get("excluded_tools") or ()):
+            result.add("agent")
     return result
 
 
