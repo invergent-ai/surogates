@@ -254,7 +254,6 @@ async def _stop_agent_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
     from surogates.devices.operations import DeviceOperations
     from surogates.harness.message_utils import extract_final_response
     from surogates.harness.subagents import runs_in_background, tell_parent
-    from surogates.session.events import EventType
 
     session_store = kwargs.get("session_store")
     me_id = kwargs.get("session_id")
