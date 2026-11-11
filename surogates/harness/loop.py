@@ -1091,9 +1091,12 @@ class AgentHarness(
         # A command is not stranded by the cursor: a command's end leaves
         # the cursor before a report no turn has read, and one that still
         # waits revives a finished session by its own rule.
+        # Nor is another agent's message (``send_message``): it resumes the session itself, where its rules let
+        # it, and one left waiting must not bring back a session its user stopped or must retry.
         return any(
             self._is_for_the_model(session, event)
             and not (asleep and (event.data or {}).get("synthetic") == MESSAGE_MARKER)
+            and (event.data or {}).get("kind") != "agent_message"
             for event in await self._store.get_events(session.id, after=cursor, types=list(MESSAGE_TYPES))
         )
 

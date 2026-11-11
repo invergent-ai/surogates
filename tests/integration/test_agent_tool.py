@@ -16,7 +16,7 @@ import pytest_asyncio
 
 import surogates.harness.loop as loop_module
 from surogates.harness.agent_news import notification_note
-from surogates.harness.subagents import DISPATCH_KEY, PARITY_KEY
+from surogates.harness.subagents import COMPANION_TOOLS, DISPATCH_KEY, PARITY_KEY, PARITY_TOOLS
 from surogates.session.events import EventType
 from surogates.tools.builtin import agents as agents_module
 from surogates.tools.builtin import delegate as delegate_module
@@ -30,7 +30,7 @@ pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 PARITY = {PARITY_KEY: True}
 #: The family's tools run for real; every other tool answers as the chats' stub does.
-REAL = frozenset({"agent"})
+REAL = frozenset({"agent", "send_message"})
 
 
 @pytest_asyncio.fixture(loop_scope="session")
@@ -104,8 +104,9 @@ async def test_parity_off_offers_none_of_the_family_and_on_offers_agent_in_deleg
     off_tools, on_tools = chats.offered[-2], chats.offered[-1]
     assert "delegate_task" in off_tools and "agent" not in off_tools
     assert "agent" in on_tools and "delegate_task" not in on_tools
+    assert COMPANION_TOOLS <= set(on_tools)
     # Everything else is offered alike, in the same order.
-    assert [t for t in off_tools if t != "delegate_task"] == [t for t in on_tools if t != "agent"]
+    assert [t for t in off_tools if t != "delegate_task"] == [t for t in on_tools if t not in PARITY_TOOLS]
 
 
 async def test_a_background_agent_returns_its_id_at_once_and_its_report_wakes_its_parent(chats):

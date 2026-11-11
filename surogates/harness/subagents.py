@@ -39,8 +39,10 @@ STANDS_IN_FOR: dict[str, tuple[str, ...]] = {
     "terminal": ("monitor",),
 }
 
+#: The tools that go with ``agent``: offered to a session that may start agents, and to every agent it started.
+COMPANION_TOOLS: frozenset[str] = frozenset({"send_message"})
 #: The tools of the family, offered only with parity on.
-PARITY_TOOLS: frozenset[str] = frozenset({"agent"})
+PARITY_TOOLS: frozenset[str] = frozenset({"agent"}) | COMPANION_TOOLS
 #: The tool ``agent`` stands in for; with parity on it is no longer offered, but still callable.
 REPLACED_TOOL = "delegate_task"
 
@@ -64,13 +66,25 @@ def apply_parity(tools: set[str], config: dict | None) -> set[str]:
 
     On: ``agent`` takes ``delegate_task``'s place wherever the session may
     delegate, so a policy that denies ``delegate_task`` denies ``agent``
-    too.  Off: none of the family.
+    too.  Its companions (``COMPANION_TOOLS``) go to such a session and to
+    every agent the ``agent`` tool started, unless the session's config
+    leaves them out by name.  Off: none of the family.
     """
     result = set(tools) - PARITY_TOOLS
-    if parity_enabled(config) and REPLACED_TOOL in result:
+    config = config or {}
+    if not parity_enabled(config):
+        return result
+    if REPLACED_TOOL in result:
         result.discard(REPLACED_TOOL)
-        if "agent" not in set((config or {}).get("excluded_tools") or ()):
+        if "agent" not in set(config.get("excluded_tools") or ()):
             result.add("agent")
+    if "agent" in result or isinstance(config.get(DISPATCH_KEY), dict):
+        allowed = config.get("allowed_tools")
+        excluded = set(config.get("excluded_tools") or ())
+        result |= {
+            name for name in COMPANION_TOOLS
+            if name not in excluded and (not allowed or name in allowed)
+        }
     return result
 
 
@@ -88,6 +102,35 @@ def runs_in_background(session: Any) -> bool:
 
 #: The reasons a turn ends with that are no early stop: it finished.
 _FINISHED = frozenset({"completed", "stop", "done", "complete"})
+async def lineage(store: Any, session: Any, *, limit: int = 8) -> list[Any]:
+    """*session*'s ancestors, its parent first, at most *limit* of them."""
+    chain: list[Any] = []
+    current = session
+    while getattr(current, "parent_id", None) is not None and len(chain) < limit:
+        current = await store.get_session(current.parent_id)
+        chain.append(current)
+    return chain
+
+
+async def may_message(store: Any, sender: Any, target: Any) -> bool:
+    """Whether *sender* may send *target* a message: both of one organisation, and *target* the agent that
+    started *sender*, or an agent the ``agent`` tool started within *sender*'s own tree (one of its own,
+    at any depth, or one its parent started)."""
+    if target.id == sender.id or target.org_id != sender.org_id:
+        return False
+    if target.id == sender.parent_id:
+        # Only an agent the ``agent`` tool started speaks up to its parent: a thread, a routine's run or a
+        # worker writes nothing into the session above it.
+        return dispatch_of(sender) is not None
+    if dispatch_of(target) is None:
+        return False
+    try:
+        ancestors = await lineage(store, target)
+    except Exception:
+        return False
+    if any(a.id == sender.id for a in ancestors):
+        return True
+    return sender.parent_id is not None and target.parent_id == sender.parent_id
 
 
 async def tell_parent(
