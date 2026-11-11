@@ -141,6 +141,8 @@ async def test_a_worker_is_presumed_gone_only_once_its_heartbeat_has_lapsed_long
     # Its heartbeat lost (a Redis restart, say): still alive for a while, as it beats again within a sweep.
     await api.app.state.redis.delete(f"{watch_module.SHARED_PREFIX}:alive:{first.watch.id}")
     assert await second.watch.worker_alive(first.watch.id)
+    await asyncio.sleep(0.15)  # it beats again at its next poll
+    assert await second.watch.worker_alive(first.watch.id)
     await crashes(first)
     await asyncio.sleep(0.4)
     # Its heartbeat has lapsed: from the first look that finds it missing, the lapse must last a while more.
