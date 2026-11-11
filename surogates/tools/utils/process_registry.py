@@ -68,6 +68,8 @@ MAX_OUTPUT_CHARS = 200_000      # 200KB rolling output buffer
 FINISHED_TTL_SECONDS = 1800     # Keep finished processes for 30 minutes
 MAX_PROCESSES = 64              # Max concurrent tracked processes (LRU pruning)
 MAX_PENDING_LINES = 1000        # Lines a watched process keeps for its next drain
+MAX_LINE_CHARS = 2000           # A watched process's line is cut here; one with no end in sight is sent in pieces
+KILL_GRACE_SECONDS = 5.0        # A watched command's group still running this long after SIGTERM gets SIGKILL
 
 
 # ---------------------------------------------------------------------------
@@ -301,6 +303,9 @@ class ProcessRegistry:
             notify_on_complete=notify_on_complete,
             watch_lines=watch_lines,
         )
+        if watch_lines and use_pty:
+            # A monitor reads its output by lines, which a terminal's echo and redraws would garble.
+            raise ValueError("a process whose lines are watched runs without a pty")
 
         if use_pty:
             # Try PTY mode for interactive CLI tools
@@ -399,7 +404,7 @@ class ProcessRegistry:
                 # A monitor's lines are news as each comes: a read of 4096
                 # waits for that much, or for the end.
                 chunk = (
-                    session.process.stdout.readline() if session.watch_lines
+                    session.process.stdout.readline(8192) if session.watch_lines
                     else session.process.stdout.read(4096)
                 )
                 if not chunk:
@@ -486,6 +491,10 @@ class ProcessRegistry:
         text = session._partial_line + strip_ansi(text).replace("\r\n", "\n")
         lines = text.split("\n")
         session._partial_line = "" if final else lines.pop()
+        if len(session._partial_line) > MAX_LINE_CHARS:
+            # Output with no line end in sight (a binary file, say) is never held whole: its piece goes as a line.
+            lines.append(session._partial_line)
+            session._partial_line = ""
         while final and lines and not lines[-1].strip():
             lines.pop()
         if lines and lines[-1] == "logout":
@@ -499,7 +508,7 @@ class ProcessRegistry:
             if len(session.pending_lines) >= MAX_PENDING_LINES:
                 session.dropped_lines += 1
             else:
-                session.pending_lines.append(line[:2000])
+                session.pending_lines.append(line[:MAX_LINE_CHARS])
 
     def drain_lines(self, ids: set[str] | None = None) -> dict[str, dict]:
         """The lines each watched process (of *ids*, when given) printed since the last drain, and how many
@@ -722,9 +731,10 @@ class ProcessRegistry:
                     if _IS_WINDOWS:
                         session.process.terminate()
                     else:
-                        os.killpg(
-                            os.getpgid(session.process.pid), signal.SIGTERM
-                        )
+                        pgid = os.getpgid(session.process.pid)
+                        os.killpg(pgid, signal.SIGTERM)
+                        if session.notify_on_complete:
+                            self._kill_group_later(session.process, pgid)
                 except (ProcessLookupError, PermissionError):
                     session.process.kill()
             elif (
@@ -758,6 +768,25 @@ class ProcessRegistry:
             return {"status": "killed", "session_id": session.id}
         except Exception as e:
             return {"status": "error", "error": str(e)}
+
+    @staticmethod
+    def _kill_group_later(process: subprocess.Popen, pgid: int) -> None:
+        """SIGKILL group *pgid* if it outlives the SIGTERM by ``KILL_GRACE_SECONDS``: a watched command
+        that ignores the stop is not left running behind a note that says it was stopped."""
+
+        def kill() -> None:
+            try:
+                process.wait(timeout=KILL_GRACE_SECONDS)
+            except subprocess.TimeoutExpired:
+                pass
+            except Exception:
+                return
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+
+        threading.Thread(target=kill, daemon=True, name=f"kill-group-{pgid}").start()
 
     def write_stdin(self, session_id: str, data: str) -> dict:
         """Send raw data to a running process's stdin (no newline appended)."""

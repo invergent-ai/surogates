@@ -214,7 +214,8 @@ def _bounded(value: Any, default: int, low: int, high: int) -> int:
 async def _monitor_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
     """Start *command* where the session's commands run, with its lines kept, and hand it to the worker's watch."""
     from surogates.devices.binding import device_of
-    from surogates.harness.background_watch import HERE, background_watch
+    from surogates.harness.background_watch import HERE, MAX_MONITORS_PER_SESSION, background_watch
+    from surogates.harness.subagents import monitor_allowed
     from surogates.sandbox.pool import SandboxPool, sandbox_session_key
 
     session_store = kwargs.get("session_store")
@@ -230,13 +231,23 @@ async def _monitor_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
     me = await session_store.get_session(UUID(str(me_id)))
     if device_of(me.config) is not None:
         return _error("monitor runs in a cloud sandbox only; on your computer, use terminal with background=true")
+    if not monitor_allowed(me.config):
+        # A sub-agent's work ends with its report, and a thread's sandbox with its turn: neither outlives a monitor.
+        return _error("monitor is for the main session; here, use terminal and wait for the command")
     if not background_watch.configured:
         return _error("this worker cannot watch commands")
+    if background_watch.monitors_for(me.id) >= MAX_MONITORS_PER_SESSION:
+        return _error(
+            f"{MAX_MONITORS_PER_SESSION} monitors already run: stop one with stop_agent before you start another"
+        )
     sandbox_pool = kwargs.get("sandbox_pool")
     if isinstance(sandbox_pool, SandboxPool):
         from surogates.harness.tool_exec import _build_session_sandbox_spec
 
         owner = sandbox_session_key(me)
+        holds_copy = getattr(sandbox_pool, "holds_copy", None)
+        if holds_copy is not None and holds_copy(owner):
+            return _error("monitor is for the main session; here, use terminal and wait for the command")
         spec = await _build_session_sandbox_spec(me, kwargs.get("tenant"), owner, credential_vault=kwargs.get("credential_vault"))
         await sandbox_pool.ensure(owner, spec)
         try:

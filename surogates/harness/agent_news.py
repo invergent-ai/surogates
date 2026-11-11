@@ -65,6 +65,8 @@ def notification_note(data: dict) -> dict:
             head = f"[{named}: {count} new line{'s' if count != 1 else ''}{left_out}]"
         elif status == "lost":
             head = f"[{named} cannot be watched any more{f' ({reason})' if reason else ''}{left_out}]"
+        elif isinstance(code, int) and code < 0:
+            head = f"[{named} stopped: its command was killed{f' ({reason})' if reason else ''}{left_out}]"
         elif code is not None:
             head = f"[{named} ended: its command exited with code {code}{left_out}]"
         else:

@@ -125,6 +125,10 @@ def _record_read(name: str, args: dict, workspace: str, result: str) -> None:
     _READ_TIMESTAMPS[resolved] = mtime
 
 
+#: Completions a drain leaves for other workers' watches, at most: of commands no live watch asks for, the oldest go.
+MAX_KEPT_COMPLETIONS = 256
+
+
 def runs_in_daemon(name: str, args: dict) -> bool:
     """Whether the call *name* with *args* runs in the daemon, where background commands live, and not in a fork."""
     return name in ("process", "_background", "_monitor") or (name == "terminal" and bool(args.get("background")))
@@ -145,25 +149,39 @@ def start_monitor(args: dict, workspace: str) -> str:
     return json.dumps(started)
 
 
-def drain_background() -> str:
+def drain_background(args: dict | None = None) -> str:
     """``_background``: the completions of the background commands that report back, ended since the last
-    drain, and the ids of every command the registry knows, running or finished.
+    drain, the ids of every command the registry knows, running or finished, and the monitors' new lines.
 
     A command the worker watches that is neither known nor among the
     completions ran in a pod that is gone.  One that finished and whose
     completion is not queued yet is still known: the next drain has it.
+    With *args* ``ids``, only those commands' completions and lines are
+    taken: the rest stay for the drain of the worker that watches them.
     """
     import queue
 
     from surogates.tools.utils.process_registry import process_registry
 
+    ids = (args or {}).get("ids")
+    wanted = {str(i) for i in ids} if isinstance(ids, list) else None
     events: list[dict] = []
+    kept: list[dict] = []
     while True:
         try:
-            events.append(process_registry.completion_queue.get_nowait())
+            entry = process_registry.completion_queue.get_nowait()
         except queue.Empty:
             break
-    lines = process_registry.drain_lines()
+        if wanted is None or entry.get("session_id") in wanted:
+            events.append(entry)
+        else:
+            kept.append(entry)
+    # Another worker's, put back for its drain.  One of a command the registry
+    # has forgotten (``FINISHED_TTL_SECONDS``), or past the bound, has no watch left to ask for it.
+    kept = [entry for entry in kept if process_registry.get(str(entry.get("session_id"))) is not None]
+    for entry in kept[-MAX_KEPT_COMPLETIONS:]:
+        process_registry.completion_queue.put(entry)
+    lines = process_registry.drain_lines(wanted)
     known = [entry["session_id"] for entry in process_registry.list_sessions()]
     return json.dumps({"events": events, "known": known, "lines": lines})
 
@@ -351,7 +369,7 @@ def run_tool(
     if name == "_file":
         return _run_file(args, workspace)
     if name == "_background":
-        return drain_background()
+        return drain_background(args)
     if name == "_monitor":
         return start_monitor(args, workspace)
     if name == "_code":
@@ -584,7 +602,7 @@ def create_app(
         if name == "_background":
             # A drain reads memory and never waits on a tool: no slot, so the
             # worker's watch is answered while long calls fill them.
-            result = drain_background()
+            result = drain_background(args)
             return Response(content=result, media_type="application/json")
         async with sem:
             if runs_in_daemon(name, args):

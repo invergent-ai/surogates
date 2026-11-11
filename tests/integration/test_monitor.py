@@ -127,6 +127,78 @@ async def test_stop_agent_ends_a_monitor(api, here_watch):  # noqa: F811
     assert stopped["agent_id"] == started["monitor_id"]
     ended = await until(lambda: notes_until_end(store, chat))
     assert ended[-1]["status"] == "killed"
+    assert notification_note(ended[-1])["content"].startswith(
+        f"[Monitor {started['monitor_id']} (Watch the ticks) stopped: its command was killed",
+    )
+
+
+async def test_a_line_with_no_end_comes_in_pieces_of_bounded_size(api, here_watch):  # noqa: F811
+    store = api.app.state.session_store
+    chat = await a_session(api)
+    await start(api, chat, "head -c 20000 /dev/zero | tr '\\0' x; sleep 0.5")
+    ended = await until(lambda: notes_until_end(store, chat))
+    said = [line for n in ended for line in n["result"].splitlines()]
+    assert len(said) >= 2 and all(set(line) == {"x"} and len(line) <= 2000 for line in said)
+
+
+async def test_a_session_runs_a_bounded_number_of_monitors(api, here_watch):  # noqa: F811
+    chat = await a_session(api)
+    started = [await start(api, chat, "sleep 2") for _ in range(watch_module.MAX_MONITORS_PER_SESSION)]
+    assert all(s.get("status") == "watching" for s in started)
+    refused = await start(api, chat, "sleep 2")
+    assert "monitors already run" in refused["error"]
+    # Another session has its own.
+    assert (await start(api, await a_session(api), "sleep 0.1"))["status"] == "watching"
+
+
+async def test_a_stopped_sessions_monitor_is_killed_and_sends_no_more_lines(api, here_watch):  # noqa: F811
+    store = api.app.state.session_store
+    chat = await a_session(api)
+    started = await start(api, chat, "while true; do echo tick; sleep 0.2; done")
+    await until(lambda: notes(store, chat))
+    paused = await api.client.post(f"/v1/sessions/{chat}/pause", headers=api.auth())
+    assert paused.status_code == 200, paused.text
+    ended = await until(lambda: notes_until_end(store, chat))
+    assert ended[-1]["status"] == "killed" and ended[-1]["reason"] == "its session was stopped"
+    from surogates.tools.utils.process_registry import process_registry
+
+    await until(lambda: asyncio.sleep(0, result=process_registry.poll(started["monitor_id"])["status"] != "running"))
+    count = len(await notes(store, chat))
+    await asyncio.sleep(0.5)
+    assert len(await notes(store, chat)) == count
+
+
+async def test_a_sub_agent_and_a_thread_are_not_offered_monitor_and_may_not_start_one(api, here_watch):  # noqa: F811
+    from surogates.harness.subagents import DISPATCH_KEY, PARITY_KEY, apply_parity
+
+    for config in ({DISPATCH_KEY: {"mode": "background"}}, {"workstream_role": "thread"}, {"under_thread": True}):
+        offered = apply_parity({"terminal", "delegate_task"}, {PARITY_KEY: True, **config})
+        assert "monitor" not in offered, config
+    assert "monitor" in apply_parity({"terminal", "delegate_task"}, {PARITY_KEY: True})
+    store = api.app.state.session_store
+    child = await a_session(api)
+    await store.update_session_config_key(child, DISPATCH_KEY, {"mode": "background"})
+    refused = await start(api, child, "sleep 0.1")
+    assert refused["error"].startswith("monitor is for the main session")
+
+
+async def test_a_monitors_notes_never_name_more_lines_than_they_show():
+    monitor = watch_module._Monitor(description="d", deadline=0.0, cap=1)
+    payload = watch_module.monitor_payload("proc_x", monitor, lines=["y" * 1000] * 50)
+    assert payload["lines"] == len(payload["result"].split("\n")) == 9
+    assert payload["dropped"] == 41 and len(payload["result"]) <= 10_000
+    # At its end, every line held past the note's count is counted as left out.
+    monitor.buffered = [f"l{i}" for i in range(120)]
+    item = watch_module._Watched(session_id=UUID(int=1), command="c", monitor=monitor)
+    end = watch_module.monitor_end("proc_x", item, None, status="killed", reason="r")
+    assert end["lines"] == 50 and end["dropped"] == 70
+
+
+async def test_a_registrys_answer_for_a_monitor_is_read_with_no_trust_in_its_shape():
+    read = watch_module._read_lines
+    assert read({"lines": "abc", "dropped": "x"}) == ([], 0)
+    assert read(["a"]) == ([], 0)
+    assert read({"lines": [1, "y" * 3000], "dropped": -4}) == (["1", "y" * 2000], 0)
 
 
 async def test_a_chat_is_offered_monitor_and_woken_by_its_lines(chats, daemon_registry, tmp_path, monkeypatch):  # noqa: F811

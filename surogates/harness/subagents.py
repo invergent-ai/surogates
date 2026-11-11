@@ -86,10 +86,19 @@ def apply_parity(tools: set[str], config: dict | None) -> set[str]:
         from surogates.devices.binding import device_of
 
         companions = set(COMPANION_TOOLS)
-        if "terminal" in result and device_of(config) is None:
+        if "terminal" in result and device_of(config) is None and monitor_allowed(config):
             companions.add(MONITOR_TOOL)
         result |= {name for name in companions if name not in excluded and (not allowed or name in allowed)}
     return result
+
+
+def monitor_allowed(config: dict | None) -> bool:
+    """Whether a session with *config* may run monitors: not a sub-agent, whose work ends with its report,
+    and not a project's thread or one under it, whose sandbox ends with its turn.  Either would be woken by lines after its end."""
+    from surogates.workstreams import under_a_thread
+
+    config = config or {}
+    return not isinstance(config.get(DISPATCH_KEY), dict) and not under_a_thread(config)
 
 
 def dispatch_of(session: Any) -> dict | None:

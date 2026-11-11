@@ -22,9 +22,10 @@ failed turn, a new pod) took its commands with it: each is reported stopped.
 
 A monitor (``monitor`` tool) is a watched command whose output lines are
 news too: each poll's new lines go to its session in one notification, at most
-``cap`` notifications a minute (the rest wait, ``MAX_BUFFERED_LINES`` of them;
+``cap`` notifications a minute, and at most ``MAX_NOTES_PER_SESSION_MINUTE``
+for all of a session's monitors (the rest wait, ``MAX_BUFFERED_LINES`` of them;
 more are counted and left out), until the command ends, its timeout passes
-(it is killed), or it is stopped.
+(it is killed), it is stopped, or its session is stopped (it is killed).
 
 One watch per worker process.  A worker that dies takes its watch along:
 the commands' ends are then never told.
@@ -68,6 +69,14 @@ GRACE_SECONDS = 600.0
 MAX_BUFFERED_LINES = 200
 #: The most lines one notification carries.
 MAX_LINES_PER_NOTE = 50
+#: The longest line the watch takes from a registry; the registry cuts them there too.
+MAX_LINE_CHARS = 2000
+#: The most notifications all of one session's monitors send in a minute.
+MAX_NOTES_PER_SESSION_MINUTE = 30
+#: The most monitors one session runs at a time.
+MAX_MONITORS_PER_SESSION = 4
+#: A session in one of these is not sent its monitors' lines: they are killed.
+_STOPPED = ("paused", "archived")
 
 #: An executor too old to keep background commands answers the drain so.
 _UNKNOWN_DRAIN = f"Unknown tool: {DRAIN}"
@@ -113,6 +122,20 @@ class _Release:
     told: list[tuple[UUID, int | None]]
 
 
+def _read_lines(got: Any) -> tuple[list[str], int]:
+    """A registry's answer for one monitor, (its lines, how many it left out), read with no trust in its shape:
+    the sandbox's daemon answers it, and what runs there may have answered in its place."""
+    if not isinstance(got, dict):
+        return [], 0
+    raw = got.get("lines")
+    lines = [str(line)[:MAX_LINE_CHARS] for line in raw] if isinstance(raw, list) else []
+    try:
+        dropped = max(int(got.get("dropped") or 0), 0)
+    except (TypeError, ValueError):
+        dropped = 0
+    return lines, dropped
+
+
 class _Unwatchable(Exception):
     """The registry cannot report its commands; the message says why."""
 
@@ -149,9 +172,17 @@ def completion_payload(
 def monitor_payload(proc_id: str, monitor: _Monitor, *, status: str = "output", lines: list[str] | None = None,
                     dropped: int = 0, exit_code: Any = None, reason: str | None = None) -> dict:
     """The ``agent.notification`` payload of a monitor's new lines (``status`` ``output``) or of its end."""
+    kept, size = [], 0
+    for line in lines or []:
+        size += len(line) + 1
+        if size > MAX_RESULT_CHARS + 1:
+            break
+        kept.append(line)
+    # Lines past the note's size are counted with those left out: its header never names more than it shows.
+    dropped += len(lines or []) - len(kept)
     payload: dict[str, Any] = {
         "agent_id": proc_id, "kind": "monitor", "status": status, "summary": monitor.description,
-        "result": "\n".join(lines or [])[-MAX_RESULT_CHARS:], "lines": len(lines or []),
+        "result": "\n".join(kept), "lines": len(kept),
     }
     if dropped:
         payload["dropped"] = dropped
@@ -165,8 +196,8 @@ def monitor_payload(proc_id: str, monitor: _Monitor, *, status: str = "output", 
 def monitor_end(proc_id: str, item: _Watched, entry: dict | None, *, status: str, reason: str | None) -> dict:
     """A monitor's last notification: how it ended, with the lines it still held."""
     monitor = item.monitor
+    dropped = monitor.dropped + max(len(monitor.buffered) - MAX_LINES_PER_NOTE, 0)
     lines, monitor.buffered = monitor.buffered[:MAX_LINES_PER_NOTE], []
-    dropped = monitor.dropped + max(len(lines) - MAX_LINES_PER_NOTE, 0)
     if entry is not None:
         code = entry.get("exit_code")
         return monitor_payload(proc_id, monitor, status=_status(code), lines=lines, dropped=dropped, exit_code=code)
@@ -182,6 +213,8 @@ class BackgroundWatch:
         self._holdable: dict[str, bool] = {}
         self._releases: dict[str, _Release] = {}
         self._tasks: dict[str, asyncio.Task[None]] = {}
+        #: When each session was last sent its monitors' lines, within the last minute.
+        self._session_sent: dict[UUID, list[float]] = {}
         self._store: Any = None
         self._redis: Any = None
         self._sandbox_pool: Any = None
@@ -205,6 +238,13 @@ class BackgroundWatch:
             {"id": proc_id, "command": item.command[:200], "status": "running"}
             for watched in self._owners.values() for proc_id, item in watched.items() if item.session_id == session_id
         ]
+
+    def monitors_for(self, session_id: UUID) -> int:
+        """How many monitors session *session_id* runs that this watch reads."""
+        return sum(
+            item.monitor is not None and item.session_id == session_id
+            for watched in self._owners.values() for item in watched.values()
+        )
 
     def owner_of(self, proc_id: str) -> str | None:
         """The registry key of watched command *proc_id*: a sandbox's key, ``HERE``, or None for one not watched."""
@@ -250,6 +290,7 @@ class BackgroundWatch:
         self._owners.clear()
         self._releases.clear()
         self._holdable.clear()
+        self._session_sent.clear()
 
     async def _poll(self, owner: str) -> None:
         failed = 0
@@ -278,8 +319,8 @@ class BackgroundWatch:
                 watched = self._owners.get(owner, {})
                 for proc_id, got in lines.items():
                     item = watched.get(proc_id)
-                    if item is not None and item.monitor is not None and isinstance(got, dict):
-                        item.monitor.take([str(line) for line in got.get("lines") or []], int(got.get("dropped") or 0))
+                    if item is not None and item.monitor is not None:
+                        item.monitor.take(*_read_lines(got))
                 for proc_id, entry in ended:
                     item = watched.pop(proc_id, None)
                     if item is not None and item.monitor is not None:
@@ -296,14 +337,25 @@ class BackgroundWatch:
                         monitor_end(proc_id, item, None, status="killed", reason=why) if item.monitor is not None
                         else completion_payload(proc_id, item, None, reason=why)
                     )))
+                for proc_id, item in await self._of_stopped_sessions(owner):
+                    watched.pop(proc_id, None)
+                    payloads.append((item, monitor_end(
+                        proc_id, item, None, status="killed", reason="its session was stopped",
+                    )))
                 now = time.monotonic()
                 for proc_id, item in watched.items():
                     monitor = item.monitor
-                    if monitor is not None and (monitor.buffered or monitor.dropped) and monitor.may_send(now):
-                        sending, monitor.buffered = monitor.buffered[:MAX_LINES_PER_NOTE], monitor.buffered[MAX_LINES_PER_NOTE:]
-                        payloads.append((item, monitor_payload(proc_id, monitor, lines=sending, dropped=monitor.dropped)))
-                        monitor.dropped = 0
-                        monitor.sent.append(now)
+                    if monitor is None or not (monitor.buffered or monitor.dropped) or not monitor.may_send(now):
+                        continue
+                    sent = self._session_sent.setdefault(item.session_id, [])
+                    sent[:] = [t for t in sent if now - t < 60.0]
+                    if len(sent) >= MAX_NOTES_PER_SESSION_MINUTE:
+                        continue
+                    sending, monitor.buffered = monitor.buffered[:MAX_LINES_PER_NOTE], monitor.buffered[MAX_LINES_PER_NOTE:]
+                    payloads.append((item, monitor_payload(proc_id, monitor, lines=sending, dropped=monitor.dropped)))
+                    monitor.dropped = 0
+                    monitor.sent.append(now)
+                    sent.append(now)
                 if not payloads:
                     continue
                 release = None
@@ -340,7 +392,8 @@ class BackgroundWatch:
                     ended.append((entry["session_id"], entry))
             return ended, process_registry.drain_lines(set(self._owners.get(owner, {})))
         try:
-            raw = await self._sandbox_pool.execute(owner, DRAIN, "{}")
+            # Only this watch's commands: another worker's watch on the same sandbox drains its own.
+            raw = await self._sandbox_pool.execute(owner, DRAIN, json.dumps({"ids": sorted(asked)}))
         except ValueError:
             # No sandbox is mapped to it now: it went, and its commands with it.
             return [(proc_id, None) for proc_id in asked], {}
@@ -368,21 +421,53 @@ class BackgroundWatch:
             (proc_id, item) for proc_id, item in self._owners.get(owner, {}).items()
             if now - item.started >= MAX_WATCH_SECONDS or (item.monitor is not None and now >= item.monitor.deadline)
         ]
-        for proc_id, _ in expired:
-            try:
-                if owner == HERE:
-                    from surogates.tools.utils.process_registry import process_registry
-
-                    process_registry.kill_process(proc_id)
-                else:
-                    await self._sandbox_pool.execute(owner, "process", json.dumps({"action": "kill", "session_id": proc_id}))
-            except Exception:
-                logger.warning("Could not kill background command %s of %s", proc_id, owner, exc_info=True)
         why = f"it ran longer than {int(MAX_WATCH_SECONDS // 60)} minutes, the most a watched command may run"
         return [
-            (proc_id, item, "its timeout passed" if item.monitor is not None and now >= item.monitor.deadline else why)
+            (
+                proc_id, item,
+                ("its timeout passed" if item.monitor is not None and now >= item.monitor.deadline else why)
+                + ("" if await self._kill(owner, proc_id) else "; it could not be killed and may still be running"),
+            )
             for proc_id, item in expired
         ]
+
+    async def _kill(self, owner: str, proc_id: str) -> bool:
+        """Kill watched command *proc_id* of *owner*; whether it is known to be gone."""
+        try:
+            if owner == HERE:
+                from surogates.tools.utils.process_registry import process_registry
+
+                answer: Any = process_registry.kill_process(proc_id)
+            else:
+                answer = json.loads(await self._sandbox_pool.execute(
+                    owner, "process", json.dumps({"action": "kill", "session_id": proc_id}),
+                ))
+        except Exception:
+            logger.warning("Could not kill background command %s of %s", proc_id, owner, exc_info=True)
+            return False
+        return isinstance(answer, dict) and answer.get("status") in ("killed", "already_exited", "not_found")
+
+    async def _of_stopped_sessions(self, owner: str) -> list[tuple[str, _Watched]]:
+        """The monitors of *owner* with lines to send whose session was stopped meanwhile, killed: a stopped
+        session is not sent lines it would read only once resumed."""
+        waiting = {
+            item.session_id for item in self._owners.get(owner, {}).values()
+            if item.monitor is not None and (item.monitor.buffered or item.monitor.dropped)
+        }
+        stopped: set[UUID] = set()
+        for session_id in waiting:
+            try:
+                if (await self._store.get_session(session_id)).status in _STOPPED:
+                    stopped.add(session_id)
+            except Exception:
+                logger.debug("Could not read the status of session %s", session_id, exc_info=True)
+        found = [
+            (proc_id, item) for proc_id, item in self._owners.get(owner, {}).items()
+            if item.monitor is not None and item.session_id in stopped
+        ]
+        for proc_id, _ in found:
+            await self._kill(owner, proc_id)
+        return found
 
     async def _tell(self, session_id: UUID, payload: dict) -> int | None:
         """Write *payload* to session *session_id* as a notification and queue the session: the event's id."""
