@@ -1,10 +1,10 @@
 """The prompt's tool guidance follows the tools the session is offered.
 
 The worker builds the prompt from the registry's tools less what it knows
-to drop; a session's own ``excluded_tools`` and ``allowed_tools`` were
-applied to the schemas only.  So a session with every web tool excluded
-was still told how to do web research, and curled Wikipedia or called a
-``web_search`` it did not have.  The guidance now follows the schemas.
+to drop; the schemas also drop what the session names (``excluded_tools``,
+``allowed_tools``) and what its kind never gets (the coordinator's tools
+outside a coordinator, a strict coordinator's implementation tools).  The
+guidance and the skill index now follow the schemas in every session.
 """
 from __future__ import annotations
 
@@ -71,7 +71,7 @@ async def test_an_allow_list_gives_the_guidance_of_its_tools_only():
     assert WEB in prompt and ARTIFACT not in prompt
 
 
-async def test_a_session_without_exclusions_gets_the_prompt_it_got_before():
+async def test_a_session_whose_schemas_offer_every_tool_keeps_its_prompt():
     config: dict = {}
     session = _chat(config)
     before = PromptBuilder(_tenant(session), session=session, available_tools=set(TOOLS)).build()
@@ -124,42 +124,102 @@ def test_sections_that_name_a_restricted_tool_stay_out():
     builder.restrict_tools({"read_file"})
     assert builder._kb_section() == ""
     unrestricted = PromptBuilder(_tenant(session), session=session, available_kbs=kbs, available_tools={"read_file"})
-    assert unrestricted._kb_section()  # a session that names no tools: as before
+    assert unrestricted._kb_section()  # a builder never narrowed: as before
 
 
-async def test_an_ordinary_session_with_the_real_tools_keeps_its_prompt():
-    """The built-in registry: the schema filter drops tools the worker keeps (the coordinator's), and a
-    session that names no tools is not narrowed by them."""
-    from surogates.tools.runtime import ToolRuntime
+def _real_harness(session, registry, skills, tools):
+    return AgentHarness(
+        session_store=AsyncMock(), tool_registry=registry, llm_client=AsyncMock(),
+        tenant=_tenant(session), worker_id="w", budget=IterationBudget(max_total=10),
+        context_compressor=MagicMock(spec=ContextCompressor),
+        prompt_builder=PromptBuilder(_tenant(session), session=session, available_tools=set(tools), skills=skills),
+        sandbox_pool=MagicMock(spec=SandboxPool), vision_client=None, vision_model="",
+        mcp_tool_names=frozenset(),
+    )
 
+
+async def test_the_skill_index_follows_the_schemas_in_every_session():
+    """The built-in registry and the in-tree skills: the orchestrator skill needs spawn_task, which only a
+    coordinator's schemas offer."""
     from surogates.tools.loader import ResourceLoader
+    from surogates.tools.runtime import ToolRuntime
 
     registry = ToolRegistry()
     ToolRuntime(registry).register_builtins()
-    skills = ResourceLoader()._load_skills_from_dir("skills", "platform")  # in-tree skills, requires_tools included
+    skills = ResourceLoader()._load_skills_from_dir("skills", "platform")
     assert any(getattr(s, "name", "") == "subagent-task-orchestrator" for s in skills)
-    session = _chat({})
     tools = set(registry.tool_names)
+
+    ordinary = _chat({})
+    harness = _real_harness(ordinary, registry, skills, tools)
+    assert "spawn_task" not in harness._tool_filter_for_session(ordinary)
+    assert "subagent-task-orchestrator" not in await harness._build_system_prompt(ordinary)
+
+    coordinator = _chat({"coordinator": True})
+    harness = _real_harness(coordinator, registry, skills, tools)
+    assert "spawn_task" in harness._tool_filter_for_session(coordinator)
+    assert "subagent-task-orchestrator" in await harness._build_system_prompt(coordinator)
+
+
+async def test_a_strict_coordinator_is_not_told_about_its_implementation_tools():
+    from surogates.tools.runtime import ToolRuntime
+
+    registry = ToolRegistry()
+    ToolRuntime(registry).register_builtins()
+    tools = set(registry.tool_names)
+    strict = _chat({"coordinator": True, "strict_coordinator": True})
+    harness = _real_harness(strict, registry, [], tools)
+    offered = harness._tool_filter_for_session(strict)
+    assert not {"web_search", "web_extract"} & offered
+    assert WEB not in await harness._build_system_prompt(strict)
+
+
+async def test_an_ordinary_session_loses_only_the_orchestrator_skill():
+    """The golden delta for every ordinary session: the prompt as the worker's tools would have it, less the
+    skill index lines of the one in-tree skill whose tool (spawn_task) only a coordinator is offered."""
+    import difflib
+
+    from surogates.tools.loader import ResourceLoader
+    from surogates.tools.runtime import ToolRuntime
+
+    registry = ToolRegistry()
+    ToolRuntime(registry).register_builtins()
+    skills = ResourceLoader()._load_skills_from_dir("skills", "platform")
+    session = _chat({})
+    # The worker's tools for this session, as the worker hands them to the builder.
+    from surogates.orchestrator.worker import _filter_effective_tools
+
+    tools = _filter_effective_tools(tools=set(registry.tool_names), tenant=_tenant(session), session=session,
+                                    use_api_for_harness_tools=True)
     before = PromptBuilder(_tenant(session), session=session, available_tools=set(tools), skills=skills).build()
-    builder = PromptBuilder(_tenant(session), session=session, available_tools=set(tools), skills=skills)
-    harness = AgentHarness(
-        session_store=AsyncMock(), tool_registry=registry, llm_client=AsyncMock(),
-        tenant=_tenant(session), worker_id="w", budget=IterationBudget(max_total=10),
-        context_compressor=MagicMock(spec=ContextCompressor), prompt_builder=builder,
-        sandbox_pool=MagicMock(spec=SandboxPool), vision_client=None, vision_model="",
-        mcp_tool_names=frozenset(),
-    )
-    assert harness._tool_filter_for_session(session) < tools  # the schemas offer fewer
-    assert await harness._build_system_prompt(session) == before
-    assert "subagent-task-orchestrator" in before
-    # A session that names its tools gets the schemas' set: the orchestrator skill needs spawn_task.
-    named = _chat({"excluded_tools": ["web_search"]})
-    narrowed = AgentHarness(
-        session_store=AsyncMock(), tool_registry=registry, llm_client=AsyncMock(),
-        tenant=_tenant(named), worker_id="w", budget=IterationBudget(max_total=10),
-        context_compressor=MagicMock(spec=ContextCompressor),
-        prompt_builder=PromptBuilder(_tenant(named), session=named, available_tools=set(tools), skills=skills),
-        sandbox_pool=MagicMock(spec=SandboxPool), vision_client=None, vision_model="",
-        mcp_tool_names=frozenset(),
-    )
-    assert "subagent-task-orchestrator" not in await narrowed._build_system_prompt(named)
+    after = await _real_harness(session, registry, skills, tools)._build_system_prompt(session)
+    gone = [line[1:] for line in difflib.ndiff(before.splitlines(), after.splitlines()) if line.startswith("- ")]
+    joined = [line for line in difflib.ndiff(before.splitlines(), after.splitlines()) if line.startswith("+ ")]
+    assert joined == []
+    assert [line.strip().split(":")[0] for line in gone] == ["kanban", "- subagent-task-orchestrator"]
+
+
+async def test_a_project_master_loses_the_web_and_artifact_guidance():
+    from surogates.tools.runtime import ToolRuntime
+
+    registry = ToolRegistry()
+    ToolRuntime(registry).register_builtins()
+    tools = set(registry.tool_names)
+    master = _chat({"coordinator": True, "strict_coordinator": True, "workstream_role": "coordinator"})
+    prompt = await _real_harness(master, registry, [], tools)._build_system_prompt(master)
+    assert WEB not in prompt and ARTIFACT not in prompt
+
+
+def test_a_coordinator_keeps_its_knowledge_base_roster():
+    """It names the knowledge base when it hands work to a worker that has the KB tools."""
+    kbs = [{"id": "kb-1", "name": "handbook", "display_name": "Handbook", "mode": "grounding"}]
+    strict = _chat({"coordinator": True, "strict_coordinator": True})
+    builder = PromptBuilder(_tenant(strict), session=strict, available_kbs=kbs,
+                            available_tools={"kb_list_pages", "kb_read_page", "kb_search_pages", "spawn_task"})
+    builder.restrict_tools({"spawn_task"})
+    assert "kb-1" in builder._kb_section()
+    named = _chat({"coordinator": True, "strict_coordinator": True, "excluded_tools": ["terminal"]})
+    builder = PromptBuilder(_tenant(named), session=named, available_kbs=kbs,
+                            available_tools={"kb_list_pages", "kb_read_page", "kb_search_pages", "spawn_task"})
+    builder.restrict_tools({"spawn_task"})
+    assert builder._kb_section() == ""  # it names its tools: narrowed as under #632

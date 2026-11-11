@@ -204,12 +204,10 @@ class PromptBuilder:
         session's schemas offer (``AgentHarness._tool_filter_for_session``).
 
         The worker builds this builder from the registry's tools less what
-        it knows to drop, but a session's own ``excluded_tools`` and
-        ``allowed_tools`` are applied to the schemas only; without this the
-        prompt told the model how to use tools it could not call (the web
-        research guidance with every web tool excluded).  Only narrows:
-        ``has_whiteboard``, read for the schemas themselves, keeps the
-        worker's answer.
+        it knows to drop; the schemas also drop what the session names
+        (``excluded_tools`` / ``allowed_tools``) and what its kind never gets.
+        Only narrows: ``has_whiteboard``, read for the schemas themselves,
+        keeps the worker's answer.
         """
         kept = self._available_tools & set(offered)
         self._restricted_out = self._restricted_out | frozenset(self._available_tools - kept)
@@ -992,7 +990,17 @@ class PromptBuilder:
         worker) so the agent can see what each KB covers instead of
         guessing from the name alone.
         """
-        if not self._available_kbs or self._restricted_away("kb_list_pages", "kb_read_page", "kb_search_pages"):
+        # A coordinator that names no tools of its own keeps the roster
+        # without the KB tools, as before: it names the knowledge base when
+        # it hands work to a worker that has them.  One whose config names
+        # its tools is narrowed like any session that does.
+        config = (self._session.config or {}) if self._session is not None else {}
+        coordinator = bool(
+            config.get("coordinator") and not (config.get("excluded_tools") or config.get("allowed_tools"))
+        )
+        if not self._available_kbs or (
+            not coordinator and self._restricted_away("kb_list_pages", "kb_read_page", "kb_search_pages")
+        ):
             return ""
 
         def _render_kb(kb: dict) -> list[str]:
