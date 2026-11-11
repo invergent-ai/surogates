@@ -221,8 +221,9 @@ async def _list_agents_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
     found: list[tuple[dict, str]] = [(row, "yours") for row in _family_below(await _tree(kwargs, me.id), me.id)]
     if me.parent_id is not None and dispatch_of(me) is not None:
         siblings = await _tree(kwargs, me.parent_id)
-        parent = next(row for row in siblings if row["id"] == me.parent_id)
-        found.append((parent, "parent"))
+        parent = next((row for row in siblings if row["id"] == me.parent_id), None)
+        if parent is not None:
+            found.append((parent, "parent"))
         found += [
             (row, "sibling") for row in siblings
             if row["parent_id"] == me.parent_id and row["id"] != me.id and isinstance(row["dispatch"], dict)
@@ -249,10 +250,7 @@ _STOP_SIGNAL = "stopped by agent"
 async def _stop_agent_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
     """Stop an agent below the caller, with the agents of the family below it, or a background command the
     caller started."""
-    from sqlalchemy import update
-
     from surogates.config import INTERRUPT_CHANNEL_PREFIX
-    from surogates.db.models import Session as SessionRow
     from surogates.devices.operations import DeviceOperations
     from surogates.harness.message_utils import extract_final_response
     from surogates.harness.subagents import runs_in_background, tell_parent
@@ -282,24 +280,19 @@ async def _stop_agent_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
                            "note": "It is not running: there is nothing to stop."})
     stopped: list[UUID] = []
     for row in [agent, *_family_below(list(mine.values()), agent["id"])]:
-        # Paused only from running, in one write: a turn that ended meanwhile stays ended, and is told of once.
-        async with session_factory() as db:
-            changed = (await db.execute(
-                update(SessionRow)
-                .where(SessionRow.id == row["id"], SessionRow.status.in_(("active", "processing")))
-                .values(status="paused")
-                .returning(SessionRow.id),
-            )).first()
-            await db.commit()
-        if changed is None:
-            continue
-        await session_store.emit_event(row["id"], EventType.SESSION_PAUSE, {
+        # Paused only from running, the status and its event in one write: a turn that ended meanwhile stays
+        # ended, and is told of once.
+        if await session_store.pause_if_active(row["id"], {
             "reason": "stopped", "message": reason, "stopped_by": str(me.id),
-        })
-        stopped.append(row["id"])
+        }):
+            stopped.append(row["id"])
+    if not stopped:
+        return json.dumps({"status": "completed", "agent_id": target, "note": "It ended before the stop: there was nothing to stop."})
     try:
-        # As the pause route does: what the stopped agents left waiting on the user's computer is cancelled.
-        await DeviceOperations(session_factory, redis).cancel(stopped, sparing=stopped)
+        # As the pause route does: what the stopped agents, and the helpers under them, left waiting on the
+        # user's computer is cancelled.
+        below = [row["id"] for row in await _tree(kwargs, agent["id"])]
+        await DeviceOperations(session_factory, redis).cancel(below, sparing=below)
     except Exception:
         logger.warning("Could not cancel the device operations of the agents %s stopped", me.id, exc_info=True)
     for sid in stopped:
@@ -313,7 +306,8 @@ async def _stop_agent_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
                 result=extract_final_response(await session_store.get_events(sid), fallback=""),
             )
     return json.dumps({"status": "stopped", "agent_id": target, "stopped": [str(sid) for sid in stopped],
-                       "note": "A stopped agent keeps its context: send_message resumes it."})
+                       "note": "A stopped agent keeps its context: send_message resumes it."
+                       if agent["parent_id"] == me.id else "A stopped agent keeps its context."})
 
 
 async def _stop_process(proc_id: str, **kwargs: Any) -> str:

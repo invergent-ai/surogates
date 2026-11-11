@@ -28,7 +28,8 @@ from surogates.harness.delivery_manifest import (
     reconcile,
 )
 from surogates.harness.loop_constants import _BACKGROUND_DRAIN_TIMEOUT_SECONDS
-from surogates.harness.subagents import runs_in_background
+from surogates.harness.subagents import dispatch_of, runs_in_background
+from surogates.harness.subagents import stopped_by as subagent_stopped_by
 from surogates.harness.loop_messages import (
     _as_aware_utc,
     _last_assistant_message_excerpt,
@@ -1396,6 +1397,13 @@ class ArtifactCompletionMixin:
             # A thread stopped while it landed stays as the Stop left it; so does one on its computer stopped at an end
             # with nothing to land.
             stopped = landing.get("stop_heard") if landing is not None else opens_its_copy(session) and self._check_interrupt()
+            if not stopped and dispatch_of(session) is not None:
+                # An agent of the family that ``stop_agent`` paused as this turn ended stays stopped: the stop
+                # already told its parent, which must not hear "completed" after "killed".
+                current = await self._store.get_session(session.id)
+                stopped = current.status == "paused" and await subagent_stopped_by(self._store, session.id) is not None
+                if stopped:
+                    notify_parent = False
             if not stopped:
                 await self._store.update_session_status(session.id, "completed")
         except Exception:
