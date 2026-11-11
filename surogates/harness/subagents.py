@@ -119,10 +119,15 @@ async def may_message(store: Any, sender: Any, target: Any) -> bool:
     if target.id == sender.id or target.org_id != sender.org_id:
         return False
     if target.id == sender.parent_id:
-        return True
+        # Only an agent the ``agent`` tool started speaks up to its parent: a thread, a routine's run or a
+        # worker writes nothing into the session above it.
+        return dispatch_of(sender) is not None
     if dispatch_of(target) is None:
         return False
-    ancestors = await lineage(store, target)
+    try:
+        ancestors = await lineage(store, target)
+    except Exception:
+        return False
     if any(a.id == sender.id for a in ancestors):
         return True
     return sender.parent_id is not None and target.parent_id == sender.parent_id

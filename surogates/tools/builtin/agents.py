@@ -26,6 +26,7 @@ import logging
 from typing import Any
 from uuid import UUID, uuid4
 
+from surogates.harness.agent_news import fenced
 from surogates.harness.subagents import DISPATCH_KEY, PARITY_KEY, dispatch_of, may_message
 from surogates.runtime.turn_slots import turn_waiting
 from surogates.tools.registry import ToolRegistry, ToolSchema
@@ -64,10 +65,10 @@ _AGENT_DESCRIPTION = (
 
 _SEND_MESSAGE_DESCRIPTION = (
     "Send a message to another agent: one you started (its agent_id), the agent that started you (to=\"parent\"), "
-    "or another agent your parent started. A running agent reads it before its next step. A finished or "
-    "stopped agent resumes with everything it had and the message, and its new report reaches the agent "
-    "that started it as a notification. Use it to continue, correct or redirect an agent instead of starting "
-    "a new one. The call does not wait for an answer: a reply comes later, as a message or a notification."
+    "or another agent your parent started. A running agent reads it before its next step. An agent you "
+    "started that has finished resumes with everything it had and the message, and its new report reaches you "
+    "as a notification. Use it to continue, correct or redirect an agent instead of starting a new one. The "
+    "call does not wait for an answer: a reply comes later, as a message or a notification."
 )
 
 _AGENT_SCHEMA = ToolSchema(
@@ -140,10 +141,6 @@ def register(registry: ToolRegistry) -> None:
     registry.register(name="send_message", schema=_SEND_MESSAGE_SCHEMA, handler=_send_message_handler, toolset="core")
 
 
-#: The statuses of an agent that is not running: a message resumes it.
-_AT_REST = ("completed", "failed", "paused")
-
-
 async def _send_message_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
     """Deliver a message to an agent of the caller's tree; see ``send_message``'s description.
 
@@ -194,32 +191,100 @@ async def _send_message_handler(arguments: dict[str, Any], **kwargs: Any) -> str
         head = "[Message from the agent that started you"
     else:
         head = f"[Message from agent {sender.id}"
-    content = f"{head}: {summary}]\n{message}" if summary else f"{head}]\n{message}"
+    # The words are the sender's, fenced off as such: they cannot pass for the harness's own lines.
+    summary = summary.replace("[", "(").replace("]", ")")
+    content = f"{head}: {summary}]\n{fenced(message)}" if summary else f"{head}]\n{fenced(message)}"
 
-    resumed = target.status in _AT_REST
-    if resumed:
-        dispatch = dispatch_of(target)
-        if dispatch is not None and dispatch.get("mode") != "background":
-            # Its first report was its call's result; a report of a later run has no call to return to.
-            await session_store.update_session_config_key(target.id, DISPATCH_KEY, {**dispatch, "mode": "background"})
-        await session_store.resume_session(target.id, source="agent_message")
+    dispatch = dispatch_of(target)
+    if dispatch is not None and dispatch.get("mode") != "background" and await _call_ended(session_store, target):
+        # Its first report was its call's result; a report of a later run has no call to return to.
+        await session_store.update_session_config_key(target.id, DISPATCH_KEY, {**dispatch, "mode": "background"})
+    running = target.status in ("active", "processing")
+    resumed, why_not = False, None
+    if not running:
+        why_not = await _why_not_resume(session_store, sender, target, kwargs.get("session_factory"))
+        if why_not is None:
+            resumed = await _resume_if_resting(kwargs.get("session_factory"), session_store, target.id)
+            if not resumed:
+                running = True  # it was woken meanwhile: it reads the message at its next step
     await session_store.emit_event(target.id, EventType.COORDINATOR_MESSAGE, {
         "content": content, "kind": "agent_message",
         "from_agent": str(sender.id), "to_agent": str(target.id), "summary": summary,
     })
     redis = kwargs.get("redis")
-    if redis is not None:
+    if redis is not None and (running or resumed):
         await enqueue_session(
             redis, org_id=str(target.org_id), agent_id=target.agent_id, session_id=target.id,
             priority=session_queue_priority(target),
         )
+    if resumed:
+        return json.dumps({"status": "resumed", "to": str(target.id), "note": "It was at rest: it resumes with the message."})
+    if running:
+        return json.dumps({"status": "delivered", "to": str(target.id), "note": "It reads the message before its next step."})
     return json.dumps({
-        "status": "resumed" if resumed else "delivered", "to": str(target.id),
-        "note": (
-            "It was at rest: it resumes with the message." if resumed
-            else "It reads the message before its next step."
-        ),
+        "status": "queued", "to": str(target.id),
+        "note": f"It rests and is not resumed ({why_not}): it reads the message when it next runs.",
     })
+
+
+async def _call_ended(session_store: Any, target: Any) -> bool:
+    """Whether the ``agent`` call that started foreground agent *target* has returned: its parent's log closes it."""
+    from surogates.session.events import EventType
+
+    ends = await session_store.get_events(
+        target.parent_id, types=[EventType.DELEGATION_COMPLETE, EventType.DELEGATION_FAILED],
+    )
+    return any((e.data or {}).get("child_session_id") == str(target.id) for e in ends)
+
+
+async def _why_not_resume(session_store: Any, sender: Any, target: Any, session_factory: Any) -> str | None:
+    """Why *sender* may not resume resting *target*; None when it may.
+
+    A sub-agent may wake the agent that started it from a finished turn,
+    never from a stop or a failure: those are its user's.  An agent that
+    started others itself (no helper, and no project's thread, whose helpers
+    start from a hand-off) may resume its own finished or failed ones,
+    within its background limit.  Nothing else is resumed: the message waits.
+    """
+    from surogates.workstreams import is_project_thread
+
+    if target.id == sender.parent_id:
+        return None if target.status == "completed" else f"it is {target.status}: its user resumes it"
+    if target.parent_id != sender.id:
+        return "only the agent that started it resumes it"
+    if getattr(sender, "channel", None) == "delegation" or is_project_thread(sender.config):
+        return "a sub-agent does not resume agents: its parent does"
+    if target.status not in ("completed", "failed"):
+        return f"it is {target.status}"
+    if session_factory is not None and sum(
+        mode == "background" for mode, _ in await _running_agents(session_factory, sender.id)
+    ) >= MAX_RUNNING_IN_BACKGROUND:
+        return f"{MAX_RUNNING_IN_BACKGROUND} of your agents already run in the background"
+    return None
+
+
+async def _resume_if_resting(session_factory: Any, session_store: Any, target_id: UUID) -> bool:
+    """Make *target_id* active if it still rests (completed or failed), in one write, and record the resume."""
+    from sqlalchemy import update
+
+    from surogates.db.models import Session as SessionRow
+    from surogates.session.events import EventType
+
+    if session_factory is None:
+        await session_store.resume_session(target_id, source="agent_message")
+        return True
+    async with session_factory() as db:
+        changed = (await db.execute(
+            update(SessionRow)
+            .where(SessionRow.id == target_id, SessionRow.status.in_(("completed", "failed")))
+            .values(status="active")
+            .returning(SessionRow.id),
+        )).first()
+        await db.commit()
+    if changed is None:
+        return False
+    await session_store.emit_event(target_id, EventType.SESSION_RESUME, {"source": "agent_message"})
+    return True
 
 
 def _error(message: str) -> str:

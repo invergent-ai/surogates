@@ -61,7 +61,10 @@ async def test_a_running_agent_reads_a_message_before_its_next_step(chats):  # n
     assert sent == [{"status": "delivered", "to": str(child.id), "note": "It reads the message before its next step."}]
     second = chats.requests[-1]
     assert second[-2]["role"] == "tool"
-    assert second[-1] == {"role": "user", "content": "[Message from the agent that started you: Count closed ones too]\nAlso count the closed ones."}
+    assert second[-1] == {
+        "role": "user",
+        "content": "[Message from the agent that started you: Count closed ones too]\n```\nAlso count the closed ones.\n```",
+    }
     [message] = await chats.store.get_events(child.id, types=[EventType.COORDINATOR_MESSAGE])
     assert message.data["kind"] == "agent_message"
     assert (message.data["from_agent"], message.data["to_agent"]) == (str(chat), str(child.id))
@@ -91,7 +94,9 @@ async def test_a_finished_agent_resumes_with_its_context_and_reports_again_as_a_
     resumed = chats.requests[-1]
     # Its earlier run, its answer, then the message.
     assert resumed[: len(first_run)] == first_run
-    assert resumed[-1] == {"role": "user", "content": "[Message from the agent that started you: Count closed ones]\nNow count the closed ones."}
+    assert resumed[-1] == {
+        "role": "user", "content": "[Message from the agent that started you: Count closed ones]\n```\nNow count the closed ones.\n```",
+    }
     notes = await chats.store.get_events(chat, types=[EventType.AGENT_NOTIFICATION])
     assert [n.data["result"] for n in notes] == ["There are 12 open items.", "There are 4 closed items."]
 
@@ -105,6 +110,8 @@ async def test_a_foreground_agent_continued_by_a_message_reports_as_a_notificati
                                                 "tool_call_id": "call_x", "parent": str(chat)}},
     )
     await chats.store.update_session_status(child.id, "completed")
+    # The call that started it has returned with its report.
+    await chats.store.emit_event(chat, EventType.DELEGATION_COMPLETE, {"child_session_id": str(child.id)})
     assert (await send(chats, chat, child.id))["status"] == "resumed"
     assert (await chats.session(child.id)).config[DISPATCH_KEY]["mode"] == "background"
     chats.replies = [_final_response("4 closed.")]
@@ -128,7 +135,7 @@ async def test_an_agent_messages_the_agent_that_started_it(chats):  # noqa: F811
     await chats.wake(chat)
     # Its message, then the notification of its turn's end, which came after it.
     assert chats.requests[before][-2:] == [
-        {"role": "user", "content": f"[Message from agent {child.id} (Count open items): Which list]\nThe tracker has two lists; which one?"},
+        {"role": "user", "content": f"[Message from agent {child.id} (Count open items): Which list]\n```\nThe tracker has two lists; which one?\n```"},
         {"role": "user", "content": f"[Agent {child.id} (Count open items) completed]\nWaiting for an answer."},
     ]
 
@@ -164,3 +171,46 @@ async def test_a_message_reaches_only_the_senders_own_tree_and_organisation(chat
     assert await chats.store.get_events(elsewhere.id, types=[EventType.COORDINATOR_MESSAGE]) == []
     # A session started by no agent has no parent to message.
     assert "no parent" in (await send(chats, chat, "parent"))["error"]
+
+
+async def test_a_sub_agent_never_undoes_its_users_stop_of_its_parent(chats):  # noqa: F811
+    chat = await a_chat(chats, PARITY)
+    child = await a_background_agent(chats, chat)
+    # The user stops the chat (the pause route's write): its agent keeps running.
+    await chats.store.emit_event(chat, EventType.SESSION_PAUSE, {}, status="paused")
+    answer = await send(chats, child.id, "parent", message="Done counting.", summary="Done")
+    assert answer["status"] == "queued" and "its user resumes it" in answer["note"]
+    assert await chats.status(chat) == "paused"
+    assert not await queued(chats.api, await chats.session(chat))
+
+
+async def test_a_foreground_agent_whose_call_still_waits_is_not_switched(chats):  # noqa: F811
+    chat = await a_chat(chats, PARITY)
+    child = await create_child_session(
+        store=chats.store, parent=await chats.session(chat), channel="delegation",
+        config={PARITY_KEY: True, DISPATCH_KEY: {"description": "Read", "mode": "foreground", "parent": str(chat)}},
+    )
+    assert (await send(chats, chat, child.id))["status"] == "delivered"
+    assert (await chats.session(child.id)).config[DISPATCH_KEY]["mode"] == "foreground"
+
+
+async def test_only_an_agent_of_the_family_speaks_up_to_its_parent(chats):  # noqa: F811
+    chat = await a_chat(chats, PARITY)
+    worker = await create_child_session(store=chats.store, parent=await chats.session(chat), channel="worker",
+                                        config={PARITY_KEY: True})
+    assert (await send(chats, worker.id, "parent"))["error"].startswith("no agent ")
+
+
+async def test_a_sub_agent_does_not_resume_its_own_finished_agent(chats):  # noqa: F811
+    chat = await a_chat(chats, PARITY)
+    middle = await create_child_session(
+        store=chats.store, parent=await chats.session(chat), channel="delegation",
+        config={PARITY_KEY: True, DISPATCH_KEY: {"description": "Lead", "mode": "foreground", "parent": str(chat)}},
+    )
+    leaf = await create_child_session(
+        store=chats.store, parent=middle, channel="delegation",
+        config={PARITY_KEY: True, DISPATCH_KEY: {"description": "Read", "mode": "foreground", "parent": str(middle.id)}},
+    )
+    await chats.store.update_session_status(leaf.id, "completed")
+    answer = await send(chats, middle.id, leaf.id)
+    assert answer["status"] == "queued" and await chats.status(leaf.id) == "completed"
