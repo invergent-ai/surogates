@@ -15,6 +15,7 @@ replay must produce the same bytes.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from surogates.session.events import EventType
@@ -43,20 +44,30 @@ def notification_note(data: dict) -> dict:
     result = str(data.get("result") or "")
     if data.get("kind") == "process":
         command = str(data.get("summary") or "")
-        if status == "killed":
-            head = f"[Background process {work} was stopped before it finished: {command}"
-            reason = data.get("reason")
-            head += f" ({reason})]" if reason else "]"
+        reason = data.get("reason")
+        why = f" ({reason})" if reason else ""
+        code = data.get("exit_code")
+        if status == "lost":
+            head = f"[Background process {work} cannot be watched any more: {command}{why}]"
+        elif status == "killed" and code is None:
+            head = f"[Background process {work} was stopped before it finished: {command}{why}]"
         else:
-            code = data.get("exit_code")
             said = "an unknown exit code" if code is None else f"exit code {code}"
             head = f"[Background process {work} finished with {said}: {command}]"
-        return {"role": "user", "content": f"{head}\n{result}" if result else head}
+        # What it printed is the command's, not the harness's or the user's words: fenced off as its output.
+        return {"role": "user", "content": f"{head}\nIts last output:\n{fenced(result)}" if result else head}
     # Any other kind: its status and summary, in the harness's words.
     summary = data.get("summary")
     named = f"{work} ({summary})" if summary else work
     head = f"[{named} {status or 'ended'}]"
     return {"role": "user", "content": f"{head}\n{result}" if result else head}
+
+
+def fenced(text: str) -> str:
+    """*text* in a code fence longer than any run of backticks in it: what it holds cannot end it."""
+    longest = max((len(run) for run in re.findall(r"`+", text)), default=0)
+    fence = "`" * max(3, longest + 1)
+    return f"{fence}\n{text}\n{fence}"
 
 
 def agent_news_unread(events: list) -> bool:

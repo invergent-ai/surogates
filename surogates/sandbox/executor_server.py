@@ -563,6 +563,11 @@ def create_app(
                 media_type="application/json",
             )
 
+        if name == "_background":
+            # A drain reads memory and never waits on a tool: no slot, so the
+            # worker's watch is answered while long calls fill them.
+            result = drain_background()
+            return Response(content=result, media_type="application/json")
         async with sem:
             if runs_in_daemon(name, args):
                 try:
@@ -589,7 +594,9 @@ def main() -> None:
     )
     workspace = os.environ.get("WORKSPACE_DIR", "/workspace")
     port = int(os.environ.get("TOOL_EXECUTOR_PORT", str(DEFAULT_PORT)))
-    token = os.environ.get("TOOL_EXECUTOR_TOKEN", "")
+    # Out of the environment once read: the commands the daemon starts, and its
+    # forks' tools, inherit it, and none of them is to call the daemon.
+    token = os.environ.pop("TOOL_EXECUTOR_TOKEN", "")
     if not token:
         logger.error("TOOL_EXECUTOR_TOKEN is required")
         sys.exit(1)

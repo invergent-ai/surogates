@@ -818,9 +818,8 @@ class LocalWorkspaceIO:
         _setup_ssh_home(env)
         session = process_registry.spawn(
             command=command, cwd=cwd, task_id=task_id, use_pty=pty, env_vars=env,
+            notify_on_complete=notify_on_complete,
         )
-        if notify_on_complete:
-            session.notify_on_complete = True
         if watcher_interval:
             session.watcher_interval = watcher_interval
         return {"session_id": session.id, "pid": session.pid}

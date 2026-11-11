@@ -57,7 +57,7 @@ async def drained_until(client: httpx.AsyncClient, proc_id: str, seconds: float 
 async def test_a_background_command_outlives_its_call_and_its_end_is_drained_once(daemon):
     async with daemon as client:
         started = await call(
-            client, "terminal", command="echo started; sleep 0.3; echo built; exit 3",
+            client, "terminal", command="echo started; sleep 2; echo built; exit 3",
             background=True, notify_on_complete=True,
         )
         proc_id = started["session_id"]
@@ -104,3 +104,16 @@ async def test_a_foreground_command_still_runs_in_a_fork(daemon, monkeypatch):
         await call(client, "terminal", command="exit 0", background=True)
         await call(client, "_background")
     assert forked == ["terminal"]
+
+
+async def test_a_drain_is_answered_while_every_slot_runs_a_long_call(daemon):
+    async with daemon as client:
+        slow = [
+            asyncio.create_task(call(client, "terminal", command="sleep 2"))
+            for _ in range(executor_server.MAX_CONCURRENCY)
+        ]
+        await asyncio.sleep(0.3)
+        started = time.monotonic()
+        answer = await call(client, "_background")
+        assert "known" in answer and time.monotonic() - started < 1.0
+        await asyncio.gather(*slow)

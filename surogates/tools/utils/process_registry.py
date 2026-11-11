@@ -266,6 +266,7 @@ class ProcessRegistry:
         session_key: str = "",
         env_vars: dict | None = None,
         use_pty: bool = False,
+        notify_on_complete: bool = False,
     ) -> ProcessSession:
         """Spawn a background process locally.
 
@@ -278,6 +279,9 @@ class ProcessRegistry:
             use_pty: If True, use a pseudo-terminal via ptyprocess for
                 interactive CLI tools. Falls back to ``subprocess.Popen``
                 if ptyprocess is not installed.
+            notify_on_complete: Queue the completion on ``completion_queue``.
+                Set before the reader thread starts, so a command that ends
+                at once is not missed.
         """
         session = ProcessSession(
             id=f"proc_{uuid.uuid4().hex[:12]}",
@@ -286,6 +290,7 @@ class ProcessRegistry:
             session_key=session_key,
             cwd=cwd or os.getcwd(),
             started_at=time.time(),
+            notify_on_complete=notify_on_complete,
         )
 
         if use_pty:
@@ -350,7 +355,9 @@ class ProcessRegistry:
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             stdin=subprocess.PIPE,
-            preexec_fn=None if _IS_WINDOWS else os.setsid,
+            # A new session, as setsid() did, without a preexec_fn: the
+            # executor daemon spawns from a thread, where one is unsafe.
+            start_new_session=not _IS_WINDOWS,
         )
 
         session.process = proc

@@ -534,6 +534,11 @@ def _watch_background(result_content: str, session: Any, tool_args: Any, *, in_s
     proc_id = started.get("session_id") if isinstance(started, dict) else None
     if not isinstance(proc_id, str) or not proc_id:
         return
+    if isinstance(tool_args, str):
+        try:
+            tool_args = json.loads(tool_args)
+        except (TypeError, ValueError):
+            tool_args = {}
     command = tool_args.get("command") if isinstance(tool_args, dict) else None
     background_watch.watch(
         owner=sandbox_session_key(session) if in_sandbox else HERE,

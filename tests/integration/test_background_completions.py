@@ -146,15 +146,26 @@ async def test_a_command_that_ends_after_its_turn_wakes_the_chat_with_its_end(wa
     [ended] = await until(lambda: notifications(chats.store, chat))
     assert ended["kind"] == "process" and ended["status"] == "failed" and ended["exit_code"] == 2
     assert ended["summary"] == command and "built" in ended["result"]
-    # The chat rests, so its sandbox went before the chat was woken; and it was queued.
-    assert daemon.destroyed == daemon.provisioned
     assert await queued(chats.api, await chats.session(chat))
+    # The sandbox is kept for the turn the end gives: what the command left there is still to be read.
+    assert daemon.destroyed == []
 
     before = len(chats.requests)
+    chats.replies = [
+        call("process", "call_log", action="log", session_id=ended["agent_id"]),
+        _final_response("The build failed with exit code 2."),
+    ]
     await chats.wake(chat)
-    [request] = chats.requests[before:]
+    request = chats.requests[before]
     assert request[-1] == notification_note(ended)
-    assert request[-1]["content"].startswith(f"[Background process {ended['agent_id']} finished with exit code 2: {command}]")
+    assert request[-1]["content"].startswith(
+        f"[Background process {ended['agent_id']} finished with exit code 2: {command}]\nIts last output:\n```\n",
+    )
+    log = json.loads(next(m for m in chats.requests[-1] if m.get("tool_call_id") == "call_log")["content"])
+    assert "compiling" in log["output"] and "built" in log["output"]
+    # Once that turn has ended and nothing of the chat runs, the sandbox goes.
+    await until(lambda: asyncio.sleep(0, result=daemon.destroyed == daemon.provisioned))
+    assert not background_watch.holds(str(chat))
     # Its next turn rebuilds that request from the log, byte for byte.
     await chats.says(chat, "Thanks.")
     await chats.wake(chat)
@@ -184,8 +195,9 @@ async def test_an_end_that_lands_during_a_turn_is_read_at_its_next_request_and_r
     await chats.says(chat, "And now?")
     await chats.wake(chat)
     assert chats.requests[-1][: len(third)] == third
-    # Both turns took their sandbox down at their ends: nothing is watched.
-    assert not background_watch.holds(str(chat))
+    # Once its turns have ended the sandbox goes: nothing is watched, nothing kept.
+    await until(lambda: asyncio.sleep(0, result=not background_watch.holds(str(chat))))
+    await until(lambda: asyncio.sleep(0, result=daemon.destroyed == daemon.provisioned))
 
 
 async def test_a_session_hears_only_the_ends_of_its_own_commands(api):  # noqa: F811
@@ -208,34 +220,111 @@ async def test_a_session_hears_only_the_ends_of_its_own_commands(api):  # noqa: 
         await watch.close()
 
 
-@pytest.mark.parametrize("sandbox", ["went", "too-old"])
-async def test_a_command_whose_sandbox_is_gone_or_cannot_tell_is_reported_stopped(api, sandbox):  # noqa: F811
-    store, redis = api.app.state.session_store, api.app.state.redis
-    created = await api.client.post("/v1/sessions", json={}, headers=api.auth())
-    chat = UUID(created.json()["id"])
+class Pool:
+    """A sandbox pool whose drain answers as *answer* says."""
 
-    class Pool:
-        async def execute(self, owner, name, input, *, timeout=None):
-            assert name == watch_module.DRAIN
-            if sandbox == "went":
-                raise ValueError(f"No sandbox provisioned for session {owner}")
+    def __init__(self, answer: str, *, copy: bool = False) -> None:
+        self.answer, self.copy, self.asked = answer, copy, 0
+
+    async def execute(self, owner, name, input, *, timeout=None):
+        assert name == watch_module.DRAIN
+        self.asked += 1
+        if self.answer == "went":
+            raise ValueError(f"No sandbox provisioned for session {owner}")
+        if self.answer == "too-old":
             return json.dumps({"exit_code": 1, "output": "", "error": "Unknown tool: _background"})
+        # A transient failure: the client's result for an HTTP error, or a timeout.
+        return json.dumps({"exit_code": -1, "stdout": "", "stderr": "Executor daemon error (HTTP 502)"})
 
-        async def release_for_session(self, owner, *, only=None):
-            return None
+    def holds_copy(self, owner):
+        return self.copy
 
+    def sandbox_of(self, owner):
+        return None
+
+    async def release_for_session(self, owner, *, only=None):
+        return None
+
+
+async def a_session(api) -> UUID:  # noqa: F811
+    created = await api.client.post("/v1/sessions", json={}, headers=api.auth())
+    return UUID(created.json()["id"])
+
+
+@pytest.mark.parametrize("sandbox, status, reason, said", [
+    ("went", "killed", "its sandbox ended", "was stopped before it finished: make serve (its sandbox ended)"),
+    (
+        "too-old", "lost", "this sandbox cannot report the ends of background commands; it may still be running",
+        "cannot be watched any more: make serve (this sandbox cannot report the ends of background commands; it may still be running)",
+    ),
+])
+async def test_a_command_whose_sandbox_is_gone_or_cannot_tell_is_reported_so(api, sandbox, status, reason, said):  # noqa: F811
+    store, redis = api.app.state.session_store, api.app.state.redis
+    chat = await a_session(api)
     watch = BackgroundWatch(poll_seconds=QUICK)
-    watch.configure(store=store, redis=redis, sandbox_pool=Pool())
+    watch.configure(store=store, redis=redis, sandbox_pool=Pool(sandbox))
     try:
         watch.watch(owner=str(chat), proc_id="proc_gone", session_id=chat, command="make serve")
         [ended] = await until(lambda: notifications(store, chat))
         assert ended == {
-            "agent_id": "proc_gone", "kind": "process", "status": "killed", "summary": "make serve",
-            "result": "", "reason": "its sandbox ended",
+            "agent_id": "proc_gone", "kind": "process", "status": status, "summary": "make serve",
+            "result": "", "reason": reason,
         }
-        assert notification_note(ended)["content"] == (
-            "[Background process proc_gone was stopped before it finished: make serve (its sandbox ended)]"
-        )
+        assert notification_note(ended)["content"] == f"[Background process proc_gone {said}]"
+        # Nothing of it is kept: no sandbox is mapped to it.
+        await until(lambda: asyncio.sleep(0, result=not watch.holds(str(chat))))
+    finally:
+        await watch.close()
+
+
+async def test_a_sandbox_that_fails_to_answer_a_while_is_no_end_until_it_gives_up(api, monkeypatch):  # noqa: F811
+    store, redis = api.app.state.session_store, api.app.state.redis
+    chat = await a_session(api)
+    monkeypatch.setattr(watch_module, "MAX_FAILED_ASKS", 5)
+    pool = Pool("error")
+    watch = BackgroundWatch(poll_seconds=QUICK)
+    watch.configure(store=store, redis=redis, sandbox_pool=pool)
+    try:
+        watch.watch(owner=str(chat), proc_id="proc_x", session_id=chat, command="make serve")
+        await until(lambda: asyncio.sleep(0, result=pool.asked >= 3))
+        # A few failed asks tell nobody anything.
+        assert await notifications(store, chat) == [] and watch.holds(str(chat))
+        [ended] = await until(lambda: notifications(store, chat))
+        assert pool.asked >= 5
+        assert (ended["status"], ended["reason"]) == ("lost", "its sandbox stopped answering; it may still be running")
+    finally:
+        await watch.close()
+
+
+async def test_a_command_is_watched_for_at_most_its_limit_then_killed(api, monkeypatch):  # noqa: F811
+    store, redis = api.app.state.session_store, api.app.state.redis
+    chat = await a_session(api)
+    monkeypatch.setattr(watch_module, "MAX_WATCH_SECONDS", 0.3)
+    watch = BackgroundWatch(poll_seconds=QUICK)
+    watch.configure(store=store, redis=redis, sandbox_pool=None)
+    started = await LocalWorkspaceIO(workspace_path=None).start(
+        "sleep 30", workdir=None, task_id="t", pty=False, notify_on_complete=True, watcher_interval=None,
+    )
+    try:
+        watch.watch(owner=HERE, proc_id=started["session_id"], session_id=chat, command="sleep 30")
+        [ended] = await until(lambda: notifications(store, chat))
+        assert ended["status"] == "killed"
+        assert ended["reason"].startswith("it ran longer than 0 minutes")
+        from surogates.tools.utils.process_registry import process_registry
+
+        await until(lambda: asyncio.sleep(0, result=process_registry.poll(started["session_id"])["status"] != "running"))
+    finally:
+        await watch.close()
+
+
+async def test_a_threads_pod_is_never_kept_past_its_turn(api):  # noqa: F811
+    store, redis = api.app.state.session_store, api.app.state.redis
+    chat = await a_session(api)
+    watch = BackgroundWatch(poll_seconds=60)
+    watch.configure(store=store, redis=redis, sandbox_pool=Pool("error", copy=True))
+    try:
+        watch.watch(owner=str(chat), proc_id="proc_t", session_id=chat, command="make serve")
         assert not watch.holds(str(chat))
+        assert watch.running_for(chat) == [{"id": "proc_t", "command": "make serve", "status": "running"}]
     finally:
         await watch.close()
