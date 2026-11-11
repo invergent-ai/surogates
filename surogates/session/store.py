@@ -2266,7 +2266,8 @@ class SessionStore:
 
         Interrupted iterations may have no llm.response usage. Count the
         stored reasoning chunks in SQL so replay keeps the number without
-        sending every delta to the browser or changing the event log.
+        sending every delta to the browser or changing the event log.  A
+        coalesced delta stands for its ``chunks`` (one when it has none).
         """
         missing = [
             event for event in events
@@ -2289,7 +2290,7 @@ class SessionStore:
             .scalar_subquery()
         )
         count = (
-            select(func.count(delta.id))
+            select(func.coalesce(func.sum(func.coalesce(delta.data["chunks"].as_integer(), 1)), 0))
             .where(
                 delta.session_id == session_id,
                 delta.type == EventType.LLM_DELTA,

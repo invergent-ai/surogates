@@ -60,6 +60,7 @@ from surogates.harness.context import NOOP_STRATEGIES
 from surogates.harness.cost_tracker import SessionCostTracker
 from surogates.harness.device_replay import replay_unanswered, resumable, unanswered_calls
 from surogates.harness.error_classify import classify_harness_error
+from surogates.harness.live_deltas import DeltaPolicy
 from surogates.harness.llm_call import (
     apply_developer_role,
     call_llm_with_retry,
@@ -712,6 +713,10 @@ class AgentHarness(
       loop to stop, skipping remaining tool calls.
     """
 
+    # The worker's policy (``__init__`` sets it); a class default for harnesses
+    # built without ``__init__``, as some tests build them.
+    _delta_policy: DeltaPolicy = DeltaPolicy()
+
     def __init__(
         self,
         session_store: SessionStore,
@@ -760,6 +765,7 @@ class AgentHarness(
         intake: Sequence[dict[str, Any]] = (),
         entitlement_excluded_tools: frozenset[str] = frozenset(),
         fallback_chain: tuple[Any, ...] = (),
+        delta_policy: DeltaPolicy | None = None,
     ) -> None:
         self._store = session_store
         self._tools = tool_registry
@@ -923,6 +929,9 @@ class AgentHarness(
 
         # Streaming can be disabled via session config or env var.
         self._streaming_enabled: bool = True
+        # How often at most a streamed call writes an ``llm.delta`` event of
+        # one kind (WorkerSettings.delta_coalesce_ms).
+        self._delta_policy: DeltaPolicy = delta_policy or DeltaPolicy()
 
         # Interrupt support -- thread-safe because only a single bool/str
         # is mutated and Python's GIL makes these assignments atomic.
@@ -3434,6 +3443,7 @@ class AgentHarness(
                         if self._streaming_enabled else None
                     ),
                     rate_limit_guard=self._provider_rate_limit_guard(),
+                    delta_policy=self._delta_policy,
                 )
             except Exception as exc:
                 logger.exception(
@@ -6190,6 +6200,7 @@ class AgentHarness(
                 ),
                 context_compressor=self._compressor,
                 rate_limit_guard=self._provider_rate_limit_guard(),
+                delta_policy=self._delta_policy,
             )
 
             # Strip thinking blocks from the summary.

@@ -51,3 +51,21 @@ async def test_replay_preserves_counts_already_saved_in_snapshots(sf):
     replay = await SessionStore(sf).get_events(sid, exclude_types=[EventType.LLM_DELTA])
     assert replay[0].data["reasoning_delta_count"] == 293
     assert replay[1].data["reasoning_tokens"] == 300
+
+
+async def test_replay_counts_the_chunks_a_coalesced_delta_joins(sf):
+    """A coalesced llm.delta stands for its ``chunks``: replay shows the count the live view showed."""
+    sid = uuid4()
+    async with sf() as db:
+        db.add_all([
+            Event(id=1, session_id=sid, type="llm.request", data={}),
+            Event(id=2, session_id=sid, type="llm.delta", data={"reasoning": "One", "chunks": 1, "reasoning_tokens": 1}),
+            Event(id=3, session_id=sid, type="llm.delta", data={"reasoning": "Many", "chunks": 37, "reasoning_tokens": 38}),
+            Event(id=4, session_id=sid, type="llm.delta", data={"reasoning": "Legacy"}),
+            Event(id=5, session_id=sid, type="llm.delta", data={"content": "Text", "chunks": 9}),
+            Event(id=6, session_id=sid, type="session.pause", data={}),
+            Event(id=7, session_id=sid, type="llm.thinking", data={"reasoning": "OneManyLegacy"}),
+        ])
+        await db.commit()
+    replay = await SessionStore(sf).get_events(sid, exclude_types=[EventType.LLM_DELTA])
+    assert [e.data.get("reasoning_delta_count") for e in replay if e.type == "llm.thinking"] == [39]

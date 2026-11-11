@@ -6,6 +6,7 @@ from uuid import uuid4
 
 import pytest
 
+from surogates.harness.live_deltas import DeltaPolicy, LiveDeltas
 from surogates.harness.llm_call import (
     _extract_reasoning_tokens,
     call_llm_streaming_inner,
@@ -60,8 +61,10 @@ def chunk(reasoning=None, tokens=None):
 
 
 @pytest.mark.asyncio
+# A window no loaded test box outlasts: the chunks of this stream land in one.
+@pytest.mark.parametrize("coalesce_ms", [0, 60_000])
 @pytest.mark.parametrize("reported", [None, 0, 1200])
-async def test_stream_forwards_only_provider_counts(reported):
+async def test_stream_forwards_only_provider_counts(reported, coalesce_ms):
     chunks = [chunk("A chunk containing several words. ")]
     if reported is not None:
         first_count = 100 if reported else 0
@@ -71,21 +74,32 @@ async def test_stream_forwards_only_provider_counts(reported):
         completions=SimpleNamespace(create=AsyncMock(return_value=stream)),
     ))
     store = AsyncMock()
+    session = SimpleNamespace(id=uuid4())
     _, usage = await call_llm_streaming_inner(
-        session=SimpleNamespace(id=uuid4()),
+        session=session,
         create_kwargs={"model": "test-model", "messages": []},
         iteration=2,
         turn_id="turn-1",
         llm_client=client,
         store=store,
+        live_deltas=LiveDeltas(
+            store, session.id, policy=DeltaPolicy(coalesce_ms=coalesce_ms),
+            iteration=2, turn_id="turn-1",
+        ),
     )
     counts = [
         call.args[2]
         for call in store.emit_event.await_args_list
         if call.args[1] == EventType.LLM_DELTA
         and "reasoning_tokens" in call.args[2]
+        # A coalesced reasoning event carries a count too: the provider's
+        # newest, or the chunks so far (tests/test_delta_coalescing.py).
+        and "reasoning" not in call.args[2]
     ]
-    assert [payload["reasoning_tokens"] for payload in counts] == ([100, 1200] if reported else [])
+    # Every change of the count without coalescing; the newest one of the
+    # window (these chunks all land in one) with it.
+    expected = ([100, 1200] if coalesce_ms == 0 else [1200]) if reported else []
+    assert [payload["reasoning_tokens"] for payload in counts] == expected
     assert usage.get("reasoning_tokens") == (1200 if reported else None)
     assert usage["reasoning_delta_count"] == (1 if reported is None else 2)
     for payload in counts:
