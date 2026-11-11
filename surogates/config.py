@@ -979,6 +979,10 @@ class AgentsSettings(BaseSettings):
     model_config = {"env_prefix": "SUROGATES_AGENTS_"}
 
     subagent_parity: bool = False
+    # The tokens (input + output) each sub-agent the ``agent`` tool starts may
+    # use, its own sub-agents' included; 0 for no limit.  A session's
+    # ``agent_token_budget`` config key wins for the agents it starts.
+    agent_token_budget: int = 0
 
 
 class Settings(BaseSettings):

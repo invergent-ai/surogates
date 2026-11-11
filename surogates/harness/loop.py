@@ -294,7 +294,14 @@ from surogates.harness.loop_pending import (
     _waits_on_its_workers,
 )
 from surogates.harness.agent_news import agent_news_unread, started_notified_work, starts_notified_work
-from surogates.harness.subagents import REPLACED_TOOL, apply_parity, runs_in_background
+from surogates.harness.subagents import (
+    BUDGET_REASON,
+    REPLACED_TOOL,
+    apply_parity,
+    budget_of,
+    over_budget,
+    runs_in_background,
+)
 from surogates.harness.loop_tool_recovery import (
     _is_valid_json_args,
     build_partial_tool_call_recovery_results,
@@ -3285,6 +3292,15 @@ class AgentHarness(
             # --- Interrupt check at the top of each iteration ---
             if self._check_interrupt():
                 await self._abort_iteration_with_pause(session, saga, cost_tracker, lease=lease)
+                return
+
+            # --- A sub-agent's token budget, its own agents' use included ---
+            if budget_of(session) and await over_budget(self._store, session) is not None:
+                logger.info("Session %s: its token budget is used up; its turn ends here", session.id)
+                await self._complete_session(
+                    session, messages, lease, reason=BUDGET_REASON,
+                    cost_tracker=cost_tracker, turn_id=turn_id, user_message=request,
+                )
                 return
 
             # --- Mid-turn steering ---

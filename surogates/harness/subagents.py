@@ -25,6 +25,12 @@ logger = logging.getLogger(__name__)
 PARITY_KEY = "subagent_parity"
 #: A sub-agent's config key: how the ``agent`` tool started it.
 DISPATCH_KEY = "agent_dispatch"
+#: A session's config key: the token budget of each agent it starts (``AgentsSettings.agent_token_budget``).
+BUDGET_KEY = "agent_token_budget"
+#: A sub-agent's config key: its own budget, ``{"tokens": N}``.
+AGENT_BUDGET_KEY = "agent_budget"
+#: The reason a turn ends with when its agent used its budget.
+BUDGET_REASON = "budget_exhausted"
 
 #: The config keys of the family only the server writes: a client naming one could switch the family on
 #: against the deployment's setting, pose as another agent's sub-agent, or lift its own depth or budget.
@@ -104,6 +110,36 @@ def monitor_allowed(config: dict | None) -> bool:
     return not isinstance(config.get(DISPATCH_KEY), dict) and not under_a_thread(config)
 
 
+def budget_for_children(config: dict | None) -> int:
+    """The token budget each agent a session with *config* starts gets: its own key, else the deployment's; 0 for none."""
+    value = (config or {}).get(BUDGET_KEY)
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    try:
+        from surogates.config import load_settings
+
+        return max(0, int(load_settings().agents.agent_token_budget))
+    except Exception:
+        return 0
+
+
+def budget_of(session: Any) -> int:
+    """The token budget of *session*, a sub-agent the ``agent`` tool started; 0 for none."""
+    value = ((getattr(session, "config", None) or {}).get(AGENT_BUDGET_KEY) or {})
+    tokens = value.get("tokens") if isinstance(value, dict) else None
+    return tokens if isinstance(tokens, int) and not isinstance(tokens, bool) and tokens > 0 else 0
+
+
+async def over_budget(store: Any, session: Any) -> int | None:
+    """The tokens *session* and the agents under it have used, when that reaches its budget; None otherwise."""
+    budget = budget_of(session)
+    if not budget:
+        return None
+    usage = await store.session_tree_usage(session.id)
+    used = usage.input_tokens + usage.output_tokens
+    return used if used >= budget else None
+
+
 def dispatch_of(session: Any) -> dict | None:
     """How the ``agent`` tool started *session*; None for any other session."""
     value = (getattr(session, "config", None) or {}).get(DISPATCH_KEY)
@@ -170,8 +206,8 @@ async def tell_parent(
 ) -> None:
     """Write the end of background sub-agent *session* to its parent as an ``agent.notification``, and wake it.
 
-    *status* is ``completed``, ``failed`` or ``killed``; *result* the agent's
-    last words.  Best effort: the agent's own log keeps its end whatever
+    *status* is ``completed``, ``failed``, ``killed`` or ``budget`` (it used
+    its token budget); *result* the agent's last words.  Best effort: the agent's own log keeps its end whatever
     becomes of this.
     """
     from surogates.harness.agent_news import MAX_RESULT_CHARS
@@ -182,6 +218,8 @@ async def tell_parent(
         "agent_id": str(session.id), "kind": "agent", "status": status,
         "summary": str(dispatch.get("description") or ""), "result": (result or "")[:MAX_RESULT_CHARS],
     }
+    if status == "budget":
+        payload["budget_tokens"] = budget_of(session)
     if error:
         payload["error"] = error[:2000]
     if reason and status == "completed" and reason not in _FINISHED:

@@ -27,7 +27,14 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from surogates.harness.agent_news import fenced
-from surogates.harness.subagents import DISPATCH_KEY, PARITY_KEY, dispatch_of, may_message
+from surogates.harness.subagents import (
+    AGENT_BUDGET_KEY,
+    DISPATCH_KEY,
+    PARITY_KEY,
+    budget_for_children,
+    dispatch_of,
+    may_message,
+)
 from surogates.runtime.turn_slots import turn_waiting
 from surogates.tools.registry import ToolRegistry, ToolSchema
 
@@ -733,7 +740,10 @@ async def _agent_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
         bundle=kwargs.get("bundle"),
         live_parent_config=kwargs.get("session_config"),
         leaf_tools=("delegate_task", "agent"),
-        extra_config={PARITY_KEY: True, DISPATCH_KEY: dispatch},
+        extra_config={
+            PARITY_KEY: True, DISPATCH_KEY: dispatch,
+            **({AGENT_BUDGET_KEY: {"tokens": budget}} if (budget := budget_for_children(parent_config)) else {}),
+        },
         seed=seed,
         start_extra={"agent": True, "description": description, "mode": dispatch["mode"], "fork": fork,
                      "tool_call_id": tool_call_id},

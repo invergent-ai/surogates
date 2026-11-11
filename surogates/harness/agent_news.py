@@ -80,6 +80,8 @@ def notification_note(data: dict) -> dict:
             head = f"[{named} failed: {data.get('error') or 'unknown error'}]"
         elif status == "killed":
             head = f"[{named} was stopped before it finished]"
+        elif status == "budget":
+            head = f"[{named} stopped before it finished: it used its budget of {data.get('budget_tokens')} tokens]"
         elif data.get("reason"):
             head = f"[{named} ended before it finished ({data['reason']})]"
         else:

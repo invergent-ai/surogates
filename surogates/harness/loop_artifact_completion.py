@@ -1422,8 +1422,11 @@ class ArtifactCompletionMixin:
             from surogates.harness.message_utils import extract_final_response
             from surogates.harness.subagents import tell_parent
 
+            from surogates.harness.subagents import BUDGET_REASON
+
             await tell_parent(
-                store=self._store, redis=self._redis, session=session, status="completed", reason=reason,
+                store=self._store, redis=self._redis, session=session, reason=reason,
+                status="budget" if reason == BUDGET_REASON else "completed",
                 result=extract_final_response(await self._store.get_events(session.id), fallback=""),
             )
         elif notify_parent and _should_notify_parent_on_completion(session):
