@@ -21,7 +21,7 @@ from surogates.channels.inbound import build_principal_stamp
 from surogates.channels.memory_boundary import simulation_boundary
 from surogates.channels.constants import queue_priority
 from surogates.config import INTERRUPT_CHANNEL_PREFIX, enqueue_session
-from surogates.harness.message_utils import tool_args
+from surogates.simulation.side_effects import tool_args
 from surogates.session.events import EventType
 from surogates.session.live import DeltaGate, LiveFrame, Notification, next_message, session_channel
 from surogates.session.interactive_input import try_resolve_text_answer

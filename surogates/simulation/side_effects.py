@@ -22,9 +22,18 @@ from typing import Any, Awaitable, Callable
 from pydantic import BaseModel
 
 from surogates.channels.memory_boundary import SIMULATION_BOUNDARY_PREFIX
-from surogates.harness.message_utils import tool_args
 
 logger = logging.getLogger(__name__)
+
+
+def tool_args(raw: Any) -> dict:
+    """A tool call's arguments, sent as a JSON string or already a dict; ``{}`` when neither."""
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            return {}
+    return raw if isinstance(raw, dict) else {}
 
 WRITE_VERBS = frozenset(
     "SEND CREATE ADD UPDATE EDIT PATCH DELETE REMOVE POST PUT PAY CHARGE REFUND CANCEL BOOK "

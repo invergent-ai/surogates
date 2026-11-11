@@ -23,7 +23,7 @@ from sqlalchemy.dialects import postgresql, sqlite
 
 from surogates.channels.website_session import COOKIE_NAME, CSRF_HEADER_NAME
 from surogates.db.models import Event, SimulationMessage
-from surogates.harness.message_utils import tool_args
+from surogates.simulation.side_effects import tool_args
 from surogates.simulation import store
 
 ASK = "ask_user_question"
