@@ -20,6 +20,7 @@ from typing import Any
 
 from openai import AsyncOpenAI
 
+from surogates.harness.tls import llm_http_client
 from surogates.runtime.context import AgentRuntimeContext, LLMEndpoint
 from surogates.runtime.entitlements import entitled_model_tier
 
@@ -256,7 +257,8 @@ async def build_session_llm_clients(
             user_id=user_id,
             service_account_id=service_account_id,
         )
-        client = AsyncOpenAI(api_key=key, base_url=endpoint.base_url)
+        # One TLS context for every slot and wake (``harness.tls``).
+        client = AsyncOpenAI(api_key=key, base_url=endpoint.base_url, http_client=llm_http_client())
         slot = ResolvedLLM(
             client=client, model=endpoint.model,
             context_window=endpoint.context_window,
@@ -282,6 +284,7 @@ async def build_session_llm_clients(
             return None
         client_kwargs: dict[str, Any] = {
             "api_key": llm.image_api_key or llm.api_key or "EMPTY",
+            "http_client": llm_http_client(),
         }
         base_url = llm.image_base_url or llm.base_url
         if base_url:
