@@ -693,6 +693,8 @@ async def _running_agents(session_factory: Any, parent_id: UUID) -> list[tuple[s
 _STARTING: dict[UUID, list[tuple[str, str | None, str]]] = {}
 #: One lock per parent for its starts and resumes; an entry lives while a call holds or waits for it (a weak map).
 _START_LOCKS: "weakref.WeakValueDictionary[UUID, asyncio.Lock]" = weakref.WeakValueDictionary()
+#: Tokens a sub-agent with a budget has handed to its agents still starting or running in this process, by its id.
+_BUDGET_HANDED: dict[UUID, int] = {}
 
 
 def _start_lock(parent_id: UUID) -> asyncio.Lock:
@@ -703,8 +705,6 @@ def _start_lock(parent_id: UUID) -> asyncio.Lock:
         lock = asyncio.Lock()
         _START_LOCKS[parent_id] = lock
     return lock
-#: Tokens a sub-agent with a budget has handed to its agents still starting or running in this process, by its id.
-_BUDGET_HANDED: dict[UUID, int] = {}
 
 
 #: The most agents one session may have running in the background at once.

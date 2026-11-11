@@ -278,12 +278,13 @@ async def test_starts_and_resumes_of_one_parent_share_one_lock_while_any_waits()
     from uuid import uuid4 as fresh
 
     parent = fresh()
-    held = agents_module._start_lock(parent)
-    async with held:
+    async with agents_module._start_lock(parent):
         waiter = asyncio.create_task(_takes(agents_module._start_lock(parent)))
         await asyncio.sleep(0)
-    # Released, with a waiter woken but not yet running: a third call still gets the same lock.
-    assert agents_module._start_lock(parent) is held
+        first = id(agents_module._START_LOCKS[parent])
+    # Released, with a waiter woken but not yet running, which alone still holds the lock: a third call gets it.
+    assert parent in agents_module._START_LOCKS
+    assert id(agents_module._start_lock(parent)) == first
     await waiter
 
 
