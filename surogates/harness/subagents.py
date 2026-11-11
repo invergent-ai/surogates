@@ -40,7 +40,7 @@ STANDS_IN_FOR: dict[str, tuple[str, ...]] = {
 }
 
 #: The tools that go with ``agent``: offered to a session that may start agents, and to every agent it started.
-COMPANION_TOOLS: frozenset[str] = frozenset({"send_message"})
+COMPANION_TOOLS: frozenset[str] = frozenset({"send_message", "list_agents", "stop_agent"})
 #: The tools of the family, offered only with parity on.
 PARITY_TOOLS: frozenset[str] = frozenset({"agent"}) | COMPANION_TOOLS
 #: The tool ``agent`` stands in for; with parity on it is no longer offered, but still callable.
@@ -102,6 +102,21 @@ def runs_in_background(session: Any) -> bool:
 
 #: The reasons a turn ends with that are no early stop: it finished.
 _FINISHED = frozenset({"completed", "stop", "done", "complete"})
+async def stopped_by(store: Any, session_id: Any) -> str | None:
+    """The agent whose ``stop_agent`` paused the session last; None when its last stop was its user's.
+
+    The pause the harness writes as the stopped turn ends (``turn_ended``) is
+    not a stop of anyone's: the one before it is.
+    """
+    pauses = await store.get_events(session_id, types=[EventType.SESSION_PAUSE])
+    for pause in reversed(pauses):
+        data = pause.data or {}
+        if data.get("turn_ended"):
+            continue
+        return data.get("stopped_by") or None
+    return None
+
+
 async def lineage(store: Any, session: Any, *, limit: int = 8) -> list[Any]:
     """*session*'s ancestors, its parent first, at most *limit* of them."""
     chain: list[Any] = []

@@ -1861,6 +1861,13 @@ async def list_sessions(
     return ListSessionsResponse(sessions=sessions, total=total)
 
 
+async def _stopped_by_an_agent(store: Any, session_id: UUID) -> bool:
+    """Whether paused *session_id*'s last stop was an agent's ``stop_agent``, not its user's."""
+    from surogates.harness.subagents import stopped_by
+
+    return await stopped_by(store, session_id) is not None
+
+
 @router.post("/api/sessions/{session_id}/pause", response_model=Session)
 @router.post("/sessions/{session_id}/pause", response_model=Session)
 async def pause_session(
@@ -1890,6 +1897,10 @@ async def pause_session(
     # session whose stop is in no event.  The user's own requests on the
     # chat's files go on.
     if session.status != "paused":
+        await store.emit_event(session_id, EventType.SESSION_PAUSE, {}, status="paused")
+    elif await _stopped_by_an_agent(store, session_id):
+        # Stopped by the agent that started it (``stop_agent``): the user's stop
+        # takes its place, so that agent can no longer lift it.
         await store.emit_event(session_id, EventType.SESSION_PAUSE, {}, status="paused")
 
     # Durably, for the session and the sessions under it: a computer that is
