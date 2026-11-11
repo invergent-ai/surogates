@@ -374,3 +374,25 @@ async def test_the_sandbox_spec_marks_a_simulated_session():
         tenant = SimpleNamespace(org_id=ORG, user_id=USER, asset_root="/tmp/test")
         spec = await _build_session_sandbox_spec(session, tenant, str(session.id))
         assert spec.simulated is simulated
+
+
+async def test_an_experts_sandbox_in_a_simulation_gets_the_claim(monkeypatch):
+    from surogates.governance.policy import PolicyDecision
+    from surogates.sandbox.base import SandboxSpec
+    from surogates.sandbox.docker import DockerSandbox
+    from surogates.tools.router import ToolRouter
+
+    monkeypatch.setenv("SUROGATES_JWT_SECRET", "test-secret")
+    allow = SimpleNamespace(check=lambda name, *a, **k: PolicyDecision(allowed=True, reason="", tool_name=name))
+    shared = SandboxSpec(env={"ORG_ID": str(ORG), "USER_ID": str(USER)})
+    for config, simulated in ((SIM_CONFIG, True), ({}, False)):
+        pool = SimpleNamespace(ensure=AsyncMock(), execute=AsyncMock(return_value="{}"))
+        await ToolRouter(ToolRegistry(), pool, allow).execute(
+            name="terminal", arguments={"command": "python report.py"},
+            tenant=SimpleNamespace(sandbox_spec=shared), session_id=SESSION, session_config=config,
+        )
+        spec = pool.ensure.await_args.args[1]
+        token = DockerSandbox._mint_mcp_token(SimpleNamespace(), spec, uuid4().hex)
+        assert _claims(token).get("simulated", False) is simulated
+    # The tenant's spec is shared by its real sessions: it stays unmarked.
+    assert shared.simulated is False

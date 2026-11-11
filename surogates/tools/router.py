@@ -16,6 +16,7 @@ tool calls.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 from enum import Enum
@@ -25,6 +26,7 @@ from uuid import UUID
 from surogates.governance.policy import GovernanceGate, PolicyDecision
 from surogates.sandbox.pool import SandboxPool
 from surogates.sandbox.base import default_sandbox_spec
+from surogates.simulation.side_effects import is_simulated
 from surogates.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -352,6 +354,9 @@ class ToolRouter:
                     getattr(tenant, "sandbox_spec", None)
                     or default_sandbox_spec()
                 )
+                if is_simulated(extra_kwargs.get("session_config")):
+                    # Its token tells the MCP proxy to fake what scripts in it would change.
+                    sandbox_spec = dataclasses.replace(sandbox_spec, simulated=True)
                 await self.sandbox_pool.ensure(
                     str(session_id), sandbox_spec,
                 )
