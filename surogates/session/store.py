@@ -1055,60 +1055,7 @@ class SessionStore:
                 )
             )).scalars().all()
             if mission_ids:
-                # Research-run sidecar (Arbor): idea_nodes -> research_runs
-                # -> missions, and idea_nodes -> tasks.  None of those FKs
-                # carry ON DELETE CASCADE, so delete the tree rows before
-                # the mission's tasks and the mission itself or they reject.
-                run_ids = (await db.execute(
-                    select(ResearchRun.id).where(
-                        ResearchRun.mission_id.in_(mission_ids),
-                    )
-                )).scalars().all()
-                if run_ids:
-                    await db.execute(
-                        delete(IdeaNode).where(
-                            IdeaNode.run_id.in_(run_ids),
-                        )
-                    )
-                    await db.execute(
-                        delete(ResearchRun).where(
-                            ResearchRun.id.in_(run_ids),
-                        )
-                    )
-                task_ids = (await db.execute(
-                    select(TaskRow.id).where(
-                        TaskRow.mission_id.in_(mission_ids),
-                    )
-                )).scalars().all()
-                if task_ids:
-                    # task_links has composite-PK FKs to tasks(id) without
-                    # cascade; clear edges where either end is in the
-                    # deleted task set so the task DELETE doesn't reject.
-                    await db.execute(
-                        delete(TaskLink).where(
-                            or_(
-                                TaskLink.parent_id.in_(task_ids),
-                                TaskLink.child_id.in_(task_ids),
-                            ),
-                        )
-                    )
-                    # ``sessions.task_id`` may still point at one of the
-                    # tasks we're about to delete (a worker session
-                    # running a mission task).  NULL it out before the
-                    # task DELETE so the FK doesn't reject.  These
-                    # sessions are in the archive tree anyway and will be
-                    # archived in the UPDATE below.
-                    await db.execute(
-                        update(SessionRow)
-                        .where(SessionRow.task_id.in_(task_ids))
-                        .values(task_id=None)
-                    )
-                    await db.execute(
-                        delete(TaskRow).where(TaskRow.id.in_(task_ids))
-                    )
-                await db.execute(
-                    delete(MissionRow).where(MissionRow.id.in_(mission_ids))
-                )
+                await delete_missions(db, mission_ids)
 
             await db.execute(
                 update(SessionRow)
@@ -1188,21 +1135,7 @@ class SessionStore:
             )).first()
             if held is not None:
                 raise RerunRunning(f"a session of the tree of {session_id} is mid-turn")
-            tasks = (await db.execute(
-                select(TaskRow.id).where(or_(TaskRow.parent_session_id.in_(tree), TaskRow.current_session_id.in_(tree)))
-            )).scalars().all()
-            if tasks:
-                await db.execute(update(SessionRow).where(SessionRow.task_id.in_(tasks)).values(task_id=None))
-                await db.execute(delete(TaskLink).where(or_(TaskLink.parent_id.in_(tasks), TaskLink.child_id.in_(tasks))))
-                await db.execute(delete(TaskRow).where(TaskRow.id.in_(tasks)))
-            await db.execute(delete(InboxItem).where(InboxItem.session_id.in_(tree)))
-            await db.execute(delete(DeliveryOutbox).where(DeliveryOutbox.session_id.in_(tree)))
-            await db.execute(delete(LeaseRow).where(LeaseRow.session_id.in_(tree)))
-            await db.execute(delete(SessionCursor).where(SessionCursor.session_id.in_(tree)))
-            await db.execute(delete(BoardNote).where(BoardNote.writer_session_id.in_(tree)))
-            await db.execute(delete(EventRow).where(EventRow.session_id.in_(tree)))
-            deleted = await db.execute(delete(SessionRow).where(SessionRow.id.in_(tree)))
-            return deleted.rowcount
+            return await delete_session_rows(db, tree)
 
     async def session_tree_usage(self, session_id: UUID) -> TreeUsage:
         """What the session and every session under it by ``parent_id`` used, at any depth.
@@ -3653,3 +3586,82 @@ def _build_counter_update_clause(event_type: EventType, data: dict) -> str:
             parts.append(f"estimated_cost_usd = estimated_cost_usd + {cost}")
 
     return ", ".join(parts)
+
+
+async def delete_missions(db: AsyncSession, mission_ids: Sequence[UUID]) -> None:
+    """Delete missions with their research runs, idea nodes, tasks and task edges."""
+    # Research-run sidecar (Arbor): idea_nodes -> research_runs
+    # -> missions, and idea_nodes -> tasks.  None of those FKs
+    # carry ON DELETE CASCADE, so delete the tree rows before
+    # the mission's tasks and the mission itself or they reject.
+    run_ids = (await db.execute(
+        select(ResearchRun.id).where(
+            ResearchRun.mission_id.in_(mission_ids),
+        )
+    )).scalars().all()
+    if run_ids:
+        await db.execute(
+            delete(IdeaNode).where(
+                IdeaNode.run_id.in_(run_ids),
+            )
+        )
+        await db.execute(
+            delete(ResearchRun).where(
+                ResearchRun.id.in_(run_ids),
+            )
+        )
+    task_ids = (await db.execute(
+        select(TaskRow.id).where(
+            TaskRow.mission_id.in_(mission_ids),
+        )
+    )).scalars().all()
+    if task_ids:
+        # task_links has composite-PK FKs to tasks(id) without
+        # cascade; clear edges where either end is in the
+        # deleted task set so the task DELETE doesn't reject.
+        await db.execute(
+            delete(TaskLink).where(
+                or_(
+                    TaskLink.parent_id.in_(task_ids),
+                    TaskLink.child_id.in_(task_ids),
+                ),
+            )
+        )
+        # ``sessions.task_id`` may still point at one of the
+        # tasks we're about to delete (a worker session
+        # running a mission task).  NULL it out before the
+        # task DELETE so the FK doesn't reject.
+        await db.execute(
+            update(SessionRow)
+            .where(SessionRow.task_id.in_(task_ids))
+            .values(task_id=None)
+        )
+        await db.execute(
+            delete(TaskRow).where(TaskRow.id.in_(task_ids))
+        )
+    await db.execute(
+        delete(MissionRow).where(MissionRow.id.in_(mission_ids))
+    )
+
+
+async def delete_session_rows(db: AsyncSession, tree: Sequence[UUID]) -> int:
+    """Delete the sessions *tree* and every row that points at them: how many sessions.
+
+    Missions, research runs and workstreams are not looked for: one under a
+    session makes the delete fail on its foreign key.
+    """
+    tasks = (await db.execute(
+        select(TaskRow.id).where(or_(TaskRow.parent_session_id.in_(tree), TaskRow.current_session_id.in_(tree)))
+    )).scalars().all()
+    if tasks:
+        await db.execute(update(SessionRow).where(SessionRow.task_id.in_(tasks)).values(task_id=None))
+        await db.execute(delete(TaskLink).where(or_(TaskLink.parent_id.in_(tasks), TaskLink.child_id.in_(tasks))))
+        await db.execute(delete(TaskRow).where(TaskRow.id.in_(tasks)))
+    await db.execute(delete(InboxItem).where(InboxItem.session_id.in_(tree)))
+    await db.execute(delete(DeliveryOutbox).where(DeliveryOutbox.session_id.in_(tree)))
+    await db.execute(delete(LeaseRow).where(LeaseRow.session_id.in_(tree)))
+    await db.execute(delete(SessionCursor).where(SessionCursor.session_id.in_(tree)))
+    await db.execute(delete(BoardNote).where(BoardNote.writer_session_id.in_(tree)))
+    await db.execute(delete(EventRow).where(EventRow.session_id.in_(tree)))
+    deleted = await db.execute(delete(SessionRow).where(SessionRow.id.in_(tree)))
+    return deleted.rowcount
