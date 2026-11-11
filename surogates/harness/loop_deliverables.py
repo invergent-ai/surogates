@@ -107,15 +107,24 @@ _INPUT_WORDS = frozenset({
     "given", "check", "checking", "consult", "eg", "ie",
 })
 #: Two words that do: "based on plan.md", "according to notes.md".
-_INPUT_PAIRS = frozenset({("based", "on"), ("according", "to"), ("look", "at")})
+_INPUT_PAIRS = frozenset({
+    ("based", "on"), ("according", "to"), ("look", "at"), ("refer", "to"), ("compared", "to"),
+    ("relative", "to"), ("similar", "to"), ("same", "as"), ("such", "as"),
+})
 #: The word that makes it a target, even when a file of that name exists:
 #: "post the numbers to status.md", "update the existing tracker.xlsx".
 _TARGET_WORDS = frozenset({
     "to", "into", "as", "save", "saving", "write", "writing", "create", "creating",
     "produce", "producing", "generate", "generating", "update", "updating", "edit",
     "editing", "overwrite", "export", "exporting", "append", "output", "deliver",
+    "rewrite", "rewriting", "redo", "revise", "revising", "finalize", "finalise", "fix",
+    "complete", "correct", "amend", "draft", "drafting", "prepare", "compile", "assemble",
+    "make", "build",
 })
 _TARGET_PAIRS = frozenset({("fill", "in"), ("fill", "out")})
+#: A list of required names: "the task requires these files by name, spelled
+#: exactly like this: `report.docx`".
+_BY_NAME_RE = re.compile(r"\bfiles?\s+by\s+name\b", re.IGNORECASE)
 #: Words passed over on the way back to the word that tells.
 _FILLER_WORDS = frozenset({
     "the", "a", "an", "this", "that", "these", "those", "our", "my", "your", "its", "their",
@@ -130,23 +139,41 @@ _INPUT, _TARGET = "input", "target"
 
 #: A filename pattern, not a name.  A year placeholder in any case
 #: ("bulletin_YYYY.txt", "app_yyyymmdd.json"); two upper-case placeholder
-#: segments in a row ("log_MM_DD.txt"); or one that is never a real name's
-#: ("chapter_N.md", "report_DATE.pdf").  One segment such as ``MM`` alone
-#: ("Q3_MM_final.xlsx") may be a real name, and counts.
+#: segments in a row ("log_MM_DD.txt"); or a date one after the name's
+#: start ("report_DATE.pdf").  One segment such as ``MM``, ``N`` or ``X``
+#: alone ("Q3_MM_final.xlsx", "Form_N.pdf", "Appendix_X.docx") may be a
+#: real name, and counts.
 _PLACEHOLDER = r"(?:YYYY|YY|MM|DD|HH|X{2,}|N{2,})"
 _PLACEHOLDER_RE = re.compile(
     r"(?:^|[_\-.])(?:(?i:yyyy(?:mm(?:dd)?)?|yymmdd)|YY(?=[_\-.]" + _PLACEHOLDER + r"))(?=[_\-.]|$)"
     r"|(?:^|[_\-.])" + _PLACEHOLDER + r"[_\-.]" + _PLACEHOLDER + r"(?=[_\-.]|$)"
-    r"|(?:^|[_\-.])(?:N|X|DATE|TIMESTAMP)(?=[_\-.]|$)"
+    r"|[_\-.](?:DATE|TIMESTAMP)(?=[_\-.]|$)"
 )
-#: Just before a match, these make it a piece of a template ("{TICKER}_10K.txt",
-#: "<id>-notes.md", "report_*.md"), not a name.
-_TEMPLATE_MARKS = frozenset("{}<>[]*$%")
+#: A match that starts with a separator right after one of these is a piece
+#: of a template ("{TICKER}_10K.txt", "<id>-notes.md"), not a name.  The
+#: opening marks are not among them: "**report.docx**", "[results.csv]".
+_TEMPLATE_MARKS = frozenset("}>]")
+#: How far back a path's start is looked for ("outputs/report.docx"), and
+#: how many mentions of one name are weighed.
+_PATH_WINDOW = 200
+_MAX_MENTIONS = 20
+
+
+def _path_start(user_text: str, start: int) -> int:
+    """Where the path a filename ends begins: "outputs/" in "to outputs/report.docx"."""
+    floor = max(0, start - _PATH_WINDOW)
+    while start > floor and user_text[start - 1] in _PATH_CHARS:
+        start -= 1
+    return start
+
+
+_PATH_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-./\\~")
 
 
 def _role(user_text: str, start: int) -> str | None:
     """Whether the words just before a filename, in its clause, make it an
     input or a target; None when they say neither."""
+    start = _path_start(user_text, start)
     window = _ABBREVIATIONS_RE.sub(lambda m: m.group(1).replace(".", ""), user_text[max(0, start - _CLAUSE_WINDOW):start])
     words = [w.lower() for w in _WORD_RE.findall(_CLAUSE_END_RE.split(window)[-1])]
     given = False
@@ -157,7 +184,7 @@ def _role(user_text: str, start: int) -> str | None:
     pair = (words[-2], last) if len(words) > 1 else ("", last)
     if pair in _INPUT_PAIRS:
         return _INPUT
-    if last in _TARGET_WORDS or pair in _TARGET_PAIRS:
+    if last in _TARGET_WORDS or pair in _TARGET_PAIRS or _BY_NAME_RE.search(window):
         return _TARGET
     if last in _INPUT_WORDS or given:
         return _INPUT
@@ -180,13 +207,16 @@ def missing_deliverables(
         return []
     roles: dict[str, set[str | None]] = {}
     names: dict[str, str] = {}
+    weighed: dict[str, int] = {}
     for match in _FILENAME_RE.finditer(user_text):
         name = posixpath.basename(match.group(0))
         key = name.lower()
         start = match.start()
         # A bare extension ("...the .docx version") is not a filename, and
         # a piece of a template ("{TICKER}_10K.txt") is not one either.
-        if key.startswith(".") or (start and user_text[start - 1] in _TEMPLATE_MARKS):
+        if key.startswith(".") or (
+            start and user_text[start - 1] in _TEMPLATE_MARKS and name[0] in "_-"
+        ):
             continue
         if _PLACEHOLDER_RE.search(name.rsplit(".", 1)[0]):
             continue
@@ -195,7 +225,8 @@ def missing_deliverables(
                 continue
             names[key] = name
         said = roles.setdefault(key, set())
-        if len(said) < 3:  # input, target and neither: nothing more to learn
+        if _TARGET not in said and weighed.get(key, 0) < _MAX_MENTIONS:
+            weighed[key] = weighed.get(key, 0) + 1
             said.add(_role(user_text, start))
     if not names:
         return []

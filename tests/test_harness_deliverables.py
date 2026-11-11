@@ -216,6 +216,44 @@ def test_a_file_in_the_workspace_the_request_asks_to_write_is_still_asked_for(us
     assert missing_deliverables(user, [], present={name.lower()}) == [name]
 
 
+@pytest.mark.parametrize("user, want", [
+    ("Save the result as **report.docx**.", ["report.docx"]),
+    ("Deliverable: *summary.md*", ["summary.md"]),
+    ("Write the output to [results.csv].", ["results.csv"]),
+    ("Put it in <b>report.html</b>", ["report.html"]),
+    ("Fill in Form_N.pdf and Appendix_X.docx.", ["Form_N.pdf", "Appendix_X.docx"]),
+])
+def test_marked_up_names_and_single_letter_segments_are_names(user, want):
+    assert missing_deliverables(user, []) == want
+
+
+@pytest.mark.parametrize("user, present, want", [
+    # The words before a path, not before its last segment, tell.
+    ("Save it to outputs/report.docx", {"report.docx"}, ["report.docx"]),
+    ("Post this week's numbers to reports/status.md", {"status.md"}, ["status.md"]),
+    ("Read from inputs/data.csv and answer.", (), []),
+    # A list of required names asks for each, even one already there.
+    ("The task requires these files by name, spelled exactly like this: `report.docx`.", {"report.docx"},
+     ["report.docx"]),
+    ("Revise report.docx with the new numbers.", {"report.docx"}, ["report.docx"]),
+    # "to" and "as" in these pairs refer to an input.
+    ("Refer to the attached policy.pdf when answering.", {"policy.pdf"}, []),
+    ("Compared to budget.xlsx, how did we do?", {"budget.xlsx"}, []),
+    ("Use a layout such as template.docx.", {"template.docx"}, []),
+])
+def test_paths_required_lists_and_references(user, present, want):
+    assert missing_deliverables(user, [], present=present) == want
+
+
+def test_a_name_repeated_many_times_is_weighed_a_few_times():
+    import time
+
+    user = "x.txt " * 200_000
+    start = time.thread_time()
+    assert missing_deliverables(user, []) == ["x.txt"]
+    assert time.thread_time() - start < 5
+
+
 def test_every_mention_counts_not_only_the_first():
     user = (
         "Use summary.md as the output file. The task requires these files by name, "
@@ -234,7 +272,6 @@ def test_a_name_that_is_only_ever_an_input_is_not_asked_for():
 @pytest.mark.parametrize("user", [
     "One file per issue, treasury_bulletin_yyyy_mm.txt.",
     "One file per day, app_YYYYMMDD.json.",
-    "One file per chapter, chapter_N.md.",
     "Each run writes report_DATE.pdf.",
     "Files are {TICKER}_10K.txt, <id>-notes.md and Q{n}_summary.md.",
     "Look it up in a filing, e.g. 10K_2023.pdf.",
