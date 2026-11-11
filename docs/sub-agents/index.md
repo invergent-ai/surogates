@@ -515,3 +515,49 @@ For batched goals, the result is a JSON array:
 
 Errors and timeouts are returned per-child as `{"error": "..."}` JSON
 in the `result` field; the surrounding tool call does not fail.
+
+## 13. The `agent` Tool Family (sub-agent parity)
+
+An agent can dispatch sub-agents on its own, in the foreground or the background, and talk to them while they run. The family is off by default: with it off, the tools the model sees are unchanged.
+
+### Switching it on
+
+| Where | Setting |
+|---|---|
+| Deployment | `agents.subagent_parity: true` (env `SUROGATES_AGENTS_SUBAGENT_PARITY=true`) |
+| One session | `"subagent_parity": true` in the session's `config` at creation (wins over the deployment's) |
+
+A session's sub-agents inherit it. With it on, `agent` takes `delegate_task`'s place wherever the session may delegate (a policy that denies `delegate_task` denies `agent`); `delegate_task` stays callable under its old name.
+
+### Tools
+
+| Tool | What it does |
+|---|---|
+| `agent(description, prompt, agent_type?, model?, run_in_background?, fork?)` | Starts a sub-agent: a child session on the delegation channel, through `delegate_task`'s own path (tool inheritance, depth limit 2, iteration cap, 5 starts a turn). Foreground: waits and returns the report with `[agent_id: …]`. Background: returns `{"agent_id", "status": "running"}` at once. `fork`: the child starts from the parent's conversation up to the call, then the brief. Below the depth limit a sub-agent gets `agent` too. |
+| `send_message(to, message, summary)` | To an agent the caller started, its parent (`"parent"`), or a sibling the parent started; same organisation only. A running agent reads it before its next step; one at rest (completed, failed, stopped) resumes with its context and the message, and its next end is told to its parent as a notification. |
+| `list_agents()` | The agents the caller can reach, with status, and the background commands it started. |
+| `stop_agent(agent_id)` | Stops an agent the caller started (with its own agents), or a background command it started. A stopped agent keeps its context: `send_message` resumes it. |
+| `monitor(command, description, timeout_seconds?, max_notifications_per_minute?)` | Runs a command in the sandbox; each line it prints reaches the session as a notification, at most the given number a minute, until it exits, times out (killed) or is stopped. Offered where `terminal` is, never on a user's computer. |
+
+### Notifications
+
+The end of background work reaches the session that started it as an `agent.notification` event `{agent_id, kind, status, summary, result, tool_call_id?}`:
+
+- `kind`: `agent`, `process` (`terminal` with `background` and `notify_on_complete`) or `monitor`.
+- `status`: `completed`, `failed`, `killed`, `budget`, `lost` or `output` (a monitor's lines).
+
+The session reads it as news. A session at work reads it before its next model request; a resting session is woken by it, and it is the input of the new turn. Replay puts it before the first request after it, so a rebuilt request is the one that was sent.
+
+### Budget
+
+`agents.agent_token_budget` (or a session's `agent_token_budget`) gives each agent it starts a budget of tokens, its own sub-agents' included. Past it, the agent's turn ends (`session.complete` with reason `budget_exhausted`), and its parent is told: `status: budget` for a background agent, a note in the call's result for a foreground one.
+
+### Linking an episode for training
+
+| Link | Where |
+|---|---|
+| Parent call → child | the parent's `tool.call` (`tool_call_id`), its `delegation.start` (`child_session_id`, `tool_call_id`, `mode`, `fork`), and the child's tree node `dispatch` (`GET /v1/sessions/{id}/tree` and `/children`) |
+| Child → parent | `agent.notification` on the parent (`agent_id`, `tool_call_id`) |
+| Messages | `coordinator.message` on the recipient (`kind: agent_message`, `from_agent`, `to_agent`, `summary`); the sender's `send_message` call |
+
+Each session's own events are its trajectory: walk the tree, read each node's events, and join them on these keys.

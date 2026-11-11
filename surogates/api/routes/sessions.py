@@ -477,6 +477,18 @@ class ListSessionsResponse(BaseModel):
     total: int
 
 
+class SessionDispatch(BaseModel):
+    """How the ``agent`` tool started a session (``session.config.agent_dispatch``): the call that started it
+    is its parent's tool call ``tool_call_id``; with the parent's log, the child's own, and the
+    ``agent.notification`` / ``coordinator.message`` events between them, an episode is whole."""
+
+    tool_call_id: str | None = None
+    description: str | None = None
+    mode: str | None = None  # foreground | background
+    fork: bool = False
+    budget_tokens: int | None = None
+
+
 class SessionTreeNode(BaseModel):
     """One node in the session tree -- a session plus its lineage metadata."""
 
@@ -488,6 +500,7 @@ class SessionTreeNode(BaseModel):
     agent_type: str | None = None  # from session.config.agent_type
     run_kind: str | None = None  # derived from channel/config, e.g. dynamic_loop
     computer: str | None = None  # a local-folder chat's computer, as session.config.execution names it
+    dispatch: SessionDispatch | None = None  # a sub-agent of the ``agent`` tool: the call that started it
     channel: str
     status: str
     title: str | None = None
@@ -1665,6 +1678,7 @@ def _tree_node_from_row(row: dict) -> SessionTreeNode:
         agent_type=config.get("agent_type"),
         run_kind=_session_run_kind(row["channel"], config),
         computer=(config.get("execution") or {}).get("device_name"),
+        dispatch=_dispatch_of(config),
         channel=row["channel"],
         status=row["status"],
         title=row.get("title"),
@@ -1673,6 +1687,21 @@ def _tree_node_from_row(row: dict) -> SessionTreeNode:
         tool_call_count=row["tool_call_count"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+    )
+
+
+def _dispatch_of(config: dict) -> SessionDispatch | None:
+    """The node's ``dispatch``: how the ``agent`` tool started the session; None for any other session."""
+    dispatch = config.get("agent_dispatch")
+    if not isinstance(dispatch, dict):
+        return None
+    budget = (config.get("agent_budget") or {}).get("tokens") if isinstance(config.get("agent_budget"), dict) else None
+    return SessionDispatch(
+        tool_call_id=dispatch.get("tool_call_id") if isinstance(dispatch.get("tool_call_id"), str) else None,
+        description=dispatch.get("description") if isinstance(dispatch.get("description"), str) else None,
+        mode=dispatch.get("mode") if dispatch.get("mode") in ("foreground", "background") else None,
+        fork=dispatch.get("fork") is True,
+        budget_tokens=budget if isinstance(budget, int) and not isinstance(budget, bool) else None,
     )
 
 
