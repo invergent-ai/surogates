@@ -609,9 +609,10 @@ class LocalWorkspaceIO:
             # The file resolve() will write: ``/workspace/...`` is this
             # workspace, and a relative path is relative to it, never to the
             # worker's own working folder.
-            target = in_workspace_terms(self.root, os.path.expanduser(path))
+            root = str(Path(self.root).resolve())  # as resolve_in_workspace takes it
+            target = in_workspace_terms(root, os.path.expanduser(path))
             if not os.path.isabs(target):
-                target = os.path.join(self.root, target)
+                target = os.path.join(root, target)
         if _is_write_denied(target):
             return f"Write denied: '{path}' is a protected system/credential file."
         return _check_sensitive_path(target, shown=path)
@@ -645,8 +646,18 @@ class LocalWorkspaceIO:
         # expected_revision is not checked: cloud behaviour does not change.
         os.makedirs(os.path.dirname(key) or ".", exist_ok=True)
         tmp = key + ".tmp"
+        # The temporary file is made new, never opened through what is
+        # already at its name: a symlink planted there (by a command, a
+        # cloned repository, an archive) would carry the write outside the
+        # workspace.  A leftover or a planted link is removed, not followed.
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
         try:
-            with open(tmp, "wb") as fh:
+            try:
+                fd = os.open(tmp, flags, 0o666)
+            except FileExistsError:
+                os.unlink(tmp)
+                fd = os.open(tmp, flags, 0o666)
+            with os.fdopen(fd, "wb") as fh:
                 fh.write(data)
             with contextlib.suppress(OSError):
                 os.chmod(tmp, stat_module.S_IMODE(os.stat(key).st_mode))

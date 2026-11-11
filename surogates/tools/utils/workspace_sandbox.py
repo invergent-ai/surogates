@@ -136,10 +136,10 @@ def resolve_in_workspace(
     resolved = candidate.resolve()
 
     if not resolved.is_relative_to(workspace_root):
+        # Named as the model wrote it: the message reaches the model, and
+        # the host's paths are not its to see.
         raise WorkspaceSandboxError(
-            f"Path traversal blocked: '{user_path}' resolves to "
-            f"'{resolved}' which is outside the workspace "
-            f"'{workspace_root}'."
+            f"Path traversal blocked: '{user_path}' resolves outside the workspace."
         )
 
     return resolved

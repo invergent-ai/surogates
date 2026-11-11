@@ -107,3 +107,53 @@ async def test_without_a_workspace_paths_are_judged_as_before(places):
     assert await wio.check_write("etc/passwd") is not None  # the worker folder's etc -> /etc
     assert await wio.check_write("/etc/passwd") is not None
     assert await wio.check_write(str(worker / "notes.txt")) is None
+
+
+async def test_a_workspace_that_is_the_workers_home_still_refuses_its_credentials(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)  # the worker runs elsewhere
+    wio = LocalWorkspaceIO(local._HOME)
+    # Judged in the worker's folder, the old check let these through; they land in the home's .ssh.
+    assert await wio.check_write(".ssh/authorized_keys") is not None
+    assert await wio.check_write("x/../.netrc") is not None
+    assert await wio.check_write("~/.ssh/config") is not None
+
+
+async def test_the_check_judges_resolves_file_for_every_spelling(places, tmp_path):
+    root, _ = places
+    (root / "sys").symlink_to("/etc")
+    link = tmp_path / "ws-link"
+    link.symlink_to(root)
+    for wio in (LocalWorkspaceIO(str(root)), LocalWorkspaceIO(str(link)), LocalWorkspaceIO(str(root) + "/")):
+        assert await wio.check_write("/workspace/sys/passwd") is not None
+        assert await wio.check_write("sys/../notes.md") is None
+        for path in ("notes.md", "/workspace/out/a.md"):
+            assert await wio.check_write(path) is None
+            assert (await wio.resolve(path)).startswith(str(root.resolve()))
+
+
+async def test_a_traversal_refusal_names_no_host_path(places):
+    root, _ = places
+    raw = await _write_file_handler({"path": "../escape.txt", "content": "x"}, workspace_path=str(root))
+    error = json.loads(raw)["error"]
+    assert "../escape.txt" in error and str(root) not in error and str(root.parent) not in error
+
+
+async def test_a_link_planted_at_the_temporary_name_is_never_written_through(places, tmp_path):
+    root, _ = places
+    outside = tmp_path / "outside.txt"
+    outside.write_text("untouched", encoding="utf-8")
+    (root / "note.txt.tmp").symlink_to(outside)
+    raw = await _write_file_handler({"path": "note.txt", "content": "PWNED"}, workspace_path=str(root))
+    assert "error" not in json.loads(raw), raw
+    assert outside.read_text(encoding="utf-8") == "untouched"
+    assert not (root / "note.txt").is_symlink()
+    assert (root / "note.txt").read_text(encoding="utf-8") == "PWNED"
+    assert not (root / "note.txt.tmp").exists()
+
+
+async def test_a_new_file_keeps_the_usual_mode(places):
+    root, _ = places
+    await LocalWorkspaceIO(str(root)).write(str(root / "plain.txt"), b"x")
+    umask = os.umask(0)
+    os.umask(umask)
+    assert (root / "plain.txt").stat().st_mode & 0o777 == 0o666 & ~umask
