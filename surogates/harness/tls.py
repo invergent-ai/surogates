@@ -13,6 +13,18 @@ No client sets TLS options of its own -- no tenant or endpoint carries any
 read changes on disk, so a rotated CA bundle is trusted as soon as it is
 there, as before.  Keys and tokens stay per client and per wake; the
 context holds only what a client trusts.
+
+What tells a changed bundle is the file's (or folder's) inode, mtime and
+size: a replaced file, a swapped symlink (a Kubernetes ConfigMap or Secret)
+and any change of size are seen.  Not seen: a rewrite in place of the same
+size within one timestamp tick, a certificate rewritten in place inside an
+``SSL_CERT_DIR`` folder, and ``SSLKEYLOGFILE`` (read when a context is
+built; for debugging only).
+
+Never give a client on this context ``http2=True`` or ``cert=``: httpcore
+sets the context's ALPN protocols at each connection, and ``cert=`` loads a
+certificate chain into the context, so either would change every client's
+TLS.  A client that needs either builds its own context.
 """
 
 from __future__ import annotations

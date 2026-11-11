@@ -30,6 +30,15 @@ def _context_of(client: httpx.AsyncClient):
 def _fresh(monkeypatch):
     monkeypatch.setattr(tls, "_cached", None)
     monkeypatch.setattr(config, "_settings_cache", None)
+    monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+    monkeypatch.delenv("SSL_CERT_DIR", raising=False)
+
+
+def _bundle(path, first: int, count: int) -> None:
+    """A CA bundle of *count* of certifi's certificates, from the *first*."""
+    end = "-----END CERTIFICATE-----"
+    certs = [c + end + "\n" for c in open(certifi.where(), encoding="ascii").read().split(end) if "BEGIN" in c]
+    path.write_text("".join(certs[first:first + count]), encoding="ascii")
 
 
 # ---------------------------------------------------------------------------
@@ -45,22 +54,33 @@ def test_the_context_is_built_once_and_verifies_as_httpx_does():
     assert len(first.get_ca_certs()) == len(default.get_ca_certs()) > 0
 
 
-def test_a_changed_bundle_or_bundle_setting_builds_a_new_one(tmp_path, monkeypatch):
+def test_a_rotated_bundle_is_trusted_at_the_next_client(tmp_path, monkeypatch):
     bundle = tmp_path / "ca.pem"
-    shutil.copy(certifi.where(), bundle)
+    _bundle(bundle, 0, 3)
     monkeypatch.setenv("SSL_CERT_FILE", str(bundle))
     before = tls.shared_ssl_context()
     assert tls.shared_ssl_context() is before
-    # A rotated bundle: replaced on disk (a new file, as a mounted secret is).
+    assert len(before.get_ca_certs()) == 3
+    # Replaced on disk, as a mounted secret is: a new file.
     rotated = tmp_path / "ca.new"
-    shutil.copy(certifi.where(), rotated)
-    with open(rotated, "ab") as f:
-        f.write(b"\n")
+    _bundle(rotated, 3, 5)
     os.replace(rotated, bundle)
     after = tls.shared_ssl_context()
-    assert after is not before
+    assert after is not before and len(after.get_ca_certs()) == 5
+    # Swapped behind a symlink, as a Kubernetes ConfigMap is.
+    (tmp_path / "v1").mkdir()
+    (tmp_path / "v2").mkdir()
+    _bundle(tmp_path / "v1" / "ca.pem", 0, 2)
+    _bundle(tmp_path / "v2" / "ca.pem", 0, 4)
+    (tmp_path / "data").symlink_to("v1")
+    monkeypatch.setenv("SSL_CERT_FILE", str(tmp_path / "data" / "ca.pem"))
+    assert len(tls.shared_ssl_context().get_ca_certs()) == 2
+    (tmp_path / "data.new").symlink_to("v2")
+    os.replace(tmp_path / "data.new", tmp_path / "data")
+    assert len(tls.shared_ssl_context().get_ca_certs()) == 4
+    # Back to certifi's bundle when the setting goes.
     monkeypatch.delenv("SSL_CERT_FILE")
-    assert tls.shared_ssl_context() is not after
+    assert len(tls.shared_ssl_context().get_ca_certs()) == len(httpx.create_ssl_context().get_ca_certs())
 
 
 async def test_the_api_client_uses_it():
@@ -94,37 +114,50 @@ async def test_every_slot_of_every_wake_uses_it_with_its_own_key():
     first = await build_session_llm_clients(ctx, vault=_Vault("sk-before"))
     # The key rotated between two wakes.
     second = await build_session_llm_clients(ctx, vault=_Vault("sk-after"))
+    from openai import AsyncOpenAI
+
+    default = AsyncOpenAI(api_key="k", base_url="https://proxy.invalid/v1")
     try:
         shared = tls.shared_ssl_context()
         for bundle, key in ((first, "sk-before"), (second, "sk-after")):
             for slot in (bundle.main, bundle.summary):
                 assert _context_of(slot.client._client) is shared
                 assert slot.client.api_key == key
-                # openai's own defaults for the client it would have made.
-                assert slot.client.timeout == DEFAULT_TIMEOUT
-                assert slot.client._client.timeout == DEFAULT_TIMEOUT
-                assert slot.client._client.follow_redirects is True
-                assert slot.client._client._transport._pool._max_connections == (
-                    DEFAULT_CONNECTION_LIMITS.max_connections
-                )
+                # The client openai would have made for itself, but for the context.
+                own, made = slot.client._client, default._client
+                assert slot.client.timeout == default.timeout == DEFAULT_TIMEOUT
+                assert own.timeout == made.timeout
+                assert own.follow_redirects is made.follow_redirects is True
+                assert own._trust_env is made._trust_env
+                for attr in ("_max_connections", "_max_keepalive_connections", "_http1", "_http2"):
+                    assert getattr(own._transport._pool, attr) == getattr(made._transport._pool, attr), attr
+                assert own._transport._pool._max_connections == DEFAULT_CONNECTION_LIMITS.max_connections
         assert first.main.client._client is not second.main.client._client
     finally:
         await first.aclose()
         await second.aclose()
+        await default.close()
     assert first.main.client._client.is_closed
 
 
-async def test_a_slot_client_left_open_is_closed_when_collected():
-    """As openai's own client is: its finaliser schedules the close on the running loop."""
+async def test_a_slot_client_left_open_is_closed_when_collected(monkeypatch):
+    """As openai's own client is: collected, it schedules its close on the running loop."""
     import asyncio
+    import gc
 
-    client = tls.llm_http_client()
-    client.__del__()
+    closed = []
+    original = httpx.AsyncClient.aclose
+
+    async def aclose(self):
+        closed.append(type(self).__name__)
+        await original(self)
+
+    monkeypatch.setattr(httpx.AsyncClient, "aclose", aclose)
+    tls.llm_http_client()  # dropped at once, never closed by its owner
+    gc.collect()
     for _ in range(20):
-        if client.is_closed:
-            break
         await asyncio.sleep(0)
-    assert client.is_closed
+    assert closed == ["_LLMHttpClient"]
 
 
 # ---------------------------------------------------------------------------
@@ -195,3 +228,19 @@ def test_a_changed_config_file_is_read_even_with_the_same_size_and_time(counted,
     finally:
         for name in ("SUROGATES_TOOL_OUTPUT_MAX_BYTES", "SUROGATES_TOOL_OUTPUT_MAX_LINES"):
             os.environ.pop(name, None)
+
+
+def test_a_variable_set_while_settings_are_built_is_read_at_the_next_call(monkeypatch, tmp_path):
+    monkeypatch.setenv("SUROGATES_CONFIG", str(tmp_path / "none.yaml"))
+    monkeypatch.setenv("SUROGATES_LOG_LEVEL", "INFO")
+    real = config.Settings
+
+    def build():
+        built = real()
+        os.environ["SUROGATES_LOG_LEVEL"] = "DEBUG"  # another thread, meanwhile
+        return built
+
+    monkeypatch.setattr(config, "Settings", build)
+    assert config.load_settings().log_level == "INFO"
+    monkeypatch.setattr(config, "Settings", real)
+    assert config.load_settings().log_level == "DEBUG"

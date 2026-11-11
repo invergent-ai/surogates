@@ -52,12 +52,23 @@ def _load_yaml_config() -> dict[str, Any]:
     Returns the parsed dict, or ``{}`` if the file doesn't exist or
     can't be parsed.
     """
-    config_path = get_config_path()
-    if not config_path.is_file():
+    return _parse_yaml_config(_read_config_bytes(get_config_path()))
+
+
+def _read_config_bytes(config_path: Path) -> bytes | None:
+    """The config file's bytes, or None if it is not a file or can't be read."""
+    try:
+        return config_path.read_bytes() if config_path.is_file() else None
+    except OSError:
+        return None
+
+
+def _parse_yaml_config(content: bytes | None) -> dict[str, Any]:
+    """The parsed config, or ``{}`` if there is none or it can't be parsed."""
+    if content is None:
         return {}
     try:
-        with open(config_path, encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
+        data = yaml.safe_load(content.decode("utf-8")) or {}
         if not isinstance(data, dict):
             return {}
         return data
@@ -1020,38 +1031,39 @@ def load_settings() -> Settings:
     last ones built, never an object another caller holds.
     """
     global _settings_cache
-    inputs = _settings_inputs()
+    path = get_config_path()
+    content = _read_config_bytes(path)
     cached = _settings_cache
-    if cached is not None and cached[0] == inputs:
+    # ``Settings`` itself is in the key: a test that replaces it never
+    # leaves what it built behind for the next caller.
+    if cached is not None and cached[0] == (Settings, str(path), content, _surogates_environment()):
         return cached[1].model_copy(deep=True)
 
-    yaml_config = _load_yaml_config()
+    # The file is read once: the key holds the bytes the settings come from.
+    yaml_config = _parse_yaml_config(content)
     if yaml_config:
         flat = _flatten_yaml(yaml_config)
         for key, value in flat.items():
             if key not in os.environ:
                 os.environ[key] = value
 
+    # Keyed by the environment after the file's values went into it, taken
+    # before the settings read it: a variable another thread sets meanwhile
+    # makes the next call build them again, never keeps them stale.
+    inputs = (Settings, str(path), content, _surogates_environment())
     settings = Settings()
-    # Keyed by the environment after the file's values went into it.
-    _settings_cache = (_settings_inputs(), settings.model_copy(deep=True))
+    _settings_cache = (inputs, settings.model_copy(deep=True))
     return settings
 
 
 #: The last settings built, keyed by what they were built from.
-_settings_cache: tuple[tuple, Settings] | None = None
+_settings_cache: tuple[tuple, Any] | None = None
 
 
-def _settings_inputs() -> tuple:
-    """Everything ``load_settings`` reads: the config file (its path and
-    bytes) and every ``SUROGATES_`` environment variable, matched without
-    regard to case as pydantic-settings matches them."""
-    path = get_config_path()
-    try:
-        content: bytes | None = path.read_bytes() if path.is_file() else None
-    except OSError:
-        content = None
-    env = frozenset(
+def _surogates_environment() -> frozenset[tuple[str, str]]:
+    """Every ``SUROGATES_`` environment variable, matched without regard to
+    case as pydantic-settings matches them: with the config file, all that
+    ``Settings()`` reads."""
+    return frozenset(
         (key, value) for key, value in os.environ.items() if key[:10].upper() == "SUROGATES_"
     )
-    return str(path), content, env
