@@ -515,3 +515,49 @@ For batched goals, the result is a JSON array:
 
 Errors and timeouts are returned per-child as `{"error": "..."}` JSON
 in the `result` field; the surrounding tool call does not fail.
+
+## 13. The `agent` Tool Family (sub-agent parity)
+
+An agent can dispatch sub-agents on its own, in the foreground or the background, and talk to them while they run. The family is off by default: with it off, the tools the model sees are unchanged.
+
+### Switching it on
+
+Set `agents.subagent_parity: true` on the workers (env `SUROGATES_AGENTS_SUBAGENT_PARITY=true`). It applies to every session the workers run.
+
+The session config keys of the family (`subagent_parity`, `agent_dispatch`, `agent_token_budget`, `agent_budget`, and `delegation_depth`) are written by the server only. A client that names one in a new session's `config` has it removed. The `agent` tool writes `subagent_parity: true` into each sub-agent's config, so its sub-agents keep the family whatever the setting.
+
+With it on, `agent` takes `delegate_task`'s place wherever the session may delegate. A governance policy that names `delegate_task` names `agent` too (allow, deny and approval), and one that names `terminal` names `monitor`. `delegate_task` stays callable under its old name. An explicit `excluded_tools: ["agent"]` holds.
+
+### Tools
+
+| Tool | What it does |
+|---|---|
+| `agent(description, prompt, agent_type?, model?, run_in_background?, fork?)` | Starts a sub-agent: a child session on the delegation channel, through `delegate_task`'s own path (tool inheritance, depth limit 2, iteration cap, 5 calls a response). Foreground: waits and returns the report with `[agent_id: …]`. Background: returns `{"agent_id", "status": "running"}` at once; at most 5 of a session's agents run in the background at a time, and a sub-agent cannot start background agents. `fork`: the child starts from the parent's conversation up to the call, then the brief. Below the depth limit a sub-agent gets `agent` too. |
+| `send_message(to, message, summary)` | To an agent the caller started, its parent (`"parent"`), or a sibling; same organisation only. A running agent reads it before its next step. One at rest resumes with its context and the message, if the caller may resume it: the agent that started it may resume a completed or failed one, or one it stopped itself; a sub-agent may resume its parent from a finished turn only, never from its user's stop. Otherwise the message waits in its log, unread until something else wakes it. |
+| `list_agents()` | The agents the caller can reach, with status, and the background commands it started. |
+| `stop_agent(agent_id)` | Stops an agent the caller started (with its own agents), or a background command it started. A stopped agent keeps its context: `send_message` from the agent that stopped it resumes it. A user's stop of it, later, is the user's to lift. |
+| `monitor(command, description, timeout_seconds?, max_notifications_per_minute?)` | Runs a command in the sandbox; each line it prints reaches the session as a notification, at most the given number a minute, until it exits, times out (killed), is stopped, or its session is stopped (killed). At most 4 run per session, counted in the sandbox. A worker sends a session at most 30 monitor notifications a minute; monitors started on different workers each count on their own worker. Offered to a root session where `terminal` is: never on a user's computer, to a session with a parent (a sub-agent, a helper, a worker, a routine run), or in a project's thread. |
+
+### Notifications
+
+The end of background work reaches the session that started it as an `agent.notification` event `{agent_id, kind, status, summary, result, tool_call_id?}`:
+
+- `kind`: `agent`, `process` (`terminal` with `background` and `notify_on_complete`) or `monitor`.
+- `status`: `completed`, `failed`, `killed`, `budget`, `lost` or `output` (a monitor's lines).
+
+The session reads it as news. A session at work reads it before its next model request; a resting session is woken by it, and it is the input of the new turn. Replay puts it before the first request after it, so a rebuilt request is the one that was sent.
+
+### Budget
+
+`agents.agent_token_budget` (env `SUROGATES_AGENTS_AGENT_TOKEN_BUDGET`) gives each agent the `agent` tool starts a budget of input and output tokens, its own sub-agents' included; 0, the default, sets none. A sub-agent with a budget hands each agent it starts at most half of what it has left, less what its agents still running were handed, so parallel calls never share more than it has. Past its budget, the agent's turn ends at its next step (`session.complete` with reason `token_budget_exhausted`), and its parent is told: `status: budget` for a background agent, a note in the call's result for a foreground one. An agent that used its budget is not resumed by a message.
+
+### Linking an episode for training
+
+| Link | Where |
+|---|---|
+| Parent call → child | the parent's `tool.call` (`tool_call_id`), its `delegation.start` (`child_session_id`, `tool_call_id`, `mode` and `fork` as started), and the child's tree node `dispatch` (`GET /v1/sessions/{id}/tree` and `/children`). The node's `dispatch.mode` is the current mode: a foreground agent messaged after its call returned runs on in the background. |
+| Child → parent, foreground | the parent's `tool.result` for that `tool_call_id` (the report, then `[agent_id: …]`), and its `delegation.complete` / `delegation.failed` (`child_session_id`) |
+| Child → parent, background | `agent.notification` on the parent (`agent_id`, `tool_call_id`) |
+| Messages | `coordinator.message` on the recipient (`kind: agent_message`, `from_agent`, `to_agent`, `summary`, and the sender's `tool_call_id`); the sender's `send_message` call |
+
+Each session's own events are its trajectory: walk the tree, read each node's events, and join them on these keys. A fork's log starts with a `context.compact` (`strategy: "fork"`) that holds the parent's conversation up to the call: it is the parent's, already in the parent's trajectory, and is the fork's prompt, not its own work.
