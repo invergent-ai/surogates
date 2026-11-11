@@ -167,7 +167,7 @@ async def test_a_run_starts_from_plan_lines(rsf):  # noqa: F811
     r = await client.post("/internal/runs", json={**start, "channel": "website",
                                                   "people": [line("Bo", autopilot=True)]})
     bo = r.json()["people"][0]
-    assert bo["driver"] == "human" and bo["persona"].startswith("You are Bo. Bo, a customer Stay")
+    assert bo["driver"] == "ai" and bo["persona"].startswith("You are Bo. Bo, a customer Stay")
 
     r = await client.post("/internal/runs", json={**start, "people": [
         line("Ioana", member_id=str(uuid.uuid4()))]})

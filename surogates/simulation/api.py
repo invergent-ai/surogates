@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field
 
 from surogates.db.models import ProgramInvitationRow, ProgramScheduleRow
 from surogates.simulation import store
-from surogates.simulation import discord, slack, teams, voice
+from surogates.simulation import discord, slack, teams, voice, website
 from surogates.simulation.webhook import (
     post_slack,
     post_teams_activity,
@@ -158,13 +158,12 @@ async def start_run(body: StartRun, request: Request):
         raise HTTPException(status_code=422, detail="A team member can stand in only once per run")
     members = set(named)
     if members:
-        if body.channel not in AI_CHANNELS:
+        if body.channel not in AI_CHANNELS or body.channel == "website":
             raise HTTPException(status_code=422, detail="Team members chat with the agent on chat channels only")
         settings = await get_settings(state.session_factory, org_id=body.org_id, agent_id=body.agent_id)
         team = {str(m) for m in (settings.alert_recipient_user_ids or [])} if settings else set()
         if not {str(m) for m in members} <= team:
             raise HTTPException(status_code=422, detail="Someone in the plan is not on this agent's team")
-    # Website visitors stay hand-played until Autopilot can write in the widget.
     autopilot = body.channel in AI_CHANNELS
     run = await store.create_run(
         state.session_factory, state.vault, org_id=body.org_id, agent_id=body.agent_id,
@@ -337,14 +336,16 @@ async def set_driver(run_id: uuid.UUID, person_id: uuid.UUID, org_id: uuid.UUID,
     return await _detail(state.session_factory, run)
 
 
-#: The channels the AI can write on: a widget and a phone call need a browser and a voice.
-AI_CHANNELS = ("whatsapp", "telegram", "slack", "teams", "discord")
+#: The channels the AI can write on: a phone call needs a voice.
+AI_CHANNELS = ("whatsapp", "telegram", "slack", "teams", "discord", "website")
 
 
 async def write(state, run, person, body: PersonMessage) -> dict[str, Any]:
     """The person's message or tap, delivered as their platform would."""
     if run.channel == "website":
-        raise HTTPException(status_code=422, detail="On a website the visitor writes in the widget")
+        if body.model_dump(exclude_none=True).keys() != {"text"} or not body.text.strip():
+            raise HTTPException(status_code=422, detail="On a website the visitor writes text")
+        return await website.send(state, run, person, body.text)
     if run.channel == "voice":
         raise HTTPException(status_code=422, detail="On a phone line the caller speaks: place a call")
     if run.channel == "telegram":

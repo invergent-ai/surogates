@@ -164,7 +164,9 @@ async def add_person(sf, run: SimulationRun, *, name: str, provision: Provision,
     if run.channel == "website":
         # A visitor is anonymous: the widget's own cookie names them, no user row.
         person = SimulationPerson(run_id=run.id, name=name, channel=run.channel, address="visitor",
-                                  about=about, test=test, persona=customer_persona(name, about, test))
+                                  about=about, test=test, persona=customer_persona(name, about, test),
+                                  driver="ai" if autopilot else "human",
+                                  ai_state="talking" if autopilot else None)
         async with sf() as db:
             db.add(person)
             await db.commit()
@@ -449,6 +451,17 @@ def is_typing(person: SimulationPerson, now: datetime) -> bool:
     return person.agent_typing_at is not None and now - person.agent_typing_at < shown
 
 
+def _theirs(person: SimulationPerson):
+    """*person*'s conversations: their user's sessions, or a visitor's one widget session."""
+    if person.user_id is not None:
+        return Session.user_id == person.user_id
+    from surogates.simulation.website import visitor_session
+
+    session = visitor_session(person)
+    # Not sa.false(): that would drop sessions from the queries' FROM.
+    return Session.id == uuid.UUID(session[0]) if session else Session.id.is_(None)
+
+
 async def agent_working(sf, person: SimulationPerson) -> bool:
     """Whether the agent owes *person* an answer: a turn is running in one of
     their conversations, or their last message has not been taken up yet."""
@@ -462,14 +475,14 @@ async def agent_working(sf, person: SimulationPerson) -> bool:
     async with sf() as db:
         return bool(await db.scalar(sa.select(
             sa.exists().where(
-                SessionLease.session_id == Session.id, Session.user_id == person.user_id,
+                SessionLease.session_id == Session.id, _theirs(person),
                 SessionLease.expires_at > sa.func.now(),
                 # A question waiting on its answer holds the lease too, but
                 # then the person is the one owed a move.
                 latest("inbox.input_required") <= latest("user.message", "ask_user_question.response"),
             )
             | sa.exists().where(
-                Session.user_id == person.user_id,
+                _theirs(person),
                 latest("user.message", said=True) > latest(*TURN_ENDS, "inbox.input_required"),
             )
         )))
@@ -477,14 +490,12 @@ async def agent_working(sf, person: SimulationPerson) -> bool:
 
 async def agent_turn_ended_at(sf, person: SimulationPerson) -> datetime | None:
     """When the agent last finished a turn in one of *person*'s conversations."""
-    if person.user_id is None:
-        return None
     async with sf() as db:
         ended = await db.scalar(
             sa.select(sa.func.max(Event.created_at))
             .join(Session, Session.id == Event.session_id)
             # A sub-agent finishing is not the agent's turn ending.
-            .where(Session.user_id == person.user_id, Session.parent_id.is_(None),
+            .where(_theirs(person), Session.parent_id.is_(None),
                    Event.type == "session.complete")
         )
     if ended is not None and ended.tzinfo is None:
@@ -502,7 +513,7 @@ async def left_unanswered(sf, person: SimulationPerson) -> bool:
 
     async with sf() as db:
         return bool(await db.scalar(sa.select(sa.exists().where(
-            Session.user_id == person.user_id,
+            _theirs(person),
             latest("session.complete") > latest("user.message"),
             latest("session.fail", "session.stopped") < latest("user.message"),
         ))))

@@ -358,7 +358,8 @@ async def test_a_stand_in_the_agent_never_wrote_to_ends_done_not_out_of_time(mon
 
     monkeypatch.setattr(ai, "_stop", stop)
     monkeypatch.setattr(store, "thread", thread)
-    run = SimpleNamespace(created_at=datetime.now(timezone.utc) - actor.RUN_CAP - timedelta(minutes=1))
+    run = SimpleNamespace(created_at=datetime.now(timezone.utc) - actor.RUN_CAP - timedelta(minutes=1),
+                          channel="whatsapp")
     await ai._move(run, SimpleNamespace(id=1, stands_for=uuid4(), task=None))
     assert stopped == [("done", "The agent never wrote to them")]
 

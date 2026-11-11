@@ -20,7 +20,7 @@ from openai import AsyncOpenAI
 from pydantic import BaseModel
 
 from surogates.harness.structured_output import generate_structured
-from surogates.simulation import store
+from surogates.simulation import store, website
 from surogates.simulation.api import PersonMessage, write
 
 logger = logging.getLogger(__name__)
@@ -231,6 +231,9 @@ class Actor:
             self.busy.discard(person.id)
 
     async def _move(self, run, person) -> None:
+        if run.channel == "website":
+            # Before taking the time: a reply logged after it would read as not yet quiet.
+            await website.collect(self.state, run, person)
         sf, now = self.state.session_factory, datetime.now(timezone.utc)
         thread = await store.thread(sf, person.id)
         # The team answers the agent; only one given a task starts the conversation.
