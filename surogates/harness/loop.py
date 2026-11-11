@@ -297,6 +297,7 @@ from surogates.harness.agent_news import agent_news_unread, started_notified_wor
 from surogates.harness.subagents import (
     BUDGET_REASON,
     REPLACED_TOOL,
+    TOKEN_BUDGET_REPORT_REQUEST,
     apply_parity,
     budget_of,
     over_budget,
@@ -1608,10 +1609,11 @@ class AgentHarness(
         self._clear_interrupt()
 
     async def _stopped_by_an_agent(self, session_id: UUID) -> bool:
-        """Whether the session's last stop was ``stop_agent``'s (``subagents.stopped_by``)."""
-        from surogates.harness.subagents import stopped_by
+        """Whether an agent's ``stop_agent`` stopped the session since its last resume: that stop told its
+        parent, once, even when its user's pause came after it (``subagents.stopped_by_an_agent_this_run``)."""
+        from surogates.harness.subagents import stopped_by_an_agent_this_run
 
-        return await stopped_by(self._store, session_id) is not None
+        return await stopped_by_an_agent_this_run(self._store, session_id)
 
     async def _tell_what_the_stop_left(self, session: Session, left: list[dict]) -> None:
         """Tell a thread's master what its user's stop did not take back, as a thread's news reaches it: a report.
@@ -3300,10 +3302,12 @@ class AgentHarness(
 
             # --- A sub-agent's token budget, its own agents' use included ---
             if budget_of(session) and await over_budget(self._store, session) is not None:
-                logger.info("Session %s: its token budget is used up; its turn ends here", session.id)
-                await self._complete_session(
-                    session, messages, lease, reason=BUDGET_REASON,
-                    cost_tracker=cost_tracker, turn_id=turn_id, user_message=request,
+                # One last tools-off call for its report, as at the iteration cap: its parent gets a report, never a
+                # line from the middle of a step.
+                await self._request_final_summary(
+                    session, messages, system_prompt, lease,
+                    request=request, cost_tracker=cost_tracker, turn_id=turn_id, reason=BUDGET_REASON,
+                    iteration_index=iteration - 1 - turn_base_iteration,
                 )
                 return
 
@@ -6323,6 +6327,8 @@ class AgentHarness(
                 "reply now to the person you are talking with, in their language: answer "
                 "what they last said as far as you can, or tell them briefly what happens next."
             )
+        elif reason == BUDGET_REASON:
+            summary_request = TOKEN_BUDGET_REPORT_REQUEST
         else:
             summary_request = (
                 "You've reached the maximum number of tool-calling iterations allowed. "

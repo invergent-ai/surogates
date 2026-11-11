@@ -46,8 +46,10 @@ logger = logging.getLogger(__name__)
 
 #: What a fork reads before its brief: the conversation above is its parent's.
 FORK_NOTE = (
-    "[You are a fork of the conversation above, started to do one task. Do only the task below, "
-    "then end with your report: it is all your parent will see of your work.]"
+    "[You are a fork of the conversation above. The plan in it, and the work it lists, are your parent's: your "
+    "parent carries on with them, and may have started other forks for other parts. Your part is only the task "
+    "below. Do not redo, finish or check anything else from the conversation. End with your report: it is all "
+    "your parent will see of your work.]"
 )
 
 #: What a background agent's call returns, after its id.
@@ -66,7 +68,8 @@ _AGENT_DESCRIPTION = (
     "A new agent sees nothing of this conversation. Its prompt must stand alone: the goal, what is already "
     "known or ruled out, where to look, the scope, and what to report. Its report can be wrong in the same "
     "confident tone as a right one; check what matters. With fork=true it starts from a copy of this "
-    "conversation instead, and the prompt only says what to do.\n"
+    "conversation instead: the prompt then names exactly which part of the plan is the fork's, and what is "
+    "not, or the fork may redo the whole plan.\n"
     "By default the call waits for the report. With run_in_background=true it returns the agent_id at once "
     "and you get a notification when the agent ends; work on meanwhile, never redo the work you handed it, "
     "and never state its result before the notification comes. Start several independent agents in one "
@@ -112,7 +115,10 @@ _AGENT_SCHEMA = ToolSchema(
             },
             "fork": {
                 "type": "boolean",
-                "description": "true: the agent starts from a copy of this conversation. Default false: from the prompt alone.",
+                "description": (
+                    "true: the agent starts from a copy of this conversation; say in the prompt which part is its "
+                    "own. Default false: from the prompt alone."
+                ),
             },
         },
         "required": ["description", "prompt"],
@@ -313,7 +319,12 @@ async def _start_monitor(me: Any, command: str, description: str, timeout: int, 
     if not proc_id:
         error = str((started or {}).get("error") or "it did not start")
         if "Unknown tool" in error:
-            error = "this sandbox cannot run monitors"
+            # The sandbox's image predates the monitor (#629): the deployment's image is older than its runtime.
+            error = (
+                "this sandbox's image is older than the monitor tool. A command that ends can run with terminal "
+                "(background=true, notify_on_complete=true) instead, its end then reaching you as a notification "
+                "where the image reports it; a command that never ends cannot be watched here"
+            )
         elif "monitors already run" in error:
             error += ": stop one with stop_agent before you start another"
         return _error(f"the monitor could not start: {error}")
@@ -570,14 +581,17 @@ async def _send_message_handler(arguments: dict[str, Any], **kwargs: Any) -> str
     running = target.status in ("active", "processing")
     resumed, why_not = False, None
     if not running and target.status != "archived":
-        why_not = await _why_not_resume(session_store, sender, target, kwargs.get("session_factory"))
-        if why_not is None:
-            resumed = await session_store.resume_if_resting(
-                target.id, (target.status,), {"source": "agent_message", "from_agent": str(sender.id)},
-            )
-            if not resumed:
-                target = await session_store.get_session(target.id)
-                running = target.status in ("active", "processing")
+        # Checked and resumed under the lock the sender's starts take: a resume and the ``agent`` calls of one
+        # response run at once, and together they stay within the background cap.
+        async with _start_lock(sender.id):
+            why_not = await _why_not_resume(session_store, sender, target, kwargs.get("session_factory"))
+            if why_not is None:
+                resumed = await session_store.resume_if_resting(
+                    target.id, (target.status,), {"source": "agent_message", "from_agent": str(sender.id)},
+                )
+        if why_not is None and not resumed:
+            target = await session_store.get_session(target.id)
+            running = target.status in ("active", "processing")
     elif not running:
         why_not = "it was deleted"
     redis = kwargs.get("redis")
@@ -621,7 +635,7 @@ async def _why_not_resume(session_store: Any, sender: Any, target: Any, session_
     from surogates.workstreams import is_project_thread
 
     if budget_of(target) and await over_budget(session_store, target) is not None:
-        # Resumed, it would stop at its first step, and its parent be told again.
+        # Resumed, it would end after one more call for its report, and its parent be told again.
         return "it used its token budget"
     if target.id == sender.parent_id:
         return None if target.status == "completed" else f"it is {target.status}: its user resumes it"
@@ -637,9 +651,9 @@ async def _why_not_resume(session_store: Any, sender: Any, target: Any, session_
             return "it was stopped by its user"
     elif target.status not in ("completed", "failed"):
         return f"it is {target.status}"
-    if session_factory is not None and sum(
-        mode == "background" for mode, _ in await _running_agents(session_factory, sender.id)
-    ) >= MAX_RUNNING_IN_BACKGROUND:
+    starting = [(mode, kind) for mode, kind, _ in _STARTING.get(sender.id, [])]
+    running = await _running_agents(session_factory, sender.id) if session_factory is not None else []
+    if sum(mode == "background" for mode, _ in running + starting) >= MAX_RUNNING_IN_BACKGROUND:
         return f"{MAX_RUNNING_IN_BACKGROUND} of your agents already run in the background"
     return None
 
@@ -655,9 +669,6 @@ def _forget_start(parent_id: UUID, start: tuple[str, str | None, str]) -> None:
         starting.remove(start)
     if not starting:
         _STARTING.pop(parent_id, None)
-        lock = _START_LOCKS.get(parent_id)
-        if lock is not None and not lock.locked():
-            _START_LOCKS.pop(parent_id, None)
 
 
 async def _running_agents(session_factory: Any, parent_id: UUID) -> list[tuple[str | None, str | None]]:
@@ -680,9 +691,20 @@ async def _running_agents(session_factory: Any, parent_id: UUID) -> list[tuple[s
 
 #: Starts under way in this process, by parent, until their child is in the database: (mode, agent_type, mark).
 _STARTING: dict[UUID, list[tuple[str, str | None, str]]] = {}
-_START_LOCKS: dict[UUID, asyncio.Lock] = {}
+#: One lock per parent for its starts and resumes; an entry lives while a call holds or waits for it (a weak map).
+_START_LOCKS: "weakref.WeakValueDictionary[UUID, asyncio.Lock]" = weakref.WeakValueDictionary()
 #: Tokens a sub-agent with a budget has handed to its agents still starting or running in this process, by its id.
 _BUDGET_HANDED: dict[UUID, int] = {}
+
+
+def _start_lock(parent_id: UUID) -> asyncio.Lock:
+    """The one lock of *parent_id*'s starts and resumes: never two at once, as a map that drops idle locks
+    could hand a second call a new one while a woken waiter still holds the old."""
+    lock = _START_LOCKS.get(parent_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _START_LOCKS[parent_id] = lock
+    return lock
 
 
 #: The most agents one session may have running in the background at once.
@@ -832,10 +854,11 @@ async def _start_agent(
     )
     # Checked and counted under one lock per parent: the calls of one response
     # run at once, and none of their children is in the database yet.
-    lock = _START_LOCKS.setdefault(parent.id, asyncio.Lock())
-    async with lock:
+    async with _start_lock(parent.id):
+        # The starts under way first, then the database: one inserted meanwhile is in one of the two.
+        starting = [(mode, kind) for mode, kind, _ in _STARTING.get(parent.id, [])]
         running = await _running_agents(kwargs.get("session_factory"), parent.id) if kwargs.get("session_factory") else []
-        under_way = running + [(mode, kind) for mode, kind, _ in _STARTING.get(parent.id, [])]
+        under_way = running + starting
         if background and sum(mode == "background" for mode, _ in under_way) >= MAX_RUNNING_IN_BACKGROUND:
             run.close()
             return _error(

@@ -216,3 +216,44 @@ async def test_a_stop_reaches_only_agents_of_the_family(chats):  # noqa: F811
     )
     assert (await stop(chats, chat, hidden.id))["error"].startswith("no agent ")
     assert all(a["agent_id"] != str(hidden.id) for a in (await listed(chats, chat))["agents"])
+
+
+async def test_a_users_pause_during_an_agents_stop_brings_no_second_notice(chats):  # noqa: F811
+    chat = await a_chat(chats, PARITY)
+    child = await a_background_agent(chats, chat)
+
+    async def stopped_then_paused_by_its_user():
+        assert (await stop(chats, chat, child.id))["status"] == "stopped"
+        # The user stops it too, before its turn has ended: the same stop, told once.
+        paused = await chats.api.client.post(f"/v1/sessions/{child.id}/pause", headers=chats.api.auth())
+        assert paused.status_code == 200, paused.text
+        chats.harnesses[child.id].interrupt("stopped by agent")
+
+    chats.during_the_tool_call = stopped_then_paused_by_its_user
+    chats.replies = [TODO_CALL, _final_response("never asked")]
+    await chats.wake(child.id)
+    assert await chats.status(child.id) == "paused"
+    notes = await chats.store.get_events(chat, types=[EventType.AGENT_NOTIFICATION])
+    assert [n.data["status"] for n in notes] == ["killed"]
+
+
+async def test_an_agents_stop_counts_for_the_run_until_the_session_is_resumed():
+    from types import SimpleNamespace
+
+    from surogates.harness.subagents import stopped_by_an_agent_this_run
+
+    class Store:
+        def __init__(self, events):
+            self.events = events
+
+        async def get_events(self, session_id, types=None):
+            return [e for e in self.events if types is None or e.type in {t.value for t in types}]
+
+    def event(kind, **data):
+        return SimpleNamespace(type=kind.value, data=data)
+
+    agents_stop, users_pause = event(EventType.SESSION_PAUSE, stopped_by="a-1"), event(EventType.SESSION_PAUSE)
+    resume = event(EventType.SESSION_RESUME)
+    assert await stopped_by_an_agent_this_run(Store([agents_stop, users_pause]), None)
+    assert not await stopped_by_an_agent_this_run(Store([agents_stop, resume, users_pause]), None)
+    assert not await stopped_by_an_agent_this_run(Store([users_pause]), None)
