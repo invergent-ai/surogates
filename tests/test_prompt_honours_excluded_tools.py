@@ -21,7 +21,6 @@ from tests.test_case_tool_gate import _chat, _tenant
 TOOLS = {"web_search", "web_extract", "create_artifact", "memory", "read_file", "ask_user_question"}
 WEB = "# Web research"
 ARTIFACT = "**Artifacts.**"
-MEMORY_MARK = "memory"
 
 
 def _registry(names: set[str]) -> ToolRegistry:
@@ -87,3 +86,64 @@ def test_restricting_only_narrows():
     builder.restrict_tools({"web_search", "create_artifact"})
     assert builder._available_tools == {"web_search"}
     assert builder.has_whiteboard  # read for the schemas themselves: the worker's answer stands
+
+
+def test_restricting_renders_the_agents_section_again():
+    """A build before the narrowing (the compaction measure) must not leave the wider spawn tools behind."""
+    from surogates.tools.loader import AgentDef
+
+    session = _chat({"coordinator": True, "excluded_tools": ["spawn_task", "spawn_worker"]})
+    builder = PromptBuilder(
+        _tenant(session), session=session, available_tools={"spawn_task", "spawn_worker", "delegate_task"},
+        available_agents=[AgentDef(name="analyst", description="Reads the numbers", system_prompt="",
+                                   source="platform")],
+    )
+    assert "spawn_task" in builder._available_agents_section()
+    builder.restrict_tools({"delegate_task"})
+    section = builder._available_agents_section()
+    assert "delegate_task" in section and "spawn_task" not in section
+
+
+async def test_the_compaction_measure_is_narrowed_too():
+    session = _chat({"excluded_tools": ["web_search", "web_extract"]})
+    builder = PromptBuilder(_tenant(session), session=session, available_tools=set(TOOLS))
+    harness = _harness(session, builder)
+    harness._compressor.should_compress.return_value = False
+    await harness._engineer_context(session, [], [])
+    measured = harness._compressor.should_compress.call_args.args[1]
+    assert WEB not in measured
+    assert await harness._build_system_prompt(session) == measured
+
+
+def test_sections_that_name_a_restricted_tool_stay_out():
+    session = _chat({})
+    kbs = [{"id": "kb-1", "name": "handbook", "display_name": "Handbook", "mode": "grounding"}]
+    builder = PromptBuilder(_tenant(session), session=session, available_kbs=kbs,
+                            available_tools={"kb_list_pages", "kb_read_page", "kb_search_pages", "read_file"})
+    assert builder._kb_section()
+    builder.restrict_tools({"read_file"})
+    assert builder._kb_section() == ""
+    unrestricted = PromptBuilder(_tenant(session), session=session, available_kbs=kbs, available_tools={"read_file"})
+    assert unrestricted._kb_section()  # a session that names no tools: as before
+
+
+async def test_an_ordinary_session_with_the_real_tools_keeps_its_prompt():
+    """The built-in registry: the schema filter drops tools the worker keeps (the coordinator's), and a
+    session that names no tools is not narrowed by them."""
+    from surogates.tools.runtime import ToolRuntime
+
+    registry = ToolRegistry()
+    ToolRuntime(registry).register_builtins()
+    session = _chat({})
+    tools = set(registry.tool_names)
+    before = PromptBuilder(_tenant(session), session=session, available_tools=set(tools)).build()
+    builder = PromptBuilder(_tenant(session), session=session, available_tools=set(tools))
+    harness = AgentHarness(
+        session_store=AsyncMock(), tool_registry=registry, llm_client=AsyncMock(),
+        tenant=_tenant(session), worker_id="w", budget=IterationBudget(max_total=10),
+        context_compressor=MagicMock(spec=ContextCompressor), prompt_builder=builder,
+        sandbox_pool=MagicMock(spec=SandboxPool), vision_client=None, vision_model="",
+        mcp_tool_names=frozenset(),
+    )
+    assert harness._tool_filter_for_session(session) < tools  # the schemas offer fewer
+    assert await harness._build_system_prompt(session) == before
