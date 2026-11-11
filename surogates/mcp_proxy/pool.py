@@ -42,7 +42,7 @@ from surogates.tools.mcp.client import (
     discover_mcp_tools,
     sanitize_mcp_name_component,
 )
-from surogates.tools.mcp.names import mcp_tool_name
+from surogates.tools.mcp.names import fit_tool_name, mcp_tool_name
 
 logger = logging.getLogger(__name__)
 
@@ -397,6 +397,7 @@ class ConnectionPool:
                 _tenant_prefix(org_id, user_id, agent_id),
             )
             clean_schemas: list[dict[str, Any]] = []
+            seen_names: set[str] = set()
             tool_index: dict[str, tuple[str, str]] = {}
             utility_index: dict[str, str] = {}
 
@@ -487,12 +488,27 @@ class ConnectionPool:
                     # reverse-route below keeps using the real upstream tool name
                     # (``original_tool``), so calls still reach Composio.
                     if is_trusted_server:
-                        clean["name"] = debrand_composio_text(clean_name)
+                        # Named from the debranded server and tool, so the
+                        # name keeps its ``mcp__tool_router__`` prefix and is
+                        # shortened (if at all) after debranding.
+                        clean["name"] = fit_tool_name(
+                            debrand_composio_text(sanitize_mcp_name_component(original_server)),
+                            debrand_composio_text(sanitize_mcp_name_component(original_tool or clean_name)),
+                        )
                         clean["description"] = debrand_composio_text(
                             clean.get("description", ""),
                         )
                         clean_name = clean["name"]
 
+                if clean_name in seen_names:
+                    # Two tools under one name (their names sanitize alike):
+                    # the first keeps it, as in process.
+                    logger.warning(
+                        "MCP tool %s from server %s shares its name %s with an earlier tool -- skipped",
+                        original_tool, owning_server_key, clean_name,
+                    )
+                    continue
+                seen_names.add(clean_name)
                 clean_schemas.append(clean)
                 if owning_server_key is not None:
                     tool_index[clean_name] = (owning_server_key, original_tool)

@@ -31,9 +31,17 @@ COMPOSIO_TOOL_ROUTER_PREFIXES: tuple[str, ...] = (
 )
 
 
-def is_composio_router_name(name: str) -> bool:
-    """True if *name* is an MCP tool advertised by the Composio tool-router."""
-    return name.startswith(COMPOSIO_TOOL_ROUTER_PREFIXES)
+#: The toolset the Composio tool-router's tools are registered under
+#: (``mcp-<server>``, the server being the proxy's ``composio-tool-router``).
+COMPOSIO_TOOL_ROUTER_TOOLSET = "mcp-composio-tool-router"
+
+
+def is_composio_router_name(name: str, toolset: str | None = None) -> bool:
+    """True if *name* is an MCP tool advertised by the Composio tool-router.
+
+    By its *toolset* when known: a shortened name may not keep the prefix.
+    """
+    return toolset == COMPOSIO_TOOL_ROUTER_TOOLSET or name.startswith(COMPOSIO_TOOL_ROUTER_PREFIXES)
 
 
 class McpProxyClient:
@@ -114,6 +122,7 @@ class McpProxyClient:
         data = resp.json()
         tools = data.get("tools", [])
         current: set[str] = set()
+        composio: set[str] = set()
 
         for tool in tools:
             name = tool.get("name", "")
@@ -123,6 +132,8 @@ class McpProxyClient:
             # The proxy says the tool's server: a shortened name may hold
             # only part of it, and the entitlement filter reads it here.
             toolset = mcp_toolset(tool["server"]) if tool.get("server") else "mcp"
+            if is_composio_router_name(name, toolset):
+                composio.add(name)
             schema = ToolSchema(
                 name=name,
                 description=tool.get("description", ""),
@@ -147,9 +158,7 @@ class McpProxyClient:
             )
 
         self._discovered_by_agent[agent_id] = current
-        self._composio_by_agent[agent_id] = {
-            n for n in current if is_composio_router_name(n)
-        }
+        self._composio_by_agent[agent_id] = composio
         registered = sorted(current)
         if cache_ttl > 0:
             now = time.monotonic()

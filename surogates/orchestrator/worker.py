@@ -808,7 +808,8 @@ def _entitlement_tool_exclusions(
         for name in tool_registry.tool_names:
             if not name.startswith("mcp__"):
                 continue
-            if is_composio_router_name(name):
+            entry = tool_registry.get(name)
+            if is_composio_router_name(name, getattr(entry, "toolset", None)):
                 # ``mcp__tool_router__TOOLKIT_ACTION``: the sellable
                 # unit is the toolkit, embedded in the tool component.
                 parts = name.split("__")
@@ -818,7 +819,6 @@ def _entitlement_tool_exclusions(
                     excluded.add(name)
                 continue
             # The server a (possibly shortened) name stands for.
-            entry = tool_registry.get(name)
             if mcp_tool_server(name, getattr(entry, "toolset", None)) not in allowed_servers:
                 excluded.add(name)
     return excluded

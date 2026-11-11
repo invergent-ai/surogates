@@ -6,10 +6,12 @@ engines refuse a whole request when any of its tool names does not match
 broke every model call of a session.  :func:`mcp_tool_name` keeps every
 name that fits exactly as it was, and gives one that does not a
 deterministic, readable shortening: the tool's own name and as much of the
-server's as fits, then ``_`` and eight hex digits of a SHA-256 of the
-original server and tool names.  The same tool gets the same name in every
-wake, so the calls in a session's history (replayed or compacted) still
-name it.
+server's as fits (at least 12 characters of it), then ``-`` and twelve hex
+digits of a SHA-256 of the full name.  Sanitizing never makes a ``-``, so
+no tool's own name can equal a shortened one.  The same tool gets the same
+name in every wake, so the calls in a session's history (replayed or
+compacted) still name it; and a rule written with the full name finds it
+(:func:`configured_tool_name`).
 
 A call routes by the registry, whose handler holds the server and the
 tool (in the MCP proxy, its ``tool_index``), never by parsing the name.
@@ -29,13 +31,17 @@ MAX_TOOL_NAME = 64
 
 _PREFIX = "mcp__"
 _SEPARATOR = "__"
-_DIGEST_HEX = 8
+_DIGEST_HEX = 12
+#: Before the digest: a character sanitizing never makes, so a shortened
+#: name is never any tool's own.
+_DIGEST_MARK = "-"
 #: Room for the server and tool parts in a shortened name:
-#: ``mcp__<server>__<tool>_<digest>``.
-_ROOM = MAX_TOOL_NAME - len(_PREFIX) - len(_SEPARATOR) - 1 - _DIGEST_HEX
+#: ``mcp__<server>__<tool>-<digest>``.
+_ROOM = MAX_TOOL_NAME - len(_PREFIX) - len(_SEPARATOR) - len(_DIGEST_MARK) - _DIGEST_HEX
 #: A shortened name keeps at least this much of the server's name (less
-#: only when the server's name is shorter).
-_MIN_SERVER = 8
+#: only when the server's name is shorter): all of ``tool_router``, so a
+#: Composio tool's name keeps its ``mcp__tool_router__`` prefix.
+_MIN_SERVER = 12
 
 #: The toolset of an MCP server's tools: ``mcp-<server>``.
 MCP_TOOLSET_PREFIX = "mcp-"
@@ -58,23 +64,41 @@ def mcp_tool_name(server: str, tool: str) -> str:
     (:func:`fit_tool_name`) only when that is not a valid name.
     """
     s, t = sanitize_mcp_name_component(server), sanitize_mcp_name_component(tool)
-    return fit_tool_name(f"{_PREFIX}{s}{_SEPARATOR}{t}", s, t, key=(str(server), str(tool)))
+    return fit_tool_name(s, t)
 
 
-def fit_tool_name(name: str, server_part: str, tool_part: str, *, key: tuple[str, str]) -> str:
-    """*name* if an engine accepts it; otherwise its shortening.
+def fit_tool_name(server_part: str, tool_part: str) -> str:
+    """``mcp__<server_part>__<tool_part>`` if an engine accepts it;
+    otherwise its shortening.
 
-    *server_part* and *tool_part* are what *name* is made of, already in
-    the name's alphabet; *key* (the original server and tool names) makes
-    the digest, so two tools whose shortenings would read alike differ.
+    The parts are already in the name's alphabet.  The digest is of the
+    full name, so it follows from that name alone, and two tools whose
+    shortenings would read alike differ.
     """
+    name = f"{_PREFIX}{server_part}{_SEPARATOR}{tool_part}"
     if TOOL_NAME_RE.match(name):
         return name
     tool_room = _ROOM - min(len(server_part), _MIN_SERVER)
     t = tool_part[:tool_room]
     s = server_part[: _ROOM - len(t)]
-    digest = hashlib.sha256("\0".join(key).encode("utf-8")).hexdigest()[:_DIGEST_HEX]
-    return f"{_PREFIX}{s}{_SEPARATOR}{t}_{digest}"
+    digest = hashlib.sha256(name.encode("utf-8")).hexdigest()[:_DIGEST_HEX]
+    return f"{_PREFIX}{s}{_SEPARATOR}{t}{_DIGEST_MARK}{digest}"
+
+
+def configured_tool_name(name: str) -> str:
+    """The name a tool rule written with *name* applies to.
+
+    A full MCP name too long for an engine (``mcp__<server>__<tool>``, as an
+    admin reads it off the server) is the shortened name the tool is
+    offered under; any other name is unchanged.
+    """
+    name = str(name)
+    if TOOL_NAME_RE.match(name) or not name.startswith(_PREFIX):
+        return name
+    server_part, sep, tool_part = name[len(_PREFIX):].partition(_SEPARATOR)
+    if not sep:
+        return name
+    return fit_tool_name(sanitize_mcp_name_component(server_part), sanitize_mcp_name_component(tool_part))
 
 
 def mcp_toolset(server: str) -> str:

@@ -23,7 +23,13 @@ from surogates.mcp_proxy import pool as pool_module
 from surogates.mcp_proxy.pool import ConnectionPool
 from surogates.tools.mcp import client as mcp_client
 from surogates.tools.mcp.client import MCPServerTask, _register_server_tools
-from surogates.tools.mcp.names import TOOL_NAME_RE, mcp_tool_name, mcp_tool_server, mcp_toolset
+from surogates.tools.mcp.names import (
+    TOOL_NAME_RE,
+    configured_tool_name,
+    mcp_tool_name,
+    mcp_tool_server,
+    mcp_toolset,
+)
 from surogates.tools.registry import ToolRegistry
 
 LONG_SERVER = "acme-enterprise-customer-relationship-management-production"
@@ -49,11 +55,23 @@ def test_a_name_that_fits_is_unchanged(server, tool, name):
 def test_a_long_name_keeps_the_tool_and_what_fits_of_the_server():
     name = mcp_tool_name(LONG_SERVER, LONG_TOOL)
     assert TOOL_NAME_RE.match(name) and len(name) <= 64
-    assert name.startswith("mcp__acme_ent")
-    server_part, rest = name[len("mcp__"):].split("__", 1)
-    assert rest.startswith(LONG_TOOL[: len(rest) - 9]) and len(rest) - 9 >= 30
-    assert "acme_enterprise_customer_relationship_management_production".startswith(server_part)
+    stem, digest = name.rsplit("-", 1)
+    assert len(digest) == 12 and all(c in "0123456789abcdef" for c in digest)
+    server_part, tool_part = stem[len("mcp__"):].split("__", 1)
+    assert server_part == "acme_enterpr"  # at least 12 characters of the server
+    assert LONG_TOOL.startswith(tool_part) and len(tool_part) == 32
     assert mcp_tool_name(LONG_SERVER, LONG_TOOL) == name  # the same in every wake
+    # A tool name that fits beside the server is kept whole.
+    assert "lookup_order-" in mcp_tool_name("s" * 70, "lookup_order")
+
+
+def test_no_tool_can_take_a_shortened_name():
+    name = mcp_tool_name(LONG_SERVER, LONG_TOOL)
+    stem, digest = name.rsplit("-", 1)
+    server_part, tool_part = stem[len("mcp__"):].split("__", 1)
+    # A server named like the stem, with a tool named like the rest: sanitizing makes "-" a "_".
+    assert mcp_tool_name(server_part, f"{tool_part}-{digest}") != name
+    assert mcp_tool_name(server_part, f"{tool_part}_{digest}") != name
 
 
 def test_two_long_names_that_would_read_alike_differ():
@@ -61,8 +79,8 @@ def test_two_long_names_that_would_read_alike_differ():
     b = mcp_tool_name(LONG_SERVER + "-staging", LONG_TOOL)  # the same stem once cut
     c = mcp_tool_name(LONG_SERVER, LONG_TOOL + "_and_more_than_fits_in_the_room_left")
     d = mcp_tool_name(LONG_SERVER, LONG_TOOL + "_and_more_than_fits_in_the_room_right")
-    assert a[:-8] == b[:-8] and a != b
-    assert c[:-8] == d[:-8] and c != d
+    assert a[:-13] == b[:-13] and a != b
+    assert c[:-13] == d[:-13] and c != d
     assert len({a, b, c, d}) == 4
 
 
@@ -156,7 +174,7 @@ def test_the_entitlement_filter_reads_a_shortened_tools_server(monkeypatch, run_
     kept = _entitlement_tool_exclusions(session_config=config, tool_registry=registry, mcp_scope=allowed,
                                         browser_enabled=True)
     assert long_name not in kept
-    other = ({"acme_ent"}, set())  # a server whose name is the shortened stem is not this one
+    other = ({"acme_enterpr"}, set())  # a server whose name is the shortened stem is not this one
     assert long_name in _entitlement_tool_exclusions(session_config=config, tool_registry=registry,
                                                      mcp_scope=other, browser_enabled=True)
 
@@ -236,3 +254,129 @@ async def test_the_proxy_client_registers_the_server_with_each_tool(monkeypatch)
         "acme_enterprise_customer_relationship_management_production")
     assert registry.get("mcp__world__ping").toolset == "mcp"
     assert mcp_tool_server("mcp__world__ping", "mcp") == "world"
+
+
+def test_a_rule_written_with_the_full_long_name_applies_to_the_tool():
+    from surogates.governance.policy import GovernanceGate
+
+    full = f"mcp__{LONG_SERVER.replace('-', '_')}__{LONG_TOOL}"
+    short = mcp_tool_name(LONG_SERVER, LONG_TOOL)
+    assert configured_tool_name(full) == short
+    assert configured_tool_name("mcp__github__create_issue") == "mcp__github__create_issue"
+    assert configured_tool_name("read_file") == "read_file"
+    assert not GovernanceGate(denied_tools={full}).check(short, {}).allowed
+    assert GovernanceGate(denied_tools={full}).check("mcp__github__create_issue", {}).allowed
+    assert GovernanceGate(require_approval={full}).check(short, {}).overridable
+
+
+async def test_composio_router_tools_keep_their_prefix_and_toolkit(monkeypatch):
+    from surogates.mcp_proxy.loader import COMPOSIO_SERVER_NAME
+
+    made: list[str] = []
+    tools = ["COMPOSIO_SEARCH_TOOLS", "GOOGLESHEETS_SPREADSHEETS_VALUES_APPEND",
+             "GOOGLESHEETS_SPREADSHEETS_VALUES_APPEND_WITH_FORMATTING_OPTIONS"]
+
+    def fake_discover(servers, registry):
+        names = []
+        for key, config in servers.items():
+            server = _server(key, tools)
+            server._registered_tool_names = _register_server_tools(key, server, config, registry)
+            with mcp_client._lock:
+                mcp_client._servers[key] = server
+            made.append(key)
+            names += server._registered_tool_names
+        return names
+
+    monkeypatch.setattr(pool_module, "discover_mcp_tools", fake_discover)
+    try:
+        pool = ConnectionPool(governance_enabled=True)
+        schemas = await pool.ensure_connected(uuid4(), uuid4(), "agent", {COMPOSIO_SERVER_NAME: {"url": "http://c"}})
+    finally:
+        with mcp_client._lock:
+            for key in made:
+                mcp_client._servers.pop(key, None)
+    names = {s["name"] for s in schemas}
+    assert all(TOOL_NAME_RE.match(n) for n in names)
+    # Names that fit are as before the change.
+    assert {"mcp__tool_router__SEARCH_TOOLS", "mcp__tool_router__GOOGLESHEETS_SPREADSHEETS_VALUES_APPEND"} <= names
+    [long_one] = [n for n in names if n.endswith(tuple("0123456789abcdef")) and "-" in n]
+    assert long_one.startswith("mcp__tool_router__GOOGLESHEETS_")
+
+
+async def test_tools_whose_names_sanitize_alike_keep_the_first_in_the_proxy(monkeypatch):
+    made: list[str] = []
+
+    def fake_discover(servers, registry):
+        names = []
+        for key, config in servers.items():
+            server = _server(key, ["get-user", "get_user"])
+            server._registered_tool_names = _register_server_tools(key, server, config, registry)
+            with mcp_client._lock:
+                mcp_client._servers[key] = server
+            made.append(key)
+            names += server._registered_tool_names
+        return names
+
+    monkeypatch.setattr(pool_module, "discover_mcp_tools", fake_discover)
+    try:
+        pool = ConnectionPool(governance_enabled=False)
+        tenant = (uuid4(), uuid4(), "agent")
+        schemas = await pool.ensure_connected(*tenant, {"world": {"url": "http://w"}})
+    finally:
+        with mcp_client._lock:
+            for key in made:
+                mcp_client._servers.pop(key, None)
+    assert [s["name"] for s in schemas].count("mcp__world__get_user") == 1
+    assert pool.resolve_call_target(*tenant, "mcp__world__get_user")[1] == "get-user"
+
+
+async def test_the_proxy_route_tells_the_worker_each_tools_server(proxy_world, monkeypatch):
+    """End to end: the proxy's list route, the worker's client, and its entitlement filter."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from surogates.mcp_proxy.auth import ProxyAuthContext, get_proxy_auth
+    from surogates.mcp_proxy.routes import router
+    from surogates.orchestrator.mcp_client import McpProxyClient
+    from surogates.orchestrator.worker import _entitlement_tool_exclusions
+    from surogates.runtime import AgentRuntimeContext, agent_runtime_context_dep, rate_limit_dep
+    from surogates.runtime.entitlements import ENTITLEMENTS_CONFIG_KEY
+
+    org, user = uuid4(), uuid4()
+    pool = ConnectionPool(governance_enabled=True)
+    await pool.ensure_connected(org, user, "agent", {LONG_SERVER: {"url": "http://crm"}, "world": {"url": "http://w"}})
+    app = FastAPI()
+    app.include_router(router)
+    app.state.pool = pool
+    app.dependency_overrides[get_proxy_auth] = lambda: ProxyAuthContext(org_id=org, user_id=user, session_id=uuid4())
+    app.dependency_overrides[agent_runtime_context_dep] = lambda: AgentRuntimeContext(
+        agent_id="agent", org_id=str(org), enabled=True, config_version=1, storage_key_prefix="",
+        mcp_server_ids=("crm-id", "world-id"))
+    app.dependency_overrides[rate_limit_dep] = lambda: None
+    listed = TestClient(app).post("/mcp/v1/tools/list", params={"agent_id": "agent"}, json={})
+    assert listed.status_code == 200
+
+    class _Response:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return listed.json()
+
+    registry = ToolRegistry()
+    client = McpProxyClient("http://proxy.invalid", registry)
+
+    async def post(*_args, **_kwargs):
+        return _Response()
+
+    monkeypatch.setattr(client._client, "post", post)
+    monkeypatch.setattr("surogates.orchestrator.mcp_client.create_sandbox_token", lambda *a, **k: "t")
+    await client.discover_and_register(org, user, uuid4(), agent_id="agent")
+    await client._client.aclose()
+    long_name = mcp_tool_name(LONG_SERVER, LONG_TOOL)
+    assert long_name in registry.tool_names
+    config = {ENTITLEMENTS_CONFIG_KEY: {"mcp_server_ids": ["crm-id"]}}
+    crm_only = ({"acme_enterprise_customer_relationship_management_production"}, set())
+    excluded = _entitlement_tool_exclusions(session_config=config, tool_registry=registry, mcp_scope=crm_only,
+                                            browser_enabled=True)
+    assert long_name not in excluded and "mcp__world__ping" in excluded

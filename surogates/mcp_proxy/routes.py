@@ -66,6 +66,9 @@ class ToolSchema(BaseModel):
     name: str
     description: str
     parameters: dict[str, Any]
+    # The MCP server the tool belongs to: a shortened name may hold only
+    # part of it, and the worker's entitlement filter reads it from here.
+    server: str | None = None
 
 
 class ToolListResponse(BaseModel):
@@ -175,6 +178,7 @@ async def list_tools(
                 name=s.get("name", ""),
                 description=s.get("description", ""),
                 parameters=s.get("parameters", {}),
+                server=s.get("server"),
             )
             for s in schemas
         ]
