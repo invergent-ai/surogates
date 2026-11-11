@@ -153,7 +153,10 @@ async def start_run(body: StartRun, request: Request):
     from surogates.followup.store import get_settings
 
     state = request.app.state
-    members = {p.member_id for p in body.people if p.member_id}
+    named = [p.member_id for p in body.people if p.member_id]
+    if len(named) != len(set(named)):
+        raise HTTPException(status_code=422, detail="A team member can stand in only once per run")
+    members = set(named)
     if members:
         if body.channel not in AI_CHANNELS:
             raise HTTPException(status_code=422, detail="Team members chat with the agent on chat channels only")
@@ -244,7 +247,7 @@ async def list_batches(org_id: uuid.UUID, agent_id: str, request: Request):
                 })
         graded = [p["grade"] for p in people if p["grade"]]
         listed.append({
-            "id": str(batch_id), "created_at": group[0].created_at.isoformat(),
+            "id": str(batch_id), "created_at": group[-1].created_at.isoformat(),
             "status": "running" if any(r.status == "running" for r in group) else "ended",
             "channels": list(dict.fromkeys(r.channel for r in group)),
             "people": people, "passed": sum(g["passed"] for g in graded), "graded": len(graded),
@@ -253,28 +256,29 @@ async def list_batches(org_id: uuid.UUID, agent_id: str, request: Request):
     return listed
 
 
-async def _batch(request: Request, batch_id: uuid.UUID, org_id: uuid.UUID):
-    runs = await store.batch_runs(request.app.state.session_factory, org_id=org_id, batch_id=batch_id)
+async def _batch(request: Request, batch_id: uuid.UUID, org_id: uuid.UUID, agent_id: str):
+    runs = await store.batch_runs(request.app.state.session_factory, org_id=org_id,
+                                  agent_id=agent_id, batch_id=batch_id)
     if not runs:
         raise HTTPException(status_code=404, detail="Simulation not found")
     return runs
 
 
 @router.get("/batches/{batch_id}")
-async def get_batch(batch_id: uuid.UUID, org_id: uuid.UUID, request: Request):
+async def get_batch(batch_id: uuid.UUID, org_id: uuid.UUID, agent_id: str, request: Request):
     sf = request.app.state.session_factory
-    runs = await _batch(request, batch_id, org_id)
+    runs = await _batch(request, batch_id, org_id, agent_id)
     return {"id": str(batch_id), "runs": [await _detail(sf, r) for r in runs]}
 
 
 @router.post("/batches/{batch_id}/end")
-async def end_batch(batch_id: uuid.UUID, org_id: uuid.UUID, request: Request):
+async def end_batch(batch_id: uuid.UUID, org_id: uuid.UUID, agent_id: str, request: Request):
     state = request.app.state
-    runs = await _batch(request, batch_id, org_id)
+    runs = await _batch(request, batch_id, org_id, agent_id)
     for r in runs:
         if r.status == "running":
             await store.finish_run(state, r.id)
-    return await get_batch(batch_id, org_id, request)
+    return await get_batch(batch_id, org_id, agent_id, request)
 
 
 @router.get("/runs/{run_id}")

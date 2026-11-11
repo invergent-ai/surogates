@@ -153,7 +153,9 @@ async def create_run(
 
 def customer_persona(name: str, about: str | None, test: str | None) -> str:
     """Who Autopilot plays for a customer line."""
-    return f"You are {name}. {about or ''} Stay in character; your aim in this chat: {test or about or ''}"
+    return " ".join(part for part in (f"You are {name}.", about,
+                                      f"Stay in character; your aim in this chat: {test or about or ''}")
+                    if part)
 
 
 async def add_person(sf, run: SimulationRun, *, name: str, provision: Provision,
@@ -162,7 +164,7 @@ async def add_person(sf, run: SimulationRun, *, name: str, provision: Provision,
     if run.channel == "website":
         # A visitor is anonymous: the widget's own cookie names them, no user row.
         person = SimulationPerson(run_id=run.id, name=name, channel=run.channel, address="visitor",
-                                  about=about, test=test)
+                                  about=about, test=test, persona=customer_persona(name, about, test))
         async with sf() as db:
             db.add(person)
             await db.commit()
@@ -246,12 +248,13 @@ async def list_runs(sf, *, org_id: uuid.UUID, agent_id: str, limit: int = 50) ->
         )).scalars().all()
 
 
-async def batch_runs(sf, *, org_id: uuid.UUID, batch_id: uuid.UUID) -> Sequence[SimulationRun]:
+async def batch_runs(sf, *, org_id: uuid.UUID, agent_id: str,
+                     batch_id: uuid.UUID) -> Sequence[SimulationRun]:
     """The runs of one plan, oldest first; a run started on its own is its own batch."""
     async with sf() as db:
         return (await db.execute(
             sa.select(SimulationRun)
-            .where(SimulationRun.org_id == org_id)
+            .where(SimulationRun.org_id == org_id, SimulationRun.agent_id == agent_id)
             .where((SimulationRun.batch_id == batch_id)
                    | ((SimulationRun.id == batch_id) & SimulationRun.batch_id.is_(None)))
             .order_by(SimulationRun.created_at)

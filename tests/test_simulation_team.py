@@ -5,8 +5,9 @@ from __future__ import annotations
 import uuid
 
 import pytest
+import sqlalchemy as sa
 
-from surogates.db.models import FollowupSettingsRow, User
+from surogates.db.models import FollowupSettingsRow, OutreachMessageRow, User
 from surogates.followup import store as followup_store
 from surogates.simulation import store
 from surogates.simulation.team import in_scope, run_settings
@@ -224,3 +225,33 @@ async def test_plan_lines_on_telegram_bring_only_the_named_member_with_their_rig
     )
     by_name = {p["name"]: p for p in (await _detail(rsf, run))["people"]}
     assert by_name["Maria"]["enrolled"] is True and by_name["Vasile"]["enrolled"] is False
+
+
+@pytest.mark.asyncio
+async def test_an_alert_reaches_a_telegram_stand_in_from_the_runs_own_bot(rsf):  # noqa: F811
+    org_id = await make_org(rsf)
+    doctor = uuid.uuid4()
+    async with rsf() as db:
+        db.add(User(id=doctor, org_id=org_id, email="d@x", display_name="Dr Ana"))
+        db.add(FollowupSettingsRow(
+            org_id=org_id, agent_id="a1", alert_recipient_user_ids=[str(doctor)],
+            senders={"whatsapp": "100"},
+        ))
+        await db.commit()
+    run = await store.create_run(
+        rsf, FakeVault(), org_id=org_id, agent_id="a1", created_by="u1", routing_config={},
+        provision=provision_into(rsf), channel="telegram",
+        people=[line("Vasile"), line("Dr Ana", member_id=doctor)],
+    )
+    customer, stand_in = await store.people(rsf, run.id)
+    real = await followup_store.get_settings(rsf, org_id=org_id, agent_id="a1")
+    inside = await run_settings(rsf, real, customer.user_id)
+    queued, why = await followup_store.notify_team(
+        rsf, inside, org_id=org_id, agent_id="a1", kind="alert", text="Bruise",
+        created_by="agent", subject_user_id=customer.user_id,
+    )
+    assert (queued, why) == (1, None)
+    async with rsf() as db:
+        [told] = (await db.execute(sa.select(OutreachMessageRow))).scalars().all()
+    assert (told.user_id, told.platform, told.channel_identifier) == (
+        stand_in.user_id, "telegram", run.phone_number_id)
