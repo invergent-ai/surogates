@@ -3307,6 +3307,7 @@ class AgentHarness(
                 await self._request_final_summary(
                     session, messages, system_prompt, lease,
                     request=request, cost_tracker=cost_tracker, turn_id=turn_id, reason=BUDGET_REASON,
+                    iteration_index=iteration - 1 - turn_base_iteration,
                 )
                 return
 

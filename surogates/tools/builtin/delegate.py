@@ -649,7 +649,11 @@ async def _run_single_delegation(
                 # An agent of the ``agent`` tool with a token budget used it up: its report is the reply to its last
                 # tools-off call, never a line from the middle of a step.
                 report = budget_report(outcome["events"])
-                result_text = (report + "\n\n" if report else "") + "[It stopped before it finished: it used its token budget.]"
+                # Its report in place of the words it had mid-step; the notes made above stay after it.
+                notes = result_text[len(outcome["text"]):].strip()
+                result_text = "\n\n".join(
+                    part for part in (report, notes, "[It stopped before it finished: it used its token budget.]") if part
+                )
             result = _format_result_with_trace_summary(result_text, trace, file_changes)
             # Last, once the result is made: this event says the call has the helper's result, so the helper's
             # own report is no news to the parent (``loop_pending.answered_helpers``).

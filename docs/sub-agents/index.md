@@ -560,7 +560,9 @@ The session reads it as news. A session at work reads it before its next model r
 
 ### Budget
 
-`agents.agent_token_budget` (env `SUROGATES_AGENTS_AGENT_TOKEN_BUDGET`) gives each agent the `agent` tool starts a budget of input and output tokens, its own sub-agents' included; 0, the default, sets none. A sub-agent with a budget hands each agent it starts at most half of what it has left, less what its agents still running were handed, so parallel calls never share more than it has. Past its budget, the agent's turn ends at its next step (`session.complete` with reason `token_budget_exhausted`), and its parent is told: `status: budget` for a background agent, a note in the call's result for a foreground one. An agent that used its budget is not resumed by a message.
+`agents.agent_token_budget` (env `SUROGATES_AGENTS_AGENT_TOKEN_BUDGET`) gives each agent the `agent` tool starts a budget of input and output tokens, its own sub-agents' included; 0, the default, sets none. A sub-agent with a budget hands each agent it starts at most half of what it has left, less what its agents still running were handed, so parallel calls never share more than it has. Past its budget, the agent makes one last call with no tools, asked for its report, and its turn ends (`session.complete` with reason `token_budget_exhausted`): that call is over the budget by its own size. Its parent is told, with that report as the result (or none, if the call failed; never a line from the middle of a step): `status: budget` for a background agent, the report and a note in the call's result for a foreground one. An agent that used its budget is not resumed by a message; news of its own (a background command's end) can still wake it, and each such wake costs that one last call again.
+
+Each resumed run of an agent gets a fresh iteration budget (the per-run loop guard every session has); what bounds an agent's total cost across resumes is its token budget, which counts every run. With no token budget set, set one before giving agents long-lived work.
 
 ### Linking an episode for training
 

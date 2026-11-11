@@ -29,7 +29,7 @@ from surogates.harness.delivery_manifest import (
 )
 from surogates.harness.loop_constants import _BACKGROUND_DRAIN_TIMEOUT_SECONDS
 from surogates.harness.subagents import dispatch_of, runs_in_background
-from surogates.harness.subagents import stopped_by as subagent_stopped_by
+from surogates.harness.subagents import stopped_by_an_agent_this_run
 from surogates.harness.loop_messages import (
     _as_aware_utc,
     _last_assistant_message_excerpt,
@@ -1401,7 +1401,7 @@ class ArtifactCompletionMixin:
                 # An agent of the family that ``stop_agent`` paused as this turn ended stays stopped: the stop
                 # already told its parent, which must not hear "completed" after "killed".
                 current = await self._store.get_session(session.id)
-                stopped = current.status == "paused" and await subagent_stopped_by(self._store, session.id) is not None
+                stopped = current.status == "paused" and await stopped_by_an_agent_this_run(self._store, session.id)
                 if stopped:
                     notify_parent = False
             if not stopped:

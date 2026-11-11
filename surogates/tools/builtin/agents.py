@@ -321,8 +321,9 @@ async def _start_monitor(me: Any, command: str, description: str, timeout: int, 
         if "Unknown tool" in error:
             # The sandbox's image predates the monitor (#629): the deployment's image is older than its runtime.
             error = (
-                "this sandbox's image is older than the monitor tool. Run the command with terminal "
-                "(background=true, notify_on_complete=true) instead: its end reaches you as a notification"
+                "this sandbox's image is older than the monitor tool. A command that ends can run with terminal "
+                "(background=true, notify_on_complete=true) instead, its end then reaching you as a notification "
+                "where the image reports it; a command that never ends cannot be watched here"
             )
         elif "monitors already run" in error:
             error += ": stop one with stop_agent before you start another"
@@ -582,15 +583,12 @@ async def _send_message_handler(arguments: dict[str, Any], **kwargs: Any) -> str
     if not running and target.status != "archived":
         # Checked and resumed under the lock the sender's starts take: a resume and the ``agent`` calls of one
         # response run at once, and together they stay within the background cap.
-        async with _START_LOCKS.setdefault(sender.id, asyncio.Lock()):
+        async with _start_lock(sender.id):
             why_not = await _why_not_resume(session_store, sender, target, kwargs.get("session_factory"))
             if why_not is None:
                 resumed = await session_store.resume_if_resting(
                     target.id, (target.status,), {"source": "agent_message", "from_agent": str(sender.id)},
                 )
-        lock = _START_LOCKS.get(sender.id)
-        if lock is not None and not lock.locked() and not _STARTING.get(sender.id):
-            _START_LOCKS.pop(sender.id, None)
         if why_not is None and not resumed:
             target = await session_store.get_session(target.id)
             running = target.status in ("active", "processing")
@@ -637,7 +635,7 @@ async def _why_not_resume(session_store: Any, sender: Any, target: Any, session_
     from surogates.workstreams import is_project_thread
 
     if budget_of(target) and await over_budget(session_store, target) is not None:
-        # Resumed, it would stop at its first step, and its parent be told again.
+        # Resumed, it would end after one more call for its report, and its parent be told again.
         return "it used its token budget"
     if target.id == sender.parent_id:
         return None if target.status == "completed" else f"it is {target.status}: its user resumes it"
@@ -671,9 +669,6 @@ def _forget_start(parent_id: UUID, start: tuple[str, str | None, str]) -> None:
         starting.remove(start)
     if not starting:
         _STARTING.pop(parent_id, None)
-        lock = _START_LOCKS.get(parent_id)
-        if lock is not None and not lock.locked():
-            _START_LOCKS.pop(parent_id, None)
 
 
 async def _running_agents(session_factory: Any, parent_id: UUID) -> list[tuple[str | None, str | None]]:
@@ -696,7 +691,18 @@ async def _running_agents(session_factory: Any, parent_id: UUID) -> list[tuple[s
 
 #: Starts under way in this process, by parent, until their child is in the database: (mode, agent_type, mark).
 _STARTING: dict[UUID, list[tuple[str, str | None, str]]] = {}
-_START_LOCKS: dict[UUID, asyncio.Lock] = {}
+#: One lock per parent for its starts and resumes; an entry lives while a call holds or waits for it (a weak map).
+_START_LOCKS: "weakref.WeakValueDictionary[UUID, asyncio.Lock]" = weakref.WeakValueDictionary()
+
+
+def _start_lock(parent_id: UUID) -> asyncio.Lock:
+    """The one lock of *parent_id*'s starts and resumes: never two at once, as a map that drops idle locks
+    could hand a second call a new one while a woken waiter still holds the old."""
+    lock = _START_LOCKS.get(parent_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _START_LOCKS[parent_id] = lock
+    return lock
 #: Tokens a sub-agent with a budget has handed to its agents still starting or running in this process, by its id.
 _BUDGET_HANDED: dict[UUID, int] = {}
 
@@ -848,10 +854,11 @@ async def _start_agent(
     )
     # Checked and counted under one lock per parent: the calls of one response
     # run at once, and none of their children is in the database yet.
-    lock = _START_LOCKS.setdefault(parent.id, asyncio.Lock())
-    async with lock:
+    async with _start_lock(parent.id):
+        # The starts under way first, then the database: one inserted meanwhile is in one of the two.
+        starting = [(mode, kind) for mode, kind, _ in _STARTING.get(parent.id, [])]
         running = await _running_agents(kwargs.get("session_factory"), parent.id) if kwargs.get("session_factory") else []
-        under_way = running + [(mode, kind) for mode, kind, _ in _STARTING.get(parent.id, [])]
+        under_way = running + starting
         if background and sum(mode == "background" for mode, _ in under_way) >= MAX_RUNNING_IN_BACKGROUND:
             run.close()
             return _error(

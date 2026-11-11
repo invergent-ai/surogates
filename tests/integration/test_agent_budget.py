@@ -184,3 +184,6 @@ async def test_a_budget_report_is_the_last_tools_off_reply_or_nothing():
     assert budget_report([step, report]) == "Done so far: 4."
     # A report of an earlier run is no report of this one.
     assert budget_report([report, event(EventType.SESSION_COMPLETE), step]) == ""
+    # Events after the run's own end (a caption, a message) do not hide its report.
+    later = event(EventType.COORDINATOR_MESSAGE, content="Also count the closed ones.")
+    assert budget_report([step, report, event(EventType.SESSION_COMPLETE), later]) == "Done so far: 4."

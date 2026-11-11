@@ -272,3 +272,21 @@ async def test_a_resume_and_a_start_at_once_stay_within_the_background_cap(chats
     assert json.loads(started)["status"] == "running"
     assert sent["status"] == "queued" and "already run in the background" in sent["note"]
     assert await chats.status(done.id) == "completed"
+
+
+async def test_starts_and_resumes_of_one_parent_share_one_lock_while_any_waits():
+    from uuid import uuid4 as fresh
+
+    parent = fresh()
+    held = agents_module._start_lock(parent)
+    async with held:
+        waiter = asyncio.create_task(_takes(agents_module._start_lock(parent)))
+        await asyncio.sleep(0)
+    # Released, with a waiter woken but not yet running: a third call still gets the same lock.
+    assert agents_module._start_lock(parent) is held
+    await waiter
+
+
+async def _takes(lock):
+    async with lock:
+        await asyncio.sleep(0)
