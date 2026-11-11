@@ -125,6 +125,16 @@ async def test_when_the_agent_last_finished_a_turn(rsf):  # noqa: F811
                      created_at=ended + timedelta(minutes=1)))
         await db.commit()
     assert await store.agent_turn_ended_at(rsf, person) == ended
+    # A sub-agent finishing doesn't end the agent's turn.
+    child = uuid.uuid4()
+    async with rsf() as db:
+        db.add(Session(id=child, org_id=org_id, agent_id="a1", channel="whatsapp",
+                       user_id=user_id, config={}, parent_id=session_id))
+        await db.flush()
+        db.add(Event(session_id=child, type="session.complete", data={},
+                     created_at=ended + timedelta(minutes=2)))
+        await db.commit()
+    assert await store.agent_turn_ended_at(rsf, person) == ended
     assert await store.agent_turn_ended_at(rsf, SimpleNamespace(user_id=None)) is None
 
 
@@ -386,3 +396,25 @@ async def test_a_run_ends_once_everyone_is_done(rsf):  # noqa: F811
     assert (await store.get_run(rsf, done.id)).status == "ended"
     assert (await store.get_run(rsf, talking.id)).status == "running"
     assert (await store.get_run(rsf, by_hand.id)).status == "running"
+
+
+async def test_a_run_ends_only_with_people_and_after_a_quiet_moment(rsf):  # noqa: F811
+    from surogates.db.models import SimulationRun
+    from tests.test_simulation_store import make_org, make_run
+
+    now = datetime.now(timezone.utc)
+    # Committed, its people not yet added: a run being created.
+    empty = SimulationRun(org_id=await make_org(rsf), agent_id="a1", created_by="u1",
+                          phone_number_id="9990000000000077", access_token="t", app_secret="s",
+                          routing_config={})
+    async with rsf() as db:
+        db.add(empty)
+        await db.commit()
+    run = await make_run(rsf)
+    [person] = await store.people(rsf, run.id)
+    await store.update_person(rsf, person.id, driver="ai", ai_state="done")
+    # The agent just wrote: it may be relaying to its team.
+    await store.log_message(rsf, run_id=run.id, person_id=person.id, direction="out", kind="text",
+                            body={}, wamid="wamid.relay")
+    assert await store.done_runs(rsf, now) == []
+    assert await store.done_runs(rsf, now + store.GRACE + timedelta(seconds=1)) == [run.id]

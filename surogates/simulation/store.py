@@ -19,14 +19,11 @@ import sqlalchemy as sa
 from surogates.channels.identity import ResolvedIdentity, get_or_create_channel_identity
 from surogates.channels.platforms.whatsapp_api import DEFAULT_API_VERSION
 from surogates.db.models import (
-    AgentUser,
-    ChannelIdentity,
-    DeliveryOutbox,
     Event,
-    InboxItem,
+    Mission,
     OutreachMessageRow,
+    ScheduledSession,
     Session,
-    SessionCursor,
     SessionLease,
     SimulationMedia,
     SimulationMessage,
@@ -58,6 +55,8 @@ logger = logging.getLogger(__name__)
 #: A run still running this long after it started was left open: nobody plays it.
 STALE_AFTER = timedelta(hours=2)
 KEEP_FOR = timedelta(days=90)
+#: How long a run whose people are all done must stay quiet before it ends.
+GRACE = timedelta(seconds=60)
 #: How a person's part can end; a run whose people all ended is over.
 _ENDED = ("done", "gave_up", "no_reply", "failed")
 
@@ -427,7 +426,9 @@ async def agent_turn_ended_at(sf, person: SimulationPerson) -> datetime | None:
         ended = await db.scalar(
             sa.select(sa.func.max(Event.created_at))
             .join(Session, Session.id == Event.session_id)
-            .where(Session.user_id == person.user_id, Event.type == "session.complete")
+            # A sub-agent finishing is not the agent's turn ending.
+            .where(Session.user_id == person.user_id, Session.parent_id.is_(None),
+                   Event.type == "session.complete")
         )
     if ended is not None and ended.tzinfo is None:
         ended = ended.replace(tzinfo=timezone.utc)
@@ -540,32 +541,61 @@ async def finish_run(state, run_id: uuid.UUID) -> SimulationRun | None:
     return run
 
 
-async def done_runs(sf) -> Sequence[uuid.UUID]:
-    """Running runs the AI plays alone whose every person's part has ended."""
+async def done_runs(sf, now: datetime) -> Sequence[uuid.UUID]:
+    """Running runs the AI plays alone whose every person's part has ended, and
+    quiet for GRACE: the agent may still be relaying to its team, which wakes a
+    stand-in that was done."""
     async with sf() as db:
         return (await db.execute(sa.select(SimulationRun.id).where(
             SimulationRun.status == "running",
+            # A run is committed before its people are added.
+            sa.exists().where(SimulationPerson.run_id == SimulationRun.id),
             ~sa.exists().where(
                 SimulationPerson.run_id == SimulationRun.id,
                 (SimulationPerson.driver != "ai")
                 | sa.func.coalesce(SimulationPerson.ai_state, "").notin_(_ENDED),
             ),
+            ~sa.exists().where(SimulationMessage.run_id == SimulationRun.id,
+                               SimulationMessage.created_at > now - GRACE),
         ))).scalars().all()
 
 
 async def delete_run(sf, run_id: uuid.UUID) -> None:
     """A run with its people, messages, media, stand-in users and their conversations."""
-    users = sa.select(User.id).where(User.simulation_run_id == run_id).scalar_subquery()
+    from surogates.session.store import delete_missions, delete_session_rows
+
     async with sf() as db:
-        sessions = (await db.execute(sa.select(Session.id).where(
+        users = (await db.execute(
+            sa.select(User.id).where(User.simulation_run_id == run_id))).scalars().all()
+        tree = set((await db.execute(sa.select(Session.id).where(
             Session.user_id.in_(users)
             | (Session.config["simulation_run_id"].as_string() == str(run_id))
-        ))).scalars().all()
-        for model in (DeliveryOutbox, InboxItem, SessionLease, SessionCursor, Event):
-            await db.execute(sa.delete(model).where(model.session_id.in_(sessions)))
-        await db.execute(sa.delete(Session).where(Session.id.in_(sessions)))
-        for model in (InboxItem, ChannelIdentity, AgentUser):
-            await db.execute(sa.delete(model).where(model.user_id.in_(users)))
+        ))).scalars().all())
+        while True:  # sub-agents' sessions, at any depth
+            children = set((await db.execute(sa.select(Session.id).where(
+                Session.parent_id.in_(tree)))).scalars().all()) - tree
+            if not children:
+                break
+            tree |= children
+        missions = (await db.execute(sa.select(Mission.id).where(
+            Mission.session_id.in_(tree) | Mission.user_id.in_(users)))).scalars().all()
+        if missions:
+            await delete_missions(db, missions)
+        await delete_session_rows(db, list(tree))
+        await db.execute(sa.delete(ScheduledSession).where(ScheduledSession.user_id.in_(users)))
+        await db.execute(sa.delete(OutreachMessageRow).where(
+            OutreachMessageRow.user_id.in_(users) | OutreachMessageRow.subject_user_id.in_(users)))
+        # Whatever else names a stand-in: emptied where it may be, deleted where
+        # it must name someone (channel identities, devices...).
+        for table in User.metadata.tables.values():
+            for fk in table.foreign_keys:
+                if fk.column is not User.__table__.c.id or fk.ondelete == "CASCADE":
+                    continue
+                where = fk.parent.in_(users)
+                if fk.parent.nullable:
+                    await db.execute(sa.update(table).where(where).values({fk.parent.name: None}))
+                else:
+                    await db.execute(sa.delete(table).where(where))
         await db.execute(sa.delete(User).where(User.id.in_(users)))
         # People, messages and media go with the run (ON DELETE CASCADE).
         await db.execute(sa.delete(SimulationRun).where(SimulationRun.id == run_id))

@@ -116,6 +116,11 @@ async def gateway(ws: WebSocket):
             frame = await ws.receive_json()
             op, d = frame.get("op"), frame.get("d") or {}
             if op == 1:
+                # A run ended in another process (the ticker's sweep) can't
+                # close this socket: its heartbeat finds out instead.
+                if run is not None and await _running(sf, run.access_token) is None:
+                    await GATEWAYS.close(run.id)
+                    return
                 await ws.send_json({"op": 11})
             elif op in (2, 6):
                 run = await _running(sf, str(d.get("token") or ""))

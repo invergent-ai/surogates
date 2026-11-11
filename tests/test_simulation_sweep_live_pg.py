@@ -23,12 +23,16 @@ from surogates.db.models import (
     Base,
     ChannelIdentity,
     Event,
+    Mission,
+    OutreachMessageRow,
+    ScheduledSession,
     Session,
     SessionLease,
     SimulationMedia,
     SimulationMessage,
     SimulationPerson,
     SimulationRun,
+    Task,
     User,
 )
 from surogates.simulation import store
@@ -77,8 +81,23 @@ async def _run(sf, vault, org_id, *, created, status="ended"):
         db.add(Session(id=session_id, org_id=org_id, agent_id="a1", channel="whatsapp",
                        user_id=person.user_id, config={"simulation_run_id": str(run.id)}))
         await db.flush()
-        db.add(Session(org_id=org_id, agent_id="a1", channel="whatsapp", parent_id=session_id,
-                       user_id=person.user_id, config={"simulation_run_id": str(run.id)}))
+        # A sub-agent's session, its task, and a mission: none cascade.
+        child_id = uuid.uuid4()
+        db.add(Session(id=child_id, org_id=org_id, agent_id="a1", channel="whatsapp",
+                       parent_id=session_id, user_id=person.user_id, config={}))
+        await db.flush()
+        task = Task(org_id=org_id, parent_session_id=session_id, current_session_id=child_id,
+                    goal="g", status="done")
+        db.add(task)
+        db.add(Mission(org_id=org_id, session_id=session_id, user_id=person.user_id,
+                       agent_id="a1", description="d", rubric="r"))
+        db.add(ScheduledSession(org_id=org_id, agent_id="a1", user_id=person.user_id, name="n",
+                                prompt="p", schedule={}, schedule_display="daily"))
+        db.add(OutreachMessageRow(org_id=org_id, agent_id="a1", user_id=person.user_id,
+                                  subject_user_id=person.user_id, kind="alert", platform="whatsapp", channel_identifier="x",
+                                  text="t"))
+        await db.flush()
+        await db.execute(sa.update(Session).where(Session.id == child_id).values(task_id=task.id))
         db.add(Event(session_id=session_id, type="user.message", data={}))
         db.add(SessionLease(session_id=session_id, owner_id="w", lease_token=uuid.uuid4(),
                             expires_at=datetime.now(timezone.utc).replace(tzinfo=None)))
@@ -119,6 +138,9 @@ async def test_sweep_ends_stale_runs_and_deletes_old_ones(pg):
     assert await _count(sf, Session, Session.user_id == old_person.user_id) == 0
     assert await _count(sf, Event, Event.user_id == old_person.user_id) == 0
     assert await _count(sf, ChannelIdentity, ChannelIdentity.user_id == old_person.user_id) == 0
+    assert await _count(sf, Mission, Mission.user_id == old_person.user_id) == 0
+    assert await _count(sf, ScheduledSession, ScheduledSession.user_id == old_person.user_id) == 0
+    assert await _count(sf, OutreachMessageRow, OutreachMessageRow.user_id == old_person.user_id) == 0
 
     assert (await store.get_run(sf, recent.id)).status == "ended"
     assert await _count(sf, SimulationMessage, SimulationMessage.run_id == recent.id) == 1

@@ -209,7 +209,7 @@ class Actor:
             await asyncio.sleep(TICK_SECONDS)
 
     async def _finish_done_runs(self) -> None:
-        for run_id in await store.done_runs(self.state.session_factory):
+        for run_id in await store.done_runs(self.state.session_factory, datetime.now(timezone.utc)):
             await store.finish_run(self.state, run_id)
 
     async def _stop(self, person, state: str, note: str) -> None:
