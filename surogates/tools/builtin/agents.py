@@ -163,12 +163,113 @@ _STOP_AGENT_SCHEMA = ToolSchema(
 )
 
 
+_MONITOR_SCHEMA = ToolSchema(
+    name="monitor",
+    description=(
+        "Watch a long-running command instead of polling it: the command runs in the background in your "
+        "workspace, and each new line it prints reaches you as a notification (lines that come together "
+        "arrive together, at most max_notifications_per_minute a minute). Use it to wait for an event: a "
+        "log line (e.g. `tail -f app.log | grep --line-buffered ERROR`), a file appearing, a server "
+        "answering (a loop that prints once the condition holds and exits). Print only what you want to "
+        "hear about. It ends when the command exits, when timeout_seconds pass, or with stop_agent on its "
+        "monitor_id. For a command that just runs to its end, use terminal."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "command": {"type": "string", "description": "The shell command to watch; each line it prints is a notification."},
+            "description": {"type": "string", "description": "What it waits for (3-5 words), shown with each notification."},
+            "timeout_seconds": {
+                "type": "integer", "minimum": 10, "maximum": 3600,
+                "description": "Stop watching (and kill the command) after this many seconds; default 600.",
+            },
+            "max_notifications_per_minute": {
+                "type": "integer", "minimum": 1, "maximum": 30,
+                "description": "The most notifications a minute; lines beyond wait for the next one. Default 6.",
+            },
+        },
+        "required": ["command", "description"],
+        "additionalProperties": False,
+    },
+)
+
+
 def register(registry: ToolRegistry) -> None:
     """Register the ``agent`` tool family."""
     registry.register(name="agent", schema=_AGENT_SCHEMA, handler=_agent_handler, toolset="core")
     registry.register(name="send_message", schema=_SEND_MESSAGE_SCHEMA, handler=_send_message_handler, toolset="core")
     registry.register(name="list_agents", schema=_LIST_AGENTS_SCHEMA, handler=_list_agents_handler, toolset="core")
     registry.register(name="stop_agent", schema=_STOP_AGENT_SCHEMA, handler=_stop_agent_handler, toolset="core")
+    registry.register(name="monitor", schema=_MONITOR_SCHEMA, handler=_monitor_handler, toolset="core")
+
+
+def _bounded(value: Any, default: int, low: int, high: int) -> int:
+    try:
+        number = int(value) if value is not None else default
+    except (TypeError, ValueError):
+        number = default
+    return max(low, min(high, number))
+
+
+async def _monitor_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
+    """Start *command* where the session's commands run, with its lines kept, and hand it to the worker's watch."""
+    from surogates.devices.binding import device_of
+    from surogates.harness.background_watch import HERE, background_watch
+    from surogates.sandbox.pool import SandboxPool, sandbox_session_key
+
+    session_store = kwargs.get("session_store")
+    me_id = kwargs.get("session_id")
+    if session_store is None or me_id is None:
+        return _error("monitor needs its session; none was given")
+    command = str(arguments.get("command") or "").strip()
+    if not command:
+        return _error("command is required")
+    description = " ".join(str(arguments.get("description") or "").split())[:80] or command[:60]
+    timeout = _bounded(arguments.get("timeout_seconds"), 600, 10, 3600)
+    cap = _bounded(arguments.get("max_notifications_per_minute"), 6, 1, 30)
+    me = await session_store.get_session(UUID(str(me_id)))
+    if device_of(me.config) is not None:
+        return _error("monitor runs in a cloud sandbox only; on your computer, use terminal with background=true")
+    if not background_watch.configured:
+        return _error("this worker cannot watch commands")
+    sandbox_pool = kwargs.get("sandbox_pool")
+    if isinstance(sandbox_pool, SandboxPool):
+        from surogates.harness.tool_exec import _build_session_sandbox_spec
+
+        owner = sandbox_session_key(me)
+        spec = await _build_session_sandbox_spec(me, kwargs.get("tenant"), owner, credential_vault=kwargs.get("credential_vault"))
+        await sandbox_pool.ensure(owner, spec)
+        try:
+            started = json.loads(await sandbox_pool.execute(owner, "_monitor", json.dumps({"command": command})))
+        except (TypeError, ValueError):
+            started = {"error": "the sandbox gave no answer"}
+    else:
+        from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
+        from surogates.tools.workspace_io.local import LocalWorkspaceIO
+
+        owner = HERE
+        try:
+            started = await LocalWorkspaceIO(workspace_path=kwargs.get("workspace_path")).start(
+                command, workdir=None, task_id=str(kwargs.get("task_id") or "monitor"), pty=False,
+                notify_on_complete=True, watcher_interval=None, watch_lines=True,
+            )
+        except WorkspaceSandboxError as exc:
+            started = {"error": str(exc)}
+    proc_id = started.get("session_id") if isinstance(started, dict) else None
+    if not proc_id:
+        error = str((started or {}).get("error") or "it did not start")
+        if "Unknown tool" in error:
+            error = "this sandbox cannot run monitors"
+        return _error(f"the monitor could not start: {error}")
+    background_watch.watch(owner=owner, proc_id=proc_id, session_id=me.id, command=command,
+                           monitor=(description, float(timeout), cap))
+    return json.dumps({
+        "monitor_id": proc_id, "status": "watching", "description": description, "timeout_seconds": timeout,
+        "note": (
+            f"Each new line it prints reaches you as a notification, at most {cap} a minute, until the command "
+            "exits, its timeout passes, or you stop it with stop_agent."
+        ),
+    })
 
 
 #: An agent's status, as the family names it, by its session's.
