@@ -1409,7 +1409,7 @@ class ArtifactCompletionMixin:
         # Scheduled loop runs use parent_id for traceability in the session
         # tree, but should not wake the parent as if they were sub-agent work.
         if notify_parent and _should_notify_parent_on_completion(session):
-            from surogates.harness.worker_notify import notify_parent_on_completion
+            from surogates.harness.worker_notify import is_delegated, notify_parent_on_completion
             try:
                 await notify_parent_on_completion(
                     session_store=self._store,
@@ -1424,6 +1424,7 @@ class ArtifactCompletionMixin:
                     landing=landing,
                     unkept=unkept,
                     set_aside=newly_aside,
+                    delegated=is_delegated(session),
                 )
             except Exception:
                 logger.warning(
@@ -1759,7 +1760,7 @@ class ArtifactCompletionMixin:
         await self._release_unattended_browser(session)
 
         if _should_notify_parent_on_completion(session):
-            from surogates.harness.worker_notify import notify_parent_on_failure
+            from surogates.harness.worker_notify import is_delegated, notify_parent_on_failure
             try:
                 await notify_parent_on_failure(
                     session_store=self._store,
@@ -1773,6 +1774,7 @@ class ArtifactCompletionMixin:
                     session_factory=self._session_factory,
                     not_taken=not_taken,
                     set_aside=newly_aside,
+                    delegated=is_delegated(session),
                 )
             except Exception:
                 logger.warning(

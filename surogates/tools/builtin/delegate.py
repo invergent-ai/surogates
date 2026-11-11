@@ -579,6 +579,21 @@ async def _run_single_delegation(
                 child_events=outcome["events"],
             )
 
+            from surogates.harness.loop_context_replay import _listed, not_handed_back
+
+            result_text = outcome["text"]
+            done = next((e.data or {} for e in outcome["events"] if e.type == EventType.SESSION_COMPLETE.value), {})
+            if done.get("not_kept"):
+                # The helper's version of these is in the history, not in the thread's copy. Each name on the result's
+                # one line, as a report names a thread's files: the pod's names are data.
+                named = _listed([{"label": path} for path in done["not_kept"]])
+                result_text += f"\n\nNot kept, because the thread or another helper changed them first: {named}"
+            if unkept := not_handed_back(done, copy="this copy"):
+                # Its hand-back failed: none of its work is in the thread's copy.
+                result_text += f"\n\n{unkept}"
+            result = _format_result_with_trace_summary(result_text, trace, file_changes)
+            # Last, once the result is made: this event says the call has the helper's result, so the helper's
+            # own report is no news to the parent (``loop_pending.answered_helpers``).
             await session_store.emit_event(
                 parent_session_id,
                 EventType.DELEGATION_COMPLETE,
@@ -592,18 +607,6 @@ async def _run_single_delegation(
                     "files_read": file_changes["read"],
                 },
             )
-            from surogates.harness.loop_context_replay import _listed, not_handed_back
-
-            result_text = outcome["text"]
-            done = next((e.data or {} for e in outcome["events"] if e.type == EventType.SESSION_COMPLETE.value), {})
-            if done.get("not_kept"):
-                # The helper's version of these is in the history, not in the thread's copy. Each name on the result's
-                # one line, as a report names a thread's files: the pod's names are data.
-                named = _listed([{"label": path} for path in done["not_kept"]])
-                result_text += f"\n\nNot kept, because the thread or another helper changed them first: {named}"
-            if unkept := not_handed_back(done, copy="this copy"):
-                # Its hand-back failed: none of its work is in the thread's copy.
-                result_text += f"\n\n{unkept}"
             if memory_manager is not None:
                 try:
                     memory_manager.on_delegation(
@@ -613,9 +616,7 @@ async def _run_single_delegation(
                     )
                 except Exception:
                     logger.debug("Memory manager on_delegation failed", exc_info=True)
-            return _format_result_with_trace_summary(
-                result_text, trace, file_changes,
-            )
+            return result
 
         # failed or timeout
         await session_store.emit_event(
@@ -739,7 +740,10 @@ async def _poll_child_completion(
 
         await asyncio.sleep(poll_interval)
 
-    return {"status": "failed", "reason": "Delegation timed out"}
+    from surogates.harness.loop_pending import GAVE_UP_ON_HELPER
+
+    # The helper may still run: its report, when it comes, is news to its parent (``answered_helpers``).
+    return {"status": "failed", "reason": GAVE_UP_ON_HELPER}
 
 
 def _last_event_is_unmatched_tool_call(events: list[Any]) -> bool:

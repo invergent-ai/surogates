@@ -943,7 +943,7 @@ class Orchestrator:
         from surogates.harness.loop_artifact_completion import announce_failure
         from surogates.harness.loop_messages import _should_notify_parent_on_completion
         from surogates.session.execution_context import is_scheduled_run
-        from surogates.harness.worker_notify import notify_parent_on_failure
+        from surogates.harness.worker_notify import is_delegated, notify_parent_on_failure
 
         session_id = session.id
         if is_scheduled_run(session):
@@ -962,6 +962,7 @@ class Orchestrator:
                 redis=self.redis,
                 task_id=getattr(session, "task_id", None),
                 session_factory=self._session_factory,
+                delegated=is_delegated(session),
             )
 
     def _task_done(self, task: asyncio.Task) -> None:
