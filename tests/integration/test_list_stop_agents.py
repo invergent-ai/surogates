@@ -121,6 +121,22 @@ async def test_a_queued_agent_stopped_before_it_runs_is_told_once(chats):  # noq
     assert len(await chats.store.get_events(chat, types=[EventType.AGENT_NOTIFICATION])) == 1
 
 
+async def test_the_users_stop_of_an_agent_its_parent_stopped_is_the_users_to_lift(chats):  # noqa: F811
+    chat = await a_chat(chats, PARITY)
+    child = await a_background_agent(chats, chat)
+    assert (await stop(chats, chat, child.id))["status"] == "stopped"
+    # The user stops it too, as it already rests: from now on the stop is the user's.
+    paused = await chats.api.client.post(f"/v1/sessions/{child.id}/pause", headers=chats.api.auth())
+    assert paused.status_code == 200, paused.text
+    answer = json.loads(await agents_module._send_message_handler(
+        {"to": str(child.id), "message": "Go on, after all.", "summary": "Go on"},
+        session_store=chats.store, session_id=str(chat), redis=chats.api.app.state.redis,
+        session_factory=chats.api.app.state.session_factory,
+    ))
+    assert answer["status"] == "queued" and "stopped by its user" in answer["note"]
+    assert await chats.status(child.id) == "paused"
+
+
 async def test_an_agent_stops_only_what_it_started(chats):  # noqa: F811
     chat, stranger = await a_chat(chats, PARITY), await a_chat(chats, PARITY)
     child = await a_background_agent(chats, chat, "Mine")
