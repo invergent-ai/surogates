@@ -26,13 +26,16 @@ pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 
 async def listed(chats, session) -> dict:  # noqa: F811
-    return json.loads(await agents_module._list_agents_handler({}, session_store=chats.store, session_id=str(session)))
+    return json.loads(await agents_module._list_agents_handler(
+        {}, session_store=chats.store, session_id=str(session), session_factory=chats.api.app.state.session_factory,
+    ))
 
 
 async def stop(chats, session, target) -> dict:  # noqa: F811
     return json.loads(await agents_module._stop_agent_handler(
         {"agent_id": str(target), "reason": "no longer needed"},
         session_store=chats.store, session_id=str(session), redis=chats.api.app.state.redis,
+        session_factory=chats.api.app.state.session_factory,
     ))
 
 
@@ -75,6 +78,8 @@ async def test_stopping_a_running_agent_stops_it_and_tells_its_parent(chats):  #
             if message is not None:
                 break
         assert message is not None
+        # A fixed word, never the model's reason, which stays in the pause event.
+        assert json.loads(message["data"])["reason"] == "stopped by agent"
         chats.harnesses[child.id].interrupt(json.loads(message["data"])["reason"])
 
     chats.during_the_tool_call = the_parent_stops_it
@@ -88,9 +93,14 @@ async def test_stopping_a_running_agent_stops_it_and_tells_its_parent(chats):  #
     said = [e.data["message"]["content"] for e in await chats.store.get_events(child.id, types=[EventType.LLM_RESPONSE])]
     assert "never asked" not in said
     # Stopped, it keeps its context: a message resumes it.
+    # The stop's own pause, then the one its turn wrote as it ended.
+    pauses = [e.data for e in await chats.store.get_events(child.id, types=[EventType.SESSION_PAUSE])]
+    assert pauses[0] == {"reason": "stopped", "message": "no longer needed", "stopped_by": str(chat)}
+    assert all(p.get("turn_ended") for p in pauses[1:])
     resumed = json.loads(await agents_module._send_message_handler(
         {"to": str(child.id), "message": "Go on, after all.", "summary": "Go on"},
         session_store=chats.store, session_id=str(chat), redis=chats.api.app.state.redis,
+        session_factory=chats.api.app.state.session_factory,
     ))
     assert resumed["status"] == "resumed" and await chats.status(child.id) == "active"
     await pubsub.aclose()
@@ -137,11 +147,15 @@ async def test_a_background_command_is_listed_and_stopped_by_the_session_that_st
 
     watch.watch(owner=HERE, proc_id=proc, session_id=UUID(mine), command="sleep 30")
     try:
-        assert (await listed_api(store, mine))["background_commands"] == [{"id": proc, "command": "sleep 30", "status": "running"}]
-        assert (await listed_api(store, theirs))["background_commands"] == []
-        refused = json.loads(await agents_module._stop_agent_handler({"agent_id": proc}, session_store=store, session_id=theirs))
+        assert (await listed_api(api, mine))["background_commands"] == [{"id": proc, "command": "sleep 30", "status": "running"}]
+        assert (await listed_api(api, theirs))["background_commands"] == []
+        refused = json.loads(await agents_module._stop_agent_handler(
+            {"agent_id": proc}, session_store=store, session_id=theirs, session_factory=api.app.state.session_factory,
+        ))
         assert "no background command" in refused["error"]
-        killed = json.loads(await agents_module._stop_agent_handler({"agent_id": proc}, session_store=store, session_id=mine))
+        killed = json.loads(await agents_module._stop_agent_handler(
+            {"agent_id": proc}, session_store=store, session_id=mine, session_factory=api.app.state.session_factory,
+        ))
         assert killed["agent_id"] == proc
         for _ in range(200):
             notes = await store.get_events(UUID(mine), types=[EventType.AGENT_NOTIFICATION])
@@ -153,5 +167,36 @@ async def test_a_background_command_is_listed_and_stopped_by_the_session_that_st
         await watch.close()
 
 
-async def listed_api(store, session) -> dict:
-    return json.loads(await agents_module._list_agents_handler({}, session_store=store, session_id=str(session)))
+async def listed_api(api, session) -> dict:  # noqa: F811
+    return json.loads(await agents_module._list_agents_handler(
+        {}, session_store=api.app.state.session_store, session_id=str(session),
+        session_factory=api.app.state.session_factory,
+    ))
+
+
+async def test_a_stop_of_a_foreground_agent_ends_the_call_that_waits_for_it(chats):  # noqa: F811
+    from surogates.session.provisioning import create_child_session
+    from surogates.tools.builtin import delegate
+
+    chat = await a_chat(chats, PARITY)
+    child = await create_child_session(store=chats.store, parent=await chats.session(chat), channel="delegation")
+    await chats.store.emit_event(child.id, EventType.SESSION_PAUSE, {"reason": "stopped", "message": "enough", "stopped_by": str(chat)})
+    outcome = await delegate._poll_child_completion(
+        session_store=chats.store, parent_session_id=chat, child_id=child.id, timeout=5, poll_interval=0.05,
+    )
+    assert outcome == {"status": "failed", "reason": "The agent was stopped: enough"}
+
+
+async def test_a_stop_reaches_only_agents_of_the_family(chats):  # noqa: F811
+    from surogates.harness.subagents import DISPATCH_KEY, PARITY_KEY
+    from surogates.session.provisioning import create_child_session
+
+    chat = await a_chat(chats, PARITY)
+    # A worker of the chat's, and an agent under it: not the chat's agents.
+    worker = await create_child_session(store=chats.store, parent=await chats.session(chat), channel="worker")
+    hidden = await create_child_session(
+        store=chats.store, parent=worker, channel="delegation",
+        config={PARITY_KEY: True, DISPATCH_KEY: {"mode": "background", "description": "Hidden", "parent": str(worker.id)}},
+    )
+    assert (await stop(chats, chat, hidden.id))["error"].startswith("no agent ")
+    assert all(a["agent_id"] != str(hidden.id) for a in (await listed(chats, chat))["agents"])

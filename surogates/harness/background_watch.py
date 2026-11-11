@@ -146,6 +146,10 @@ class BackgroundWatch:
             for watched in self._owners.values() for proc_id, item in watched.items() if item.session_id == session_id
         ]
 
+    def owner_of(self, proc_id: str) -> str | None:
+        """The registry key of watched command *proc_id*: a sandbox's key, ``HERE``, or None for one not watched."""
+        return next((owner for owner, watched in self._owners.items() if proc_id in watched), None)
+
     def started_by(self, proc_id: str, session_id: UUID) -> bool:
         """Whether this watch waits on command *proc_id* for session *session_id*."""
         return any(

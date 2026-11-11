@@ -740,6 +740,12 @@ async def _poll_child_completion(
                     ),
                     "events": events,
                 }
+            if event.type == EventType.SESSION_PAUSE.value and (event.data or {}).get("stopped_by"):
+                # Stopped by an agent above it (``stop_agent``): the call has its answer, and waits no more.
+                return {
+                    "status": "failed",
+                    "reason": f"The agent was stopped: {(event.data or {}).get('message') or 'stopped'}",
+                }
             if event.type == EventType.SESSION_FAIL.value:
                 from surogates.harness.loop_context_replay import _listed
 

@@ -175,95 +175,151 @@ def register(registry: ToolRegistry) -> None:
 _STATUS = {"active": "running", "processing": "running", "completed": "completed", "failed": "failed", "paused": "stopped"}
 
 
+async def _tree(kwargs: dict, root_id: UUID) -> list[dict]:
+    """*root_id* and every session under it: id, parent, org, status and ``agent_dispatch``, in one read."""
+    from sqlalchemy import text
+
+    async with kwargs["session_factory"]() as db:
+        rows = (await db.execute(text(
+            """
+            WITH RECURSIVE tree(id) AS (
+                SELECT id FROM sessions WHERE id = :id
+                UNION
+                SELECT s.id FROM sessions s JOIN tree t ON s.parent_id = t.id
+            )
+            SELECT s.id, s.parent_id, s.org_id, s.status, s.channel, s.config -> 'agent_dispatch' AS dispatch
+            FROM sessions s WHERE s.id IN (SELECT id FROM tree)
+            """
+        ), {"id": root_id})).mappings().all()
+    return [dict(row) for row in rows]
+
+
+def _family_below(rows: list[dict], top: UUID) -> list[dict]:
+    """The sessions under *top* reached through agents of the family only: each hop an ``agent_dispatch``."""
+    children: dict[UUID, list[dict]] = {}
+    for row in rows:
+        children.setdefault(row["parent_id"], []).append(row)
+    out, stack = [], [top]
+    while stack:
+        for row in children.get(stack.pop(), []):
+            if isinstance(row["dispatch"], dict):
+                out.append(row)
+                stack.append(row["id"])
+    return out
+
+
 async def _list_agents_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
-    """The agents the caller may message (``may_message``), and its background commands still running."""
+    """The agents the caller can reach: its own, at any depth, through agents of the family only; and, for an
+    agent of the family, its parent and its siblings.  Plus its background commands still running."""
     from surogates.harness.background_watch import background_watch
 
     session_store = kwargs.get("session_store")
     me_id = kwargs.get("session_id")
-    if session_store is None or me_id is None:
+    if session_store is None or me_id is None or kwargs.get("session_factory") is None:
         return _error("list_agents needs its session; none was given")
     me = await session_store.get_session(UUID(str(me_id)))
-    found: dict[UUID, tuple[Any, str]] = {}
-    for sid in await session_store.session_tree_ids(me.id):
-        if sid != me.id:
-            found[sid] = (await session_store.get_session(sid), "yours")
-    if me.parent_id is not None:
-        parent = await session_store.get_session(me.parent_id)
-        found[parent.id] = (parent, "parent")
-        for sid in await session_store.session_tree_ids(parent.id):
-            if sid not in found and sid != me.id:
-                other = await session_store.get_session(sid)
-                if other.parent_id == parent.id:
-                    found[sid] = (other, "sibling")
+    found: list[tuple[dict, str]] = [(row, "yours") for row in _family_below(await _tree(kwargs, me.id), me.id)]
+    if me.parent_id is not None and dispatch_of(me) is not None:
+        siblings = await _tree(kwargs, me.parent_id)
+        parent = next(row for row in siblings if row["id"] == me.parent_id)
+        found.append((parent, "parent"))
+        found += [
+            (row, "sibling") for row in siblings
+            if row["parent_id"] == me.parent_id and row["id"] != me.id and isinstance(row["dispatch"], dict)
+        ]
     agents = []
-    for session, relation in found.values():
-        if session.org_id != me.org_id or session.status == "archived":
+    for row, relation in found:
+        if row["org_id"] != me.org_id or row["status"] == "archived":
             continue
-        dispatch = dispatch_of(session)
-        if dispatch is None and relation != "parent":
-            # Not an agent the family started: a delegate_task helper, a worker, a routine's run.
-            continue
-        entry = {"agent_id": str(session.id), "relation": relation, "status": _STATUS.get(session.status, session.status)}
+        entry = {"agent_id": str(row["id"]), "relation": relation, "status": _STATUS.get(row["status"], row["status"])}
+        dispatch = row["dispatch"] if isinstance(row["dispatch"], dict) else None
         if dispatch is not None:
             entry["description"] = dispatch.get("description") or ""
             entry["mode"] = dispatch.get("mode")
-            if session.parent_id is not None and session.parent_id != me.id and relation == "yours":
-                entry["started_by"] = str(session.parent_id)
+            if relation == "yours" and row["parent_id"] != me.id:
+                entry["started_by"] = str(row["parent_id"])
         agents.append(entry)
     return json.dumps({"agents": agents, "background_commands": background_watch.running_for(me.id)})
 
 
+#: What the interrupt of an agent's stop says: a fixed word, never the model's, which the dispatcher reads.
+_STOP_SIGNAL = "stopped by agent"
+
+
 async def _stop_agent_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
-    """Stop an agent below the caller, with its own agents, or a background command of the caller's sandbox."""
+    """Stop an agent below the caller, with the agents of the family below it, or a background command the
+    caller started."""
+    from sqlalchemy import update
+
     from surogates.config import INTERRUPT_CHANNEL_PREFIX
-    from surogates.harness.subagents import lineage, runs_in_background, tell_parent
+    from surogates.db.models import Session as SessionRow
+    from surogates.devices.operations import DeviceOperations
+    from surogates.harness.message_utils import extract_final_response
+    from surogates.harness.subagents import runs_in_background, tell_parent
     from surogates.session.events import EventType
 
     session_store = kwargs.get("session_store")
     me_id = kwargs.get("session_id")
     redis = kwargs.get("redis")
-    if session_store is None or me_id is None:
-        return _error("stop_agent needs its session; none was given")
+    session_factory = kwargs.get("session_factory")
     target = str(arguments.get("agent_id") or "").strip()
-    reason = " ".join(str(arguments.get("reason") or "").split())[:200] or "stopped by the agent that started it"
-    if target.startswith("proc_"):
+    if session_store is not None and me_id is not None and target.startswith("proc_"):
         return await _stop_process(target, **kwargs)
+    if session_store is None or me_id is None or session_factory is None:
+        return _error("stop_agent needs its session; none was given")
+    reason = " ".join(str(arguments.get("reason") or "").split())[:200] or "stopped by the agent that started it"
     me = await session_store.get_session(UUID(str(me_id)))
     try:
-        agent = await session_store.get_session(UUID(target))
-    except Exception:
-        agent = None
-    if (
-        agent is None or agent.org_id != me.org_id or dispatch_of(agent) is None
-        or not any(a.id == me.id for a in await lineage(session_store, agent))
-    ):
+        target_id = UUID(target)
+    except ValueError:
+        target_id = None
+    mine = {row["id"]: row for row in _family_below(await _tree(kwargs, me.id), me.id)}
+    agent = mine.get(target_id)
+    if agent is None or agent["org_id"] != me.org_id:
         return _error(f"no agent {target} that you started")
-    if agent.status not in ("active", "processing"):
-        return json.dumps({"status": _STATUS.get(agent.status, agent.status), "agent_id": str(agent.id),
+    if agent["status"] not in ("active", "processing"):
+        return json.dumps({"status": _STATUS.get(agent["status"], agent["status"]), "agent_id": str(agent["id"]),
                            "note": "It is not running: there is nothing to stop."})
-    stopped = []
-    for sid in await session_store.session_tree_ids(agent.id):
-        session = agent if sid == agent.id else await session_store.get_session(sid)
-        if session.status not in ("active", "processing"):
+    stopped: list[UUID] = []
+    for row in [agent, *_family_below(list(mine.values()), agent["id"])]:
+        # Paused only from running, in one write: a turn that ended meanwhile stays ended, and is told of once.
+        async with session_factory() as db:
+            changed = (await db.execute(
+                update(SessionRow)
+                .where(SessionRow.id == row["id"], SessionRow.status.in_(("active", "processing")))
+                .values(status="paused")
+                .returning(SessionRow.id),
+            )).first()
+            await db.commit()
+        if changed is None:
             continue
-        # As the pause route does: the status first, in the event's own write, then the running turn's interrupt.
-        await session_store.emit_event(sid, EventType.SESSION_PAUSE, {"reason": "stopped", "message": reason}, status="paused")
+        await session_store.emit_event(row["id"], EventType.SESSION_PAUSE, {
+            "reason": "stopped", "message": reason, "stopped_by": str(me.id),
+        })
+        stopped.append(row["id"])
+    try:
+        # As the pause route does: what the stopped agents left waiting on the user's computer is cancelled.
+        await DeviceOperations(session_factory, redis).cancel(stopped, sparing=stopped)
+    except Exception:
+        logger.warning("Could not cancel the device operations of the agents %s stopped", me.id, exc_info=True)
+    for sid in stopped:
         if redis is not None:
-            await redis.publish(f"{INTERRUPT_CHANNEL_PREFIX}:{sid}", json.dumps({"reason": reason}))
-        stopped.append(str(sid))
-        has_live_lease = getattr(session_store, "has_live_lease", None)
-        if runs_in_background(session) and has_live_lease is not None and not await has_live_lease(sid):
-            # No turn runs to hear the interrupt and tell its parent: told here.
-            await tell_parent(store=session_store, redis=redis, session=session, status="killed")
-    return json.dumps({"status": "stopped", "agent_id": str(agent.id), "stopped": stopped,
+            await redis.publish(f"{INTERRUPT_CHANNEL_PREFIX}:{sid}", json.dumps({"reason": _STOP_SIGNAL}))
+        session = await session_store.get_session(sid)
+        if runs_in_background(session):
+            # The stop tells the agent that started it, once: the turn it interrupts does not.
+            await tell_parent(
+                store=session_store, redis=redis, session=session, status="killed",
+                result=extract_final_response(await session_store.get_events(sid), fallback=""),
+            )
+    return json.dumps({"status": "stopped", "agent_id": target, "stopped": [str(sid) for sid in stopped],
                        "note": "A stopped agent keeps its context: send_message resumes it."})
 
 
 async def _stop_process(proc_id: str, **kwargs: Any) -> str:
     """Kill background command *proc_id* where the caller's commands run: its sandbox, or this process."""
     from surogates.harness.background_watch import background_watch
-    from surogates.sandbox.pool import SandboxPool, sandbox_session_key
+    from surogates.sandbox.pool import SandboxPool
 
     session_store = kwargs["session_store"]
     me = await session_store.get_session(UUID(str(kwargs["session_id"])))
@@ -271,8 +327,12 @@ async def _stop_process(proc_id: str, **kwargs: Any) -> str:
         return _error(f"no background command {proc_id} that you started and that still runs")
     sandbox_pool = kwargs.get("sandbox_pool")
     args = json.dumps({"action": "kill", "session_id": proc_id})
-    if isinstance(sandbox_pool, SandboxPool) and sandbox_pool.sandbox_of(sandbox_session_key(me)):
-        result = json.loads(await sandbox_pool.execute(sandbox_session_key(me), "process", args))
+    owner = background_watch.owner_of(proc_id)
+    if owner and isinstance(sandbox_pool, SandboxPool) and sandbox_pool.sandbox_of(owner):
+        try:
+            result = json.loads(await sandbox_pool.execute(owner, "process", args))
+        except (TypeError, ValueError):
+            result = {"status": "error"}
     else:
         from surogates.tools.utils.process_registry import process_registry
 
@@ -405,7 +465,13 @@ async def _why_not_resume(session_store: Any, sender: Any, target: Any, session_
         return "only the agent that started it resumes it"
     if getattr(sender, "channel", None) == "delegation" or is_project_thread(sender.config):
         return "a sub-agent does not resume agents: its parent does"
-    if target.status not in ("completed", "failed"):
+    if target.status == "paused":
+        # Only a stop of its own: one by the user, or by another agent, is theirs to lift.
+        from surogates.harness.subagents import stopped_by
+
+        if await stopped_by(session_store, target.id) != str(sender.id):
+            return "it was stopped by its user"
+    elif target.status not in ("completed", "failed"):
         return f"it is {target.status}"
     if session_factory is not None and sum(
         mode == "background" for mode, _ in await _running_agents(session_factory, sender.id)

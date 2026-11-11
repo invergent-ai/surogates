@@ -1574,8 +1574,9 @@ class AgentHarness(
             )
         if said:
             await self._tell_what_the_stop_left(session, left)
-        if current.status == "paused" and runs_in_background(session):
-            # A sub-agent started in the background was stopped: the agent that started it hears so.
+        if current.status == "paused" and runs_in_background(session) and not await self._stopped_by_an_agent(session.id):
+            # A sub-agent started in the background was stopped by its user: the agent that started it hears so.
+            # A stop of an agent's (``stop_agent``) told it already, once.
             from surogates.harness.subagents import tell_parent
 
             await tell_parent(
@@ -1594,6 +1595,12 @@ class AgentHarness(
                 {"reason": "channel_stop", "worker_id": self._worker_id},
             )
         self._clear_interrupt()
+
+    async def _stopped_by_an_agent(self, session_id: UUID) -> bool:
+        """Whether the session's last stop was ``stop_agent``'s (``subagents.stopped_by``)."""
+        from surogates.harness.subagents import stopped_by
+
+        return await stopped_by(self._store, session_id) is not None
 
     async def _tell_what_the_stop_left(self, session: Session, left: list[dict]) -> None:
         """Tell a thread's master what its user's stop did not take back, as a thread's news reaches it: a report.
