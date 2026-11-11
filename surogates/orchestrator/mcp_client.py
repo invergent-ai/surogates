@@ -123,6 +123,7 @@ class McpProxyClient:
                 name=name,
                 description=tool.get("description", ""),
                 parameters=tool.get("parameters", {}),
+                annotations=tool.get("annotations") or None,
             )
             # The registry is process-wide; another agent may have
             # already registered this exact tool name.  An unchanged

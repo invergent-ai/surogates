@@ -25,6 +25,8 @@ class ToolSchema:
     name: str
     description: str
     parameters: dict[str, Any]  # JSON Schema for the tool's input
+    # MCP tool hints (readOnlyHint, destructiveHint...); never sent to the model.
+    annotations: dict[str, Any] | None = None
 
 
 @dataclass(slots=True)

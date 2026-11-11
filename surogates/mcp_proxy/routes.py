@@ -66,6 +66,7 @@ class ToolSchema(BaseModel):
     name: str
     description: str
     parameters: dict[str, Any]
+    annotations: dict[str, Any] | None = None
 
 
 class ToolListResponse(BaseModel):
@@ -170,6 +171,7 @@ async def list_tools(
                 name=s.get("name", ""),
                 description=s.get("description", ""),
                 parameters=s.get("parameters", {}),
+                annotations=s.get("annotations"),
             )
             for s in schemas
         ]

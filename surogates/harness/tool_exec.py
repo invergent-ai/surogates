@@ -237,6 +237,19 @@ def _noted(content: str, note: str) -> str:
     return f"{content}\n\n[{note}]"
 
 
+async def _simulation_fakes(
+    tool_name: str, tool_args: Any, session: Any, tools: Any, summary_llm_client: Any, summary_model: str | None,
+) -> bool:
+    from surogates.simulation.side_effects import decide, is_simulated, summary_judge
+
+    if not is_simulated(session.config):
+        return False
+    entry = tools.get(tool_name) if hasattr(tools, "get") else None
+    schema = getattr(entry, "schema", None)
+    judge = summary_judge(summary_llm_client, summary_model, {tool_name: getattr(schema, "description", "")})
+    return await decide(tool_name, getattr(schema, "annotations", None), llm=judge, args=tool_args)
+
+
 async def _refused_open_document(tool_name: str, tool_args: Any, session: Any, session_factory: Any) -> str | None:
     from surogates.office.guard import refused_open_document
 
@@ -1921,6 +1934,7 @@ async def _run_single_tool(
     # helpers' files the copy then kept its own version of.
     handed_on: list[bool] = []
     not_taken: list[str] = []
+    simulated: dict[str, str] | None = None
     try:
         from surogates.tools.router import TOOL_LOCATIONS, ToolLocation
         from surogates.sandbox.pool import sandbox_session_key
@@ -1996,6 +2010,13 @@ async def _run_single_tool(
             # tool also acts off it (it creates an artifact, it pays for a
             # model call), and running it again would do that again.
             result_content = interrupted(tool_name)
+        elif tool_name.startswith("mcp__") and await _simulation_fakes(
+            tool_name, tool_args, session, tools, summary_llm_client, summary_model,
+        ):
+            from surogates.simulation.side_effects import fake_result, would_have
+
+            result_content = fake_result(tool_name, tool_args)
+            simulated = {"would_have": would_have(tool_name, tool_args)}
         elif device_call is not None and location == ToolLocation.SANDBOX:
             result_content = await device_call.dispatch(tool_name, tool_args)
         elif location == ToolLocation.SANDBOX and sandbox_pool is not None:
@@ -2270,6 +2291,7 @@ async def _run_single_tool(
                 "name": tool_name,
                 "content": sanitized_content,
                 "elapsed_ms": elapsed_ms,
+                **({"simulated": simulated} if simulated else {}),
             },
             **fence,
         )

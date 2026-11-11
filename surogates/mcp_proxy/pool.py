@@ -294,6 +294,10 @@ class ConnectionPool:
                 _flatten_openai_schema(s)
                 for s in temp_registry.get_schemas(names=set(registered))
             ]
+            for s in schemas:
+                tool = temp_registry.get(s["name"])
+                if tool is not None and tool.schema.annotations:
+                    s["annotations"] = tool.schema.annotations
 
             # Build clean schemas and reverse tool index.
             tenant_pfx = sanitize_mcp_name_component(
