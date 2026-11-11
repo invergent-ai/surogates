@@ -11,6 +11,7 @@ from uuid import UUID
 from surogates.channels.memory_boundary import rerun_kind_of
 from surogates.devices.binding import device_of
 from surogates.devices.browser import of_a_sub_agent, resumes_the_agent, takes_the_browser_over
+from surogates.harness.agent_news import AGENT_NEWS_TYPES, notification_note
 from surogates.harness.context import NOOP_STRATEGIES
 from surogates.harness.context_files import load_folder_context
 from surogates.harness.loop_attachments import (
@@ -148,7 +149,7 @@ BROWSER_HANDED_BACK = (
     "you act on it.]"
 )
 #: The events a session reads as news at its next model request.
-NEWS_TYPES = WORKER_NEWS_TYPES | {
+NEWS_TYPES = WORKER_NEWS_TYPES | AGENT_NEWS_TYPES | {
     EventType.SESSION_RESUME.value, EventType.HISTORY_REDO.value, EventType.INBOX_ACTION_REQUIRED.value,
 }
 
@@ -562,10 +563,12 @@ def news(event) -> dict | None:
     """The message a session reads an event as at its next model request, or
     None for an event that is no news: a worker's news to its coordinator,
     a redo a project's thread was told of, the wait on its user over files
-    it was put in, and, in a chat on its user's computer, the resume a hand
-    back of the browser gave it."""
+    it was put in, the end of background work it started, and, in a chat on
+    its user's computer, the resume a hand back of the browser gave it."""
     if event.type in WORKER_NEWS_TYPES:
         return worker_news(event.type, event.data)
+    if event.type in AGENT_NEWS_TYPES:
+        return notification_note(event.data)
     if event.type == EventType.HISTORY_REDO.value:
         return redo_note(event.data)
     if event.type == EventType.INBOX_ACTION_REQUIRED.value:
@@ -874,6 +877,12 @@ class ContextReplayMixin:
             # the browser over again first.  The hand back's own event, as the
             # take-over's, is for the pane.
             elif resumes_the_agent(event) or takes_the_browser_over(event):
+                held_reports = held_news(held_reports, event)
+
+            # The end of background work the session started is read the
+            # same way: it lands whenever the work ends, between a call and
+            # its result too.
+            elif etype in AGENT_NEWS_TYPES:
                 held_reports = held_news(held_reports, event)
 
             # A redo a project's thread was told of opens its next turn, and

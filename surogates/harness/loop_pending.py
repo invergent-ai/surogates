@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from surogates.devices.browser import for_the_pane_alone, resumes_the_agent, takes_the_browser_over
+from surogates.harness.agent_news import AGENT_NEWS_TYPES
 from surogates.session.execution_context import is_scheduled_run
 from surogates.keel.steps import is_case_work
 from surogates.session.events import MESSAGE_TYPES, EventType
@@ -324,8 +325,9 @@ _GOAL_TURN_MESSAGES = frozenset({"outcome_kickoff", "outcome_continuation"})
 def _first_unread(events: list[Any], *, goal_in_flight: bool, is_plain_message: Any) -> int | None:
     """Return the id of the first event in *events* that still waits for the model to read it.
 
-    A worker's report; a redo a thread was told of; a message of the
-    user's own that is no command (*is_plain_message* says which); and,
+    A worker's report; the end of background work the session started; a
+    redo a thread was told of; a message of the user's own that is no
+    command (*is_plain_message* says which); and,
     while a goal is in flight, the message that gives the goal its next
     turn.  A request reads what was written before it, so the unread ones
     are those after the log's last ``llm.request``.
@@ -337,6 +339,7 @@ def _first_unread(events: list[Any], *, goal_in_flight: bool, is_plain_message: 
             first = None
         elif first is None and (
             event_type in _REPORT_EVENT_TYPES
+            or event_type in AGENT_NEWS_TYPES
             or event_type == EventType.HISTORY_REDO.value
             or is_plain_message(event)
             or goal_in_flight and _gives_a_goal_its_turn(event)

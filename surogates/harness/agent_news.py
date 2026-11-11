@@ -1,0 +1,109 @@
+"""What a session hears of background work it started: ``agent.notification``.
+
+A background command the session started with ``notify_on_complete`` ends
+long after the call that started it returned.  Its end is written to the
+session as an ``agent.notification`` event and wakes it.  The session reads
+the event as news (``loop_context_replay.news``): one user-role message at
+its next model request, in the live loop and in replay alike, so a request
+rebuilt from the log is the request that was sent.  A session at rest is
+woken by it, and the notification is the input of the turn it gets.
+
+Every message is built from the event's payload alone: the live loop and
+replay must produce the same bytes.
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Any
+
+from surogates.session.events import EventType
+
+#: The events a session hears of its own background work by.
+AGENT_NEWS_TYPES = frozenset({EventType.AGENT_NOTIFICATION.value})
+
+#: The most characters of a background command's last output a notification carries.
+MAX_RESULT_CHARS = 10_000
+
+
+def _type(event: Any) -> str:
+    kind = getattr(event, "type", None)
+    return kind.value if isinstance(kind, EventType) else str(kind)
+
+
+def notification_note(data: dict) -> dict:
+    """The user-role message the session reads an ``agent.notification`` as.
+
+    The harness speaks in its first line, in brackets; what the work printed
+    or reported follows it, as a worker's report does.
+    """
+    data = data if isinstance(data, dict) else {}
+    work = str(data.get("agent_id") or "?")
+    status = data.get("status")
+    result = str(data.get("result") or "")
+    if data.get("kind") == "process":
+        command = str(data.get("summary") or "")
+        if status == "killed":
+            head = f"[Background process {work} was stopped before it finished: {command}"
+            reason = data.get("reason")
+            head += f" ({reason})]" if reason else "]"
+        else:
+            code = data.get("exit_code")
+            said = "an unknown exit code" if code is None else f"exit code {code}"
+            head = f"[Background process {work} finished with {said}: {command}]"
+        return {"role": "user", "content": f"{head}\n{result}" if result else head}
+    # Any other kind: its status and summary, in the harness's words.
+    summary = data.get("summary")
+    named = f"{work} ({summary})" if summary else work
+    head = f"[{named} {status or 'ended'}]"
+    return {"role": "user", "content": f"{head}\n{result}" if result else head}
+
+
+def agent_news_unread(events: list) -> bool:
+    """Whether a notification waits in *events* that no model request has read: one after the last ``llm.request``.
+
+    The harness cursor cannot tell.  A notification that lands while a turn
+    writes its last answer is behind the cursor once that turn ends, and the
+    next request reads it all the same (``unread_reports``).
+    """
+    unread = False
+    for event in events:
+        kind = _type(event)
+        if kind == EventType.LLM_REQUEST.value:
+            unread = False
+        elif kind in AGENT_NEWS_TYPES:
+            unread = True
+    return unread
+
+
+def started_notified_work(events: list) -> bool:
+    """Whether *events* hold a call that started background work which reports back:
+    ``terminal`` with ``background`` and ``notify_on_complete``, or a notification already.
+
+    Such a session reads its notifications live, before each model request
+    (``AgentHarness._collect_reports``); any other session never gets one
+    and is spared the read.
+    """
+    for event in events:
+        kind = _type(event)
+        if kind in AGENT_NEWS_TYPES:
+            return True
+        if kind == EventType.TOOL_CALL.value and starts_notified_work(
+            (event.data or {}).get("name"), (event.data or {}).get("arguments"),
+        ):
+            return True
+    return False
+
+
+def starts_notified_work(name: Any, arguments: Any) -> bool:
+    """Whether a call of tool *name* with *arguments* starts background work that reports back when it ends."""
+    if name != "terminal":
+        return False
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except (TypeError, ValueError):
+            return False
+    return isinstance(arguments, dict) and bool(arguments.get("background")) and bool(
+        arguments.get("notify_on_complete"),
+    )
