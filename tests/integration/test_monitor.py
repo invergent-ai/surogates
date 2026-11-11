@@ -139,6 +139,8 @@ async def test_a_line_with_no_end_comes_in_pieces_of_bounded_size(api, here_watc
     ended = await until(lambda: notes_until_end(store, chat))
     said = [line for n in ended for line in n["result"].splitlines()]
     assert len(said) >= 2 and all(set(line) == {"x"} and len(line) <= 2000 for line in said)
+    # In pieces, none of it lost.
+    assert sum(len(line) for line in said) == 20000
 
 
 async def test_a_session_runs_a_bounded_number_of_monitors(api, here_watch):  # noqa: F811
@@ -175,11 +177,86 @@ async def test_a_sub_agent_and_a_thread_are_not_offered_monitor_and_may_not_star
         offered = apply_parity({"terminal", "delegate_task"}, {PARITY_KEY: True, **config})
         assert "monitor" not in offered, config
     assert "monitor" in apply_parity({"terminal", "delegate_task"}, {PARITY_KEY: True})
+    # Nor to any session with a parent: a helper's, a worker's or a routine run's end is its parent's news.
+    assert "monitor" not in apply_parity({"terminal", "delegate_task"}, {PARITY_KEY: True}, root=False)
     store = api.app.state.session_store
     child = await a_session(api)
     await store.update_session_config_key(child, DISPATCH_KEY, {"mode": "background"})
     refused = await start(api, child, "sleep 0.1")
     assert refused["error"].startswith("monitor is for the main session")
+    thread = await a_session(api)
+    await store.update_session_config_key(thread, "workstream_role", "thread")
+    assert (await start(api, thread, "sleep 0.1"))["error"].startswith("monitor is for the main session")
+    from surogates.session.provisioning import create_child_session
+
+    helper = await create_child_session(store=store, parent=await store.get_session(await a_session(api)), channel="delegation")
+    assert (await start(api, helper.id, "sleep 0.1"))["error"].startswith("monitor is for the main session")
+
+
+async def test_a_sandbox_made_for_one_turn_runs_no_monitor(api, here_watch, daemon_registry, tmp_path, monkeypatch):  # noqa: F811
+    from surogates.sandbox.pool import SandboxPool
+
+    pool = SandboxPool(Daemon(tmp_path))
+    monkeypatch.setattr(pool, "holds_copy", lambda owner: True, raising=False)
+    chat = await a_session(api)
+    refused = json.loads(await agents_module._monitor_handler(
+        {"command": "sleep 0.1", "description": "d"},
+        session_store=api.app.state.session_store, session_id=str(chat), sandbox_pool=pool,
+    ))
+    assert refused["error"].startswith("monitor is for the main session")
+
+
+async def test_all_of_a_sessions_monitors_share_one_rate(api, here_watch, monkeypatch):  # noqa: F811
+    monkeypatch.setattr(watch_module, "MAX_NOTES_PER_SESSION_MINUTE", 3)
+    store = api.app.state.session_store
+    chat = await a_session(api)
+    loud = "for i in $(seq 30); do echo tick $i; sleep 0.05; done"
+    first = await start(api, chat, loud, max_notifications_per_minute=30)
+    second = await start(api, chat, loud, max_notifications_per_minute=30)
+    ended = {first["monitor_id"]: False, second["monitor_id"]: False}
+
+    async def both_ended():
+        found = await notes(store, chat)
+        done = {n["agent_id"] for n in found if n["status"] != "output"}
+        return found if set(ended) <= done else None
+
+    found = await until(both_ended)
+    # Within the minute, three line notes for the two of them; every line came, the rest with the ends.
+    assert len([n for n in found if n["status"] == "output"]) == 3
+    assert sum(n["lines"] + n.get("dropped", 0) for n in found) == 60
+
+
+async def test_a_daemon_answer_of_any_shape_never_stops_the_watch(api, monkeypatch):  # noqa: F811
+    store = api.app.state.session_store
+    chat = await a_session(api)
+    owner = str(chat)
+    answers = [
+        {"events": [], "known": ["proc_bad"], "lines": {"proc_bad": {"lines": "x", "dropped": "y"}, "other": 5}},
+        {"events": [], "known": ["proc_bad"], "lines": {"proc_bad": {"lines": [{"a": 1}, "ok"], "dropped": -3}}},
+        {"events": [{"session_id": "proc_bad", "exit_code": "9" * 5000, "output": "done"}], "known": ["proc_bad"]},
+    ]
+
+    class Pool:
+        async def execute(self, sandbox, name, payload):
+            return json.dumps(answers.pop(0) if answers else {"events": [], "known": []})
+
+        def sandbox_of(self, key):
+            return None
+
+        def holds_copy(self, key):
+            return False
+
+    watch = BackgroundWatch(poll_seconds=0.05)
+    watch.configure(store=store, redis=api.app.state.redis, sandbox_pool=Pool())
+    try:
+        watch.watch(owner=owner, proc_id="proc_bad", session_id=chat, command="c", monitor=("d", 60.0, 30))
+        ended = await until(lambda: notes_until_end(store, chat))
+        end = ended[-1]
+        assert end["status"] == "completed" and "exit_code" not in end
+        assert [line for n in ended for line in n["result"].splitlines()] == ["{'a': 1}", "ok"]
+        await until(lambda: asyncio.sleep(0, result=not watch.holds(owner)))
+    finally:
+        await watch.close()
 
 
 async def test_a_monitors_notes_never_name_more_lines_than_they_show():

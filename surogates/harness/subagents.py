@@ -63,14 +63,15 @@ def parity_enabled(config: dict | None) -> bool:
         return False
 
 
-def apply_parity(tools: set[str], config: dict | None) -> set[str]:
+def apply_parity(tools: set[str], config: dict | None, *, root: bool = True) -> set[str]:
     """*tools*, a session's offered set, with the family in or out.
 
     On: ``agent`` takes ``delegate_task``'s place wherever the session may
     delegate, so a policy that denies ``delegate_task`` denies ``agent``
     too.  Its companions (``COMPANION_TOOLS``) go to such a session and to
     every agent the ``agent`` tool started, unless the session's config
-    leaves them out by name.  Off: none of the family.
+    leaves them out by name; ``monitor`` only to a *root* session
+    (``monitor_allowed``).  Off: none of the family.
     """
     result = set(tools) - PARITY_TOOLS
     config = config or {}
@@ -86,7 +87,7 @@ def apply_parity(tools: set[str], config: dict | None) -> set[str]:
         from surogates.devices.binding import device_of
 
         companions = set(COMPANION_TOOLS)
-        if "terminal" in result and device_of(config) is None and monitor_allowed(config):
+        if "terminal" in result and device_of(config) is None and root and monitor_allowed(config):
             companions.add(MONITOR_TOOL)
         result |= {name for name in companions if name not in excluded and (not allowed or name in allowed)}
     return result
@@ -94,7 +95,9 @@ def apply_parity(tools: set[str], config: dict | None) -> set[str]:
 
 def monitor_allowed(config: dict | None) -> bool:
     """Whether a session with *config* may run monitors: not a sub-agent, whose work ends with its report,
-    and not a project's thread or one under it, whose sandbox ends with its turn.  Either would be woken by lines after its end."""
+    and not a project's thread or one under it, whose sandbox ends with its turn.  Either would be woken by
+    lines after its end.  Only a root session may (no ``parent_id``): every other session's end is someone's
+    news, a helper's, a worker's or a routine run's; the callers check that, from the session."""
     from surogates.workstreams import under_a_thread
 
     config = config or {}

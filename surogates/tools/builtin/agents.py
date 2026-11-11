@@ -214,7 +214,7 @@ def _bounded(value: Any, default: int, low: int, high: int) -> int:
 async def _monitor_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
     """Start *command* where the session's commands run, with its lines kept, and hand it to the worker's watch."""
     from surogates.devices.binding import device_of
-    from surogates.harness.background_watch import HERE, MAX_MONITORS_PER_SESSION, background_watch
+    from surogates.harness.background_watch import HERE, MAX_MONITORS_PER_SESSION, background_watch, monitor_task
     from surogates.harness.subagents import monitor_allowed
     from surogates.sandbox.pool import SandboxPool, sandbox_session_key
 
@@ -231,15 +231,11 @@ async def _monitor_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
     me = await session_store.get_session(UUID(str(me_id)))
     if device_of(me.config) is not None:
         return _error("monitor runs in a cloud sandbox only; on your computer, use terminal with background=true")
-    if not monitor_allowed(me.config):
+    if me.parent_id is not None or not monitor_allowed(me.config):
         # A sub-agent's work ends with its report, and a thread's sandbox with its turn: neither outlives a monitor.
         return _error("monitor is for the main session; here, use terminal and wait for the command")
     if not background_watch.configured:
         return _error("this worker cannot watch commands")
-    if background_watch.monitors_for(me.id) >= MAX_MONITORS_PER_SESSION:
-        return _error(
-            f"{MAX_MONITORS_PER_SESSION} monitors already run: stop one with stop_agent before you start another"
-        )
     sandbox_pool = kwargs.get("sandbox_pool")
     if isinstance(sandbox_pool, SandboxPool):
         from surogates.harness.tool_exec import _build_session_sandbox_spec
@@ -251,26 +247,37 @@ async def _monitor_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
         spec = await _build_session_sandbox_spec(me, kwargs.get("tenant"), owner, credential_vault=kwargs.get("credential_vault"))
         await sandbox_pool.ensure(owner, spec)
         try:
-            started = json.loads(await sandbox_pool.execute(owner, "_monitor", json.dumps({"command": command})))
+            # Counted where the commands run, the sandbox's registry: whichever worker runs a turn, a session
+            # has at most ``MAX_MONITORS_PER_SESSION`` running.
+            started = json.loads(await sandbox_pool.execute(owner, "_monitor", json.dumps({
+                "command": command, "task_id": monitor_task(me.id), "max_running": MAX_MONITORS_PER_SESSION,
+            })))
         except (TypeError, ValueError):
             started = {"error": "the sandbox gave no answer"}
     else:
         from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
         from surogates.tools.workspace_io.local import LocalWorkspaceIO
 
+        from surogates.tools.utils.process_registry import process_registry
+
         owner = HERE
-        try:
-            started = await LocalWorkspaceIO(workspace_path=kwargs.get("workspace_path")).start(
-                command, workdir=None, task_id=str(kwargs.get("task_id") or "monitor"), pty=False,
-                notify_on_complete=True, watcher_interval=None, watch_lines=True,
-            )
-        except WorkspaceSandboxError as exc:
-            started = {"error": str(exc)}
+        if process_registry.running_count(monitor_task(me.id)) >= MAX_MONITORS_PER_SESSION:
+            started = {"error": f"{MAX_MONITORS_PER_SESSION} monitors already run"}
+        else:
+            try:
+                started = await LocalWorkspaceIO(workspace_path=kwargs.get("workspace_path")).start(
+                    command, workdir=None, task_id=monitor_task(me.id), pty=False,
+                    notify_on_complete=True, watcher_interval=None, watch_lines=True,
+                )
+            except WorkspaceSandboxError as exc:
+                started = {"error": str(exc)}
     proc_id = started.get("session_id") if isinstance(started, dict) else None
     if not proc_id:
         error = str((started or {}).get("error") or "it did not start")
         if "Unknown tool" in error:
             error = "this sandbox cannot run monitors"
+        elif "monitors already run" in error:
+            error += ": stop one with stop_agent before you start another"
         return _error(f"the monitor could not start: {error}")
     background_watch.watch(owner=owner, proc_id=proc_id, session_id=me.id, command=command,
                            monitor=(description, float(timeout), cap))

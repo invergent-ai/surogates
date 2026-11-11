@@ -139,9 +139,15 @@ def start_monitor(args: dict, workspace: str) -> str:
     from surogates.tools.workspace_io.local import LocalWorkspaceIO
     from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
 
+    from surogates.tools.utils.process_registry import process_registry
+
+    task_id = str(args.get("task_id") or "monitor")
+    limit = args.get("max_running")
+    if isinstance(limit, int) and process_registry.running_count(task_id) >= limit:
+        return json.dumps({"error": f"{limit} monitors already run"})
     try:
         started = asyncio.run(LocalWorkspaceIO(workspace_path=workspace).start(
-            str(args.get("command") or ""), workdir=args.get("workdir"), task_id="monitor", pty=False,
+            str(args.get("command") or ""), workdir=args.get("workdir"), task_id=task_id, pty=False,
             notify_on_complete=True, watcher_interval=None, watch_lines=True,
         ))
     except WorkspaceSandboxError as exc:

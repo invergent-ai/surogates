@@ -73,7 +73,7 @@ MAX_LINES_PER_NOTE = 50
 MAX_LINE_CHARS = 2000
 #: The most notifications all of one session's monitors send in a minute.
 MAX_NOTES_PER_SESSION_MINUTE = 30
-#: The most monitors one session runs at a time.
+#: The most monitors one session runs at a time, counted by the registry where they run (``monitor_task``).
 MAX_MONITORS_PER_SESSION = 4
 #: A session in one of these is not sent its monitors' lines: they are killed.
 _STOPPED = ("paused", "archived")
@@ -140,6 +140,18 @@ class _Unwatchable(Exception):
     """The registry cannot report its commands; the message says why."""
 
 
+def monitor_task(session_id: Any) -> str:
+    """The registry task of session *session_id*'s monitors: the registry counts those still running."""
+    return f"monitor:{session_id}"
+
+
+def _exit_code(entry: dict) -> int | None:
+    """A completion's exit code, an int or None: the sandbox's daemon answers it, and what runs there may
+    have answered in its place."""
+    code = entry.get("exit_code")
+    return code if isinstance(code, int) and not isinstance(code, bool) else None
+
+
 def _status(exit_code: Any) -> str:
     """How a command that exited with *exit_code* ended."""
     if isinstance(exit_code, int) and exit_code < 0:
@@ -161,7 +173,7 @@ def completion_payload(
             "summary": watched.command, "result": "",
             **({"reason": reason} if reason else {}),
         }
-    code = entry.get("exit_code")
+    code = _exit_code(entry)
     return {
         "agent_id": proc_id, "kind": "process", "status": _status(code),
         "summary": watched.command, "exit_code": code,
@@ -172,12 +184,7 @@ def completion_payload(
 def monitor_payload(proc_id: str, monitor: _Monitor, *, status: str = "output", lines: list[str] | None = None,
                     dropped: int = 0, exit_code: Any = None, reason: str | None = None) -> dict:
     """The ``agent.notification`` payload of a monitor's new lines (``status`` ``output``) or of its end."""
-    kept, size = [], 0
-    for line in lines or []:
-        size += len(line) + 1
-        if size > MAX_RESULT_CHARS + 1:
-            break
-        kept.append(line)
+    kept = (lines or [])[:_fitting(lines or [])]
     # Lines past the note's size are counted with those left out: its header never names more than it shows.
     dropped += len(lines or []) - len(kept)
     payload: dict[str, Any] = {
@@ -193,13 +200,23 @@ def monitor_payload(proc_id: str, monitor: _Monitor, *, status: str = "output", 
     return payload
 
 
+def _fitting(lines: list[str]) -> int:
+    """How many of *lines*, from the first, one note's ``MAX_RESULT_CHARS`` holds."""
+    size = -1
+    for count, line in enumerate(lines):
+        size += len(line) + 1
+        if size > MAX_RESULT_CHARS:
+            return count
+    return len(lines)
+
+
 def monitor_end(proc_id: str, item: _Watched, entry: dict | None, *, status: str, reason: str | None) -> dict:
     """A monitor's last notification: how it ended, with the lines it still held."""
     monitor = item.monitor
     dropped = monitor.dropped + max(len(monitor.buffered) - MAX_LINES_PER_NOTE, 0)
     lines, monitor.buffered = monitor.buffered[:MAX_LINES_PER_NOTE], []
     if entry is not None:
-        code = entry.get("exit_code")
+        code = _exit_code(entry)
         return monitor_payload(proc_id, monitor, status=_status(code), lines=lines, dropped=dropped, exit_code=code)
     return monitor_payload(proc_id, monitor, status=status, lines=lines, dropped=dropped, reason=reason)
 
@@ -238,13 +255,6 @@ class BackgroundWatch:
             {"id": proc_id, "command": item.command[:200], "status": "running"}
             for watched in self._owners.values() for proc_id, item in watched.items() if item.session_id == session_id
         ]
-
-    def monitors_for(self, session_id: UUID) -> int:
-        """How many monitors session *session_id* runs that this watch reads."""
-        return sum(
-            item.monitor is not None and item.session_id == session_id
-            for watched in self._owners.values() for item in watched.values()
-        )
 
     def owner_of(self, proc_id: str) -> str | None:
         """The registry key of watched command *proc_id*: a sandbox's key, ``HERE``, or None for one not watched."""
@@ -351,11 +361,16 @@ class BackgroundWatch:
                     sent[:] = [t for t in sent if now - t < 60.0]
                     if len(sent) >= MAX_NOTES_PER_SESSION_MINUTE:
                         continue
-                    sending, monitor.buffered = monitor.buffered[:MAX_LINES_PER_NOTE], monitor.buffered[MAX_LINES_PER_NOTE:]
+                    # As many as one note holds: the rest wait for the next.
+                    count = _fitting(monitor.buffered[:MAX_LINES_PER_NOTE]) or 1
+                    sending, monitor.buffered = monitor.buffered[:count], monitor.buffered[count:]
                     payloads.append((item, monitor_payload(proc_id, monitor, lines=sending, dropped=monitor.dropped)))
                     monitor.dropped = 0
                     monitor.sent.append(now)
                     sent.append(now)
+                live = {item.session_id for each in self._owners.values() for item in each.values()}
+                for session_id in [sid for sid in self._session_sent if sid not in live]:
+                    self._session_sent.pop(session_id, None)
                 if not payloads:
                     continue
                 release = None
@@ -455,10 +470,14 @@ class BackgroundWatch:
             if item.monitor is not None and (item.monitor.buffered or item.monitor.dropped)
         }
         stopped: set[UUID] = set()
+        from surogates.session.store import SessionNotFoundError
+
         for session_id in waiting:
             try:
                 if (await self._store.get_session(session_id)).status in _STOPPED:
                     stopped.add(session_id)
+            except SessionNotFoundError:
+                stopped.add(session_id)  # deleted: no one is left to read its lines
             except Exception:
                 logger.debug("Could not read the status of session %s", session_id, exc_info=True)
         found = [

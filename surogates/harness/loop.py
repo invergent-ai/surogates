@@ -6105,7 +6105,7 @@ class AgentHarness(
         # session gets the step tools, which every other session loses.
         # Then the sub-agent family: ``agent`` in ``delegate_task``'s place
         # with parity on, none of it with parity off.
-        return apply_parity(gate_case_tools(tool_filter, session), config)
+        return apply_parity(gate_case_tools(tool_filter, session), config, root=session.parent_id is None)
 
     @staticmethod
     def _dynamic_loop_wait_succeeded(

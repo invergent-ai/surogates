@@ -404,7 +404,7 @@ class ProcessRegistry:
                 # A monitor's lines are news as each comes: a read of 4096
                 # waits for that much, or for the end.
                 chunk = (
-                    session.process.stdout.readline(8192) if session.watch_lines
+                    session.process.stdout.readline(MAX_LINE_CHARS) if session.watch_lines
                     else session.process.stdout.read(4096)
                 )
                 if not chunk:
@@ -491,8 +491,8 @@ class ProcessRegistry:
         text = session._partial_line + strip_ansi(text).replace("\r\n", "\n")
         lines = text.split("\n")
         session._partial_line = "" if final else lines.pop()
-        if len(session._partial_line) > MAX_LINE_CHARS:
-            # Output with no line end in sight (a binary file, say) is never held whole: its piece goes as a line.
+        if len(session._partial_line) >= MAX_LINE_CHARS:
+            # Output with no line end in sight (a binary file, say) is never held whole: its pieces go as lines.
             lines.append(session._partial_line)
             session._partial_line = ""
         while final and lines and not lines[-1].strip():
@@ -505,10 +505,12 @@ class ProcessRegistry:
         for line in lines:
             if not line.strip():
                 continue
-            if len(session.pending_lines) >= MAX_PENDING_LINES:
-                session.dropped_lines += 1
-            else:
-                session.pending_lines.append(line[:MAX_LINE_CHARS])
+            # A line longer than the cap goes in pieces of the cap, none of it lost.
+            for start in range(0, len(line), MAX_LINE_CHARS):
+                if len(session.pending_lines) >= MAX_PENDING_LINES:
+                    session.dropped_lines += 1
+                else:
+                    session.pending_lines.append(line[start:start + MAX_LINE_CHARS])
 
     def drain_lines(self, ids: set[str] | None = None) -> dict[str, dict]:
         """The lines each watched process (of *ids*, when given) printed since the last drain, and how many
@@ -829,6 +831,11 @@ class ProcessRegistry:
     def submit_stdin(self, session_id: str, data: str = "") -> dict:
         """Send data + newline to a running process's stdin (like pressing Enter)."""
         return self.write_stdin(session_id, data + "\n")
+
+    def running_count(self, task_id: str) -> int:
+        """How many processes of *task_id* still run."""
+        with self._lock:
+            return sum(s.task_id == task_id and not s.exited for s in self._running.values())
 
     def list_sessions(self, task_id: str | None = None) -> list:
         """List all running and recently-finished processes."""
