@@ -939,6 +939,23 @@ class SessionStore:
             await self._announce_event(pause)
         return paused
 
+    async def resume_if_resting(self, session_id: UUID, statuses: tuple[str, ...], data: dict) -> bool:
+        """Resume *session_id* if its status is one of *statuses*, with a ``session.resume`` whose data is
+        *data*; whether it was.  The status and its event are one transaction, as :meth:`pause_if_active`'s."""
+        resume = await self._ready_event(session_id, EventType.SESSION_RESUME, data)
+        async with self._sf() as db:
+            resumed = (await db.execute(
+                update(SessionRow)
+                .where(SessionRow.id == session_id, SessionRow.status.in_(statuses))
+                .values(status="active", updated_at=func.now())
+            )).rowcount == 1
+            if resumed:
+                await self._write_event(db, resume)
+            await db.commit()
+        if resumed:
+            await self._announce_event(resume)
+        return resumed
+
     async def resume_session(self, session_id: UUID, *, source: str = "") -> None:
         """Re-activate an idle (completed/paused) session and record the resume.
 

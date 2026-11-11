@@ -214,3 +214,17 @@ async def test_a_sub_agent_does_not_resume_its_own_finished_agent(chats):  # noq
     await chats.store.update_session_status(leaf.id, "completed")
     answer = await send(chats, middle.id, leaf.id)
     assert answer["status"] == "queued" and await chats.status(leaf.id) == "completed"
+
+
+async def test_a_queued_message_never_brings_back_a_failed_parent(chats):  # noqa: F811
+    chat = await a_chat(chats, PARITY)
+    child = await a_background_agent(chats, chat)
+    await chats.store.update_session_status(chat, "failed")
+    answer = await send(chats, child.id, "parent", message="Done counting.", summary="Done")
+    assert answer["status"] == "queued" and "do not wait for its reply" in answer["note"]
+    # The agent's end queues its parent, as any notification does: the failed chat stays its user's to retry.
+    chats.replies = [_final_response("12 open items.")]
+    await chats.wake(child.id)
+    before = len(chats.requests)
+    await chats.wake(chat)
+    assert len(chats.requests) == before and await chats.status(chat) == "failed"

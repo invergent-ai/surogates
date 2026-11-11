@@ -185,7 +185,7 @@ async def _send_message_handler(arguments: dict[str, Any], **kwargs: Any) -> str
 
     if target.id == sender.parent_id:
         head = f"[Message from agent {sender.id}"
-        description = (dispatch_of(sender) or {}).get("description")
+        description = str((dispatch_of(sender) or {}).get("description") or "").replace("[", "(").replace("]", ")")
         head += f" ({description})" if description else ""
     elif sender.id == target.parent_id:
         head = "[Message from the agent that started you"
@@ -199,18 +199,26 @@ async def _send_message_handler(arguments: dict[str, Any], **kwargs: Any) -> str
     if dispatch is not None and dispatch.get("mode") != "background" and await _call_ended(session_store, target):
         # Its first report was its call's result; a report of a later run has no call to return to.
         await session_store.update_session_config_key(target.id, DISPATCH_KEY, {**dispatch, "mode": "background"})
-    running = target.status in ("active", "processing")
-    resumed, why_not = False, None
-    if not running:
-        why_not = await _why_not_resume(session_store, sender, target, kwargs.get("session_factory"))
-        if why_not is None:
-            resumed = await _resume_if_resting(kwargs.get("session_factory"), session_store, target.id)
-            if not resumed:
-                running = True  # it was woken meanwhile: it reads the message at its next step
     await session_store.emit_event(target.id, EventType.COORDINATOR_MESSAGE, {
         "content": content, "kind": "agent_message",
         "from_agent": str(sender.id), "to_agent": str(target.id), "summary": summary,
     })
+    # Read after the message is in its log: a turn that ended meanwhile has not read it, and is resumed for it
+    # as one at rest is, if the rules let the sender.  No other wake takes it up (``_has_stranded_user_message``).
+    target = await session_store.get_session(target.id)
+    running = target.status in ("active", "processing")
+    resumed, why_not = False, None
+    if not running and target.status != "archived":
+        why_not = await _why_not_resume(session_store, sender, target, kwargs.get("session_factory"))
+        if why_not is None:
+            resumed = await session_store.resume_if_resting(
+                target.id, (target.status,), {"source": "agent_message", "from_agent": str(sender.id)},
+            )
+            if not resumed:
+                target = await session_store.get_session(target.id)
+                running = target.status in ("active", "processing")
+    elif not running:
+        why_not = "it was deleted"
     redis = kwargs.get("redis")
     if redis is not None and (running or resumed):
         await enqueue_session(
@@ -223,7 +231,10 @@ async def _send_message_handler(arguments: dict[str, Any], **kwargs: Any) -> str
         return json.dumps({"status": "delivered", "to": str(target.id), "note": "It reads the message before its next step."})
     return json.dumps({
         "status": "queued", "to": str(target.id),
-        "note": f"It rests and is not resumed ({why_not}): it reads the message when it next runs.",
+        "note": (
+            f"It rests and you may not resume it ({why_not}). Nothing wakes it for this message: do not wait "
+            "for its reply."
+        ),
     })
 
 
@@ -261,30 +272,6 @@ async def _why_not_resume(session_store: Any, sender: Any, target: Any, session_
     ) >= MAX_RUNNING_IN_BACKGROUND:
         return f"{MAX_RUNNING_IN_BACKGROUND} of your agents already run in the background"
     return None
-
-
-async def _resume_if_resting(session_factory: Any, session_store: Any, target_id: UUID) -> bool:
-    """Make *target_id* active if it still rests (completed or failed), in one write, and record the resume."""
-    from sqlalchemy import update
-
-    from surogates.db.models import Session as SessionRow
-    from surogates.session.events import EventType
-
-    if session_factory is None:
-        await session_store.resume_session(target_id, source="agent_message")
-        return True
-    async with session_factory() as db:
-        changed = (await db.execute(
-            update(SessionRow)
-            .where(SessionRow.id == target_id, SessionRow.status.in_(("completed", "failed")))
-            .values(status="active")
-            .returning(SessionRow.id),
-        )).first()
-        await db.commit()
-    if changed is None:
-        return False
-    await session_store.emit_event(target_id, EventType.SESSION_RESUME, {"source": "agent_message"})
-    return True
 
 
 def _error(message: str) -> str:
