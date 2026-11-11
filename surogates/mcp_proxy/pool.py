@@ -46,11 +46,37 @@ from surogates.tools.mcp.client import (
 logger = logging.getLogger(__name__)
 
 #: How many tenants' approved tool fingerprints the pool keeps (the least
-#: recently used without a live connection dropped first).
+#: recently used without a live connection dropped first).  Tenants with a
+#: live connection are never dropped, so while more than this many are
+#: connected the store holds one set per live connection.
 _MAX_TENANT_APPROVALS = 10_000
-#: How many tools one tenant may have approved; a new tool past it is left
-#: out (old approvals are never dropped to make room).
-_MAX_APPROVALS_PER_TENANT = 5_000
+#: How many tools of one server (one identity) a tenant may have approved,
+#: and how many in all: a new tool past either is left out, and old
+#: approvals are never dropped to make room, so a server that floods new
+#: names starves only itself.
+_MAX_APPROVALS_PER_SERVER = 1_000
+_MAX_APPROVALS_PER_TENANT = 20_000
+
+
+class _ApprovalRoom:
+    """How many more tools a tenant may have approved, per server and in all,
+    counted once per connection."""
+
+    def __init__(self, approvals: dict[str, str]) -> None:
+        self._approvals = approvals
+        self._per_server: dict[str, int] = {}
+
+    def take(self, server_prefix: str) -> bool:
+        """Room for one more approval of the server named by *server_prefix*."""
+        if server_prefix not in self._per_server:
+            self._per_server[server_prefix] = sum(1 for k in self._approvals if k.startswith(server_prefix))
+        if (
+            self._per_server[server_prefix] >= _MAX_APPROVALS_PER_SERVER
+            or len(self._approvals) >= _MAX_APPROVALS_PER_TENANT
+        ):
+            return False
+        self._per_server[server_prefix] += 1
+        return True
 
 
 def _server_identity(config: dict[str, Any] | None) -> str:
@@ -235,6 +261,7 @@ class ConnectionPool:
         if entry is None:
             return None
         entry.last_used = time.monotonic()
+        self._touch_approvals((org_id, user_id, agent_id))
         return entry.tool_schemas
 
     def visible_schemas(
@@ -282,6 +309,7 @@ class ConnectionPool:
         if entry is None:
             return None
         entry.last_used = time.monotonic()
+        self._touch_approvals((org_id, user_id, agent_id))
         routing = entry.tool_index.get(tool_name)
         if routing is None:
             return None
@@ -328,8 +356,7 @@ class ConnectionPool:
             entry = self._entries.get(key)
             if entry is not None:
                 entry.last_used = time.monotonic()
-                if key in self._approvals:
-                    self._approvals.move_to_end(key)
+                self._touch_approvals(key)
                 return entry.tool_schemas
 
             # Prefix each server name for tenant isolation.  The resource /
@@ -375,10 +402,12 @@ class ConnectionPool:
             # Per-tenant MCPGovernance over the tenant's approved
             # fingerprints, keyed by (server, tool), never shared with
             # other tenants even when server names collide.
-            tenant_governance: MCPGovernance | None = (
-                MCPGovernance(fingerprints=self._tenant_approvals(key))
-                if self._governance_enabled else None
-            )
+            tenant_governance: MCPGovernance | None = None
+            approval_room: _ApprovalRoom | None = None
+            if self._governance_enabled:
+                approvals = self._tenant_approvals(key)
+                tenant_governance = MCPGovernance(fingerprints=approvals)
+                approval_room = _ApprovalRoom(approvals)
 
             for schema in schemas:
                 clean = dict(schema)
@@ -448,6 +477,7 @@ class ConnectionPool:
                         schema=clean,
                         is_service_account=is_service_account,
                         server_identity=_server_identity(configs.get(original_server)),
+                        approval_room=approval_room,
                     ):
                         continue  # unsafe or rug-pulled — exclude from advertised set
 
@@ -496,6 +526,11 @@ class ConnectionPool:
     # Governance scan helper
     # ------------------------------------------------------------------
 
+    def _touch_approvals(self, key: tuple[UUID, UUID, str]) -> None:
+        """Mark tenant *key*'s approvals as just used."""
+        if key in self._approvals:
+            self._approvals.move_to_end(key)
+
     def _tenant_approvals(self, key: tuple[UUID, UUID, str]) -> dict[str, str]:
         """The fingerprints approved for tenant *key*, kept across its connections.
 
@@ -526,6 +561,7 @@ class ConnectionPool:
         schema: dict[str, Any],
         is_service_account: bool = False,
         server_identity: str = "",
+        approval_room: _ApprovalRoom | None = None,
     ) -> bool:
         """Scan *schema* for safety + rug-pull; return True if tool is safe.
 
@@ -550,10 +586,8 @@ class ConnectionPool:
             "inputSchema": schema.get("parameters") or {},
             "_server_name": server_name,
         }
-        qualified_name = (
-            f"{server_name}@{server_identity}.{tool_name}" if server_identity
-            else f"{server_name}.{tool_name}"
-        )
+        server_prefix = f"{server_name}@{server_identity}." if server_identity else f"{server_name}."
+        qualified_name = f"{server_prefix}{tool_name}"
 
         # The ``audit_log.user_id`` column FKs to ``users.id``; for
         # service-account sessions the JWT carries a ``service_accounts.id``
@@ -612,15 +646,16 @@ class ConnectionPool:
             )
             return False
 
-        if (
-            not governance.has_fingerprint(qualified_name)
-            and governance.fingerprint_count() >= _MAX_APPROVALS_PER_TENANT
+        if not governance.has_fingerprint(qualified_name) and not (
+            approval_room.take(server_prefix) if approval_room is not None
+            else governance.fingerprint_count() < _MAX_APPROVALS_PER_TENANT
         ):
             # Old approvals are never dropped to make room: a server could
             # otherwise flood new names until its own approvals went.
             logger.warning(
-                "MCP tool %s from server %s not approved: the tenant holds %d approvals already",
-                tool_name, server_name, _MAX_APPROVALS_PER_TENANT,
+                "MCP tool %s from server %s not approved: no room for more approvals "
+                "(%d per server, %d per tenant)",
+                tool_name, server_name, _MAX_APPROVALS_PER_SERVER, _MAX_APPROVALS_PER_TENANT,
             )
             return False
         governance.register_fingerprint(qualified_name, tool_def)

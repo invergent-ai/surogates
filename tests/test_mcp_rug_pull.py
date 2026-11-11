@@ -239,22 +239,47 @@ async def test_the_approvals_kept_are_bounded_and_a_live_tenant_keeps_its_own(wo
     assert set(pool._approvals) == {tuple(busy), tuple(new)}
 
 
-async def test_a_flood_of_new_tools_never_pushes_out_the_approved_ones(world, monkeypatch):
+async def test_a_flood_of_new_tools_starves_only_the_server_that_floods(world, monkeypatch):
     audit = _Audit()
     pool = ConnectionPool(governance_enabled=True, audit_store=audit)
     tenant = _tenant()
     first = await _connect(pool, tenant)
     approvals = dict(pool._approvals[tuple(tenant)])
-    monkeypatch.setattr(pool_module, "_MAX_APPROVALS_PER_TENANT", len(approvals) + 2)
+    files_now = sum(1 for k in approvals if k.startswith("files@"))
+    monkeypatch.setattr(pool_module, "_MAX_APPROVALS_PER_SERVER", files_now + 2)
     world.tools["files"] += [_tool(f"extra_{i}", "Another tool.") for i in range(20)]
+    world.tools["crm"].append(_tool("new_crm_tool", "A new CRM tool."))
     world.tools["crm"][0] = _tool("get_record", "Changed after the flood.")
     await _evict(pool)
     names = await _connect(pool, tenant)
     extras = [n for n in names if n.startswith("mcp__files__extra_")]
-    assert len(extras) == 2  # up to the cap; the rest are left out
+    assert len(extras) == 2  # up to the server's cap; the rest are left out
+    assert "mcp__crm__new_crm_tool" in names  # the other server still has room
     assert "mcp__crm__get_record" not in names  # and the old approvals still judge
     assert all(pool._approvals[tuple(tenant)].get(k) == v for k, v in approvals.items())
     assert first - {"mcp__crm__get_record"} <= names
+
+
+async def test_the_tenant_wide_cap_is_a_backstop(world, monkeypatch):
+    pool = ConnectionPool(governance_enabled=True, audit_store=_Audit())
+    tenant = _tenant()
+    await _connect(pool, tenant)
+    monkeypatch.setattr(pool_module, "_MAX_APPROVALS_PER_TENANT", len(pool._approvals[tuple(tenant)]))
+    world.tools["crm"].append(_tool("one_more", "One more tool."))
+    await _evict(pool)
+    assert "mcp__crm__one_more" not in await _connect(pool, tenant)
+
+
+async def test_using_a_connection_keeps_its_tenant_recent(world, monkeypatch):
+    pool = ConnectionPool(governance_enabled=True, audit_store=_Audit())
+    a, b = _tenant(), _tenant()
+    await _connect(pool, a)
+    await _connect(pool, b)
+    assert list(pool._approvals)[0] == tuple(a)
+    pool.get_cached_schemas(*a)
+    assert list(pool._approvals)[-1] == tuple(a)
+    pool.resolve_call_target(*b, "mcp__crm__get_record")
+    assert list(pool._approvals)[-1] == tuple(b)
 
 
 async def test_without_governance_nothing_is_kept_or_refused(world):
