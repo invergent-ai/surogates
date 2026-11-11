@@ -234,14 +234,40 @@ async def run_by_token(sf, token: str) -> SimulationRun | None:
         )).scalar_one_or_none()
 
 
-async def list_runs(sf, *, org_id: uuid.UUID, agent_id: str) -> Sequence[SimulationRun]:
+async def list_runs(sf, *, org_id: uuid.UUID, agent_id: str, limit: int = 50) -> Sequence[SimulationRun]:
     async with sf() as db:
         return (await db.execute(
             sa.select(SimulationRun)
             .where(SimulationRun.org_id == org_id, SimulationRun.agent_id == agent_id)
             .order_by(SimulationRun.created_at.desc())
-            .limit(50)
+            .limit(limit)
         )).scalars().all()
+
+
+async def batch_runs(sf, *, org_id: uuid.UUID, batch_id: uuid.UUID) -> Sequence[SimulationRun]:
+    """The runs of one plan, oldest first; a run started on its own is its own batch."""
+    async with sf() as db:
+        return (await db.execute(
+            sa.select(SimulationRun)
+            .where(SimulationRun.org_id == org_id)
+            .where((SimulationRun.batch_id == batch_id)
+                   | ((SimulationRun.id == batch_id) & SimulationRun.batch_id.is_(None)))
+            .order_by(SimulationRun.created_at)
+        )).scalars().all()
+
+
+async def people_of(sf, run_ids: Sequence[uuid.UUID]) -> dict[uuid.UUID, list[SimulationPerson]]:
+    """Each run's people, in the order they were added."""
+    found: dict[uuid.UUID, list[SimulationPerson]] = {run_id: [] for run_id in run_ids}
+    if not run_ids:
+        return found
+    async with sf() as db:
+        for person in (await db.execute(
+            sa.select(SimulationPerson).where(SimulationPerson.run_id.in_(run_ids))
+            .order_by(SimulationPerson.created_at)
+        )).scalars():
+            found[person.run_id].append(person)
+    return found
 
 
 async def enrolled(sf, run: SimulationRun, user_ids: Sequence[uuid.UUID]) -> set[uuid.UUID]:

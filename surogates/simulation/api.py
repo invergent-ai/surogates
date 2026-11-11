@@ -174,17 +174,32 @@ async def start_run(body: StartRun, request: Request):
     return await _detail(state.session_factory, run)
 
 
+def _changes(run, people) -> list[dict[str, Any]]:
+    """What the run's review changed in the agent, each with its finding's index for Undo."""
+    tests = {str(p.id): p.test for p in people}
+    return [
+        {"run_id": str(run.id), "index": index, "title": f.get("title"),
+         "target": (f.get("proposal") or {}).get("target"),
+         "name": (f.get("proposal") or {}).get("name"), "person_id": f.get("person_id"),
+         "test": tests.get(f.get("person_id") or ""), "applied_at": f.get("applied_at")}
+        for index, f in enumerate((run.review or {}).get("findings") or [])
+        if f.get("state") == "applied"
+    ]
+
+
 @router.get("/runs")
 async def list_runs(org_id: uuid.UUID, agent_id: str, request: Request):
     sf = request.app.state.session_factory
     runs = await store.list_runs(sf, org_id=org_id, agent_id=agent_id)
     counts = await store.message_counts(sf, [r.id for r in runs])
+    everyone = await store.people_of(sf, [r.id for r in runs])
     summaries = []
     for r in runs:
-        people = await store.people(sf, r.id)
+        people = everyone[r.id]
         first = people[0] if people else None
         summaries.append({
             "id": str(r.id), "status": r.status, "channel": r.channel,
+            "batch_id": str(r.batch_id) if r.batch_id else None,
             "created_by": r.created_by, "via": r.via,
             "created_at": r.created_at.isoformat(),
             "ended_at": r.ended_at.isoformat() if r.ended_at else None,
@@ -195,13 +210,71 @@ async def list_runs(org_id: uuid.UUID, agent_id: str, request: Request):
             "ai_note": first.ai_note if first else None,
             "messages": counts.get(r.id, 0),
             "verdict": (r.review or {}).get("verdict"),
-            "changes": [
-                {"title": f.get("title"), "target": (f.get("proposal") or {}).get("target"),
-                 "name": (f.get("proposal") or {}).get("name"), "applied_at": f.get("applied_at")}
-                for f in (r.review or {}).get("findings") or [] if f.get("state") == "applied"
-            ],
+            "changes": _changes(r, people),
         })
     return summaries
+
+
+@router.get("/batches")
+async def list_batches(org_id: uuid.UUID, agent_id: str, request: Request):
+    """Simulations newest first: the runs one plan started, grouped, with each person's grade."""
+    sf = request.app.state.session_factory
+    # ponytail: batches come from the newest 200 runs; page by batch if plans grow past that.
+    runs = await store.list_runs(sf, org_id=org_id, agent_id=agent_id, limit=200)
+    everyone = await store.people_of(sf, [r.id for r in runs])
+    batches: dict[uuid.UUID, list] = {}
+    for r in runs:
+        batches.setdefault(r.batch_id or r.id, []).append(r)
+    listed = []
+    for batch_id, group in list(batches.items())[:50]:
+        group.reverse()
+        people, changes = [], []
+        for r in group:
+            grades = {g.get("person_id"): g for g in (r.review or {}).get("grades") or []}
+            changes += _changes(r, everyone[r.id])
+            for p in everyone[r.id]:
+                grade = grades.get(str(p.id))
+                people.append({
+                    "name": p.name, "channel": p.channel, "about": p.about, "test": p.test,
+                    "member_id": str(p.stands_for) if p.stands_for else None,
+                    "ai_state": p.ai_state,
+                    "grade": grade and {"passed": bool(grade.get("passed")),
+                                        "reason": grade.get("reason"),
+                                        "message_id": grade.get("message_id")},
+                })
+        graded = [p["grade"] for p in people if p["grade"]]
+        listed.append({
+            "id": str(batch_id), "created_at": group[0].created_at.isoformat(),
+            "status": "running" if any(r.status == "running" for r in group) else "ended",
+            "channels": list(dict.fromkeys(r.channel for r in group)),
+            "people": people, "passed": sum(g["passed"] for g in graded), "graded": len(graded),
+            "total": len(people), "via": group[0].via, "changes": changes,
+        })
+    return listed
+
+
+async def _batch(request: Request, batch_id: uuid.UUID, org_id: uuid.UUID):
+    runs = await store.batch_runs(request.app.state.session_factory, org_id=org_id, batch_id=batch_id)
+    if not runs:
+        raise HTTPException(status_code=404, detail="Simulation not found")
+    return runs
+
+
+@router.get("/batches/{batch_id}")
+async def get_batch(batch_id: uuid.UUID, org_id: uuid.UUID, request: Request):
+    sf = request.app.state.session_factory
+    runs = await _batch(request, batch_id, org_id)
+    return {"id": str(batch_id), "runs": [await _detail(sf, r) for r in runs]}
+
+
+@router.post("/batches/{batch_id}/end")
+async def end_batch(batch_id: uuid.UUID, org_id: uuid.UUID, request: Request):
+    state = request.app.state
+    runs = await _batch(request, batch_id, org_id)
+    for r in runs:
+        if r.status == "running":
+            await store.finish_run(state, r.id)
+    return await get_batch(batch_id, org_id, request)
 
 
 @router.get("/runs/{run_id}")
