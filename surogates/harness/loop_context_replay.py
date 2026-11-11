@@ -1065,23 +1065,21 @@ class ContextReplayMixin:
             return False, None
 
     def _narrow_prompt_tools(self, session: Session) -> None:
-        """Gate the prompt's tool guidance on the tools the schemas offer,
-        for a session that names its own tools.
+        """Gate the prompt's tool guidance on the tools the schemas offer.
 
-        ``excluded_tools`` / ``allowed_tools``, which the worker does not
-        apply, are applied to the schemas only; without this the prompt
-        told the model how to use tools it could not call.  A session that
-        names none keeps the prompt it had.  Called before any ``build()``
-        of the wake (the compaction measure, the system prompt), and
-        idempotent.  ``getattr``: some test harnesses skip ``__init__`` or
-        stand in a prompt builder of their own.
+        The worker builds the prompt from the registry's tools less what it
+        knows to drop; the schemas (``_tool_filter_for_session``) also drop
+        what the session names (``excluded_tools`` / ``allowed_tools``) and
+        what its kind never gets (the coordinator's tools outside a
+        coordinator, the implementation tools of a strict one, ...).  The
+        guidance and the skill index follow the schemas, so the model is
+        never told about a tool it cannot call.  Called before any
+        ``build()`` of the wake (the compaction measure, the system prompt),
+        and idempotent.  ``getattr``: some test harnesses skip ``__init__``
+        or stand in a prompt builder of their own.
         """
-        config = session.config or {}
         restrict = getattr(self._prompt, "restrict_tools", None)
-        if (
-            (config.get("excluded_tools") or config.get("allowed_tools"))
-            and restrict is not None and getattr(self, "_tools", None) is not None
-        ):
+        if restrict is not None and getattr(self, "_tools", None) is not None:
             offered = self._tool_filter_for_session(session)
             if offered is not None:
                 restrict(offered)
