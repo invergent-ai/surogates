@@ -404,6 +404,11 @@ class ProcessRegistry:
                 )
                 if not chunk:
                     break
+                if first_chunk and session.watch_lines and any(
+                    noise in chunk for noise in self._SHELL_NOISE_SUBSTRINGS
+                ):
+                    # Read by lines, the shell's startup noise comes a line at a time.
+                    continue
                 if first_chunk:
                     chunk = self._clean_shell_noise(chunk)
                     first_chunk = False
