@@ -597,6 +597,7 @@ def is_parallelizable(tool_name: str) -> bool:
 DELEGATION_TOOLS: frozenset[str] = frozenset({
     "delegate_task",
     "spawn_worker",
+    "agent",
 })
 
 # All tools that ``should_parallelize`` may dispatch concurrently after
@@ -627,7 +628,7 @@ AFTER_THE_RESPONSE_TOOLS: frozenset[str] = frozenset({"office_edit"})
 # The tools whose step starts a helper.  In a project's thread the copy goes
 # on the thread's hand-off first, for the helper's own copy to start from, and
 # what helpers kept comes into the copy after.
-HELPER_STARTING_TOOLS: frozenset[str] = frozenset({"delegate_task", "spawn_worker", "spawn_task"})
+HELPER_STARTING_TOOLS: frozenset[str] = frozenset({"delegate_task", "spawn_worker", "spawn_task", "agent"})
 
 # The session-starting tools the thread's rule leaves alone: three only reach
 # a session that exists, and two answer a thread themselves.

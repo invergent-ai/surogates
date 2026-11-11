@@ -362,6 +362,87 @@ async def _delegate_handler(
     return results[0]
 
 
+def child_tool_policy(
+    *,
+    parent_config: dict[str, Any],
+    agent_def: Any | None,
+    role: str,
+    leaf_tools: tuple[str, ...] = ("delegate_task",),
+) -> tuple[list[str] | None, list[str]]:
+    """The tools a delegated child may use: its ``allowed_tools`` (None for no allowlist) and ``excluded_tools``.
+
+    A leaf loses *leaf_tools*, the tools that would start a child of its own,
+    unless its agent type lists ``delegate_task`` (it is an orchestrator by
+    definition).
+    """
+    allowed_tools: list[str] | None = None
+    excluded_tools: list[str] = []
+    if agent_def is not None:
+        if agent_def.tools:
+            allowed_tools = list(agent_def.tools)
+        if agent_def.disallowed_tools:
+            excluded_tools = list(agent_def.disallowed_tools)
+    # Inherit parent's exclusions: anything the parent can't run, the
+    # child can't either.
+    parent_allowed = parent_config.get("allowed_tools")
+    for t in parent_config.get("excluded_tools") or []:
+        if t not in excluded_tools:
+            excluded_tools.append(t)
+
+    # Toolset intersection: child's allowlist must be ⊆ parent's
+    # allowlist -- UNLESS the child is using an admin-defined
+    # agent_def, in which case the agent_def's tools list is
+    # authoritative for what the sub-agent needs.  Intersection used
+    # to silently drop tools the agent_def explicitly required (e.g.
+    # the research-writer's create_artifact was being stripped because
+    # the planner -- a peer sub-agent -- doesn't have it in its own
+    # allowlist).  Symptom in the wild: the writer literally cannot
+    # create the report artifact, so it falls back to
+    # ask_user_question and stalls the workflow.
+    #
+    # Platform-level denials still propagate via excluded_tools
+    # (parent's exclusions are inherited above) and via
+    # _DELEGATION_ALWAYS_BLOCKED_TOOLS below, so this carve-out
+    # cannot be used to escape governance.
+    if parent_allowed and allowed_tools is None:
+        # Ad-hoc delegation with no agent_def -- inherit parent's
+        # allowlist unchanged.  Without an admin contract there's
+        # no other source of truth for what the child should have.
+        allowed_tools = list(parent_allowed)
+    # When ``allowed_tools`` came from the agent_def, leave it alone.
+
+    # Hardcoded blocklist: tools that should never run in a delegated
+    # child regardless of preset or parent config.
+    for t in _DELEGATION_ALWAYS_BLOCKED_TOOLS:
+        if allowed_tools is not None:
+            if t in allowed_tools:
+                allowed_tools.remove(t)
+        elif t not in excluded_tools:
+            excluded_tools.append(t)
+
+    # Leaf role: strip delegate_task -- UNLESS the agent_def itself
+    # lists delegate_task as required.  Some agent types are orchestrators
+    # by definition (e.g. ``deep-research``, which uses delegate_task
+    # to hand off to ``research-writer``); stripping the tool there
+    # turns a structural workflow into a runtime failure where the
+    # planner literally cannot reach the writer and falls back to
+    # writing prose in-place.  Treat the agent_def's tool list as
+    # authoritative: if it advertises delegate_task, the agent is an
+    # orchestrator no matter what the caller passed for ``role``.
+    agent_def_requires_delegate = (
+        agent_def is not None
+        and agent_def.tools is not None
+        and "delegate_task" in agent_def.tools
+    )
+    if role == "leaf" and not agent_def_requires_delegate:
+        for leaf_tool in leaf_tools:
+            if allowed_tools is not None:
+                allowed_tools = [t for t in allowed_tools if t != leaf_tool]
+            elif leaf_tool not in excluded_tools:
+                excluded_tools.append(leaf_tool)
+    return allowed_tools, excluded_tools
+
+
 async def _run_single_delegation(
     *,
     task: dict[str, Any],
@@ -375,8 +456,21 @@ async def _run_single_delegation(
     memory_manager: Any,
     bundle: Any | None = None,
     live_parent_config: dict[str, Any] | None = None,
+    leaf_tools: tuple[str, ...] = ("delegate_task",),
+    extra_config: dict[str, Any] | None = None,
+    seed: list[dict] | None = None,
+    start_extra: dict[str, Any] | None = None,
+    on_started: Any | None = None,
 ) -> str:
-    """Spawn one child, poll it, emit lifecycle events, and return its result."""
+    """Spawn one child, poll it, emit lifecycle events, and return its result.
+
+    The ``agent`` tool starts its sub-agents here too: *leaf_tools* are the
+    tools a leaf child loses, *extra_config* goes into the child's config,
+    *seed* (a fork's conversation) is the child's context before its brief,
+    *start_extra* goes into ``delegation.start``.  *on_started*, given the
+    child's session once it is queued, returns the call's result to end the
+    call there (a sub-agent in the background), or None to wait for it.
+    """
     goal: str = task["goal"]
     context: str = task["context"]
     model_override: str | None = task["model"]
@@ -437,76 +531,15 @@ async def _run_single_delegation(
         live_parent_config=live_parent_config,
     )
 
-    allowed_tools: list[str] | None = None
-    excluded_tools: list[str] = []
-    if agent_def is not None:
-        if agent_def.tools:
-            allowed_tools = list(agent_def.tools)
-        if agent_def.disallowed_tools:
-            excluded_tools = list(agent_def.disallowed_tools)
-    # Inherit parent's exclusions: anything the parent can't run, the
-    # child can't either.
-    parent_config = parent_session.config or {}
-    parent_allowed = parent_config.get("allowed_tools")
-    for t in parent_config.get("excluded_tools") or []:
-        if t not in excluded_tools:
-            excluded_tools.append(t)
-
-    # Toolset intersection: child's allowlist must be ⊆ parent's
-    # allowlist -- UNLESS the child is using an admin-defined
-    # agent_def, in which case the agent_def's tools list is
-    # authoritative for what the sub-agent needs.  Intersection used
-    # to silently drop tools the agent_def explicitly required (e.g.
-    # the research-writer's create_artifact was being stripped because
-    # the planner -- a peer sub-agent -- doesn't have it in its own
-    # allowlist).  Symptom in the wild: the writer literally cannot
-    # create the report artifact, so it falls back to
-    # ask_user_question and stalls the workflow.
-    #
-    # Platform-level denials still propagate via excluded_tools
-    # (parent's exclusions are inherited above) and via
-    # _DELEGATION_ALWAYS_BLOCKED_TOOLS below, so this carve-out
-    # cannot be used to escape governance.
-    if parent_allowed and allowed_tools is None:
-        # Ad-hoc delegation with no agent_def -- inherit parent's
-        # allowlist unchanged.  Without an admin contract there's
-        # no other source of truth for what the child should have.
-        allowed_tools = list(parent_allowed)
-    # When ``allowed_tools`` came from the agent_def, leave it alone.
-
-    # Hardcoded blocklist: tools that should never run in a delegated
-    # child regardless of preset or parent config.
-    for t in _DELEGATION_ALWAYS_BLOCKED_TOOLS:
-        if allowed_tools is not None:
-            if t in allowed_tools:
-                allowed_tools.remove(t)
-        elif t not in excluded_tools:
-            excluded_tools.append(t)
-
-    # Leaf role: strip delegate_task -- UNLESS the agent_def itself
-    # lists delegate_task as required.  Some agent types are orchestrators
-    # by definition (e.g. ``deep-research``, which uses delegate_task
-    # to hand off to ``research-writer``); stripping the tool there
-    # turns a structural workflow into a runtime failure where the
-    # planner literally cannot reach the writer and falls back to
-    # writing prose in-place.  Treat the agent_def's tool list as
-    # authoritative: if it advertises delegate_task, the agent is an
-    # orchestrator no matter what the caller passed for ``role``.
-    agent_def_requires_delegate = (
-        agent_def is not None
-        and agent_def.tools is not None
-        and "delegate_task" in agent_def.tools
+    allowed_tools, excluded_tools = child_tool_policy(
+        parent_config=parent_session.config or {}, agent_def=agent_def, role=role, leaf_tools=leaf_tools,
     )
-    if role == "leaf" and not agent_def_requires_delegate:
-        if allowed_tools is not None:
-            allowed_tools = [t for t in allowed_tools if t != "delegate_task"]
-        elif "delegate_task" not in excluded_tools:
-            excluded_tools.append("delegate_task")
-
     if allowed_tools is not None:
         child_config["allowed_tools"] = allowed_tools
     if excluded_tools and "allowed_tools" not in child_config:
         child_config["excluded_tools"] = excluded_tools
+    if extra_config:
+        child_config.update(extra_config)
 
     started_at = time.monotonic()
     try:
@@ -521,6 +554,19 @@ async def _run_single_delegation(
         )
         child_id = child_session.id
 
+        if seed is not None:
+            # A fork starts from its parent's conversation, as a compaction
+            # would leave it: replay reads it before the brief.
+            await session_store.emit_event(
+                child_id,
+                EventType.CONTEXT_COMPACT,
+                {
+                    "compacted_messages": seed,
+                    "strategy": "fork",
+                    "original_message_count": len(seed),
+                    "compressed_message_count": len(seed),
+                },
+            )
         await session_store.emit_event(
             child_id,
             EventType.USER_MESSAGE,
@@ -536,6 +582,7 @@ async def _run_single_delegation(
                 "depth": child_depth,
                 "agent_type": agent_type,
                 "model": model_override,
+                **(start_extra or {}),
             },
         )
         if redis is not None:
@@ -546,6 +593,11 @@ async def _run_single_delegation(
                 session_id=child_id,
                 priority=session_queue_priority(child_session),
             )
+
+        if on_started is not None:
+            early = await on_started(child_session)
+            if early is not None:
+                return early
 
         outcome = await _poll_child_completion(
             session_store=session_store,

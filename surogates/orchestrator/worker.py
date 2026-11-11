@@ -393,7 +393,11 @@ def _filter_effective_tools(
     # Last: a Keel case's sessions are offered only the case's tools, and only
     # its step's own session the step tools.  The schemas apply the same gate
     # last (``AgentHarness._tool_filter_for_session_impl``).
-    return gate_case_tools(result, session)
+    # Then the sub-agent family: ``agent`` in ``delegate_task``'s place with parity on, none of it with parity
+    # off, as the harness offers the schemas (``AgentHarness._tool_filter_for_session_impl``).
+    from surogates.harness.subagents import apply_parity
+
+    return apply_parity(gate_case_tools(result, session), session.config)
 
 
 _warned_missing_model_metadata: set[str] = set()

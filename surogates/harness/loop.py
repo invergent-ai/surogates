@@ -294,6 +294,7 @@ from surogates.harness.loop_pending import (
     _waits_on_its_workers,
 )
 from surogates.harness.agent_news import agent_news_unread, started_notified_work, starts_notified_work
+from surogates.harness.subagents import REPLACED_TOOL, apply_parity, runs_in_background
 from surogates.harness.loop_tool_recovery import (
     _is_valid_json_args,
     build_partial_tool_call_recovery_results,
@@ -3243,6 +3244,9 @@ class AgentHarness(
         offered_tools = (
             frozenset(s["function"]["name"] for s in tool_schemas) | deferred_tools.names
         )
+        if "agent" in offered_tools:
+            # ``agent`` stands in for ``delegate_task``, which stays callable under its old name.
+            offered_tools |= {REPLACED_TOOL}
 
         # The browser pause notice costs a Redis read, and only a session
         # that can drive a browser can ever be holding one.
@@ -6081,7 +6085,9 @@ class AgentHarness(
         # Last, as in ``worker._filter_effective_tools``: a Keel case's
         # sessions keep only the case's tools, and only its step's own
         # session gets the step tools, which every other session loses.
-        return gate_case_tools(tool_filter, session)
+        # Then the sub-agent family: ``agent`` in ``delegate_task``'s place
+        # with parity on, none of it with parity off.
+        return apply_parity(gate_case_tools(tool_filter, session), config)
 
     @staticmethod
     def _dynamic_loop_wait_succeeded(
@@ -6564,7 +6570,14 @@ class AgentHarness(
             except Exception:
                 # The run is at rest all the same: its answer is in its own log.
                 logger.warning("Failed to announce the end of run %s at a command", session.id, exc_info=True)
-        if _should_notify_parent_on_completion(session) and not is_project_thread(session.config):
+        if _should_notify_parent_on_completion(session) and runs_in_background(session):
+            from surogates.harness.subagents import tell_parent
+
+            await tell_parent(
+                store=self._store, redis=self._redis, session=session, status="completed",
+                result=extract_final_response(events, fallback=""),
+            )
+        elif _should_notify_parent_on_completion(session) and not is_project_thread(session.config):
             from surogates.harness.worker_notify import is_delegated, notify_parent_on_completion
 
             await notify_parent_on_completion(
