@@ -218,9 +218,9 @@ class PromptBuilder:
         self._available_agents_section_cache = None
 
     def _restricted_away(self, *tools: str) -> bool:
-        """Whether :meth:`restrict_tools` took away every one of *tools*."""
-        out = getattr(self, "_restricted_out", frozenset())
-        return bool(tools) and all(t in out for t in tools)
+        """Whether, in a builder :meth:`restrict_tools` narrowed, none of
+        *tools* is offered (taken away here or never given)."""
+        return bool(self._restricted_out) and not (set(tools) & self._available_tools)
 
     def build(self) -> str:
         """Assemble the full system prompt.

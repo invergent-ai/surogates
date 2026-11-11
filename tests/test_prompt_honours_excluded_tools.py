@@ -132,12 +132,16 @@ async def test_an_ordinary_session_with_the_real_tools_keeps_its_prompt():
     session that names no tools is not narrowed by them."""
     from surogates.tools.runtime import ToolRuntime
 
+    from surogates.tools.loader import ResourceLoader
+
     registry = ToolRegistry()
     ToolRuntime(registry).register_builtins()
+    skills = ResourceLoader()._load_skills_from_dir("skills", "platform")  # in-tree skills, requires_tools included
+    assert any(getattr(s, "name", "") == "subagent-task-orchestrator" for s in skills)
     session = _chat({})
     tools = set(registry.tool_names)
-    before = PromptBuilder(_tenant(session), session=session, available_tools=set(tools)).build()
-    builder = PromptBuilder(_tenant(session), session=session, available_tools=set(tools))
+    before = PromptBuilder(_tenant(session), session=session, available_tools=set(tools), skills=skills).build()
+    builder = PromptBuilder(_tenant(session), session=session, available_tools=set(tools), skills=skills)
     harness = AgentHarness(
         session_store=AsyncMock(), tool_registry=registry, llm_client=AsyncMock(),
         tenant=_tenant(session), worker_id="w", budget=IterationBudget(max_total=10),
@@ -147,3 +151,15 @@ async def test_an_ordinary_session_with_the_real_tools_keeps_its_prompt():
     )
     assert harness._tool_filter_for_session(session) < tools  # the schemas offer fewer
     assert await harness._build_system_prompt(session) == before
+    assert "subagent-task-orchestrator" in before
+    # A session that names its tools gets the schemas' set: the orchestrator skill needs spawn_task.
+    named = _chat({"excluded_tools": ["web_search"]})
+    narrowed = AgentHarness(
+        session_store=AsyncMock(), tool_registry=registry, llm_client=AsyncMock(),
+        tenant=_tenant(named), worker_id="w", budget=IterationBudget(max_total=10),
+        context_compressor=MagicMock(spec=ContextCompressor),
+        prompt_builder=PromptBuilder(_tenant(named), session=named, available_tools=set(tools), skills=skills),
+        sandbox_pool=MagicMock(spec=SandboxPool), vision_client=None, vision_model="",
+        mcp_tool_names=frozenset(),
+    )
+    assert "subagent-task-orchestrator" not in await narrowed._build_system_prompt(named)
