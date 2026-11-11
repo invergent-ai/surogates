@@ -236,7 +236,10 @@ class Actor:
 
     async def _finish_done_runs(self) -> None:
         for run_id in await store.done_runs(self.state.session_factory, datetime.now(timezone.utc)):
-            await store.finish_run(self.state, run_id)
+            try:
+                await store.finish_run(self.state, run_id)
+            except Exception:
+                logger.exception("[simulation] couldn't end run %s; the others still end", run_id)
 
     async def _stop(self, person, state: str, note: str) -> None:
         await store.update_person(self.state.session_factory, person.id, ai_state=state, ai_note=note)
