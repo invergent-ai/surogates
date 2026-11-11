@@ -26,6 +26,7 @@ from surogates.devices.operations import OperationConflict
 from surogates.devices.sandbox import UNAVAILABLE_TOOLS, device_call_for, interrupted, refusal
 from surogates.devices.workspace import DeviceOperationError
 from surogates.session.events import EventType
+from surogates.harness.agent_news import starts_notified_work
 from surogates.harness.message_utils import leading_json_object, make_skipped_tool_result
 from surogates.harness.resilience import unknown_tool_error
 from surogates.harness.tool_guardrails import (
@@ -519,6 +520,30 @@ CONCURRENCY_SAFE_TOOLS: frozenset[str] = frozenset({
 SIBLING_ABORT_TOOLS: frozenset[str] = frozenset({
     "terminal",
 })
+
+
+def _watch_background(result_content: str, session: Any, tool_args: Any, *, in_sandbox: bool) -> None:
+    """Hand the background command a ``terminal`` call started to the worker's watch (``background_watch``)."""
+    from surogates.harness.background_watch import HERE, background_watch
+    from surogates.sandbox.pool import sandbox_session_key
+
+    try:
+        started = json.loads(result_content)
+    except (TypeError, ValueError):
+        return
+    proc_id = started.get("session_id") if isinstance(started, dict) else None
+    if not isinstance(proc_id, str) or not proc_id:
+        return
+    if isinstance(tool_args, str):
+        try:
+            tool_args = json.loads(tool_args)
+        except (TypeError, ValueError):
+            tool_args = {}
+    command = tool_args.get("command") if isinstance(tool_args, dict) else None
+    background_watch.watch(
+        owner=sandbox_session_key(session) if in_sandbox else HERE,
+        proc_id=proc_id, session_id=session.id, command=str(command or ""),
+    )
 
 
 def is_concurrency_safe(tool_name: str) -> bool:
@@ -2138,6 +2163,13 @@ async def _run_single_tool(
                 "error": f"Tool execution failed: {exc}",
             })
     elapsed_ms = int((time.monotonic() - start) * 1000)
+
+    # A background command that reports back is watched until it ends: its end
+    # reaches this session as a notification.  Read from the call's own result,
+    # before any note is added to it.  Not one on the user's computer, which
+    # keeps its own processes.
+    if tool_name == "terminal" and not tool_failed and device_call is None and starts_notified_work(tool_name, tool_args):
+        _watch_background(result_content, session, tool_args, in_sandbox=location == ToolLocation.SANDBOX and sandbox_pool is not None)
 
     # --- Saga step commit / fail ---
     if saga_step is not None and _active_saga_id is not None:

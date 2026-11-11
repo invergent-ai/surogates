@@ -1453,6 +1453,11 @@ async def run_worker(settings: Settings) -> None:
     else:
         sandbox_backend = ProcessSandbox()
     sandbox_pool = SandboxPool(sandbox_backend)
+    # The watch on background commands that report back: their ends reach the
+    # sessions that started them as notifications.
+    from surogates.harness.background_watch import background_watch
+
+    background_watch.configure(store=session_store, redis=redis_client, sandbox_pool=sandbox_pool)
 
     # 4b. Browser pool -- one browser per session, lazily provisioned.
     browser_backend = _build_browser_backend(
@@ -2487,6 +2492,7 @@ async def run_worker(settings: Settings) -> None:
         except asyncio.CancelledError:
             pass
         await health_server.stop()
+        await background_watch.close()
         # Deliberately NOT destroying browsers here. Containers are detached
         # and registry entries persist, so sessions -- which outlive workers in
         # shared-runtime mode -- reattach to their live browser on the next

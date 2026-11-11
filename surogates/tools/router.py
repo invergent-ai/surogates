@@ -84,7 +84,9 @@ TOOL_LOCATIONS: dict[str, ToolLocation] = {
     "todo": ToolLocation.HARNESS,
     # Procedure step markers: an event append, nothing to isolate.
     "skill_step": ToolLocation.HARNESS,
-    "process": ToolLocation.HARNESS,
+    # ``process`` is not here: a background process lives where the command
+    # that started it ran, in the sandbox's executor daemon, so it is asked
+    # there (the default, SANDBOX).
     "create_artifact": ToolLocation.HARNESS,
     # Whiteboard canvas — validation only, but it must not route to the
     # sandbox: an unlisted tool falls back there and dies as

@@ -291,6 +291,7 @@ from surogates.harness.loop_pending import (
     _turn_for_a_redo,
     _waits_on_its_workers,
 )
+from surogates.harness.agent_news import agent_news_unread, started_notified_work, starts_notified_work
 from surogates.harness.loop_tool_recovery import (
     _is_valid_json_args,
     build_partial_tool_call_recovery_results,
@@ -676,7 +677,7 @@ def _carries_information(text: str) -> bool:
 #: project's thread was told of, and,
 #: in a chat on its user's computer, the resume a hand back of the browser
 #: gave it that no turn has read.
-_REVIVED_BY_NEWS = frozenset({"worker_report", "history_redo", "unread_browser_hand_back"})
+_REVIVED_BY_NEWS = frozenset({"worker_report", "history_redo", "unread_browser_hand_back", "agent_notification"})
 
 
 
@@ -1283,6 +1284,15 @@ class AgentHarness(
         )
         return bool(unread_reports(events))
 
+    async def _has_unread_agent_news(self, session_id: UUID) -> bool:
+        """Return True if a notification of background work the session started is newer than its last model request."""
+        if not await self._store.has_event(session_id, EventType.AGENT_NOTIFICATION):
+            return False
+        events = await self._store.get_events(
+            session_id, types=[EventType.LLM_REQUEST, EventType.AGENT_NOTIFICATION],
+        )
+        return agent_news_unread(events)
+
     async def _has_awaited_report(self, session: Session) -> bool:
         """Return True if a report the session was told to wait for is newer than its last model
         request (``_awaited_report_unread``).
@@ -1324,7 +1334,9 @@ class AgentHarness(
         request did not read would stand ahead of the turn's answer, and
         the next turn's request would end on that answer.  A ``delegate_task``
         parent, which a master never is, already has its child's result as
-        the tool's result.
+        the tool's result.  A session that started background work which
+        reports back (``started_notified_work``) reads its notifications
+        live too.
         """
         types: list[EventType] = []
         if is_project_master(session.config) or (session.config or {}).get("active_mission_id"):
@@ -1334,6 +1346,9 @@ class AgentHarness(
             types += [EventType.INBOX_ACTION_REQUIRED]
         if device_of(session.config) is not None:
             types += [EventType.SESSION_RESUME, EventType.BROWSER_CONTROL_GRANTED]
+        if getattr(self, "_hears_agent_news", False):
+            # Background work it started reports whenever it ends.
+            types += [EventType.AGENT_NOTIFICATION]
         if not types:
             return held, after_event_id
         events = await self._store.get_events(session.id, after=after_event_id, types=types)
@@ -2113,6 +2128,10 @@ class AgentHarness(
                         revived_by = "worker_report"
                     elif session.status == "completed" and await self._has_awaited_report(session):
                         revived_by = "worker_report"
+                    elif session.status == "completed" and await self._has_unread_agent_news(session_id):
+                        # Background work it started ended after its turn did:
+                        # the notification is the input of the turn it gets.
+                        revived_by = "agent_notification"
                     elif (
                         session.status == "completed"
                         and is_project_thread(session.config)
@@ -2257,7 +2276,10 @@ class AgentHarness(
             ):
                 logger.debug("Session %s: its mission is paused, nothing of its user's waits", session_id)
                 return
-            if not pending and not unanswered_calls(all_events) and not command_waits and not _hand_back_unread(all_events):
+            if (
+                not pending and not unanswered_calls(all_events) and not command_waits
+                and not _hand_back_unread(all_events) and not agent_news_unread(all_events)
+            ):
                 logger.debug(
                     "Session %s: no actionable pending events after cursor %d",
                     session_id,
@@ -2271,6 +2293,7 @@ class AgentHarness(
             if (
                 _nothing_to_answer(pending) and not unanswered_calls(all_events)
                 and not command_waits and not _hand_back_unread(all_events)
+                and not agent_news_unread(all_events)
             ):
                 logger.info(
                     "Session %s: revived for a message that never came; nothing to answer",
@@ -2949,6 +2972,10 @@ class AgentHarness(
         # browser, that no request had read when the wake began.  Replay
         # left them out of ``messages``; the first request reads them.
         reports = unread_reports(all_events or [])
+        # Whether the wake reads notifications of background work live: only
+        # a session that started such work gets one.  Set again once a call
+        # of this wake starts some.
+        self._hears_agent_news = started_notified_work(all_events or [])
         # What the user asked for, for the turn's summary: their own words,
         # never a worker's report, which replay and the live loop put after them.
         request = _latest_user_event_text(all_events or [])[:1000]
@@ -4231,6 +4258,7 @@ class AgentHarness(
                 if followup is not None or (reports and (
                     await self._has_unread_report(session.id)
                     or (device_of(session.config) is not None and await self._has_unread_hand_back(session.id))
+                    or (self._hears_agent_news and await self._has_unread_agent_news(session.id))
                 )):
                     if followup is not None:
                         messages.append(followup)
@@ -4426,6 +4454,9 @@ class AgentHarness(
             # 7a. Reset nudge counters when relevant tools are used
             for tr_tc in tool_calls_raw:
                 tc_name = tr_tc.get("function", {}).get("name", "")
+                if starts_notified_work(tc_name, tr_tc.get("function", {}).get("arguments")):
+                    # Its end reaches this session as a notification: read live from here on.
+                    self._hears_agent_news = True
                 if tc_name == "memory":
                     self._turns_since_memory = 0
                 elif tc_name == "skill_manage":
@@ -6475,7 +6506,10 @@ class AgentHarness(
         tool saga, no summary and no files to land: its answer is its whole
         result, which ``_report_command_turn`` tells.
         """
-        if self._sandbox_pool is not None:
+        from surogates.harness.background_watch import background_watch
+
+        # One that runs a background command the session waits to hear the end of stays up, as at a model's turn end.
+        if self._sandbox_pool is not None and not background_watch.holds(str(session.id)):
             try:
                 sandbox_id = await self._sandbox_pool.release_for_session(str(session.id))
             except Exception:

@@ -1262,7 +1262,11 @@ class ArtifactCompletionMixin:
         # A landing that recorded a commit leaves its pod the day's pruning
         # of the project's history: run at the very end, once the report is out.
         prunes: str | None = None
-        if self._sandbox_pool is not None:
+        from surogates.harness.background_watch import background_watch
+
+        # A sandbox that runs a background command the session waits to hear
+        # the end of stays up: the watch lets it go once the command ends.
+        if self._sandbox_pool is not None and not background_watch.holds(str(session.id)):
             try:
                 sandbox_id = await self._sandbox_pool.release_for_session(
                     str(session.id),
