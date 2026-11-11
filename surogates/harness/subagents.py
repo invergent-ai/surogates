@@ -197,12 +197,16 @@ async def stopped_by_an_agent_this_run(store: Any, session_id: Any) -> bool:
 def budget_report(events: list[Any]) -> str:
     """What an agent that ran out of tokens reports: the reply to its last tools-off call, or nothing; never a
     line from the middle of a step."""
+    within = False
     for event in reversed(events):
+        if event.type == EventType.SESSION_COMPLETE.value:
+            if within:
+                break  # an earlier run's end: its report is no report of this run
+            continue  # this run's own end, written after its report
+        within = True
         if event.type == EventType.LLM_RESPONSE.value and (event.data or {}).get("finish_reason") == BUDGET_REASON:
             content = ((event.data or {}).get("message") or {}).get("content")
             return content if isinstance(content, str) else ""
-        if event.type == EventType.SESSION_COMPLETE.value:
-            break
     return ""
 
 
