@@ -24,6 +24,15 @@ in this call, or else the reasoning chunks of the call so far, which is the
 number the viewer counted when every chunk was an event.  Replay counts the
 chunks of stored events (``SessionStore._restore_reasoning_counts``) the same
 way.  With ``coalesce_ms=0`` every event is one chunk and carries neither.
+
+Where the deltas go is the policy's ``transport``.  ``log`` writes each one
+to the event log, as every release has, so every client reads it as an
+event with an id.  ``redis`` writes none: each goes out as a live frame on
+the session's pub/sub channel (:mod:`surogates.session.live`), which the
+api's streams pass on in order; nothing reads deltas once their call is
+over, since the ``llm.response`` holds the text.  ``enabled=False`` sends
+no deltas at all, for sessions nobody watches live (headless benchmarks,
+training rollouts).
 """
 
 from __future__ import annotations
@@ -54,15 +63,40 @@ _clock = time.monotonic
 DEFAULT_COALESCE_MS = 100
 
 
+#: Where deltas go: to the event log, or over Redis only (module docstring).
+TRANSPORTS = ("log", "redis")
+
+
 @dataclass(frozen=True, slots=True)
 class DeltaPolicy:
-    """How often at most one model call writes an ``llm.delta`` event of one kind.
+    """Whether a model call sends ``llm.delta`` events, where, and how often at most.
 
-    ``coalesce_ms=0`` writes one per streamed chunk, as releases before this
-    one did.
+    ``coalesce_ms=0`` sends one per streamed chunk, as releases before
+    coalescing did.  ``enabled=False`` sends none.  ``transport`` is ``log``
+    or ``redis``.
     """
 
     coalesce_ms: int = DEFAULT_COALESCE_MS
+    enabled: bool = True
+    transport: str = "log"
+
+    def __post_init__(self) -> None:
+        if self.transport not in TRANSPORTS:
+            raise ValueError(f"delta transport must be one of {TRANSPORTS}, not {self.transport!r}")
+
+    def for_session(self, config: dict[str, Any] | None) -> DeltaPolicy:
+        """This policy as *config*, a session's config, narrows it.
+
+        ``live_deltas: false`` turns the deltas off for the session, and
+        ``delta_coalesce_ms`` sets its window.
+        """
+        config = config or {}
+        enabled = self.enabled and config.get("live_deltas", True) is not False
+        coalesce_ms = self.coalesce_ms
+        raw = config.get("delta_coalesce_ms")
+        if isinstance(raw, (int, float)) and not isinstance(raw, bool) and raw >= 0:
+            coalesce_ms = int(raw)
+        return DeltaPolicy(coalesce_ms=coalesce_ms, enabled=enabled, transport=self.transport)
 
 
 class LiveDeltas:
@@ -78,7 +112,7 @@ class LiveDeltas:
 
     __slots__ = (
         "_store", "_session_id", "_window", "_meta", "_kind", "_parts", "_tokens", "_last_sent",
-        "_reported", "_reasoning_chunks", "_lock", "_timer",
+        "_reported", "_reasoning_chunks", "_lock", "_timer", "_enabled", "_redis", "_after", "_seq",
     )
 
     def __init__(
@@ -96,6 +130,13 @@ class LiveDeltas:
         self._session_id = session_id
         self._window = max(policy.coalesce_ms, 0) / 1000.0
         self._meta = (iteration, turn_id, iteration_index)
+        self._enabled = policy.enabled
+        self._redis = policy.transport == "redis"
+        # Over Redis: the session's newest event id when the call sends its
+        # first frame (it names the call, surogates.session.live), and the
+        # frame count.
+        self._after: int | None = None
+        self._seq = 0
         self._kind: str | None = None
         self._parts: list[str] = []
         # A reported count not yet sent, and the newest one reported.
@@ -111,7 +152,7 @@ class LiveDeltas:
 
     async def text(self, kind: str, text: str) -> None:
         """Add *text* of *kind* (``content`` or ``reasoning``)."""
-        if not text:
+        if not text or not self._enabled:
             return
         if self._kind is not None and self._kind != kind:
             await self.flush()
@@ -123,6 +164,8 @@ class LiveDeltas:
 
     async def reasoning_tokens(self, count: int) -> None:
         """Note the provider's running reasoning-token count; the newest is sent."""
+        if not self._enabled:
+            return
         self._tokens = self._reported = count
         await self.tick()
 
@@ -145,6 +188,8 @@ class LiveDeltas:
 
     async def send(self, data: dict[str, Any]) -> None:
         """Send *data* as an event of its own, after everything gathered so far."""
+        if not self._enabled:
+            return
         self._stop_timer()
         async with self._lock:
             await self._drain()
@@ -198,7 +243,18 @@ class LiveDeltas:
         if "iteration" not in data:
             data["iteration"] = iteration
         _stamp_turn_meta(data, iteration=iteration, turn_id=turn_id, iteration_index=iteration_index)
-        await self._store.emit_event(self._session_id, EventType.LLM_DELTA, data)
+        if not self._redis:
+            await self._store.emit_event(self._session_id, EventType.LLM_DELTA, data)
+        else:
+            # Best-effort, as any publish: a frame that cannot go out is
+            # dropped, and its number with it, so a reader sees the gap.
+            seq, self._seq = self._seq, self._seq + 1
+            try:
+                if self._after is None:
+                    self._after = await self._store.last_event_id(self._session_id)
+                await self._store.publish_live_frame(self._session_id, data, after=self._after, seq=seq)
+            except Exception:
+                logger.debug("Live frame not sent for session %s", self._session_id, exc_info=True)
         # The window runs from the end of the write: on a loaded worker a
         # write can outlast it, and a window from the write's start would be
         # closed again by the next chunk, one event per chunk.  From the end,

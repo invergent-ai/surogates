@@ -51,6 +51,10 @@ _MAX_UNFINISHED_RETRIES: int = 1
 #: so a model insisting the file exists is more likely right than the
 #: guard is, and a second nudge would just argue with it.
 _MAX_DELIVERABLE_RETRIES: int = 1
+#: How many workspace entries the deliverable check reads to tell inputs from deliverables.
+_WORKSPACE_NAMES_LIMIT: int = 5000
+#: How long the deliverable check waits for that listing before it nudges as if there were no inputs.
+_WORKSPACE_NAMES_TIMEOUT: float = 5.0
 
 #: Nudges for a reply claiming a memory save the turn never made. One: the
 #: claim regex can misread a reply, so a model that keeps its wording after

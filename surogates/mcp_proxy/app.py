@@ -48,7 +48,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.vault = _NoOpVault()
 
     # Audit substrate.  Each pool entry gets its own
-    # :class:`MCPGovernance` instance for tenant-scoped fingerprints.
+    # :class:`MCPGovernance` instance over its tenant's approved
+    # fingerprints, which the pool keeps across connections.
     app.state.audit_store = AuditStore(app.state.session_factory)
 
     # Connection pool.  Scan + audit wired in so every MCP tool

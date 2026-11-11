@@ -11,6 +11,7 @@ from uuid import UUID
 from surogates.channels.memory_boundary import rerun_kind_of
 from surogates.devices.binding import device_of
 from surogates.devices.browser import of_a_sub_agent, resumes_the_agent, takes_the_browser_over
+from surogates.harness.agent_news import AGENT_NEWS_TYPES, notification_note
 from surogates.harness.context import NOOP_STRATEGIES
 from surogates.harness.context_files import load_folder_context
 from surogates.harness.loop_attachments import (
@@ -26,7 +27,7 @@ from surogates.harness.loop_tool_recovery import collapse_repeated_tool_rounds
 from surogates.harness.sanitize import strip_budget_warnings
 from surogates.harness.todo_reminder import strip_todo_reminders
 from surogates.harness.tool_exec import _WORKSPACE_TOKEN
-from surogates.harness.loop_pending import _in_typed_order
+from surogates.harness.loop_pending import _in_typed_order, answered_helpers
 from surogates.keel.steps import is_keel_message
 from surogates.session.events import MESSAGE_TYPES, PLATFORM_NOTE, EventType
 from surogates.session.files import HARNESS_WITHIN_S, gave_up_level, session_files
@@ -148,7 +149,7 @@ BROWSER_HANDED_BACK = (
     "you act on it.]"
 )
 #: The events a session reads as news at its next model request.
-NEWS_TYPES = WORKER_NEWS_TYPES | {
+NEWS_TYPES = WORKER_NEWS_TYPES | AGENT_NEWS_TYPES | {
     EventType.SESSION_RESUME.value, EventType.HISTORY_REDO.value, EventType.INBOX_ACTION_REQUIRED.value,
 }
 
@@ -547,9 +548,14 @@ def wait_note(data: dict) -> dict | None:
     )}
 
 
-def worker_news(event_type: str, data: dict) -> dict | None:
+def worker_news(event_type: str, data: dict, answered: frozenset[str] = frozenset()) -> dict | None:
     """The message a coordinator reads a worker's news as: its report, or a
-    thread the user started; None for a spawn the coordinator made."""
+    thread the user started; None for a spawn the coordinator made, and for
+    the report of a ``delegate_task`` helper whose call got its result
+    (*answered*, ``loop_pending.answered_helpers``): its parent has it as
+    that call's result (``worker_notify.is_delegated``)."""
+    if (data or {}).get("delegated") and str((data or {}).get("worker_id")) in answered:
+        return None
     if event_type != EventType.WORKER_SPAWNED.value:
         return worker_note(event_type, data)
     if data.get("started_by") != "user":
@@ -558,14 +564,16 @@ def worker_news(event_type: str, data: dict) -> dict | None:
     return {"role": "user", "content": f"[Thread {title} ({data.get('worker_id', '?')}) started by the user]"}
 
 
-def news(event) -> dict | None:
+def news(event, answered: frozenset[str] = frozenset()) -> dict | None:
     """The message a session reads an event as at its next model request, or
     None for an event that is no news: a worker's news to its coordinator,
     a redo a project's thread was told of, the wait on its user over files
-    it was put in, and, in a chat on its user's computer, the resume a hand
-    back of the browser gave it."""
+    it was put in, the end of background work it started, and, in a chat on
+    its user's computer, the resume a hand back of the browser gave it."""
     if event.type in WORKER_NEWS_TYPES:
-        return worker_news(event.type, event.data)
+        return worker_news(event.type, event.data, answered)
+    if event.type in AGENT_NEWS_TYPES:
+        return notification_note(event.data)
     if event.type == EventType.HISTORY_REDO.value:
         return redo_note(event.data)
     if event.type == EventType.INBOX_ACTION_REQUIRED.value:
@@ -575,7 +583,7 @@ def news(event) -> dict | None:
     return None
 
 
-def held_news(held: list[dict], event) -> list[dict]:
+def held_news(held: list[dict], event, answered: frozenset[str] = frozenset()) -> list[dict]:
     """*held*, the news waiting for a session's next model request, once
     *event* is in its log after it.
 
@@ -583,7 +591,7 @@ def held_news(held: list[dict], event) -> list[dict]:
     takes its browser over again, a hand back still waiting is news no
     more: read then, it would say the browser tools work while they do not.
     """
-    if (note := news(event)) is not None:
+    if (note := news(event, answered)) is not None:
         return [*held, note]
     if takes_the_browser_over(event):
         return [note for note in held if note["content"] != BROWSER_HANDED_BACK]
@@ -598,9 +606,16 @@ def unread_reports(events: list) -> list[dict]:
     after its compaction, its command and its board update, which is where
     replay puts them once that request is in the log."""
     held: list[dict] = []
+    answered = answered_helpers(events)
     for event in events:
-        held = [] if event.type == EventType.LLM_REQUEST.value else held_news(held, event)
+        held = [] if event.type == EventType.LLM_REQUEST.value else held_news(held, event, answered)
     return held
+
+
+def replayed_messages(events: list, workspace_path: str | None = None) -> list[dict]:
+    """The conversation *events* rebuild, as a wake's replay rebuilds it: ``ContextReplayMixin._rebuild_messages``,
+    which reads nothing of its harness.  A fork of a session starts from it (``tools.builtin.agents``)."""
+    return ContextReplayMixin._rebuild_messages(None, events, workspace_path)  # type: ignore[arg-type]
 
 
 def coalesce_user_messages(messages: list[dict]) -> dict:
@@ -737,6 +752,9 @@ class ContextReplayMixin:
         # ``workspace_path.rstrip("/")``.
         workspace_root = (workspace_path or "").rstrip("/")
         events = _in_typed_order(events)
+        # The helpers whose delegate_task call got their result, in the whole
+        # log: a helper's report can land after the call has returned.
+        answered = answered_helpers(events)
         messages: list[dict] = []
         iteration_open = False
         awaiting_tool_ids: set[str] = set()
@@ -865,7 +883,7 @@ class ContextReplayMixin:
             # carry the user's words as a report.  So each waits for the
             # next request, on its own.
             elif etype in WORKER_NEWS_TYPES:
-                note = worker_news(etype, event.data)
+                note = worker_news(etype, event.data, answered)
                 if note is not None:
                     held_reports.append(note)
 
@@ -874,6 +892,12 @@ class ContextReplayMixin:
             # the browser over again first.  The hand back's own event, as the
             # take-over's, is for the pane.
             elif resumes_the_agent(event) or takes_the_browser_over(event):
+                held_reports = held_news(held_reports, event)
+
+            # The end of background work the session started is read the
+            # same way: it lands whenever the work ends, between a call and
+            # its result too.
+            elif etype in AGENT_NEWS_TYPES:
                 held_reports = held_news(held_reports, event)
 
             # A redo a project's thread was told of opens its next turn, and

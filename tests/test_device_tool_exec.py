@@ -116,22 +116,34 @@ async def test_an_image_is_read_through_the_device_like_any_file():
 
 
 async def test_a_harness_tool_gets_the_device_and_no_host_path():
-    registry = registry_with("process")
+    registry = registry_with("create_artifact")
     session = device_session()
-    await run(registry, session, "process", {"action": "list"}, sandbox_pool=SimpleNamespace())
-    kwargs = registry.get("process").handler.call_args.kwargs
+    await run(registry, session, "create_artifact", {"action": "list"}, sandbox_pool=SimpleNamespace())
+    kwargs = registry.get("create_artifact").handler.call_args.kwargs
     assert isinstance(kwargs["workspace_io"], DeviceWorkspaceIO)
     assert isinstance(kwargs["sandbox_pool"], DeviceCall)
     assert kwargs["workspace_path"] is None
     assert kwargs["task_id"] == str(session.id)
 
 
+async def test_process_asks_the_computer_where_its_background_commands_run():
+    registry = registry_with("process")
+    session = device_session()
+    pool = SimpleNamespace(ensure=AsyncMock(), execute=AsyncMock())
+    await run(registry, session, "process", {"action": "list"}, sandbox_pool=pool)
+    kwargs = registry.get("process").handler.call_args.kwargs
+    assert isinstance(kwargs["workspace_io"], DeviceWorkspaceIO)
+    assert kwargs["workspace_path"] is None
+    pool.ensure.assert_not_called()
+    pool.execute.assert_not_called()
+
+
 async def test_a_child_works_under_its_roots_task_id():
     root = str(uuid4())
-    registry = registry_with("process")
+    registry = registry_with("create_artifact")
     session = device_session(sandbox_root_session_id=root)
-    await run(registry, session, "process", {"action": "list"})
-    kwargs = registry.get("process").handler.call_args.kwargs
+    await run(registry, session, "create_artifact", {"action": "list"})
+    kwargs = registry.get("create_artifact").handler.call_args.kwargs
     assert kwargs["task_id"] == root
     # It journals as itself, under its root.
     runner = kwargs["workspace_io"]._runner

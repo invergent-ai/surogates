@@ -23,6 +23,7 @@ from typing import Any, BinaryIO
 from surogates.tools.utils.env_passthrough import is_env_passthrough
 from surogates.tools.utils.process_registry import process_registry
 from surogates.tools.utils.workspace_sandbox import (
+    in_workspace_terms,
     WorkspaceSandboxError,
     validate_path,
     validate_workdir,
@@ -437,21 +438,25 @@ _SENSITIVE_PATH_PREFIXES = ("/etc/", "/boot/", "/usr/lib/systemd/")
 _SENSITIVE_EXACT_PATHS = {"/var/run/docker.sock", "/run/docker.sock"}
 
 
-def _check_sensitive_path(filepath: str) -> str | None:
-    """Return an error message if the path targets a sensitive system location."""
+def _check_sensitive_path(filepath: str, shown: str | None = None) -> str | None:
+    """Return an error message if the path targets a sensitive system location.
+
+    The message names *shown*, the path as the model wrote it, when given.
+    """
     try:
         resolved = os.path.realpath(os.path.expanduser(filepath))
     except (OSError, ValueError):
         resolved = filepath
+    named = filepath if shown is None else shown
     for prefix in _SENSITIVE_PATH_PREFIXES:
         if resolved.startswith(prefix):
             return (
-                f"Refusing to write to sensitive system path: {filepath}\n"
+                f"Refusing to write to sensitive system path: {named}\n"
                 "Use the terminal tool with sudo if you need to modify system files."
             )
     if resolved in _SENSITIVE_EXACT_PATHS:
         return (
-            f"Refusing to write to sensitive system path: {filepath}\n"
+            f"Refusing to write to sensitive system path: {named}\n"
             "Use the terminal tool with sudo if you need to modify system files."
         )
     return None
@@ -599,9 +604,18 @@ class LocalWorkspaceIO:
 
     async def check_write(self, path: str) -> str | None:
         refuse_nul(path)
-        if _is_write_denied(path):
+        target = path
+        if self.root:
+            # The file resolve() will write: ``/workspace/...`` is this
+            # workspace, and a relative path is relative to it, never to the
+            # worker's own working folder.
+            root = str(Path(self.root).resolve())  # as resolve_in_workspace takes it
+            target = in_workspace_terms(root, os.path.expanduser(path))
+            if not os.path.isabs(target):
+                target = os.path.join(root, target)
+        if _is_write_denied(target):
             return f"Write denied: '{path}' is a protected system/credential file."
-        return _check_sensitive_path(path)
+        return _check_sensitive_path(target, shown=path)
 
     async def stat(self, key: str) -> FileStat | None:
         try:
@@ -632,11 +646,23 @@ class LocalWorkspaceIO:
         # expected_revision is not checked: cloud behaviour does not change.
         os.makedirs(os.path.dirname(key) or ".", exist_ok=True)
         tmp = key + ".tmp"
+        # The temporary file is made new, never opened through what is
+        # already at its name: a symlink planted there (by a command, a
+        # cloned repository, an archive) would carry the write outside the
+        # workspace.  A leftover or a planted link is removed, not followed.
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
         try:
-            with open(tmp, "wb") as fh:
+            try:
+                fd = os.open(tmp, flags, 0o666)
+            except FileExistsError:
+                os.unlink(tmp)
+                fd = os.open(tmp, flags, 0o666)
+            with os.fdopen(fd, "wb") as fh:
                 fh.write(data)
-            with contextlib.suppress(OSError):
-                os.chmod(tmp, stat_module.S_IMODE(os.stat(key).st_mode))
+                # Through the open file, not its name: the name could be
+                # swapped for a link before a chmod by name reached it.
+                with contextlib.suppress(OSError):
+                    os.fchmod(fh.fileno(), stat_module.S_IMODE(os.stat(key).st_mode))
             os.replace(tmp, key)
         except Exception:
             with contextlib.suppress(OSError):
@@ -792,9 +818,8 @@ class LocalWorkspaceIO:
         _setup_ssh_home(env)
         session = process_registry.spawn(
             command=command, cwd=cwd, task_id=task_id, use_pty=pty, env_vars=env,
+            notify_on_complete=notify_on_complete,
         )
-        if notify_on_complete:
-            session.notify_on_complete = True
         if watcher_interval:
             session.watcher_interval = watcher_interval
         return {"session_id": session.id, "pid": session.pid}

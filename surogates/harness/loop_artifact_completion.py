@@ -28,6 +28,7 @@ from surogates.harness.delivery_manifest import (
     reconcile,
 )
 from surogates.harness.loop_constants import _BACKGROUND_DRAIN_TIMEOUT_SECONDS
+from surogates.harness.subagents import runs_in_background
 from surogates.harness.loop_messages import (
     _as_aware_utc,
     _last_assistant_message_excerpt,
@@ -1262,7 +1263,11 @@ class ArtifactCompletionMixin:
         # A landing that recorded a commit leaves its pod the day's pruning
         # of the project's history: run at the very end, once the report is out.
         prunes: str | None = None
-        if self._sandbox_pool is not None:
+        from surogates.harness.background_watch import background_watch
+
+        # A sandbox that runs a background command the session waits to hear
+        # the end of stays up: the watch lets it go once the command ends.
+        if self._sandbox_pool is not None and not background_watch.holds(str(session.id)):
             try:
                 sandbox_id = await self._sandbox_pool.release_for_session(
                     str(session.id),
@@ -1404,8 +1409,17 @@ class ArtifactCompletionMixin:
         # Notify parent session if this is a worker (child) session.
         # Scheduled loop runs use parent_id for traceability in the session
         # tree, but should not wake the parent as if they were sub-agent work.
-        if notify_parent and _should_notify_parent_on_completion(session):
-            from surogates.harness.worker_notify import notify_parent_on_completion
+        if notify_parent and _should_notify_parent_on_completion(session) and runs_in_background(session):
+            # A sub-agent its parent started in the background: its parent hears of its end as a notification.
+            from surogates.harness.message_utils import extract_final_response
+            from surogates.harness.subagents import tell_parent
+
+            await tell_parent(
+                store=self._store, redis=self._redis, session=session, status="completed", reason=reason,
+                result=extract_final_response(await self._store.get_events(session.id), fallback=""),
+            )
+        elif notify_parent and _should_notify_parent_on_completion(session):
+            from surogates.harness.worker_notify import is_delegated, notify_parent_on_completion
             try:
                 await notify_parent_on_completion(
                     session_store=self._store,
@@ -1420,6 +1434,7 @@ class ArtifactCompletionMixin:
                     landing=landing,
                     unkept=unkept,
                     set_aside=newly_aside,
+                    delegated=is_delegated(session),
                 )
             except Exception:
                 logger.warning(
@@ -1754,8 +1769,12 @@ class ArtifactCompletionMixin:
             )
         await self._release_unattended_browser(session)
 
-        if _should_notify_parent_on_completion(session):
-            from surogates.harness.worker_notify import notify_parent_on_failure
+        if _should_notify_parent_on_completion(session) and runs_in_background(session):
+            from surogates.harness.subagents import tell_parent
+
+            await tell_parent(store=self._store, redis=self._redis, session=session, status="failed", error=error)
+        elif _should_notify_parent_on_completion(session):
+            from surogates.harness.worker_notify import is_delegated, notify_parent_on_failure
             try:
                 await notify_parent_on_failure(
                     session_store=self._store,
@@ -1769,6 +1788,7 @@ class ArtifactCompletionMixin:
                     session_factory=self._session_factory,
                     not_taken=not_taken,
                     set_aside=newly_aside,
+                    delegated=is_delegated(session),
                 )
             except Exception:
                 logger.warning(

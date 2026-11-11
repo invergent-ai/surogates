@@ -664,6 +664,12 @@ def apply_eval_isolation(
     # which decides its tools, its prompt and the lists it shows in.
     for key in SERVER_OWNED_KEYS:
         resolved.pop(key, None)
+    # The sub-agent family's keys, and the delegation depth: only the server
+    # writes them (``subagents.SERVER_OWNED_KEYS``).
+    from surogates.harness.subagents import SERVER_OWNED_KEYS as SUBAGENT_KEYS
+
+    for key in SUBAGENT_KEYS:
+        resolved.pop(key, None)
     resolved.pop(CASE_STEP_KEY, None)
     resolved.pop(CASE_ITEM_KEY, None)
     resolved.pop(CASE_SCOPE_KEY, None)

@@ -118,7 +118,7 @@ from surogates.harness.tool_exec import (
     execute_tool_calls,
 )
 from surogates.harness.tool_guardrails import ToolGuardrailConfig, ToolGuardrails
-from surogates.sandbox.copy_files import has_copy, read_copy
+from surogates.sandbox.copy_files import has_copy, read_copy, writes_to_copy
 from surogates.sandbox.history import PRUNE_DAYS
 from surogates.sandbox.pool import sandbox_session_key
 from surogates.scheduled.schedule import local_iso
@@ -225,6 +225,8 @@ from surogates.harness.loop_deliverables import (
 from surogates.harness.loop_constants import (
     _EMPTY_RESPONSE_NUDGE,
     _MAX_DELIVERABLE_RETRIES,
+    _WORKSPACE_NAMES_LIMIT,
+    _WORKSPACE_NAMES_TIMEOUT,
     _MAX_SAVE_CLAIM_RETRIES,
     _MAX_SCHEDULE_CLAIM_RETRIES,
     _UNFINISHED_RESPONSE_NUDGE,
@@ -268,6 +270,8 @@ from surogates.harness.loop_mission_evaluator import (
 )
 from surogates.harness.outcomes import OutcomeState
 from surogates.harness.loop_pending import (
+    answered_helpers,
+    read_as_result,
     _actionable_pending_events,
     _awaited_report_unread,
     _aware,
@@ -289,6 +293,8 @@ from surogates.harness.loop_pending import (
     _turn_for_a_redo,
     _waits_on_its_workers,
 )
+from surogates.harness.agent_news import agent_news_unread, started_notified_work, starts_notified_work
+from surogates.harness.subagents import REPLACED_TOOL, apply_parity, runs_in_background
 from surogates.harness.loop_tool_recovery import (
     _is_valid_json_args,
     build_partial_tool_call_recovery_results,
@@ -674,7 +680,7 @@ def _carries_information(text: str) -> bool:
 #: project's thread was told of, and,
 #: in a chat on its user's computer, the resume a hand back of the browser
 #: gave it that no turn has read.
-_REVIVED_BY_NEWS = frozenset({"worker_report", "history_redo", "unread_browser_hand_back"})
+_REVIVED_BY_NEWS = frozenset({"worker_report", "history_redo", "unread_browser_hand_back", "agent_notification"})
 
 
 
@@ -687,6 +693,12 @@ def rescue_context(reply: str | None, question: str) -> str:
     if at < 0:
         return context
     return (context[:at] + context[at + len(question):]).strip()
+
+#: The stamp before an uploaded file's own name: a chat upload's
+#: ``<ts>-<n>-`` (``channels/runner.py``), a fetched Slack file's ``<id>-``.
+_CHAT_UPLOAD_STAMP_RE = re.compile(r"^[0-9][0-9.]*-[0-9]+-")
+_SLACK_FETCH_STAMP_RE = re.compile(r"^[^-]+-")
+
 
 class AgentHarness(
     BoardMixin,
@@ -713,8 +725,9 @@ class AgentHarness(
       loop to stop, skipping remaining tool calls.
     """
 
-    # The worker's policy (``__init__`` sets it); a class default for harnesses
-    # built without ``__init__``, as some tests build them.
+    # The worker's policy (``__init__`` sets them); class defaults for
+    # harnesses built without ``__init__``, as some tests build them.
+    _worker_delta_policy: DeltaPolicy = DeltaPolicy()
     _delta_policy: DeltaPolicy = DeltaPolicy()
 
     def __init__(
@@ -929,9 +942,12 @@ class AgentHarness(
 
         # Streaming can be disabled via session config or env var.
         self._streaming_enabled: bool = True
-        # How often at most a streamed call writes an ``llm.delta`` event of
-        # one kind (WorkerSettings.delta_coalesce_ms).
-        self._delta_policy: DeltaPolicy = delta_policy or DeltaPolicy()
+        # Whether, where and how often at most a streamed call sends an
+        # ``llm.delta`` event of one kind: the worker's policy, which a
+        # session's config narrows at wake (``live_deltas``,
+        # ``delta_coalesce_ms``).
+        self._worker_delta_policy: DeltaPolicy = delta_policy or DeltaPolicy()
+        self._delta_policy: DeltaPolicy = self._worker_delta_policy
 
         # Interrupt support -- thread-safe because only a single bool/str
         # is mutated and Python's GIL makes these assignments atomic.
@@ -1075,9 +1091,12 @@ class AgentHarness(
         # A command is not stranded by the cursor: a command's end leaves
         # the cursor before a report no turn has read, and one that still
         # waits revives a finished session by its own rule.
+        # Nor is another agent's message (``send_message``): it resumes the session itself, where its rules let
+        # it, and one left waiting must not bring back a session its user stopped or must retry.
         return any(
             self._is_for_the_model(session, event)
             and not (asleep and (event.data or {}).get("synthetic") == MESSAGE_MARKER)
+            and (event.data or {}).get("kind") != "agent_message"
             for event in await self._store.get_events(session.id, after=cursor, types=list(MESSAGE_TYPES))
         )
 
@@ -1267,9 +1286,22 @@ class AgentHarness(
         """
         events = await self._store.get_events(
             session_id,
-            types=[EventType.LLM_REQUEST, EventType.WORKER_COMPLETE, EventType.WORKER_FAILED],
+            types=[
+                EventType.LLM_REQUEST, EventType.WORKER_COMPLETE, EventType.WORKER_FAILED,
+                # Which delegate_task helpers' reports are their calls' results (``answered_helpers``).
+                EventType.DELEGATION_COMPLETE, EventType.DELEGATION_FAILED,
+            ],
         )
         return bool(unread_reports(events))
+
+    async def _has_unread_agent_news(self, session_id: UUID) -> bool:
+        """Return True if a notification of background work the session started is newer than its last model request."""
+        if not await self._store.has_event(session_id, EventType.AGENT_NOTIFICATION):
+            return False
+        events = await self._store.get_events(
+            session_id, types=[EventType.LLM_REQUEST, EventType.AGENT_NOTIFICATION],
+        )
+        return agent_news_unread(events)
 
     async def _has_awaited_report(self, session: Session) -> bool:
         """Return True if a report the session was told to wait for is newer than its last model
@@ -1312,7 +1344,9 @@ class AgentHarness(
         request did not read would stand ahead of the turn's answer, and
         the next turn's request would end on that answer.  A ``delegate_task``
         parent, which a master never is, already has its child's result as
-        the tool's result.
+        the tool's result.  A session that started background work which
+        reports back (``started_notified_work``) reads its notifications
+        live too.
         """
         types: list[EventType] = []
         if is_project_master(session.config) or (session.config or {}).get("active_mission_id"):
@@ -1322,6 +1356,9 @@ class AgentHarness(
             types += [EventType.INBOX_ACTION_REQUIRED]
         if device_of(session.config) is not None:
             types += [EventType.SESSION_RESUME, EventType.BROWSER_CONTROL_GRANTED]
+        if getattr(self, "_hears_agent_news", False):
+            # Background work it started reports whenever it ends.
+            types += [EventType.AGENT_NOTIFICATION]
         if not types:
             return held, after_event_id
         events = await self._store.get_events(session.id, after=after_event_id, types=types)
@@ -1329,9 +1366,19 @@ class AgentHarness(
             events = [event for event in events if event.id < before]
         if not events:
             return held, after_event_id
+        answered = await self._answered_helpers(session, events)
         for event in events:
-            held = held_news(held, event)
+            held = held_news(held, event, answered)
         return held, max(event.id for event in events)
+
+    async def _answered_helpers(self, session: Session, events: list) -> frozenset[str]:
+        """The ``delegate_task`` helpers whose call got their result (``answered_helpers``), read from the log only
+        when *events* hold a report of one."""
+        if not any((event.data or {}).get("delegated") for event in events):
+            return frozenset()
+        return answered_helpers(await self._store.get_events(
+            session.id, types=[EventType.DELEGATION_COMPLETE, EventType.DELEGATION_FAILED],
+        ))
 
     async def _answer_file_waits(self, session: Session, events: list) -> None:
         """Retire the waits on you over its files that a project's thread
@@ -2101,6 +2148,10 @@ class AgentHarness(
                         revived_by = "worker_report"
                     elif session.status == "completed" and await self._has_awaited_report(session):
                         revived_by = "worker_report"
+                    elif session.status == "completed" and await self._has_unread_agent_news(session_id):
+                        # Background work it started ended after its turn did:
+                        # the notification is the input of the turn it gets.
+                        revived_by = "agent_notification"
                     elif (
                         session.status == "completed"
                         and is_project_thread(session.config)
@@ -2183,6 +2234,7 @@ class AgentHarness(
             # Honour per-session streaming config.
             if not session.config.get("streaming", True):
                 self._streaming_enabled = False
+            self._delta_policy = self._worker_delta_policy.for_session(session.config)
 
             # 2. Acquire exclusive lease -- return silently if another
             # worker holds it.
@@ -2244,7 +2296,10 @@ class AgentHarness(
             ):
                 logger.debug("Session %s: its mission is paused, nothing of its user's waits", session_id)
                 return
-            if not pending and not unanswered_calls(all_events) and not command_waits and not _hand_back_unread(all_events):
+            if (
+                not pending and not unanswered_calls(all_events) and not command_waits
+                and not _hand_back_unread(all_events) and not agent_news_unread(all_events)
+            ):
                 logger.debug(
                     "Session %s: no actionable pending events after cursor %d",
                     session_id,
@@ -2258,6 +2313,7 @@ class AgentHarness(
             if (
                 _nothing_to_answer(pending) and not unanswered_calls(all_events)
                 and not command_waits and not _hand_back_unread(all_events)
+                and not agent_news_unread(all_events)
             ):
                 logger.info(
                     "Session %s: revived for a message that never came; nothing to answer",
@@ -2936,6 +2992,10 @@ class AgentHarness(
         # browser, that no request had read when the wake began.  Replay
         # left them out of ``messages``; the first request reads them.
         reports = unread_reports(all_events or [])
+        # Whether the wake reads notifications of background work live: only
+        # a session that started such work gets one.  Set again once a call
+        # of this wake starts some.
+        self._hears_agent_news = started_notified_work(all_events or [])
         # What the user asked for, for the turn's summary: their own words,
         # never a worker's report, which replay and the live loop put after them.
         request = _latest_user_event_text(all_events or [])[:1000]
@@ -3187,6 +3247,9 @@ class AgentHarness(
         offered_tools = (
             frozenset(s["function"]["name"] for s in tool_schemas) | deferred_tools.names
         )
+        if "agent" in offered_tools:
+            # ``agent`` stands in for ``delegate_task``, which stays callable under its old name.
+            offered_tools |= {REPLACED_TOOL}
 
         # The browser pause notice costs a Redis read, and only a session
         # that can drive a browser can ever be holding one.
@@ -3948,8 +4011,8 @@ class AgentHarness(
                 # the guard above: costs nothing when the file is there,
                 # costs one turn when it is not.
                 if deliverable_retries < _MAX_DELIVERABLE_RETRIES:
-                    absent = missing_deliverables(
-                        _latest_user_event_text(all_events or []), messages
+                    absent = await self._absent_deliverables(
+                        session, _latest_user_event_text(all_events or []), messages,
                     )
                     if absent:
                         deliverable_retries += 1
@@ -4105,10 +4168,12 @@ class AgentHarness(
                             session.id, after=min(steer_cursor, report_cursor),
                             types=[*MESSAGE_TYPES, EventType.WORKER_COMPLETE, EventType.WORKER_FAILED, EventType.HISTORY_REDO],
                         )
+                        answered = await self._answered_helpers(session, since)
                         unread = min((
                             event.id for event in since
                             if event.id > steer_cursor and self._is_plain_message(session, event)
                             or event.id > report_cursor and event.type not in MESSAGE_TYPES
+                            and not read_as_result(event, answered)
                         ), default=None)
                         await self._store.advance_harness_cursor(
                             session.id,
@@ -4218,6 +4283,7 @@ class AgentHarness(
                 if followup is not None or (reports and (
                     await self._has_unread_report(session.id)
                     or (device_of(session.config) is not None and await self._has_unread_hand_back(session.id))
+                    or (self._hears_agent_news and await self._has_unread_agent_news(session.id))
                 )):
                     if followup is not None:
                         messages.append(followup)
@@ -4413,6 +4479,9 @@ class AgentHarness(
             # 7a. Reset nudge counters when relevant tools are used
             for tr_tc in tool_calls_raw:
                 tc_name = tr_tc.get("function", {}).get("name", "")
+                if starts_notified_work(tc_name, tr_tc.get("function", {}).get("arguments")):
+                    # Its end reaches this session as a notification: read live from here on.
+                    self._hears_agent_news = True
                 if tc_name == "memory":
                     self._turns_since_memory = 0
                 elif tc_name == "skill_manage":
@@ -4757,6 +4826,74 @@ class AgentHarness(
             turn_id=turn_id,
             iteration_index=max(iteration - 1 - turn_base_iteration, 0),
         )
+
+    async def _absent_deliverables(
+        self, session: Session, request_text: str, messages: list[dict],
+    ) -> list[str]:
+        """The files the request named and the turn never wrote.
+
+        A file already in the workspace is an input the request named, not
+        one it asked for, unless the request asks for it to be written
+        (``missing_deliverables``).  The workspace is read only when there
+        is something to nudge about.
+        """
+        absent = missing_deliverables(request_text, messages)
+        if absent:
+            absent = missing_deliverables(
+                request_text, messages, present=await self._workspace_file_names(session),
+            )
+        return absent
+
+    async def _workspace_file_names(self, session: Session) -> frozenset[str]:
+        """The lower-cased names of the user's files in *session*'s workspace.
+
+        Those at its top level or one folder down, and every upload under
+        ``uploads/``, also under the name the user gave it (a chat upload is
+        stored as ``<ts>-<n>-<name>``, a fetched Slack file as
+        ``<id>-<name>``).  Platform paths are left out.  Empty when they
+        cannot be told: no storage, a session on the user's computer, one
+        that works on a thread's copy, a storage error, or a listing slower
+        than ``_WORKSPACE_NAMES_TIMEOUT`` seconds.
+        """
+        cfg = session.config or {}
+        bucket = cfg.get("storage_bucket") or ""
+        storage = getattr(self, "_storage", None)
+        if storage is None or not bucket or device_of(cfg) is not None:
+            return frozenset()
+        try:
+            if writes_to_copy(getattr(self, "_sandbox_pool", None), sandbox_session_key(session), cfg):
+                return frozenset()
+            from surogates.harness.turn_summarizer import is_platform_path
+            from surogates.session.attachment_ingest import workspace_root_id
+            from surogates.storage.tenant import boundary_workspace_key
+
+            prefix = boundary_workspace_key(cfg, session, workspace_root_id(session), "")
+            # Uploads listed on their own: in a large workspace the first
+            # listing's cap may end before ``uploads/`` (keys come in order).
+            listings = await asyncio.wait_for(
+                asyncio.gather(
+                    storage.list_entries(bucket, prefix, limit=_WORKSPACE_NAMES_LIMIT),
+                    storage.list_entries(bucket, f"{prefix}uploads/", limit=_WORKSPACE_NAMES_LIMIT),
+                ),
+                timeout=_WORKSPACE_NAMES_TIMEOUT,
+            )
+        except Exception:
+            logger.debug("Session %s: workspace listing failed", session.id, exc_info=True)
+            return frozenset()
+        names: set[str] = set()
+        for entry in (e for listing in listings for e in listing):
+            key = str(entry.get("key") or "")
+            if not key.startswith(prefix) or key.endswith("/"):
+                continue
+            parts = key[len(prefix):].split("/")
+            name = parts[-1].lower()
+            if parts[0] == "uploads":
+                names.add(name)
+                stamp = _SLACK_FETCH_STAMP_RE if parts[1:3] == ["slack", "fetch"] else _CHAT_UPLOAD_STAMP_RE
+                names.add(stamp.sub("", name, count=1))
+            elif len(parts) <= 2 and not is_platform_path("/".join(parts)):
+                names.add(name)
+        return frozenset(names)
 
     async def _read_workspace_image(
         self,
@@ -5951,7 +6088,9 @@ class AgentHarness(
         # Last, as in ``worker._filter_effective_tools``: a Keel case's
         # sessions keep only the case's tools, and only its step's own
         # session gets the step tools, which every other session loses.
-        return gate_case_tools(tool_filter, session)
+        # Then the sub-agent family: ``agent`` in ``delegate_task``'s place
+        # with parity on, none of it with parity off.
+        return apply_parity(gate_case_tools(tool_filter, session), config)
 
     @staticmethod
     def _dynamic_loop_wait_succeeded(
@@ -6394,7 +6533,10 @@ class AgentHarness(
         tool saga, no summary and no files to land: its answer is its whole
         result, which ``_report_command_turn`` tells.
         """
-        if self._sandbox_pool is not None:
+        from surogates.harness.background_watch import background_watch
+
+        # One that runs a background command the session waits to hear the end of stays up, as at a model's turn end.
+        if self._sandbox_pool is not None and not background_watch.holds(str(session.id)):
             try:
                 sandbox_id = await self._sandbox_pool.release_for_session(str(session.id))
             except Exception:
@@ -6431,13 +6573,21 @@ class AgentHarness(
             except Exception:
                 # The run is at rest all the same: its answer is in its own log.
                 logger.warning("Failed to announce the end of run %s at a command", session.id, exc_info=True)
-        if _should_notify_parent_on_completion(session) and not is_project_thread(session.config):
-            from surogates.harness.worker_notify import notify_parent_on_completion
+        if _should_notify_parent_on_completion(session) and runs_in_background(session):
+            from surogates.harness.subagents import tell_parent
+
+            await tell_parent(
+                store=self._store, redis=self._redis, session=session, status="completed",
+                result=extract_final_response(events, fallback=""),
+            )
+        elif _should_notify_parent_on_completion(session) and not is_project_thread(session.config):
+            from surogates.harness.worker_notify import is_delegated, notify_parent_on_completion
 
             await notify_parent_on_completion(
                 session_store=self._store, worker_session_id=session.id, parent_session_id=session.parent_id,
                 org_id=str(session.org_id), agent_id=session.agent_id, redis=self._redis,
                 task_id=getattr(session, "task_id", None), session_factory=self._session_factory,
+                delegated=is_delegated(session),
             )
 
     def _goal_waits(self, session: Session, events: list) -> bool:

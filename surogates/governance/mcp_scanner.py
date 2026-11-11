@@ -86,8 +86,11 @@ class MCPGovernance:
     A tool must pass **both** layers to be considered safe.
     """
 
-    def __init__(self) -> None:
-        self._fingerprints: dict[str, str] = {}
+    def __init__(self, fingerprints: dict[str, str] | None = None) -> None:
+        # The approved fingerprints.  A caller that keeps them across
+        # connections (the MCP proxy's pool, per tenant) passes its own
+        # dict, which this instance then reads and writes.
+        self._fingerprints: dict[str, str] = {} if fingerprints is None else fingerprints
         self._agt_scanner = AGTScanner()
 
     # ------------------------------------------------------------------
@@ -180,16 +183,15 @@ class MCPGovernance:
     def register_fingerprint(self, tool_name: str, tool_def: dict) -> None:
         """Store the SHA-256 fingerprint of *tool_def* for future comparison.
 
-        Registers with both our own fingerprint store and AGT's scanner.
+        This store is the rug-pull check (:meth:`check_rug_pull`).  Nothing
+        is registered with AGT's scanner.  Tools used to be registered there
+        under the qualified name (``server.tool``) and scanned under the bare
+        one, so AGT's own rug-pull check never matched, and its registry
+        never outlived a connection anyway.  Registered under the bare name,
+        its cross-server checks would refuse any tool whose name is within
+        two edits of another server's (``get_user`` / ``get_users``).
         """
-        fp = _fingerprint(tool_def)
-        self._fingerprints[tool_name] = fp
-
-        # Also register with AGT for its rug-pull detection.
-        description = tool_def.get("description", "")
-        schema = tool_def.get("inputSchema") or tool_def.get("input_schema")
-        server_name = tool_def.get("_server_name", "unknown")
-        self._agt_scanner.register_tool(tool_name, description, schema, server_name)
+        self._fingerprints[tool_name] = _fingerprint(tool_def)
 
     def check_rug_pull(self, tool_name: str, tool_def: dict) -> bool:
         """Check whether *tool_def* still matches the stored fingerprint.
@@ -202,6 +204,10 @@ class MCPGovernance:
         if stored is None:
             return False
         return stored == _fingerprint(tool_def)
+
+    def fingerprint_count(self) -> int:
+        """How many tools have an approved fingerprint."""
+        return len(self._fingerprints)
 
     def has_fingerprint(self, tool_name: str) -> bool:
         """Return True when *tool_name* has been previously registered."""
@@ -286,9 +292,26 @@ def _escalate(current: str, proposed: str) -> str:
 
 
 def _fingerprint(tool_def: dict) -> str:
-    """Compute a deterministic SHA-256 fingerprint for *tool_def*."""
-    canonical = json.dumps(tool_def, sort_keys=True, separators=(",", ":"))
+    """Compute a deterministic SHA-256 fingerprint for *tool_def*.
+
+    Key order never counts, nor the order of a schema's ``required`` names
+    (a server may build that list from a set, in a new order each start).
+    """
+    canonical = json.dumps(_canonical(tool_def), sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def _canonical(value):
+    """*value* with every ``required`` list of names sorted."""
+    if isinstance(value, dict):
+        return {
+            key: sorted(item) if key == "required" and isinstance(item, list)
+            and all(isinstance(name, str) for name in item) else _canonical(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_canonical(item) for item in value]
+    return value
 
 
 def _extract_text_fields(

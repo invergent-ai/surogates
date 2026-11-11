@@ -78,6 +78,7 @@ from surogates.runtime import (
     rate_limit_dep,
 )
 from surogates.session.events import EventType
+from surogates.session.live import DeltaGate, LiveFrame, Notification, next_message, session_channel
 from surogates.session.provisioning import create_agent_session
 from surogates.session.store import SessionStore
 from surogates.tenant.auth.middleware import get_current_tenant
@@ -656,6 +657,7 @@ class _TurnReader:
     def __init__(self, store: SessionStore, session_id: UUID, after: int) -> None:
         self._store = store
         self._session_id = session_id
+        self.start = after
         self._cursor = after
         self.finished = False
         self.finish_reason = "stop"
@@ -663,9 +665,14 @@ class _TurnReader:
         self.usage: dict[str, Any] = {}
         self.failure: str | None = None
 
-    async def poll(self) -> list[Any]:
-        """Return events since the last poll, marking the turn finished."""
-        events = await self._store.get_events(self._session_id, after=self._cursor)
+    @property
+    def cursor(self) -> int:
+        """The id of the last event read."""
+        return self._cursor
+
+    async def poll(self, *, until: int | None = None) -> list[Any]:
+        """Return events since the last poll, up to event *until* when given, marking the turn finished."""
+        events = await self._store.get_events(self._session_id, after=self._cursor, until=until)
         if events:
             self._cursor = events[-1].id
         out = []
@@ -723,6 +730,10 @@ def _answer_text(events: list[Any]) -> tuple[str, str]:
     tool, not the turn's conclusion, and a seeded one is history we wrote
     ourselves — both are skipped, or a failed turn would be reported as a
     successful answer to the wrong question.
+
+    The reasoning is the turn's ``llm.delta`` rows' when deltas went to the
+    log, as before, or else its ``llm.thinking`` text (deltas sent over Redis
+    only).
     """
     content = ""
     for event in reversed(events):
@@ -739,10 +750,15 @@ def _answer_text(events: list[Any]) -> tuple[str, str]:
             content = text
             break
 
+    reasoning_type = (
+        EventType.LLM_DELTA.value
+        if any(e.type == EventType.LLM_DELTA.value for e in events)
+        else EventType.LLM_THINKING.value
+    )
     reasoning = "".join(
         str((e.data or {}).get("reasoning") or "")
         for e in events
-        if e.type == EventType.LLM_DELTA.value
+        if e.type == reasoning_type
     )
     return content, reasoning
 
@@ -762,7 +778,7 @@ async def _wait_for_answer(
     if redis is not None:
         try:
             pubsub = redis.pubsub()
-            await pubsub.subscribe(f"surogates:session:{session_id}")
+            await pubsub.subscribe(session_channel(session_id))
         except Exception:
             pubsub = None
     try:
@@ -780,9 +796,14 @@ async def _wait_for_answer(
                 )
             if pubsub is not None and pubsub_healthy:
                 try:
-                    await pubsub.get_message(
-                        ignore_subscribe_messages=True, timeout=_POLL_INTERVAL,
-                    )
+                    # A live llm.delta frame changes nothing in the log: wait
+                    # on through the reply, for an event's notification.
+                    wait_until = time.monotonic() + _POLL_INTERVAL
+                    while isinstance(
+                        await next_message(pubsub, max(wait_until - time.monotonic(), 0.0)),
+                        LiveFrame,
+                    ):
+                        pass
                     continue
                 except Exception:
                     # Fall back to polling, but keep the handle so ``finally``
@@ -1003,6 +1024,107 @@ async def chat_completions(
     )
 
 
+class _LiveText:
+    """The text of a streamed turn's model calls, from live frames and the log.
+
+    A call's text reaches the stream as live ``llm.delta`` frames over Redis
+    (:mod:`surogates.session.live`), which no log keeps: a stream that joined
+    after a call's first frame (a retry attaching to a turn under way), or
+    lost frames (a gap in their numbers, a channel that failed), cannot read
+    them again.  So a call's frames are passed on only while this stream has
+    had every one of them from the call's first, and at the call's
+    ``llm.thinking`` / ``llm.response`` it passes on whatever of the call's
+    reasoning / text it has not: all of it, for a call it heard none of.
+    That holds once the stream has heard any frame of the turn; before that
+    (deltas written to the log, a session with live deltas off) a call's
+    response sends nothing here, and the turn's answer is sent at its end
+    when nothing was.  ``llm.delta`` rows are passed on as they are read.
+    """
+
+    def __init__(self, start: int) -> None:
+        # Frames of a call that started before the turn's first event are
+        # the turn before's.
+        self._gate = DeltaGate(floor=start)
+        # Whether this turn's text comes as live frames.
+        self._heard = False
+        self._reset()
+
+    def _reset(self) -> None:
+        self._after: int | None = None
+        self._live = False
+        self._next_seq = 0
+        self._content = ""
+        self._reasoning = ""
+
+    def frame(self, frame: LiveFrame) -> list[tuple[str, str]]:
+        """The ``(kind, text)`` pieces a live *frame* adds to the stream."""
+        if not self._gate.admits(frame):
+            return []
+        self._heard = True
+        if frame.after != self._after:
+            self._reset()
+            self._after, self._live = frame.after, frame.seq == 0
+        if frame.seq != self._next_seq:
+            self._live = False  # a frame went missing: the rest comes at the response
+        self._next_seq = frame.seq + 1
+        if not self._live:
+            return []
+        return self._pieces(frame.data, track=True)
+
+    def event(self, event: Any) -> list[tuple[str, str]]:
+        """The ``(kind, text)`` pieces a persisted *event* adds to the stream."""
+        data = event.data or {}
+        pieces: list[tuple[str, str]] = []
+        synthetic = bool(data.get("synthetic"))
+        catching_up = self._heard or self._after is not None
+        if event.type == EventType.LLM_DELTA.value:
+            pieces = self._pieces(data, track=True)
+        elif event.type == EventType.LLM_THINKING.value and catching_up:
+            pieces = self._rest("reasoning", self._reasoning, data.get("reasoning"))
+        elif event.type == EventType.LLM_RESPONSE.value and catching_up and not synthetic:
+            pieces = self._rest("content", self._content, (data.get("message") or {}).get("content"))
+        self._gate.saw(event.type, event.id, synthetic=synthetic)
+        if event.type == EventType.LLM_REQUEST.value or (event.type == EventType.LLM_RESPONSE.value and not synthetic):
+            self._reset()
+        return pieces
+
+    def _pieces(self, data: dict, *, track: bool) -> list[tuple[str, str]]:
+        pieces = []
+        text = data.get("content")
+        if text:
+            pieces.append(("content", str(text)))
+            if track:
+                self._content += str(text)
+        thought = data.get("reasoning")
+        if thought:
+            pieces.append(("reasoning", str(thought)))
+            if track:
+                self._reasoning += str(thought)
+        return pieces
+
+    def _rest(self, kind: str, sent: str, whole: Any) -> list[tuple[str, str]]:
+        """What of *whole*, the call's final text of *kind*, is past what was sent.
+
+        The harness strips the stored text of a call with reasoning and keeps
+        the text of one without as streamed; the frames kept their leading
+        whitespace, so either form counts.
+        """
+        if not isinstance(whole, str):
+            return []
+        for start in (sent, sent.lstrip()):
+            if whole.startswith(start):
+                break
+        else:
+            return []
+        if len(whole) <= len(start):
+            return []
+        if kind == "content":
+            self._content = whole
+        else:
+            self._reasoning = whole
+        return [(kind, whole[len(start):])]
+
+
 async def _stream_turn(
     *,
     reader: _TurnReader,
@@ -1019,7 +1141,10 @@ async def _stream_turn(
     Deliberately not layered over the SSE route: that stream closes after 300
     seconds and expects the client to reconnect, which an OpenAI client will
     never do.  Reading the log directly keeps one HTTP response open for the
-    whole turn, however long it runs.
+    whole turn, however long it runs.  The text comes from the live frames on
+    the session's channel (:class:`_LiveText`), taken in order, the log read
+    only up to the event a notification names: a call's text goes out before
+    the events that follow it.
 
     Every exit path emits a terminal frame and ``[DONE]``.  A stream that
     stops without them reads to the client as a truncated response.
@@ -1031,7 +1156,7 @@ async def _stream_turn(
     if redis is not None:
         try:
             pubsub = redis.pubsub()
-            await pubsub.subscribe(f"surogates:session:{session_id}")
+            await pubsub.subscribe(session_channel(session_id))
         except Exception:
             pubsub = None
 
@@ -1041,23 +1166,56 @@ async def _stream_turn(
     finish_reason = "stop"
     emitted_any = False
     collected: list[Any] = []
+    live = _LiveText(reader.start)
+    # Whether the log is read before the next wait, and up to which event;
+    # a live frame that waits for that read.
+    must_read, read_until = True, None
+    held: LiveFrame | None = None
 
     try:
         while True:
-            events = await reader.poll()
-            collected.extend(events)
-            for event in events:
-                if event.type == EventType.LLM_DELTA.value:
-                    data = event.data or {}
-                    text = data.get("content")
-                    if text:
-                        emitted_any = True
-                        last_emit = time.monotonic()
-                        yield sse_data(build_chunk(**frame, content=str(text)))
-                    thought = data.get("reasoning")
-                    if thought:
-                        last_emit = time.monotonic()
-                        yield sse_data(build_chunk(**frame, reasoning=str(thought)))
+            pieces: list[tuple[str, str]] = []
+            if must_read:
+                events = await reader.poll(until=read_until)
+                must_read, read_until = False, None
+                collected.extend(events)
+                for event in events:
+                    pieces.extend(live.event(event))
+                if held is not None:
+                    if not reader.finished:  # a frame of the turn after this one is not this turn's
+                        pieces.extend(live.frame(held))
+                    held = None
+            else:
+                message = None
+                if pubsub is not None and pubsub_healthy:
+                    try:
+                        message = await next_message(pubsub, _POLL_INTERVAL)
+                    except Exception:
+                        # Keep the handle for ``finally``; only stop using it.
+                        pubsub_healthy = False
+                else:
+                    await asyncio.sleep(_POLL_INTERVAL)
+                if isinstance(message, LiveFrame) and message.after > reader.cursor and held is None:
+                    # The events before the frame's call (a notification lost,
+                    # or not read yet) go out before it.
+                    held, must_read, read_until = message, True, message.after
+                elif isinstance(message, LiveFrame):
+                    pieces = live.frame(message)
+                elif isinstance(message, Notification):
+                    if message.event_id > reader.cursor:
+                        must_read, read_until = True, message.event_id
+                else:
+                    # Quiet channel (the poll fallback), no channel, or a
+                    # message of another shape: read everything there is.
+                    must_read = True
+
+            for kind, text in pieces:
+                last_emit = time.monotonic()
+                if kind == "content":
+                    emitted_any = True
+                    yield sse_data(build_chunk(**frame, content=text))
+                else:
+                    yield sse_data(build_chunk(**frame, reasoning=text))
 
             if reader.finished:
                 finish_reason = reader.finish_reason
@@ -1066,17 +1224,6 @@ async def _stream_turn(
             if time.monotonic() >= deadline:
                 finish_reason = "length"
                 break
-
-            if pubsub is not None and pubsub_healthy:
-                try:
-                    await pubsub.get_message(
-                        ignore_subscribe_messages=True, timeout=_POLL_INTERVAL,
-                    )
-                except Exception:
-                    # Keep the handle for ``finally``; only stop using it.
-                    pubsub_healthy = False
-            else:
-                await asyncio.sleep(_POLL_INTERVAL)
 
             # An agent can be silent for minutes inside one turn (a long tool
             # call, a browser step). Without this the proxy in front of us

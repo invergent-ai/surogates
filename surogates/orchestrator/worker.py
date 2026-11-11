@@ -393,7 +393,11 @@ def _filter_effective_tools(
     # Last: a Keel case's sessions are offered only the case's tools, and only
     # its step's own session the step tools.  The schemas apply the same gate
     # last (``AgentHarness._tool_filter_for_session_impl``).
-    return gate_case_tools(result, session)
+    # Then the sub-agent family: ``agent`` in ``delegate_task``'s place with parity on, none of it with parity
+    # off, as the harness offers the schemas (``AgentHarness._tool_filter_for_session_impl``).
+    from surogates.harness.subagents import apply_parity
+
+    return apply_parity(gate_case_tools(result, session), session.config)
 
 
 _warned_missing_model_metadata: set[str] = set()
@@ -786,6 +790,7 @@ def _entitlement_tool_exclusions(
     :func:`_resolve_mcp_entitlement_scope`).
     """
     from surogates.orchestrator.mcp_client import is_composio_router_name
+    from surogates.tools.mcp.names import mcp_tool_server
 
     excluded: set[str] = set()
     if not browser_enabled or not _entitlement_capability_allowed(session_config, "browser"):
@@ -807,7 +812,8 @@ def _entitlement_tool_exclusions(
         for name in tool_registry.tool_names:
             if not name.startswith("mcp__"):
                 continue
-            if is_composio_router_name(name):
+            entry = tool_registry.get(name)
+            if is_composio_router_name(name, getattr(entry, "toolset", None)):
                 # ``mcp__tool_router__TOOLKIT_ACTION``: the sellable
                 # unit is the toolkit, embedded in the tool component.
                 parts = name.split("__")
@@ -816,9 +822,8 @@ def _entitlement_tool_exclusions(
                 if toolkit not in allowed_toolkits:
                     excluded.add(name)
                 continue
-            parts = name.split("__")
-            server = parts[1] if len(parts) >= 3 else ""
-            if server not in allowed_servers:
+            # The server a (possibly shortened) name stands for.
+            if mcp_tool_server(name, getattr(entry, "toolset", None)) not in allowed_servers:
                 excluded.add(name)
     return excluded
 
@@ -1453,6 +1458,11 @@ async def run_worker(settings: Settings) -> None:
     else:
         sandbox_backend = ProcessSandbox()
     sandbox_pool = SandboxPool(sandbox_backend)
+    # The watch on background commands that report back: their ends reach the
+    # sessions that started them as notifications.
+    from surogates.harness.background_watch import background_watch
+
+    background_watch.configure(store=session_store, redis=redis_client, sandbox_pool=sandbox_pool)
 
     # 4b. Browser pool -- one browser per session, lazily provisioned.
     browser_backend = _build_browser_backend(
@@ -2288,7 +2298,11 @@ async def run_worker(settings: Settings) -> None:
             # with the rest of the bundle, so the harness swaps to a
             # client it already owns instead of minting one mid-call.
             fallback_chain=llm_bundle.fallbacks,
-            delta_policy=DeltaPolicy(coalesce_ms=settings.worker.delta_coalesce_ms),
+            delta_policy=DeltaPolicy(
+                coalesce_ms=settings.worker.delta_coalesce_ms,
+                enabled=settings.worker.live_deltas,
+                transport=settings.worker.delta_transport,
+            ),
             media_gen=media_gen_config,
             turn_summarizer=turn_summarizer,
             # Share the per-session bundle with
@@ -2483,6 +2497,7 @@ async def run_worker(settings: Settings) -> None:
         except asyncio.CancelledError:
             pass
         await health_server.stop()
+        await background_watch.close()
         # Deliberately NOT destroying browsers here. Containers are detached
         # and registry entries persist, so sessions -- which outlive workers in
         # shared-runtime mode -- reattach to their live browser on the next

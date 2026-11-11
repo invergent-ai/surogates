@@ -31,7 +31,7 @@ from surogates.runtime import (
     rate_limit_dep,
 )
 from surogates.simulation.side_effects import decide, fake_result, would_have
-from surogates.tools.mcp.client import _sanitize_error
+from surogates.tools.mcp.client import _sanitize_error, call_utility
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +68,9 @@ class ToolSchema(BaseModel):
     description: str
     parameters: dict[str, Any]
     annotations: dict[str, Any] | None = None
+    # The MCP server the tool belongs to: a shortened name may hold only
+    # part of it, and the worker's entitlement filter reads it from here.
+    server: str | None = None
 
 
 class ToolListResponse(BaseModel):
@@ -157,7 +160,11 @@ async def list_tools(
     auth: ProxyAuthContext = Depends(get_proxy_auth),
     ctx: AgentRuntimeContext = Depends(agent_runtime_context_dep),
 ) -> ToolListResponse:
-    """Discover the MCP tools available to the requesting agent."""
+    """Discover the MCP tools available to the requesting agent.
+
+    A server's resource / prompt tools are listed only when it has
+    resources / prompts (:meth:`ConnectionPool.visible_schemas`).
+    """
     _bind_agent(auth, ctx)
     pool: ConnectionPool = request.app.state.pool
     schemas = await _ensure_tenant_connected(
@@ -165,6 +172,7 @@ async def list_tools(
         agent_id=ctx.agent_id,
         allowed_ids=frozenset(ctx.mcp_server_ids),
     )
+    schemas = pool.visible_schemas(auth.org_id, auth.user_id, ctx.agent_id, schemas)
 
     return ToolListResponse(
         tools=[
@@ -173,6 +181,7 @@ async def list_tools(
                 description=s.get("description", ""),
                 parameters=s.get("parameters", {}),
                 annotations=s.get("annotations"),
+                server=s.get("server"),
             )
             for s in schemas
         ]
@@ -319,6 +328,8 @@ async def _audit_call(
 _OUTCOME_SUCCESS = "success"
 _OUTCOME_TOOL_ERROR = "tool_error"  # tool ran, returned isError=True
 _OUTCOME_TRANSPORT_ERROR = "transport_error"  # never reached the tool
+# mcp's code for a session whose stream closed under a call: not the server's answer.
+_CONNECTION_CLOSED = -32000
 
 
 async def _execute_call(
@@ -391,9 +402,25 @@ async def _execute_call(
         args=list(server_config.get("args", []) or []),
         env=dict(server_config.get("env", {}) or {}),
     )
+    utility = pool.utility_of(org_id, user_id, agent_id, clean_tool_name)
 
     try:
         async with sandbox.mcp_session() as session:
+            if utility is not None:
+                # A resource / prompt utility runs as its MCP method
+                # (resources/read, prompts/get, ...), not as tools/call.
+                # The server answering with an error (an unknown URI) is the
+                # tool's error; a server that went away is a transport failure.
+                try:
+                    text = await call_utility(session, utility, arguments)
+                except Exception as exc:  # noqa: BLE001 — translated to client error
+                    answered = getattr(getattr(exc, "error", None), "code", None)
+                    return (
+                        json.dumps({"error": _sanitize_error(f"MCP call failed: {type(exc).__name__}: {exc}")}),
+                        _OUTCOME_TOOL_ERROR if answered is not None and answered != _CONNECTION_CLOSED
+                        else _OUTCOME_TRANSPORT_ERROR,
+                    )
+                return text, (_OUTCOME_TOOL_ERROR if _looks_like_error_envelope(text) else _OUTCOME_SUCCESS)
             # The stdio MCP server only knows its own tools by their
             # original (unprefixed) names -- the ``mcp__<server>__``
             # prefix is a proxy-side namespace marker, not part of the

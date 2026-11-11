@@ -12,9 +12,11 @@ context to prevent collisions across organisations and users.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID
@@ -32,14 +34,62 @@ from surogates.mcp_proxy.loader import (
 )
 from surogates.tools.mcp.client import (
     _MCP_AVAILABLE,
+    _UTILITY_OFFER,
     _lock,
     _servers,
     _sanitize_error,
+    call_utility,
     discover_mcp_tools,
     sanitize_mcp_name_component,
 )
+from surogates.tools.mcp.names import fit_tool_name, mcp_tool_name
 
 logger = logging.getLogger(__name__)
+
+#: How many tenants' approved tool fingerprints the pool keeps (the least
+#: recently used without a live connection dropped first).  Tenants with a
+#: live connection are never dropped, so while more than this many are
+#: connected the store holds one set per live connection.
+_MAX_TENANT_APPROVALS = 10_000
+#: How many tools of one server (one identity) a tenant may have approved,
+#: and how many in all: a new tool past either is left out, and old
+#: approvals are never dropped to make room, so a server that floods new
+#: names starves only itself.
+_MAX_APPROVALS_PER_SERVER = 1_000
+_MAX_APPROVALS_PER_TENANT = 20_000
+
+
+class _ApprovalRoom:
+    """How many more tools a tenant may have approved, per server and in all,
+    counted once per connection."""
+
+    def __init__(self, approvals: dict[str, str]) -> None:
+        self._approvals = approvals
+        self._per_server: dict[str, int] = {}
+
+    def take(self, server_prefix: str) -> bool:
+        """Room for one more approval of the server named by *server_prefix*."""
+        if server_prefix not in self._per_server:
+            self._per_server[server_prefix] = sum(1 for k in self._approvals if k.startswith(server_prefix))
+        if (
+            self._per_server[server_prefix] >= _MAX_APPROVALS_PER_SERVER
+            or len(self._approvals) >= _MAX_APPROVALS_PER_TENANT
+        ):
+            return False
+        self._per_server[server_prefix] += 1
+        return True
+
+
+def _server_identity(config: dict[str, Any] | None) -> str:
+    """What a server is, for its approvals: a digest of its transport, URL,
+    command and arguments.  Credentials (headers, env) are left out, so a
+    rotated token keeps the approvals; an admin who repoints the server
+    gets it approved anew."""
+    if not config:
+        return ""
+    ident = {k: config.get(k) for k in ("transport", "url", "command", "args")}
+    canonical = json.dumps(ident, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(canonical.encode()).hexdigest()[:16]
 
 
 def _tenant_prefix(org_id: UUID, user_id: UUID, agent_id: str) -> str:
@@ -86,10 +136,11 @@ class PoolEntry:
     """Tracks a tenant's MCP server set and its last-access time.
 
     ``governance`` is the tenant-scoped :class:`MCPGovernance` instance
-    that holds this tenant's rug-pull fingerprints.  One per
-    ``(org_id, user_id)`` pool entry so fingerprints never leak across
-    tenants — a rug-pull in tenant A's server must not suppress a scan
-    in tenant B's differently-configured server with the same name.
+    that checks this tenant's tools against the fingerprints approved at
+    its earlier connections (:meth:`ConnectionPool._tenant_approvals`).
+    One per ``(org_id, user_id, agent_id)`` so fingerprints never leak
+    across tenants — a rug-pull in tenant A's server must not suppress a
+    scan in tenant B's differently-configured server with the same name.
     """
 
     org_id: UUID
@@ -108,6 +159,10 @@ class PoolEntry:
     sanitized_prefix: str = ""
     last_used: float = field(default_factory=time.monotonic)
     governance: MCPGovernance | None = None
+    # The MCP utility tools among the clean names: name -> what it runs
+    # (``list_resources``, ``read_resource``, ``list_prompts``,
+    # ``get_prompt``), called as that MCP method, never as ``tools/call``.
+    utility_index: dict[str, str] = field(default_factory=dict)
 
 
 class ConnectionPool:
@@ -122,10 +177,14 @@ class ConnectionPool:
     governance_enabled:
         When True, every advertised MCP tool is scanned for prompt
         injection, hidden instructions, invisible Unicode, etc. — and
-        tracked for rug-pull mutations on reconnect.  Each pool entry
-        gets its own :class:`MCPGovernance` instance so fingerprints
-        are tenant-scoped.  Unsafe tools are filtered out of the
-        advertised schema set.
+        tracked for rug-pull mutations on reconnect.  The fingerprints
+        approved at a tenant's first connection outlive its pool entry
+        (``_approvals``), so a later connection whose tool definitions
+        changed is caught, audited and left without those tools.  They are
+        kept per server identity (transport, URL, command, arguments): a
+        server an admin repoints is approved anew.  They live in this
+        process only; a restart, or another replica, approves anew.
+        Unsafe tools are filtered out of the advertised schema set.
     audit_store:
         Optional :class:`AuditStore` that receives
         ``policy.mcp_scan`` and ``policy.rug_pull`` entries per scanned
@@ -151,6 +210,10 @@ class ConnectionPool:
         self._eviction_task: asyncio.Task | None = None
         self._governance_enabled = governance_enabled
         self._audit_store = audit_store
+        # Per tenant, the fingerprints of the tools approved at its first
+        # connection: ``server.tool`` -> SHA-256.  Kept when the tenant's
+        # entry is evicted, so its next connection is checked against them.
+        self._approvals: OrderedDict[tuple[UUID, UUID, str], dict[str, str]] = OrderedDict()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -199,7 +262,36 @@ class ConnectionPool:
         if entry is None:
             return None
         entry.last_used = time.monotonic()
+        self._touch_approvals((org_id, user_id, agent_id))
         return entry.tool_schemas
+
+    def visible_schemas(
+        self, org_id: UUID, user_id: UUID, agent_id: str, schemas: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """*schemas* without the resource / prompt tools of servers that have no resources / prompts."""
+        entry = self._entries.get((org_id, user_id, agent_id))
+        if entry is None or not entry.utility_index:
+            return schemas
+        # Read from the live connections: a reconnect reads a server's offers anew.
+        with _lock:
+            idle = {
+                name for name, utility in entry.utility_index.items()
+                if not self._offers(entry.tool_index.get(name, ("", ""))[0], utility)
+            }
+        return [s for s in schemas if s.get("name") not in idle]
+
+    @staticmethod
+    def _offers(server_key: str, utility: str) -> bool:
+        """Whether the connected server *server_key* offers what *utility* needs (call under ``_lock``)."""
+        server = _servers.get(server_key)
+        return bool((getattr(server, "offers", None) or {}).get(_UTILITY_OFFER[utility]))
+
+    def utility_of(
+        self, org_id: UUID, user_id: UUID, agent_id: str, tool_name: str,
+    ) -> str | None:
+        """The MCP utility a clean tool name runs, or None for a server's own tool."""
+        entry = self._entries.get((org_id, user_id, agent_id))
+        return None if entry is None else entry.utility_index.get(tool_name)
 
     def resolve_call_target(
         self, org_id: UUID, user_id: UUID, agent_id: str, tool_name: str,
@@ -218,6 +310,7 @@ class ConnectionPool:
         if entry is None:
             return None
         entry.last_used = time.monotonic()
+        self._touch_approvals((org_id, user_id, agent_id))
         routing = entry.tool_index.get(tool_name)
         if routing is None:
             return None
@@ -264,14 +357,18 @@ class ConnectionPool:
             entry = self._entries.get(key)
             if entry is not None:
                 entry.last_used = time.monotonic()
+                self._touch_approvals(key)
                 return entry.tool_schemas
 
-            # Prefix each server name for tenant isolation.
+            # Prefix each server name for tenant isolation.  The resource /
+            # prompt utility tools are registered for every server here; a
+            # list leaves out those whose server offers nothing of that kind,
+            # read from the live connection (``visible_schemas``).
             prefixed: dict[str, dict[str, Any]] = {}
             original_names: list[str] = []
             for name, cfg in configs.items():
                 pname = _prefixed_name(org_id, user_id, agent_id, name)
-                prefixed[pname] = cfg
+                prefixed[pname] = {**cfg, "tools": {**(cfg.get("tools") or {}), "utilities": "all"}}
                 original_names.append(name)
 
             from surogates.tools.registry import ToolRegistry
@@ -304,39 +401,54 @@ class ConnectionPool:
                 _tenant_prefix(org_id, user_id, agent_id),
             )
             clean_schemas: list[dict[str, Any]] = []
+            seen_names: set[str] = set()
             tool_index: dict[str, tuple[str, str]] = {}
+            utility_index: dict[str, str] = {}
 
-            # Per-tenant MCPGovernance — fingerprints are keyed by
-            # (server, tool) within this instance, never shared with
+            # Per-tenant MCPGovernance over the tenant's approved
+            # fingerprints, keyed by (server, tool), never shared with
             # other tenants even when server names collide.
-            tenant_governance: MCPGovernance | None = (
-                MCPGovernance() if self._governance_enabled else None
-            )
+            tenant_governance: MCPGovernance | None = None
+            approval_room: _ApprovalRoom | None = None
+            if self._governance_enabled:
+                approvals = self._tenant_approvals(key)
+                tenant_governance = MCPGovernance(fingerprints=approvals)
+                approval_room = _ApprovalRoom(approvals)
 
             for schema in schemas:
                 clean = dict(schema)
+                # The proxy's own name for the tool, under the tenant-scoped
+                # server key (``mcp__{tenant_prefix}__{server}__{tool}``,
+                # shortened: it is never parsed back).
                 raw_name = clean.get("name", "")
-
-                # raw_name: mcp__{tenant_prefix}__{server}__{tool}
-                # clean:    mcp__{server}__{tool}
-                if raw_name.startswith(f"mcp__{tenant_pfx}__"):
-                    clean_name = "mcp__" + raw_name[len(f"mcp__{tenant_pfx}__"):]
-                    clean["name"] = clean_name
-                else:
-                    clean_name = raw_name
+                clean_name = raw_name
 
                 # Build reverse index for O(1) tool call routing.
-                # Find which prefixed server owns this tool.
+                # Find which prefixed server owns this tool, and the MCP
+                # name the tool is called by there.
                 owning_server_key: str | None = None
                 original_tool: str = ""
+                utility: str | None = None
                 with _lock:
                     for server_key, server in _servers.items():
-                        if hasattr(server, "_registered_tool_names") and raw_name in server._registered_tool_names:
-                            safe_key = sanitize_mcp_name_component(server_key)
-                            prefix = f"mcp__{safe_key}__"
-                            original_tool = raw_name[len(prefix):] if raw_name.startswith(prefix) else raw_name
+                        if raw_name in (getattr(server, "_registered_tool_names", None) or ()):
                             owning_server_key = server_key
+                            original_tool = (getattr(server, "_tool_names", None) or {}).get(raw_name, raw_name)
+                            utility = (getattr(server, "_utility_names", None) or {}).get(raw_name)
                             break
+                if owning_server_key is not None:
+                    expected = f"{_tenant_prefix(org_id, user_id, agent_id)}__"
+                    plain = owning_server_key[len(expected):] if owning_server_key.startswith(expected) else owning_server_key
+                    # The name the agent knows: ``mcp__{server}__{tool}``,
+                    # shortened when an engine would refuse it.
+                    clean_name = mcp_tool_name(plain, original_tool)
+                    clean["server"] = plain
+                    # A description the harness wrote (a utility's, or the
+                    # stand-in for a tool the server left undescribed) names
+                    # the server by the name the agent knows, not by the
+                    # tenant-scoped key with its org / user / agent ids.
+                    clean["description"] = str(clean.get("description", "")).replace(owning_server_key, plain)
+                clean["name"] = clean_name
 
                 # Governance scan — run before adding the tool to the
                 # advertised schema set so unsafe tools never reach the
@@ -370,6 +482,8 @@ class ConnectionPool:
                         tool_name=original_tool or clean_name,
                         schema=clean,
                         is_service_account=is_service_account,
+                        server_identity=_server_identity(configs.get(original_server)),
+                        approval_room=approval_room,
                     ):
                         continue  # unsafe or rug-pulled — exclude from advertised set
 
@@ -378,15 +492,32 @@ class ConnectionPool:
                     # reverse-route below keeps using the real upstream tool name
                     # (``original_tool``), so calls still reach Composio.
                     if is_trusted_server:
-                        clean["name"] = debrand_composio_text(clean_name)
+                        # Named from the debranded server and tool, so the
+                        # name keeps its ``mcp__tool_router__`` prefix and is
+                        # shortened (if at all) after debranding.
+                        clean["name"] = fit_tool_name(
+                            debrand_composio_text(sanitize_mcp_name_component(original_server)),
+                            debrand_composio_text(sanitize_mcp_name_component(original_tool or clean_name)),
+                        )
                         clean["description"] = debrand_composio_text(
                             clean.get("description", ""),
                         )
                         clean_name = clean["name"]
 
+                if clean_name in seen_names:
+                    # Two tools under one name (their names sanitize alike):
+                    # the first keeps it, as in process.
+                    logger.warning(
+                        "MCP tool %s from server %s shares its name %s with an earlier tool -- skipped",
+                        original_tool, owning_server_key, clean_name,
+                    )
+                    continue
+                seen_names.add(clean_name)
                 clean_schemas.append(clean)
                 if owning_server_key is not None:
                     tool_index[clean_name] = (owning_server_key, original_tool)
+                if utility is not None:
+                    utility_index[clean_name] = utility
 
             entry = PoolEntry(
                 org_id=org_id,
@@ -400,6 +531,7 @@ class ConnectionPool:
                 },
                 sanitized_prefix=tenant_pfx,
                 governance=tenant_governance,
+                utility_index=utility_index,
             )
             self._entries[key] = entry
 
@@ -415,6 +547,30 @@ class ConnectionPool:
     # Governance scan helper
     # ------------------------------------------------------------------
 
+    def _touch_approvals(self, key: tuple[UUID, UUID, str]) -> None:
+        """Mark tenant *key*'s approvals as just used."""
+        if key in self._approvals:
+            self._approvals.move_to_end(key)
+
+    def _tenant_approvals(self, key: tuple[UUID, UUID, str]) -> dict[str, str]:
+        """The fingerprints approved for tenant *key*, kept across its connections.
+
+        At most ``_MAX_TENANT_APPROVALS`` tenants are kept: past that, the
+        least recently used tenant without a live connection is dropped
+        first, and is approved anew at its next connection.  A tenant with
+        a live connection is never dropped.
+        """
+        approvals = self._approvals.get(key)
+        if approvals is None:
+            approvals = self._approvals[key] = {}
+            excess = len(self._approvals) - _MAX_TENANT_APPROVALS
+            if excess > 0:
+                for old in [k for k in self._approvals if k != key and k not in self._entries][:excess]:
+                    del self._approvals[old]
+        else:
+            self._approvals.move_to_end(key)
+        return approvals
+
     async def _scan_and_record(
         self,
         *,
@@ -425,11 +581,19 @@ class ConnectionPool:
         tool_name: str,
         schema: dict[str, Any],
         is_service_account: bool = False,
+        server_identity: str = "",
+        approval_room: _ApprovalRoom | None = None,
     ) -> bool:
         """Scan *schema* for safety + rug-pull; return True if tool is safe.
 
-        *governance* is tenant-scoped (one instance per :class:`PoolEntry`)
-        so fingerprints never leak between tenants.  Emits a
+        *server_identity* names what the server is (:func:`_server_identity`):
+        approvals are kept per identity, so a server an admin repoints (a new
+        URL, command or arguments) is approved anew, not held against the
+        definitions of the server it was.
+
+        *governance* is tenant-scoped (one instance per :class:`PoolEntry`,
+        over the tenant's approvals) so fingerprints never leak between
+        tenants.  Emits a
         ``policy.mcp_scan`` row for every scan and an additional
         ``policy.rug_pull`` row when a previously-registered tool's
         fingerprint has changed.  Unsafe or rug-pulled tools return
@@ -443,7 +607,8 @@ class ConnectionPool:
             "inputSchema": schema.get("parameters") or {},
             "_server_name": server_name,
         }
-        qualified_name = f"{server_name}.{tool_name}"
+        server_prefix = f"{server_name}@{server_identity}." if server_identity else f"{server_name}."
+        qualified_name = f"{server_prefix}{tool_name}"
 
         # The ``audit_log.user_id`` column FKs to ``users.id``; for
         # service-account sessions the JWT carries a ``service_accounts.id``
@@ -451,8 +616,8 @@ class ConnectionPool:
         # still scoping the row by ``org_id``.
         audit_user_id: UUID | None = None if is_service_account else user_id
 
-        # Rug-pull check — only meaningful when we've seen this tool
-        # before within the same tenant's governance instance.
+        # Rug-pull check — against the definition approved at one of this
+        # tenant's earlier connections to the same server.
         if governance.has_fingerprint(qualified_name):
             if not governance.check_rug_pull(qualified_name, tool_def):
                 if self._audit_store is not None:
@@ -502,6 +667,18 @@ class ConnectionPool:
             )
             return False
 
+        if not governance.has_fingerprint(qualified_name) and not (
+            approval_room.take(server_prefix) if approval_room is not None
+            else governance.fingerprint_count() < _MAX_APPROVALS_PER_TENANT
+        ):
+            # Old approvals are never dropped to make room: a server could
+            # otherwise flood new names until its own approvals went.
+            logger.warning(
+                "MCP tool %s from server %s not approved: no room for more approvals "
+                "(%d per server, %d per tenant)",
+                tool_name, server_name, _MAX_APPROVALS_PER_SERVER, _MAX_APPROVALS_PER_TENANT,
+            )
+            return False
         governance.register_fingerprint(qualified_name, tool_def)
         return True
 
@@ -548,9 +725,38 @@ class ConnectionPool:
                 "error": f"MCP server for tool '{tool_name}' is not connected.",
             })
 
+        utility = entry.utility_index.get(tool_name)
+        if utility is not None:
+            return await self._execute_utility_call(server, utility, arguments)
         return await self._execute_tool_call(
             server, original_tool, arguments, meta=meta,
         )
+
+    @staticmethod
+    async def _execute_utility_call(server: Any, utility: str, arguments: dict[str, Any]) -> str:
+        """Run an MCP utility (resources / prompts) on the server's long-lived session.
+
+        As its MCP method (``resources/read``, ``prompts/get``, ...): a
+        ``tools/call`` of ``read_resource`` reaches no server's resources.
+        Bridged to the MCP loop as :meth:`_execute_tool_call` is.
+        """
+        from surogates.tools.mcp import client as _mcp_client_module
+
+        try:
+            coro = call_utility(server.session, utility, arguments)
+            loop = _mcp_client_module._mcp_loop  # type: ignore[attr-defined]
+            if loop is None or not loop.is_running():
+                return await coro
+            future = asyncio.run_coroutine_threadsafe(coro, loop)
+            try:
+                return await asyncio.wrap_future(future)
+            except BaseException:
+                future.cancel()
+                raise
+        except Exception as exc:
+            return json.dumps({
+                "error": _sanitize_error(f"MCP call failed: {type(exc).__name__}: {exc}"),
+            })
 
     @staticmethod
     async def _execute_tool_call(
@@ -689,6 +895,10 @@ class ConnectionPool:
         scheduled on the running loop.
         """
         keys = [k for k in self._entries if k[2] == agent_id]
+        # The approvals stay: an invalidation follows any edit of the agent,
+        # and the next connection is held against them like any other.  A
+        # server an admin repoints has a new identity (``_server_identity``)
+        # and is approved anew.
         entries: list[PoolEntry] = []
         for key in keys:
             entry = self._entries.pop(key, None)
@@ -707,19 +917,23 @@ class ConnectionPool:
                 await asyncio.sleep(60)
             except asyncio.CancelledError:
                 return
+            await self._evict_idle_once(time.monotonic())
 
-            now = time.monotonic()
-            evicted: list[tuple[UUID, UUID, str]] = []
+    async def _evict_idle_once(self, now: float) -> None:
+        """Evict the tenant connections idle at *now*.  Their approved
+        fingerprints stay (``_approvals``): the next connection is checked
+        against them."""
+        evicted: list[tuple[UUID, UUID, str]] = []
 
-            for key, entry in list(self._entries.items()):
-                if now - entry.last_used > self._idle_timeout:
-                    await self._disconnect_entry(entry)
-                    evicted.append(key)
+        for key, entry in list(self._entries.items()):
+            if now - entry.last_used > self._idle_timeout:
+                await self._disconnect_entry(entry)
+                evicted.append(key)
 
-            for key in evicted:
-                self._entries.pop(key, None)
-                self._locks.pop(key, None)
-                logger.info(
-                    "Evicted idle MCP connections for org=%s user=%s agent=%s",
-                    key[0], key[1], key[2],
-                )
+        for key in evicted:
+            self._entries.pop(key, None)
+            self._locks.pop(key, None)
+            logger.info(
+                "Evicted idle MCP connections for org=%s user=%s agent=%s",
+                key[0], key[1], key[2],
+            )

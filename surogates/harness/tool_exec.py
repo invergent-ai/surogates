@@ -26,6 +26,7 @@ from surogates.devices.operations import OperationConflict
 from surogates.devices.sandbox import UNAVAILABLE_TOOLS, device_call_for, interrupted, refusal
 from surogates.devices.workspace import DeviceOperationError
 from surogates.session.events import EventType
+from surogates.harness.agent_news import starts_notified_work
 from surogates.harness.message_utils import leading_json_object, make_skipped_tool_result
 from surogates.harness.resilience import unknown_tool_error
 from surogates.harness.tool_guardrails import (
@@ -542,6 +543,30 @@ SIBLING_ABORT_TOOLS: frozenset[str] = frozenset({
 })
 
 
+def _watch_background(result_content: str, session: Any, tool_args: Any, *, in_sandbox: bool) -> None:
+    """Hand the background command a ``terminal`` call started to the worker's watch (``background_watch``)."""
+    from surogates.harness.background_watch import HERE, background_watch
+    from surogates.sandbox.pool import sandbox_session_key
+
+    try:
+        started = json.loads(result_content)
+    except (TypeError, ValueError):
+        return
+    proc_id = started.get("session_id") if isinstance(started, dict) else None
+    if not isinstance(proc_id, str) or not proc_id:
+        return
+    if isinstance(tool_args, str):
+        try:
+            tool_args = json.loads(tool_args)
+        except (TypeError, ValueError):
+            tool_args = {}
+    command = tool_args.get("command") if isinstance(tool_args, dict) else None
+    background_watch.watch(
+        owner=sandbox_session_key(session) if in_sandbox else HERE,
+        proc_id=proc_id, session_id=session.id, command=str(command or ""),
+    )
+
+
 def is_concurrency_safe(tool_name: str) -> bool:
     """Return ``True`` if *tool_name* can safely execute during streaming."""
     return tool_name in CONCURRENCY_SAFE_TOOLS
@@ -593,6 +618,7 @@ def is_parallelizable(tool_name: str) -> bool:
 DELEGATION_TOOLS: frozenset[str] = frozenset({
     "delegate_task",
     "spawn_worker",
+    "agent",
 })
 
 # All tools that ``should_parallelize`` may dispatch concurrently after
@@ -607,6 +633,7 @@ BATCH_PARALLEL_TOOLS: frozenset[str] = PARALLEL_TOOLS | DELEGATION_TOOLS
 # show its proposal twice.
 SESSION_STARTING_TOOLS: frozenset[str] = DELEGATION_TOOLS | frozenset({
     "send_worker_message",
+    "send_message",
     "spawn_task",
     "unblock_task",
     "dispatch_experiments",
@@ -623,12 +650,13 @@ AFTER_THE_RESPONSE_TOOLS: frozenset[str] = frozenset({"office_edit"})
 # The tools whose step starts a helper.  In a project's thread the copy goes
 # on the thread's hand-off first, for the helper's own copy to start from, and
 # what helpers kept comes into the copy after.
-HELPER_STARTING_TOOLS: frozenset[str] = frozenset({"delegate_task", "spawn_worker", "spawn_task"})
+HELPER_STARTING_TOOLS: frozenset[str] = frozenset({"delegate_task", "spawn_worker", "spawn_task", "agent"})
 
-# The session-starting tools the thread's rule leaves alone: three only reach
+# The session-starting tools the thread's rule leaves alone: four only reach
 # a session that exists, and two answer a thread themselves.
 _NOT_THE_THREADS_TO_REFUSE: frozenset[str] = frozenset({
     "send_worker_message", "unblock_task", "message_thread", "start_thread", "propose_threads",
+    "send_message",
 })
 
 
@@ -2170,6 +2198,13 @@ async def _run_single_tool(
                 "error": f"Tool execution failed: {exc}",
             })
     elapsed_ms = int((time.monotonic() - start) * 1000)
+
+    # A background command that reports back is watched until it ends: its end
+    # reaches this session as a notification.  Read from the call's own result,
+    # before any note is added to it.  Not one on the user's computer, which
+    # keeps its own processes.
+    if tool_name == "terminal" and not tool_failed and device_call is None and starts_notified_work(tool_name, tool_args):
+        _watch_background(result_content, session, tool_args, in_sandbox=location == ToolLocation.SANDBOX and sandbox_pool is not None)
 
     # --- Saga step commit / fail ---
     if saga_step is not None and _active_saga_id is not None:

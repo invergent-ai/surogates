@@ -335,6 +335,14 @@ class EventType(str, Enum):
     # Scheduled loop run result surfaced inline on a web/api parent session.
     LOOP_RESULT = "loop.result"
 
+    # Background work of a session's own, or a sub-agent it started, ended (or
+    # spoke): written to the session that started it, which reads it as news at
+    # its next model request, and woken by it when it rests.  ``agent_id`` names
+    # the work, ``kind`` what it is (``process``), ``status`` how it ended
+    # (``completed``, ``failed``, ``killed``), ``summary`` what it was,
+    # ``result`` what it said last.
+    AGENT_NOTIFICATION = "agent.notification"
+
 
 #: What a session reads as a message typed into it: the user's own, and a
 #: project coordinator's follow-up to its thread, which is never the user's.

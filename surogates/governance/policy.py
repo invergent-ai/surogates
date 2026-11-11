@@ -73,6 +73,22 @@ class PolicyDecision:
     policy_id: str | None = None
 
 
+def _with_stand_ins(names: set[str] | None, *, starting_work: bool = False) -> set[str] | None:
+    """*names* with the tools each stands for (``surogates.harness.subagents.STANDS_IN_FOR``) added; with
+    *starting_work*, only those that start work (``agent``, ``monitor``)."""
+    if not names:
+        return names
+    from surogates.harness.subagents import STANDS_IN_FOR
+
+    aliases = {alias for name in names for alias in STANDS_IN_FOR.get(name, ())}
+    if "agent" in names:
+        # ``delegate_task`` stays callable beside ``agent``: what binds one binds the other.
+        aliases.add("delegate_task")
+    if starting_work:
+        aliases &= {"agent", "monitor"}
+    return set(names) | aliases
+
+
 class GovernanceGate:
     """Wraps the AGT PolicyEngine for Surogates tool-call governance.
 
@@ -98,6 +114,24 @@ class GovernanceGate:
         require_approval: set[str] | None = None,
     ) -> None:
         self._enabled: bool = enabled
+        # A rule written with an MCP tool's full name, too long for an
+        # engine, applies to the shortened name the tool is offered under.
+        from surogates.tools.mcp.names import configured_tool_names
+
+        if allowed_tools is not None:
+            allowed_tools = {n for t in allowed_tools for n in configured_tool_names(t)}
+        if denied_tools is not None:
+            denied_tools = [n for t in denied_tools for n in sorted(configured_tool_names(t))]
+        if require_approval is not None:
+            require_approval = {n for t in require_approval for n in configured_tool_names(t)}
+        # A name a policy gives stands for the tools that take its place
+        # (``subagents.STANDS_IN_FOR``): denying ``delegate_task`` denies
+        # ``agent``, allowing it allows ``agent``.
+        allowed_tools = _with_stand_ins(allowed_tools)
+        if denied_tools:
+            denied_tools = [*denied_tools, *sorted(_with_stand_ins(denied_tools) - set(denied_tools))]
+        # Of approvals, only the tools that start work: a list or a message needs none.
+        require_approval = _with_stand_ins(require_approval, starting_work=True)
         # Tools a human must approve before they run.  Checked beside the
         # deny-list fast path -- above the open-policy/``mcp__`` early
         # return -- because open policy is the production default and MCP
@@ -406,14 +440,23 @@ class GovernanceGate:
                 continue
 
             # For relative paths, resolve against workspace root so the
-            # sandbox check uses the correct absolute path.
+            # sandbox check uses the correct absolute path.  ``/workspace``,
+            # where every sandbox mounts the session's files, is the
+            # workspace root too (a host folder with local storage), as the
+            # file tools read it (``in_workspace_terms``).
             import os
-            expanded = os.path.expanduser(raw_path)
+            from surogates.tools.utils.workspace_sandbox import in_workspace_terms
+
+            expanded = in_workspace_terms(workspace_path, os.path.expanduser(raw_path))
             if not os.path.isabs(expanded):
                 expanded = os.path.join(workspace_path, expanded)
 
             mode = "w" if tool_name in ("write_file", "patch") else "r"
-            if not sandbox.check_file_access(expanded, mode):
+            try:
+                allowed = sandbox.check_file_access(expanded, mode)
+            except RuntimeError:  # a symlink loop (Path.resolve on Python 3.12)
+                allowed = False
+            if not allowed:
                 return (
                     f"Workspace sandbox violation: '{raw_path}' resolves "
                     f"outside the session workspace. All file operations "

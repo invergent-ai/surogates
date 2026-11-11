@@ -14,6 +14,24 @@ shows up anywhere in the tool traffic is evidence enough that the file was
 handled. Both defaults fail silent, because a wrong nudge costs a turn and
 annoys someone whose work was already finished.
 
+A name the user gives for something that already exists is an input, not
+a deliverable, and is never asked for:
+
+- a name every mention of which marks it as an input, by the words just
+  before it in its clause -- "using data.csv", "from the attached
+  sales.xlsx", "based on notes.md";
+- a file already in the session's workspace (an upload, an attachment, a
+  file an earlier turn wrote; the caller passes their names as *present*),
+  unless a mention asks for it to be written -- "post the numbers to
+  status.md", "update the existing tracker.xlsx";
+- a pattern or a template rather than a name -- "one file per issue named
+  bulletin_YYYY_MM.txt", "{TICKER}_10K.txt".
+
+Counting only names the user asks to receive by phrasing ("save ... as X")
+would miss the cases this check exists for: the prompts that motivated it
+name the deliverable without such a verb ("the task requires these files by
+name: X").
+
 No model call: this is string matching over the transcript the loop
 already holds.
 """
@@ -23,6 +41,7 @@ from __future__ import annotations
 import json
 import posixpath
 import re
+from collections.abc import Collection
 
 from surogates.harness.tool_schemas import CRON_WRITE_TOOLS
 
@@ -35,13 +54,18 @@ _DELIVERABLE_EXTS = (
     "pdf", "md", "json", "html", "txt",
 )
 
-#: Bounded on both sides: the stem repetition is capped so a pathological
-#: input cannot drive quadratic backtracking, and the class excludes the
-#: separators that would let one match run across two filenames.
+#: Bounded on both sides: the stem repetition is capped and a match starts
+#: only where a name can (not inside a run of name characters), so a
+#: pathological input cannot drive quadratic backtracking; the class
+#: excludes the separators that would let one match run across two
+#: filenames.
 _FILENAME_RE = re.compile(
-    r"[A-Za-z0-9_\-.]{1,200}\.(?:" + "|".join(_DELIVERABLE_EXTS) + r")\b",
+    r"(?<![A-Za-z0-9_\-.])[A-Za-z0-9_\-.]{1,200}\.(?:" + "|".join(_DELIVERABLE_EXTS) + r")\b",
     re.IGNORECASE,
 )
+#: A request naming more files than this is a pasted listing; names past it
+#: are not weighed (those already seen still are, at every mention).
+_MAX_NAMES = 1000
 
 
 def _tool_traffic(messages: list[dict]) -> str:
@@ -68,29 +92,157 @@ def _tool_traffic(messages: list[dict]) -> str:
     return "\n".join(parts).lower()
 
 
+#: How far back from a filename its clause is read, and where a clause
+#: ends: a sentence's end, a colon, a semicolon, a comma or a line break.
+_CLAUSE_WINDOW = 120
+_CLAUSE_END_RE = re.compile(r"[.!?](?=\s)|[;:,\n]")
+_ABBREVIATIONS_RE = re.compile(r"\b(e\.g|i\.e)\.", re.IGNORECASE)
+_WORD_RE = re.compile(r"[A-Za-z]+")
+
+#: The word just before a filename, in its clause, that makes it an input:
+#: "using data.csv", "from the attached sales.xlsx", "read notes.md".
+_INPUT_WORDS = frozenset({
+    "from", "read", "reading", "open", "opening", "load", "loading", "using",
+    "analyse", "analyze", "analysing", "analyzing", "reviewing", "parse", "parsing",
+    "given", "check", "checking", "consult", "eg", "ie",
+})
+#: Two words that do: "based on plan.md", "according to notes.md".
+_INPUT_PAIRS = frozenset({
+    ("based", "on"), ("according", "to"), ("look", "at"), ("refer", "to"), ("compared", "to"),
+    ("relative", "to"), ("similar", "to"), ("same", "as"), ("such", "as"),
+})
+#: The word that makes it a target, even when a file of that name exists:
+#: "post the numbers to status.md", "update the existing tracker.xlsx".
+_TARGET_WORDS = frozenset({
+    "to", "into", "as", "save", "saving", "write", "writing", "create", "creating",
+    "produce", "producing", "generate", "generating", "update", "updating", "edit",
+    "editing", "overwrite", "export", "exporting", "append", "output", "deliver",
+    "rewrite", "rewriting", "redo", "revise", "revising", "finalize", "finalise", "fix",
+    "complete", "correct", "amend", "draft", "drafting", "prepare", "make", "build",
+})
+_TARGET_PAIRS = frozenset({("fill", "in"), ("fill", "out")})
+#: A list of required names: "the task requires these files by name, spelled
+#: exactly like this: `report.docx`", read in the name's own sentence.
+_BY_NAME_RE = re.compile(r"\bfiles?\s+by\s+name\b", re.IGNORECASE)
+_SENTENCE_END_RE = re.compile(r"[.!?](?=\s)|\n")
+#: Words passed over on the way back to the word that tells.
+_FILLER_WORDS = frozenset({
+    "the", "a", "an", "this", "that", "these", "those", "our", "my", "your", "its", "their",
+    "file", "files", "document", "documents", "doc", "spreadsheet", "sheet", "workbook",
+    "template", "named", "called", "existing", "new", "final",
+    "attached", "uploaded", "provided",
+})
+#: Passed over, these still mark the file as one the user gave.
+_GIVEN_WORDS = frozenset({"attached", "uploaded", "provided"})
+
+_INPUT, _TARGET = "input", "target"
+
+#: A filename pattern, not a name.  A year placeholder in any case
+#: ("bulletin_YYYY.txt", "app_yyyymmdd.json"); two upper-case placeholder
+#: segments in a row ("log_MM_DD.txt"); or a date one after the name's
+#: start ("report_DATE.pdf").  One segment such as ``MM``, ``N`` or ``X``
+#: alone ("Q3_MM_final.xlsx", "Form_N.pdf", "Appendix_X.docx") may be a
+#: real name, and counts.
+_PLACEHOLDER = r"(?:YYYY|YY|MM|DD|HH|X{2,}|N{2,})"
+_PLACEHOLDER_RE = re.compile(
+    r"(?:^|[_\-.])(?:(?i:yyyy(?:mm(?:dd)?)?|yymmdd)|YY(?=[_\-.]" + _PLACEHOLDER + r"))(?=[_\-.]|$)"
+    r"|(?:^|[_\-.])" + _PLACEHOLDER + r"[_\-.]" + _PLACEHOLDER + r"(?=[_\-.]|$)"
+    r"|[_\-.](?:DATE|TIMESTAMP)(?=[_\-.]|$)"
+)
+#: A match that starts with a separator right after one of these is a piece
+#: of a template ("{TICKER}_10K.txt", "<id>-notes.md"), not a name.  The
+#: opening marks are not among them: "**report.docx**", "[results.csv]".
+_TEMPLATE_MARKS = frozenset("}>]")
+#: How far back a path's start is looked for ("outputs/report.docx"), and
+#: how many mentions of one name are weighed.
+_PATH_WINDOW = 200
+_MAX_MENTIONS = 20
+
+
+def _path_start(user_text: str, start: int) -> int:
+    """Where the path a filename ends begins: "outputs/" in "to outputs/report.docx"."""
+    floor = max(0, start - _PATH_WINDOW)
+    while start > floor and user_text[start - 1] in _PATH_CHARS:
+        start -= 1
+    return start
+
+
+_PATH_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-./\\~")
+
+
+def _role(user_text: str, start: int) -> str | None:
+    """Whether the words just before a filename, in its clause, make it an
+    input or a target; None when they say neither."""
+    start = _path_start(user_text, start)
+    window = _ABBREVIATIONS_RE.sub(lambda m: m.group(1).replace(".", ""), user_text[max(0, start - _CLAUSE_WINDOW):start])
+    words = [w.lower() for w in _WORD_RE.findall(_CLAUSE_END_RE.split(window)[-1])]
+    given = False
+    while words and words[-1] in _FILLER_WORDS:
+        given = given or words[-1] in _GIVEN_WORDS
+        words.pop()
+    last = words[-1] if words else ""
+    pair = (words[-2], last) if len(words) > 1 else ("", last)
+    if pair in _INPUT_PAIRS:
+        return _INPUT
+    if (
+        last in _TARGET_WORDS or pair in _TARGET_PAIRS
+        or _BY_NAME_RE.search(_SENTENCE_END_RE.split(window)[-1])
+    ):
+        return _TARGET
+    if last in _INPUT_WORDS or given:
+        return _INPUT
+    return None
+
+
 def missing_deliverables(
-    user_text: str, messages: list[dict], limit: int = 5
+    user_text: str, messages: list[dict], limit: int = 5, present: Collection[str] = (),
 ) -> list[str]:
     """Filenames the user named that the turn never touched.
 
-    Returns at most *limit* names, in the order the user gave them, so a
-    request listing many outputs produces a nudge the model can act on
-    rather than a wall of filenames.
+    Names that are inputs are left out (module docstring).  A name counts as
+    an input when every mention of it reads as one, or when *present* (the
+    lower-cased names of the files already in the session's workspace) holds
+    it and no mention asks for it to be written.  Returns at most *limit*
+    names, in the order the user gave them, so a request listing many outputs
+    produces a nudge the model can act on rather than a wall of filenames.
     """
     if not user_text:
         return []
-    traffic = _tool_traffic(messages)
-    missing: list[str] = []
-    seen: set[str] = set()
+    roles: dict[str, set[str | None]] = {}
+    names: dict[str, str] = {}
+    weighed: dict[str, int] = {}
     for match in _FILENAME_RE.finditer(user_text):
         name = posixpath.basename(match.group(0))
         key = name.lower()
-        # A bare extension ("...the .docx version") is not a filename.
-        if key in seen or key.startswith("."):
+        start = match.start()
+        # A bare extension ("...the .docx version") is not a filename, and
+        # a piece of a template ("{TICKER}_10K.txt") is not one either.
+        if key.startswith(".") or (
+            start and user_text[start - 1] in _TEMPLATE_MARKS and name[0] in "_-"
+        ):
             continue
-        seen.add(key)
-        if key not in traffic:
-            missing.append(name)
+        if _PLACEHOLDER_RE.search(name.rsplit(".", 1)[0]):
+            continue
+        if key not in names:
+            if len(names) >= _MAX_NAMES:
+                continue
+            names[key] = name
+        said = roles.setdefault(key, set())
+        if _TARGET not in said and weighed.get(key, 0) < _MAX_MENTIONS:
+            weighed[key] = weighed.get(key, 0) + 1
+            said.add(_role(user_text, start))
+    if not names:
+        return []
+    traffic = _tool_traffic(messages)
+    touched = {posixpath.basename(m.group(0)) for m in _FILENAME_RE.finditer(traffic)}
+    missing: list[str] = []
+    for key, name in names.items():
+        said = roles[key]
+        if said == {_INPUT} or (key in present and _TARGET not in said):
+            continue
+        if key in touched or key in traffic:
+            continue
+        missing.append(name)
         if len(missing) >= limit:
             break
     return missing

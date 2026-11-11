@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from surogates.devices.browser import for_the_pane_alone, resumes_the_agent, takes_the_browser_over
+from surogates.harness.agent_news import AGENT_NEWS_TYPES
 from surogates.session.execution_context import is_scheduled_run
 from surogates.keel.steps import is_case_work
 from surogates.session.events import MESSAGE_TYPES, EventType
@@ -30,6 +31,33 @@ _HARNESS_CONTROL_PENDING_EVENT_TYPES = frozenset({
 
 def _event_type(event: Any) -> str:
     return event.type.value if isinstance(event.type, EventType) else str(event.type)
+
+
+#: The ``delegation.failed`` reason of a ``delegate_task`` call that gave up on its helper, which may still run.
+GAVE_UP_ON_HELPER = "Delegation timed out"
+
+
+def answered_helpers(events: list[Any]) -> frozenset[str]:
+    """The ``delegate_task`` helpers in *events* whose call got their result: a ``delegation.complete``, or a
+    ``delegation.failed`` other than a call that gave up on its helper.  Such a helper's report is no news:
+    its parent has it as the call's result.  One whose call gave up, was cut off or broke has none, and its
+    report is read as any helper's."""
+    answered: set[str] = set()
+    for event in events:
+        kind = _event_type(event)
+        data = getattr(event, "data", None) or {}
+        if kind == EventType.DELEGATION_COMPLETE.value or (
+            kind == EventType.DELEGATION_FAILED.value and data.get("reason") != GAVE_UP_ON_HELPER
+        ):
+            if data.get("child_session_id"):
+                answered.add(str(data["child_session_id"]))
+    return frozenset(answered)
+
+
+def read_as_result(event: Any, answered: frozenset[str]) -> bool:
+    """Whether *event* is the report of a ``delegate_task`` helper whose call got its result (*answered*)."""
+    data = getattr(event, "data", None) or {}
+    return bool(data.get("delegated")) and str(data.get("worker_id")) in answered
 
 
 def _hand_backs_taken_over_again(events: list[Any]) -> set[int]:
@@ -61,6 +89,7 @@ def _actionable_pending_events(events: list[Any], cursor: int) -> list[Any]:
     stops before what was said while the command was answered.
     """
     taken_again = _hand_backs_taken_over_again(events)
+    answered = answered_helpers(events)
     pending = []
     for event in events:
         if (
@@ -70,6 +99,7 @@ def _actionable_pending_events(events: list[Any], cursor: int) -> list[Any]:
             and not for_the_pane_alone(event)
             and event.id not in taken_again
             and not _ends_a_commands_turn(event)
+            and not read_as_result(event, answered)
         ):
             pending.append(event)
     return pending
@@ -324,19 +354,22 @@ _GOAL_TURN_MESSAGES = frozenset({"outcome_kickoff", "outcome_continuation"})
 def _first_unread(events: list[Any], *, goal_in_flight: bool, is_plain_message: Any) -> int | None:
     """Return the id of the first event in *events* that still waits for the model to read it.
 
-    A worker's report; a redo a thread was told of; a message of the
-    user's own that is no command (*is_plain_message* says which); and,
+    A worker's report; the end of background work the session started; a
+    redo a thread was told of; a message of the user's own that is no
+    command (*is_plain_message* says which); and,
     while a goal is in flight, the message that gives the goal its next
     turn.  A request reads what was written before it, so the unread ones
     are those after the log's last ``llm.request``.
     """
     first: int | None = None
+    answered = answered_helpers(events)
     for event in events:
         event_type = _event_type(event)
         if event_type == EventType.LLM_REQUEST.value:
             first = None
         elif first is None and (
-            event_type in _REPORT_EVENT_TYPES
+            event_type in _REPORT_EVENT_TYPES and not read_as_result(event, answered)
+            or event_type in AGENT_NEWS_TYPES
             or event_type == EventType.HISTORY_REDO.value
             or is_plain_message(event)
             or goal_in_flight and _gives_a_goal_its_turn(event)

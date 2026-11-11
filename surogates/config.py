@@ -52,12 +52,23 @@ def _load_yaml_config() -> dict[str, Any]:
     Returns the parsed dict, or ``{}`` if the file doesn't exist or
     can't be parsed.
     """
-    config_path = get_config_path()
-    if not config_path.is_file():
+    return _parse_yaml_config(_read_config_bytes(get_config_path()))
+
+
+def _read_config_bytes(config_path: Path) -> bytes | None:
+    """The config file's bytes, or None if it is not a file or can't be read."""
+    try:
+        return config_path.read_bytes() if config_path.is_file() else None
+    except OSError:
+        return None
+
+
+def _parse_yaml_config(content: bytes | None) -> dict[str, Any]:
+    """The parsed config, or ``{}`` if there is none or it can't be parsed."""
+    if content is None:
         return {}
     try:
-        with open(config_path, encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
+        data = yaml.safe_load(content.decode("utf-8")) or {}
         if not isinstance(data, dict):
             return {}
         return data
@@ -289,8 +300,21 @@ class WorkerSettings(BaseSettings):
     # The most often one streamed model call writes an ``llm.delta`` event of
     # one kind (``content``, ``reasoning``); the chunks in between are joined
     # into it.  The first chunk of a call is written at once.  0 writes one
-    # event per streamed chunk, as before this setting existed.
+    # event per streamed chunk, as before this setting existed.  A session may
+    # set its own window with ``config.delta_coalesce_ms``.
     delta_coalesce_ms: int = 100
+    # ``False`` sends no ``llm.delta`` at all: for workers whose sessions
+    # nobody watches live (headless benchmarks, training rollouts).  A session
+    # turns them off with ``config.live_deltas: false``.  Each reply still
+    # reaches every client whole, at its ``llm.response``.
+    live_deltas: bool = True
+    # Where the deltas go.  ``log`` (the default) writes them to the event
+    # log, as before.  ``redis`` writes none: they reach the api's streams as
+    # live frames over Redis pub/sub only (surogates.session.live), so the
+    # log keeps no row per piece of a reply.  Clients that read the event
+    # stream with their own parser must pass on frames whose id is negative
+    # (see docs/operations/keel-link.md) before this is switched on.
+    delta_transport: Literal["log", "redis"] = "log"
 
 
 class BoardSettings(BaseSettings):
@@ -941,8 +965,26 @@ class KeelSettings(BaseSettings):
     max_file_bytes: int = 52428800
 
 
+class AgentsSettings(BaseSettings):
+    """Sub-agents as an agent dispatches them on its own.
+
+    ``subagent_parity`` gives every session the ``agent`` tool family (start
+    a sub-agent in the foreground or the background, or a fork of the
+    conversation) in place of ``delegate_task``, which stays callable under
+    its old name.  Off by default: the tools the model sees are unchanged.
+    A session's own ``subagent_parity`` config key, true or false, wins over
+    it, and its sub-agents inherit the session's.
+    """
+
+    model_config = {"env_prefix": "SUROGATES_AGENTS_"}
+
+    subagent_parity: bool = False
+
+
 class Settings(BaseSettings):
     model_config = {"env_prefix": "SUROGATES_"}
+
+    agents: AgentsSettings = Field(default_factory=AgentsSettings)
 
     db: DatabaseSettings = Field(default_factory=DatabaseSettings)
     ops_db: OpsDatabaseSettings = Field(default_factory=OpsDatabaseSettings)
@@ -1012,12 +1054,47 @@ def load_settings() -> Settings:
        (with ``SUROGATES_`` prefix)
     2. Real environment variables override YAML values
     3. pydantic-settings reads the final environment
+
+    Building them costs about 12 ms of CPU, and the worker reads them
+    several times a turn.  They are built again only when what they are
+    built from changed: the config file's bytes, or a ``SUROGATES_``
+    environment variable.  Otherwise the caller gets a deep copy of the
+    last ones built, never an object another caller holds.
     """
-    yaml_config = _load_yaml_config()
+    global _settings_cache
+    path = get_config_path()
+    content = _read_config_bytes(path)
+    cached = _settings_cache
+    # ``Settings`` itself is in the key: a test that replaces it never
+    # leaves what it built behind for the next caller.
+    if cached is not None and cached[0] == (Settings, str(path), content, _surogates_environment()):
+        return cached[1].model_copy(deep=True)
+
+    # The file is read once: the key holds the bytes the settings come from.
+    yaml_config = _parse_yaml_config(content)
     if yaml_config:
         flat = _flatten_yaml(yaml_config)
         for key, value in flat.items():
             if key not in os.environ:
                 os.environ[key] = value
 
-    return Settings()
+    # Keyed by the environment after the file's values went into it, taken
+    # before the settings read it: a variable another thread sets meanwhile
+    # makes the next call build them again, never keeps them stale.
+    inputs = (Settings, str(path), content, _surogates_environment())
+    settings = Settings()
+    _settings_cache = (inputs, settings.model_copy(deep=True))
+    return settings
+
+
+#: The last settings built, keyed by what they were built from.
+_settings_cache: tuple[tuple, Any] | None = None
+
+
+def _surogates_environment() -> frozenset[tuple[str, str]]:
+    """Every ``SUROGATES_`` environment variable, matched without regard to
+    case as pydantic-settings matches them: with the config file, all that
+    ``Settings()`` reads."""
+    return frozenset(
+        (key, value) for key, value in os.environ.items() if key[:10].upper() == "SUROGATES_"
+    )

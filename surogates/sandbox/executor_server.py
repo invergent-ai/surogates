@@ -5,6 +5,8 @@ load the tool registry once (the ~7.5 CPU-second import cost is paid
 during pod startup, before the port binds), then serve HTTP:
 
     POST /execute   {"name": ..., "args": {...}, "timeout": 300}
+                    ``{"name": "_background"}`` drains the daemon's finished
+                    background commands (see below)
     GET  /healthz   -> 200 when $WORKSPACE_DIR has a live FUSE mount; in a
                        thread's pod, when $PROJECT_DIR has one and the
                        thread's copy is made
@@ -18,6 +20,14 @@ the readinessProbe would flap, ``_map_pod_status`` would report
 ``PENDING``, and ``SandboxPool.ensure`` would destroy the sandbox
 mid-tool.  On timeout the child is killed (the old exec path abandoned
 the remote process and left it running).
+
+A background command (``terminal`` with ``background``) and every
+``process`` action run in the daemon instead, on a thread: the process
+registry that keeps a background command's output and exit lives in the
+process that started it, and a fork's dies with the fork.  Kept in the
+daemon, a command lives as long as the pod, ``process`` finds it there, and
+``_background`` tells the worker which ones that report back have ended
+(``surogates.harness.background_watch``).
 
 The worker authenticates with ``Authorization: Bearer
 $TOOL_EXECUTOR_TOKEN``; ``/healthz`` is unauthenticated (the kubelet
@@ -113,6 +123,33 @@ def _record_read(name: str, args: dict, workspace: str, result: str) -> None:
     if len(_READ_TIMESTAMPS) >= _MAX_READ_TIMESTAMPS:
         _READ_TIMESTAMPS.clear()
     _READ_TIMESTAMPS[resolved] = mtime
+
+
+def runs_in_daemon(name: str, args: dict) -> bool:
+    """Whether the call *name* with *args* runs in the daemon, where background commands live, and not in a fork."""
+    return name in ("process", "_background") or (name == "terminal" and bool(args.get("background")))
+
+
+def drain_background() -> str:
+    """``_background``: the completions of the background commands that report back, ended since the last
+    drain, and the ids of every command the registry knows, running or finished.
+
+    A command the worker watches that is neither known nor among the
+    completions ran in a pod that is gone.  One that finished and whose
+    completion is not queued yet is still known: the next drain has it.
+    """
+    import queue
+
+    from surogates.tools.utils.process_registry import process_registry
+
+    events: list[dict] = []
+    while True:
+        try:
+            events.append(process_registry.completion_queue.get_nowait())
+        except queue.Empty:
+            break
+    known = [entry["session_id"] for entry in process_registry.list_sessions()]
+    return json.dumps({"events": events, "known": known})
 
 
 def init_registry() -> Any:
@@ -297,6 +334,8 @@ def run_tool(
         return _run_history(args, history)
     if name == "_file":
         return _run_file(args, workspace)
+    if name == "_background":
+        return drain_background()
     if name == "_code":
         # The payload may carry a credential on launch; never log args.
         from surogates.coding_agents.pod_runner import dispatch as code_dispatch
@@ -524,8 +563,21 @@ def create_app(
                 media_type="application/json",
             )
 
+        if name == "_background":
+            # A drain reads memory and never waits on a tool: no slot, so the
+            # worker's watch is answered while long calls fill them.
+            result = drain_background()
+            return Response(content=result, media_type="application/json")
         async with sem:
-            result = await execute_in_child(name, args, workspace, timeout, history)
+            if runs_in_daemon(name, args):
+                try:
+                    result = await asyncio.wait_for(
+                        asyncio.to_thread(run_tool, name, args, workspace, None, history), timeout,
+                    )
+                except TimeoutError:
+                    result = _timed_out_result()
+            else:
+                result = await execute_in_child(name, args, workspace, timeout, history)
         logger.info("← %s (%d bytes)", name, len(result))
         return Response(content=result, media_type="application/json")
 
@@ -542,7 +594,9 @@ def main() -> None:
     )
     workspace = os.environ.get("WORKSPACE_DIR", "/workspace")
     port = int(os.environ.get("TOOL_EXECUTOR_PORT", str(DEFAULT_PORT)))
-    token = os.environ.get("TOOL_EXECUTOR_TOKEN", "")
+    # Out of the environment once read: the commands the daemon starts, and its
+    # forks' tools, inherit it, and none of them is to call the daemon.
+    token = os.environ.pop("TOOL_EXECUTOR_TOKEN", "")
     if not token:
         logger.error("TOOL_EXECUTOR_TOKEN is required")
         sys.exit(1)
