@@ -20,12 +20,13 @@ does not.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
-from surogates.harness.subagents import DISPATCH_KEY, PARITY_KEY, dispatch_of
+from surogates.harness.subagents import DISPATCH_KEY, PARITY_KEY
 from surogates.runtime.turn_slots import turn_waiting
 from surogates.tools.registry import ToolRegistry, ToolSchema
 
@@ -108,13 +109,39 @@ def _error(message: str) -> str:
     return json.dumps({"error": message})
 
 
-async def _children(session_store: Any, parent_id: UUID) -> list[Any]:
-    """The sessions *parent_id* started, directly."""
-    children = []
-    for sid in await session_store.session_tree_ids(parent_id):
-        if sid != parent_id and (session := await session_store.get_session(sid)).parent_id == parent_id:
-            children.append(session)
-    return children
+def _forget_start(parent_id: UUID, start: tuple[str, str | None, str]) -> None:
+    """Count a start no more: its child is in the database, or it never came."""
+    starting = _STARTING.get(parent_id)
+    if starting and start in starting:
+        starting.remove(start)
+    if not starting:
+        _STARTING.pop(parent_id, None)
+        lock = _START_LOCKS.get(parent_id)
+        if lock is not None and not lock.locked():
+            _START_LOCKS.pop(parent_id, None)
+
+
+async def _running_agents(session_factory: Any, parent_id: UUID) -> list[tuple[str | None, str | None]]:
+    """The agents *parent_id* started that are running: each one's (mode, agent_type), in one read."""
+    from sqlalchemy import select
+
+    from surogates.db.models import Session as SessionRow
+
+    async with session_factory() as db:
+        rows = (await db.execute(
+            select(SessionRow.config).where(
+                SessionRow.parent_id == parent_id, SessionRow.status.in_(("active", "processing")),
+            ),
+        )).scalars().all()
+    return [
+        ((config.get(DISPATCH_KEY) or {}).get("mode"), config.get("agent_type"))
+        for config in rows if isinstance(config, dict) and isinstance(config.get(DISPATCH_KEY), dict)
+    ]
+
+
+#: Starts under way in this process, by parent, until their child is in the database: (mode, agent_type, mark).
+_STARTING: dict[UUID, list[tuple[str, str | None, str]]] = {}
+_START_LOCKS: dict[UUID, asyncio.Lock] = {}
 
 
 #: The most agents one session may have running in the background at once.
@@ -170,23 +197,9 @@ async def _agent_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
     parent_type = parent_config.get("agent_type") or ""
     if parent_type in delegate._NON_RECURSIVE_AGENT_TYPES and agent_type == parent_type:
         return _error(f"agent_type {parent_type!r} cannot start another of its own type.")
-    if background and parent.parent_id is not None:
-        # Its parent hears of its end once: work it left running would end after that.
+    if background and getattr(parent, "channel", None) == "delegation":
+        # A helper's parent hears of its end once: work it left running would end after that.
         return _error("a sub-agent cannot start agents in the background: start it in the foreground")
-    if background or agent_type in delegate._NON_RECURSIVE_AGENT_TYPES:
-        running = [
-            child for child in await _children(session_store, parent.id)
-            if child.status in ("active", "processing") and dispatch_of(child) is not None
-        ]
-        if background and sum(dispatch_of(c).get("mode") == "background" for c in running) >= MAX_RUNNING_IN_BACKGROUND:
-            return _error(
-                f"{MAX_RUNNING_IN_BACKGROUND} of your agents already run in the background: wait for their "
-                "reports, or stop one, before starting another",
-            )
-        if agent_type in delegate._NON_RECURSIVE_AGENT_TYPES and any(
-            (c.config or {}).get("agent_type") == agent_type for c in running
-        ):
-            return _error(f"an agent of type {agent_type!r} already runs: one at a time")
     child_depth = depth + 1
     # Below the depth limit an agent may start agents of its own.
     role = "orchestrator" if child_depth < delegate._MAX_DELEGATION_DEPTH else "leaf"
@@ -204,9 +217,13 @@ async def _agent_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
         "parent": str(parent.id),
     }
     started: list[UUID] = []
+    # This start, until its child is in the database: (mode, agent_type, a mark of its own).
+    start = ("background" if background else "foreground", agent_type, uuid4().hex)
 
     async def on_started(child: Any) -> str | None:
         started.append(child.id)
+        # In the database now: counted there from here on.
+        _forget_start(parent.id, start)
         if not background:
             return None
         return json.dumps({
@@ -235,11 +252,30 @@ async def _agent_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
                      "tool_call_id": tool_call_id},
         on_started=on_started,
     )
-    if background:
-        return await run
-    # The parent's turn gives its slots back while it waits, as delegate_task's does.
-    async with turn_waiting():
-        result = await run
+    # Checked and counted under one lock per parent: the calls of one response
+    # run at once, and none of their children is in the database yet.
+    lock = _START_LOCKS.setdefault(parent.id, asyncio.Lock())
+    async with lock:
+        running = await _running_agents(kwargs.get("session_factory"), parent.id) if kwargs.get("session_factory") else []
+        under_way = running + [(mode, kind) for mode, kind, _ in _STARTING.get(parent.id, [])]
+        if background and sum(mode == "background" for mode, _ in under_way) >= MAX_RUNNING_IN_BACKGROUND:
+            run.close()
+            return _error(
+                f"{MAX_RUNNING_IN_BACKGROUND} of your agents already run in the background: wait for their "
+                "reports, or stop one, before starting another",
+            )
+        if agent_type in delegate._NON_RECURSIVE_AGENT_TYPES and any(kind == agent_type for _, kind in under_way):
+            run.close()
+            return _error(f"an agent of type {agent_type!r} already runs: one at a time")
+        _STARTING.setdefault(parent.id, []).append(start)
+    try:
+        if background:
+            return await run
+        # The parent's turn gives its slots back while it waits, as delegate_task's does.
+        async with turn_waiting():
+            result = await run
+    finally:
+        _forget_start(parent.id, start)
     if started and not result.startswith('{"error"'):
         result += f"\n\n[agent_id: {started[0]}]"
     return result

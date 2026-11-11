@@ -81,6 +81,9 @@ def _with_stand_ins(names: set[str] | None, *, starting_work: bool = False) -> s
     from surogates.harness.subagents import STANDS_IN_FOR
 
     aliases = {alias for name in names for alias in STANDS_IN_FOR.get(name, ())}
+    if "agent" in names:
+        # ``delegate_task`` stays callable beside ``agent``: what binds one binds the other.
+        aliases.add("delegate_task")
     if starting_work:
         aliases &= {"agent", "monitor"}
     return set(names) | aliases

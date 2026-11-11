@@ -409,6 +409,9 @@ def gate_case_tools(tools: set[str], session: object) -> set[str]:
     scope = case_scope_of(session)
     if scope is not None and scope.tools is not None:
         named = set(scope.tools)
+        if "delegate_task" in named:
+            # ``agent`` takes its place with sub-agent parity on (``surogates.harness.subagents``).
+            named.add("agent")
         kept = {name for name in kept if name in named or name in ALWAYS_KEPT or platform(name)}
     if rerun_kind_of(session) is not None:
         kept -= RERUN_REFUSED

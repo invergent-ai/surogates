@@ -296,3 +296,25 @@ async def test_a_background_agent_that_ends_early_says_why_and_closes_its_run_in
     )
     [closed] = await chats.store.get_events(chat, types=[EventType.DELEGATION_COMPLETE])
     assert (closed.data["child_session_id"], closed.data["tool_call_id"]) == (str(child.id), "call_agent")
+
+
+async def test_the_parent_is_told_even_when_its_log_cannot_be_closed(chats, monkeypatch):  # noqa: F811
+    from surogates.harness.subagents import tell_parent
+    from surogates.tools.builtin import delegate
+
+    chat = await a_chat(chats, PARITY)
+    chats.replies = [
+        calling("agent", "call_agent", description="Count open items", prompt="Count them.", run_in_background=True),
+        _final_response("Started."),
+    ]
+    await chats.says(chat, "Count them.")
+    await chats.wake(chat)
+    [child] = await children(chats, chat)
+
+    async def broken(**_):
+        raise RuntimeError("storage is away")
+
+    monkeypatch.setattr(delegate, "_propagate_child_artifacts", broken)
+    await tell_parent(store=chats.store, redis=None, session=child, status="completed", result="12.")
+    [note] = await chats.store.get_events(chat, types=[EventType.AGENT_NOTIFICATION])
+    assert note.data["result"] == "12."

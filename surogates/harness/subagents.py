@@ -116,13 +116,24 @@ async def tell_parent(
     if dispatch.get("tool_call_id"):
         payload["tool_call_id"] = dispatch["tool_call_id"]
     try:
-        # The parent's log closes the agent's run as it closes a foreground one: what training and viewers join on.
+        # The parent's log closes the agent's run as it closes a foreground one: what training and viewers join
+        # on.  Before the notification, so the turn it gives reads past them; on their own, so a failure here
+        # never keeps the notification from going.
         if status in ("completed", "budget"):
             from surogates.tools.builtin.delegate import _propagate_child_artifacts
 
+            told = {
+                (e.data or {}).get("artifact_id")
+                for e in await store.get_events(session.parent_id, types=[EventType.ARTIFACT_CREATED])
+                if (e.data or {}).get("originating_session_id") == str(session.id)
+            }
             await _propagate_child_artifacts(
                 session_store=store, parent_session_id=session.parent_id, child_session_id=session.id,
-                child_events=await store.get_events(session.id, types=[EventType.ARTIFACT_CREATED]),
+                # Each once: an agent that runs again reports again, its earlier artifacts already up.
+                child_events=[
+                    e for e in await store.get_events(session.id, types=[EventType.ARTIFACT_CREATED])
+                    if (e.data or {}).get("artifact_id") not in told
+                ],
             )
             await store.emit_event(session.parent_id, EventType.DELEGATION_COMPLETE, {
                 "child_session_id": str(session.id), "goal": payload["summary"], "agent": True,
@@ -133,6 +144,9 @@ async def tell_parent(
                 "child_session_id": str(session.id), "goal": payload["summary"], "agent": True,
                 "reason": f"Child session failed: {error or 'unknown error'}", "tool_call_id": dispatch.get("tool_call_id"),
             })
+    except Exception:
+        logger.warning("Could not close the run of agent %s in its parent's log", session.id, exc_info=True)
+    try:
         await notify_parent_of_task_event(
             session_store=store, parent_session_id=session.parent_id,
             event_type=EventType.AGENT_NOTIFICATION, payload=payload, redis=redis,
