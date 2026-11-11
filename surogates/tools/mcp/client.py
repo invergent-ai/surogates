@@ -1505,13 +1505,14 @@ _make_get_prompt_handler = _make_utility_handler("get_prompt")
 def _normalize_mcp_input_schema(schema: dict | None) -> dict:
     """Normalize MCP input schemas for LLM tool-calling compatibility.
 
-    An object schema that declares no properties and says nothing of
-    others is a tool that takes no arguments: FastMCP / pydantic emit
-    ``{"type": "object", "properties": {}}`` for every such tool.  It is
-    closed (``additionalProperties: false``), which is what it means and
-    what the MCP proxy's security scan asks of a no-argument schema; one
-    that declares ``additionalProperties`` itself (``true``, or a schema)
-    keeps it, and is still flagged as permissive.
+    An object schema that declares no properties and nothing else that
+    shapes its arguments is a tool that takes no arguments: FastMCP /
+    pydantic emit ``{"type": "object", "properties": {}}`` for every such
+    tool.  It is closed (``additionalProperties: false``), which is what it
+    means and what the MCP proxy's security scan asks of a no-argument
+    schema.  A schema with any other keyword (``additionalProperties``,
+    ``patternProperties``, ``$ref`` / ``$defs``, ``anyOf`` / ``oneOf`` /
+    ``allOf``, ...) is left as it is, and the scan judges it as before.
     """
     if not schema:
         return _no_arguments()
@@ -1519,10 +1520,14 @@ def _normalize_mcp_input_schema(schema: dict | None) -> dict:
     if schema.get("type") == "object":
         if schema.get("properties") is None:
             schema = {**schema, "properties": {}}
-        if not schema["properties"] and "additionalProperties" not in schema:
+        if not schema["properties"] and set(schema) <= _NO_ARGUMENT_KEYS:
             schema = {**schema, "additionalProperties": False}
 
     return schema
+
+
+#: The keywords a no-argument object schema may carry and still be closed.
+_NO_ARGUMENT_KEYS = frozenset({"type", "properties", "required", "title", "description", "$schema"})
 
 
 def _no_arguments() -> dict:
