@@ -32,8 +32,11 @@ from surogates.harness.subagents import (
     DISPATCH_KEY,
     PARITY_KEY,
     budget_for_children,
+    budget_left,
+    budget_of,
     dispatch_of,
     may_message,
+    over_budget,
 )
 from surogates.runtime.turn_slots import turn_waiting
 from surogates.tools.registry import ToolRegistry, ToolSchema
@@ -578,6 +581,9 @@ async def _why_not_resume(session_store: Any, sender: Any, target: Any, session_
     """
     from surogates.workstreams import is_project_thread
 
+    if budget_of(target) and await over_budget(session_store, target) is not None:
+        # Resumed, it would stop at its first step, and its parent be told again.
+        return "it used its token budget"
     if target.id == sender.parent_id:
         return None if target.status == "completed" else f"it is {target.status}: its user resumes it"
     if target.parent_id != sender.id:
@@ -694,6 +700,13 @@ async def _agent_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
     if background and getattr(parent, "channel", None) == "delegation":
         # A helper's parent hears of its end once: work it left running would end after that.
         return _error("a sub-agent cannot start agents in the background: start it in the foreground")
+    # Its token budget: the deployment's, or its parent's key; a sub-agent's own agents get at most what it has left.
+    child_tokens = budget_for_children(parent_config)
+    left = await budget_left(session_store, parent)
+    if left is not None:
+        if left <= 0:
+            return _error("your token budget is used up: finish with what you have")
+        child_tokens = min(child_tokens, left) if child_tokens else left
     child_depth = depth + 1
     # Below the depth limit an agent may start agents of its own.
     role = "orchestrator" if child_depth < delegate._MAX_DELEGATION_DEPTH else "leaf"
@@ -742,7 +755,7 @@ async def _agent_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
         leaf_tools=("delegate_task", "agent"),
         extra_config={
             PARITY_KEY: True, DISPATCH_KEY: dispatch,
-            **({AGENT_BUDGET_KEY: {"tokens": budget}} if (budget := budget_for_children(parent_config)) else {}),
+            **({AGENT_BUDGET_KEY: {"tokens": child_tokens}} if child_tokens else {}),
         },
         seed=seed,
         start_extra={"agent": True, "description": description, "mode": dispatch["mode"], "fork": fork,

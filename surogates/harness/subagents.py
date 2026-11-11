@@ -29,8 +29,9 @@ DISPATCH_KEY = "agent_dispatch"
 BUDGET_KEY = "agent_token_budget"
 #: A sub-agent's config key: its own budget, ``{"tokens": N}``.
 AGENT_BUDGET_KEY = "agent_budget"
-#: The reason a turn ends with when its agent used its budget.
-BUDGET_REASON = "budget_exhausted"
+#: The reason a turn ends with when its agent used its token budget: distinct from the iteration cap's
+#: ``budget_exhausted``, which says nothing of tokens.
+BUDGET_REASON = "token_budget_exhausted"
 
 #: The config keys of the family only the server writes: a client naming one could switch the family on
 #: against the deployment's setting, pose as another agent's sub-agent, or lift its own depth or budget.
@@ -135,9 +136,16 @@ async def over_budget(store: Any, session: Any) -> int | None:
     budget = budget_of(session)
     if not budget:
         return None
-    usage = await store.session_tree_usage(session.id)
-    used = usage.input_tokens + usage.output_tokens
+    used = await store.session_tree_tokens(session.id)
     return used if used >= budget else None
+
+
+async def budget_left(store: Any, session: Any) -> int | None:
+    """The tokens *session*, a sub-agent with a budget, may still use, its agents included; None for no budget."""
+    budget = budget_of(session)
+    if not budget:
+        return None
+    return max(budget - await store.session_tree_tokens(session.id), 0)
 
 
 def dispatch_of(session: Any) -> dict | None:

@@ -643,7 +643,9 @@ async def _run_single_delegation(
             if unkept := not_handed_back(done, copy="this copy"):
                 # Its hand-back failed: none of its work is in the thread's copy.
                 result_text += f"\n\n{unkept}"
-            if done.get("reason") == "budget_exhausted":
+            from surogates.harness.subagents import BUDGET_REASON
+
+            if done.get("reason") == BUDGET_REASON:
                 # An agent of the ``agent`` tool with a token budget used it up: its words are what it had so far.
                 result_text += "\n\n[It stopped before it finished: it used its token budget.]"
             result = _format_result_with_trace_summary(result_text, trace, file_changes)

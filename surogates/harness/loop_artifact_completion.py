@@ -1420,14 +1420,15 @@ class ArtifactCompletionMixin:
         if notify_parent and _should_notify_parent_on_completion(session) and runs_in_background(session):
             # A sub-agent its parent started in the background: its parent hears of its end as a notification.
             from surogates.harness.message_utils import extract_final_response
-            from surogates.harness.subagents import tell_parent
+            from surogates.harness.subagents import BUDGET_REASON, budget_of, tell_parent
 
-            from surogates.harness.subagents import BUDGET_REASON
-
+            events = await self._store.get_events(session.id)
+            # This run's words only: a run of an agent resumed after its first report starts past that report's end.
+            ends = [i for i, event in enumerate(events) if event.type == EventType.SESSION_COMPLETE.value]
             await tell_parent(
                 store=self._store, redis=self._redis, session=session, reason=reason,
-                status="budget" if reason == BUDGET_REASON else "completed",
-                result=extract_final_response(await self._store.get_events(session.id), fallback=""),
+                status="budget" if reason == BUDGET_REASON and budget_of(session) else "completed",
+                result=extract_final_response(events[ends[-2] + 1:] if len(ends) >= 2 else events, fallback=""),
             )
         elif notify_parent and _should_notify_parent_on_completion(session):
             from surogates.harness.worker_notify import is_delegated, notify_parent_on_completion
