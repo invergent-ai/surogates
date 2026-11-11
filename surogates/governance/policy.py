@@ -406,14 +406,23 @@ class GovernanceGate:
                 continue
 
             # For relative paths, resolve against workspace root so the
-            # sandbox check uses the correct absolute path.
+            # sandbox check uses the correct absolute path.  ``/workspace``,
+            # where every sandbox mounts the session's files, is the
+            # workspace root too (a host folder with local storage), as the
+            # file tools read it (``in_workspace_terms``).
             import os
-            expanded = os.path.expanduser(raw_path)
+            from surogates.tools.utils.workspace_sandbox import in_workspace_terms
+
+            expanded = in_workspace_terms(workspace_path, os.path.expanduser(raw_path))
             if not os.path.isabs(expanded):
                 expanded = os.path.join(workspace_path, expanded)
 
             mode = "w" if tool_name in ("write_file", "patch") else "r"
-            if not sandbox.check_file_access(expanded, mode):
+            try:
+                allowed = sandbox.check_file_access(expanded, mode)
+            except RuntimeError:  # a symlink loop (Path.resolve on Python 3.12)
+                allowed = False
+            if not allowed:
                 return (
                     f"Workspace sandbox violation: '{raw_path}' resolves "
                     f"outside the session workspace. All file operations "

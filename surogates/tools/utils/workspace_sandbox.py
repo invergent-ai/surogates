@@ -27,6 +27,7 @@ or absolute paths (``/etc/shadow``) must be stopped at the tool layer.
 from __future__ import annotations
 
 import os
+import posixpath
 from pathlib import Path
 
 
@@ -53,6 +54,37 @@ def refuse_nul(*texts: str | None) -> None:
     """Raise ValueError(NUL_REFUSED) when one of *texts* holds a NUL."""
     if holds_nul(*texts):
         raise ValueError(NUL_REFUSED)
+
+
+#: The path the model, the task texts and every sandbox know the workspace
+#: by: each sandbox mounts the session's files there.  With S3 storage the
+#: session's ``workspace_path`` is this path; with local storage it is a
+#: folder on the worker's host, which the Docker sandbox mounts here.
+WORKSPACE_MOUNT = "/workspace"
+
+
+def in_workspace_terms(workspace_root: str | Path, path: str) -> str:
+    """*path*, with a leading :data:`WORKSPACE_MOUNT` read as *workspace_root*.
+
+    Only a path that is ``/workspace`` or below it once its ``..`` are
+    collapsed is read so, as inside a sandbox: "/workspace2" and
+    "/workspace/../x" are left as written.  The text after ``/workspace``
+    is kept as written, so the containment check that follows resolves its
+    symlinks and ``..`` for real, as in any other path.  Where the workspace
+    is ``/workspace`` (S3), or holds the path already, nothing changes; with
+    no workspace, neither.
+    """
+    root = str(workspace_root).rstrip("/")
+    if not root:
+        return path
+    if path == root or path.startswith(root + "/"):
+        return path  # the workspace's own path (a host folder under /workspace, or /workspace)
+    if not (path == WORKSPACE_MOUNT or path.startswith(WORKSPACE_MOUNT + "/")):
+        return path
+    collapsed = posixpath.normpath(path)
+    if not (collapsed == WORKSPACE_MOUNT or collapsed.startswith(WORKSPACE_MOUNT + "/")):
+        return path
+    return root + path[len(WORKSPACE_MOUNT):]
 
 
 def validate_workspace_root(workspace_path: str | None) -> Path:
@@ -84,16 +116,17 @@ def resolve_in_workspace(
     The path is resolved in this order:
 
     1. ``~`` expansion (``expanduser``).
-    2. If relative, joined to *workspace_root*.
-    3. Symlink resolution (``resolve()``).
-    4. Containment check (``is_relative_to``).
+    2. ``/workspace/...`` read as the workspace (:func:`in_workspace_terms`).
+    3. If relative, joined to *workspace_root*.
+    4. Symlink resolution (``resolve()``).
+    5. Containment check (``is_relative_to``).
 
     Returns the resolved absolute path.
 
     Raises :class:`WorkspaceSandboxError` if the resolved path escapes
     the workspace root.
     """
-    expanded = os.path.expanduser(user_path)
+    expanded = in_workspace_terms(workspace_root, os.path.expanduser(user_path))
     candidate = Path(expanded)
 
     # Relative paths are resolved against workspace root, not CWD.
