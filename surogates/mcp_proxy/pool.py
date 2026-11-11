@@ -208,17 +208,11 @@ class ConnectionPool:
         return entry.tool_schemas
 
     def visible_schemas(
-        self, org_id: UUID, user_id: UUID, agent_id: str,
-        schemas: list[dict[str, Any]], *, utility_tools: str = "offered",
+        self, org_id: UUID, user_id: UUID, agent_id: str, schemas: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
-        """*schemas* as a session sees them.
-
-        ``utility_tools="offered"`` (the default) leaves out the resource /
-        prompt tools of servers that have no resources / prompts;
-        ``"all"`` keeps them for every server, as releases before did.
-        """
+        """*schemas* without the resource / prompt tools of servers that have no resources / prompts."""
         entry = self._entries.get((org_id, user_id, agent_id))
-        if entry is None or utility_tools == "all" or not entry.utility_index:
+        if entry is None or not entry.utility_index:
             return schemas
         # Read from the live connections: a reconnect reads a server's offers anew.
         with _lock:
@@ -307,9 +301,9 @@ class ConnectionPool:
                 return entry.tool_schemas
 
             # Prefix each server name for tenant isolation.  The resource /
-            # prompt utility tools are registered for every server here, and
-            # those a server does not offer are marked, so each session can
-            # be shown what it asks for (``visible_schemas``).
+            # prompt utility tools are registered for every server here; a
+            # list leaves out those whose server offers nothing of that kind,
+            # read from the live connection (``visible_schemas``).
             prefixed: dict[str, dict[str, Any]] = {}
             original_names: list[str] = []
             for name, cfg in configs.items():

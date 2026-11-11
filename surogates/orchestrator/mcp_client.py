@@ -30,13 +30,6 @@ COMPOSIO_TOOL_ROUTER_PREFIXES: tuple[str, ...] = (
 )
 
 
-def utility_tools_mode(config: dict | None) -> str:
-    """What a session asks the proxy for of the MCP resource / prompt tools:
-    ``all`` (every server's, as before; config ``mcp_utility_tools: all``) or
-    ``offered`` (those of servers that have resources / prompts, the default)."""
-    return "all" if (config or {}).get("mcp_utility_tools") == "all" else "offered"
-
-
 def is_composio_router_name(name: str) -> bool:
     """True if *name* is an MCP tool advertised by the Composio tool-router."""
     return name.startswith(COMPOSIO_TOOL_ROUTER_PREFIXES)
@@ -76,12 +69,8 @@ class McpProxyClient:
         agent_id: str,
         is_service_account: bool = False,
         cache_ttl: float = 0,
-        utility_tools: str = "offered",
     ) -> list[str]:
         """Discover *agent_id*'s MCP tools via the proxy and register them.
-
-        ``utility_tools`` is ``offered`` (a server's resource / prompt tools
-        only when it has resources / prompts) or ``all`` (for every server).
 
         Returns the FULL set of MCP tool names available to *agent_id*
         (not just names registered on this call), so the caller can
@@ -109,13 +98,10 @@ class McpProxyClient:
         headers = {"Authorization": f"Bearer {token}"}
         known = self._discovered_by_agent.setdefault(agent_id, set())
 
-        params = {"agent_id": agent_id}
-        if utility_tools != "offered":
-            params["utility_tools"] = utility_tools
         resp = await self._client.post(
             "/mcp/v1/tools/list",
             headers=headers,
-            params=params,
+            params={"agent_id": agent_id},
         )
         if resp.status_code != 200:
             logger.warning(

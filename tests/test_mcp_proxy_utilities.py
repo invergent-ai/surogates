@@ -1,6 +1,6 @@
 """The MCP proxy: a server's resource / prompt tools are listed only when it has resources /
-prompts (unless a session asks for all), named by the server's own name, and called as the MCP
-methods they stand for (resources/read, prompts/get), never as tools/call."""
+prompts, named by the server's own name, and called as the MCP methods they stand for
+(resources/read, prompts/get), never as tools/call."""
 
 from __future__ import annotations
 
@@ -9,18 +9,21 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from uuid import uuid4
 
-import httpx
 import pytest
 
 from surogates.mcp_proxy import pool as pool_module
 from surogates.mcp_proxy import routes as routes_module
 from surogates.mcp_proxy.pool import ConnectionPool
-from surogates.orchestrator.mcp_client import McpProxyClient, utility_tools_mode
 from surogates.tools.mcp import client as mcp_client
 from surogates.tools.mcp.client import MCPServerTask
-from surogates.tools.registry import ToolRegistry
 
 pytestmark = pytest.mark.asyncio
+
+
+class Answered(Exception):
+    """As mcp's McpError: the server answered the call with an error."""
+
+    error = SimpleNamespace(code=-32002, message="Resource not found")
 
 
 class Session:
@@ -105,14 +108,6 @@ async def test_a_session_sees_the_resource_tools_only_of_a_server_that_has_resou
     }
 
 
-async def test_a_session_that_asks_for_all_sees_them_for_every_server_as_before(connected):
-    pool = ConnectionPool()
-    tenant, schemas = await _connect(pool)
-    seen = {s["name"] for s in pool.visible_schemas(*tenant, schemas, utility_tools="all")}
-    for server in SERVERS:
-        assert {f"mcp__{server}__{u}" for u in ("list_resources", "read_resource", "list_prompts", "get_prompt")} <= seen
-
-
 async def test_descriptions_name_the_server_not_its_tenant_key(connected):
     pool = ConnectionPool()
     (org, user, agent), schemas = await _connect(pool)
@@ -174,7 +169,7 @@ async def test_a_stdio_servers_prompt_is_got_with_prompts_get_in_its_call_sandbo
 async def test_a_stdio_servers_error_answer_is_the_tools_error_not_a_transport_failure(monkeypatch):
     class Unknown(Session):
         async def read_resource(self, uri):
-            raise RuntimeError("Unknown resource: ws_rules.md")
+            raise Answered("Unknown resource: ws_rules.md")
 
     class Sandbox:
         def __init__(self, **kwargs):
@@ -194,22 +189,24 @@ async def test_a_stdio_servers_error_answer_is_the_tools_error_not_a_transport_f
     assert outcome == "tool_error" and "Unknown resource" in json.loads(text)["error"]
 
 
-@pytest.mark.parametrize("config, mode", [(None, "offered"), ({}, "offered"), ({"mcp_utility_tools": "all"}, "all"),
-                                          ({"mcp_utility_tools": "everything"}, "offered")])
-def test_a_sessions_config_picks_the_mode(config, mode):
-    assert utility_tools_mode(config) == mode
+async def test_a_stdio_server_that_dies_in_a_utility_call_is_a_transport_failure(monkeypatch):
+    class Dies(Session):
+        async def read_resource(self, uri):
+            raise RuntimeError("stream closed")
 
+    class Sandbox:
+        def __init__(self, **kwargs):
+            pass
 
-@pytest.mark.parametrize("mode, sent", [("offered", None), ("all", "all")])
-async def test_the_worker_asks_the_proxy_for_what_its_session_wants(monkeypatch, mode, sent):
-    monkeypatch.setenv("SUROGATES_JWT_SECRET", "test-secret-for-sandbox-tokens-32b")
-    asked: list = []
+        @asynccontextmanager
+        async def mcp_session(self):
+            yield Dies()
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        asked.append(request.url.params.get("utility_tools"))
-        return httpx.Response(200, json={"tools": []})
-
-    client = McpProxyClient("http://proxy", ToolRegistry())
-    client._client = httpx.AsyncClient(base_url="http://proxy", transport=httpx.MockTransport(handler))
-    await client.discover_and_register(uuid4(), uuid4(), uuid4(), agent_id="a", utility_tools=mode)
-    assert asked == [sent]
+    monkeypatch.setattr(routes_module, "MCPCallSandbox", Sandbox)
+    _, outcome = await routes_module._execute_call(
+        pool=SimpleNamespace(utility_of=lambda *args: "read_resource"), org_id=uuid4(), user_id=uuid4(),
+        agent_id="a", server_config={"transport": "stdio", "command": "srv"},
+        clean_tool_name="mcp__docs__read_resource", original_tool="read_resource",
+        arguments={"uri": "x"}, meta=None,
+    )
+    assert outcome == "transport_error"

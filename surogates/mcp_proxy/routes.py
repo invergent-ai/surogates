@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from typing import Any, Literal
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
@@ -154,13 +154,11 @@ async def list_tools(
     request: Request,
     auth: ProxyAuthContext = Depends(get_proxy_auth),
     ctx: AgentRuntimeContext = Depends(agent_runtime_context_dep),
-    utility_tools: Literal["offered", "all"] = "offered",
 ) -> ToolListResponse:
     """Discover the MCP tools available to the requesting agent.
 
-    A server's resource / prompt tools are listed when it has resources /
-    prompts (``utility_tools=offered``, the default), or for every server
-    (``all``, as before: a session's ``mcp_utility_tools`` asks for it).
+    A server's resource / prompt tools are listed only when it has
+    resources / prompts (:meth:`ConnectionPool.visible_schemas`).
     """
     _bind_agent(auth, ctx)
     pool: ConnectionPool = request.app.state.pool
@@ -169,9 +167,7 @@ async def list_tools(
         agent_id=ctx.agent_id,
         allowed_ids=frozenset(ctx.mcp_server_ids),
     )
-    schemas = pool.visible_schemas(
-        auth.org_id, auth.user_id, ctx.agent_id, schemas, utility_tools=utility_tools,
-    )
+    schemas = pool.visible_schemas(auth.org_id, auth.user_id, ctx.agent_id, schemas)
 
     return ToolListResponse(
         tools=[
@@ -301,6 +297,8 @@ async def call_tool(
 _OUTCOME_SUCCESS = "success"
 _OUTCOME_TOOL_ERROR = "tool_error"  # tool ran, returned isError=True
 _OUTCOME_TRANSPORT_ERROR = "transport_error"  # never reached the tool
+# mcp's code for a session whose stream closed under a call: not the server's answer.
+_CONNECTION_CLOSED = -32000
 
 
 async def _execute_call(
@@ -381,13 +379,15 @@ async def _execute_call(
                 # A resource / prompt utility runs as its MCP method
                 # (resources/read, prompts/get, ...), not as tools/call.
                 # The server answering with an error (an unknown URI) is the
-                # tool's error, not a transport failure.
+                # tool's error; a server that went away is a transport failure.
                 try:
                     text = await call_utility(session, utility, arguments)
-                except Exception as exc:  # noqa: BLE001 — answered as the tool's error
+                except Exception as exc:  # noqa: BLE001 — translated to client error
+                    answered = getattr(getattr(exc, "error", None), "code", None)
                     return (
                         json.dumps({"error": _sanitize_error(f"MCP call failed: {type(exc).__name__}: {exc}")}),
-                        _OUTCOME_TOOL_ERROR,
+                        _OUTCOME_TOOL_ERROR if answered is not None and answered != _CONNECTION_CLOSED
+                        else _OUTCOME_TRANSPORT_ERROR,
                     )
                 return text, (_OUTCOME_TOOL_ERROR if _looks_like_error_envelope(text) else _OUTCOME_SUCCESS)
             # The stdio MCP server only knows its own tools by their
