@@ -264,8 +264,8 @@ class _Shared:
 
     def __init__(self, redis: Any, me: str) -> None:
         self.redis, self.me = redis, me
-        #: When this process first found each other watch's heartbeat missing (``presumed_dead``).
-        self._missing_since: dict[str, float] = {}
+        #: For each other watch whose heartbeat this process found missing: since when, and when it last looked.
+        self._missing_since: dict[str, tuple[float, float]] = {}
 
     def key(self, *parts: Any) -> str:
         return ":".join([SHARED_PREFIX, *(str(p) for p in parts)])
@@ -340,7 +340,14 @@ class _Shared:
         if await self.redis.exists(self.key("alive", watch)):
             self._missing_since.pop(watch, None)
             return False
-        return now - self._missing_since.setdefault(watch, now) >= ALIVE_SECONDS
+        since, looked = self._missing_since.get(watch, (now, now))
+        if now - looked > ALIVE_SECONDS:
+            since = now  # not looked at for a while: it may have beaten meanwhile, and the lapse starts again
+        self._missing_since[watch] = (since, now)
+        # Forget long-dead watches: one entry per worker that ever died would otherwise stay for good.
+        for old in [w for w, (_, at) in self._missing_since.items() if now - at > 3600]:
+            self._missing_since.pop(old, None)
+        return now - since >= ALIVE_SECONDS
 
     async def ask_stop(self, watch: str, session_id: Any, proc_id: str) -> None:
         if self.redis is not None:
@@ -457,7 +464,7 @@ class BackgroundWatch:
     async def stop_elsewhere(self, proc_id: str, session_id: UUID) -> str | None:
         """Ask the watch of another worker that reads command *proc_id*, one session *session_id* started, to kill
         it: ``stopping``, its end then reaching the session as a notification; ``gone`` when that worker is gone;
-        None when no other worker watches such a command."""
+        ``unknown`` when Redis did not answer; None when no other worker watches such a command."""
         try:
             entry = await self._shared.entry(f"{session_id}:{proc_id}") if self.configured else None
             if entry is None or entry.get("watch") == self.id:
@@ -467,7 +474,7 @@ class BackgroundWatch:
             await self._shared.ask_stop(str(entry.get("watch")), session_id, proc_id)
         except Exception:
             logger.warning("Could not ask another worker to stop %s", proc_id, exc_info=True)
-            return None
+            return "unknown"
         return "stopping"
 
     async def stop_session_elsewhere(self, session_id: UUID) -> None:

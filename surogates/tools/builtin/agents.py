@@ -479,6 +479,8 @@ async def _stop_process(proc_id: str, **kwargs: Any) -> str:
         if elsewhere == "stopping":
             return json.dumps({"status": "stopping", "agent_id": proc_id,
                                "note": "It is being stopped. Its end reaches you as a notification."})
+        if elsewhere == "unknown":
+            return _error(f"background command {proc_id} could not be looked up just now: try again")
         if elsewhere == "gone":
             return _error(f"background command {proc_id} can no longer be stopped: it may have ended, or may still be running")
         return _error(f"no background command {proc_id} that you started and that still runs")

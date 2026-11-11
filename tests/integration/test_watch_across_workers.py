@@ -75,20 +75,13 @@ class Worker:
                 "session_factory": self.api.app.state.session_factory}
 
 
-async def forget_shared_state(redis) -> None:
-    """Drop what earlier tests' watches left in the shared keys: a sweep here reads only this test's."""
-    async for key in redis.scan_iter(match=f"{watch_module.SHARED_PREFIX}:*"):
-        await redis.delete(key)
-
-
 @pytest_asyncio.fixture(loop_scope="session")
 async def two_workers(api, daemon_registry, tmp_path, monkeypatch):  # noqa: F811
-    await forget_shared_state(api.app.state.redis)
+    # Other tests' commands may sit in the shared keys too: each assertion here reads only this test's sessions.
     first, second = Worker(api, tmp_path, "a"), Worker(api, tmp_path, "b")
     yield first, second
     await first.watch.close()
     await second.watch.close()
-    await forget_shared_state(api.app.state.redis)
 
 
 async def crashes(worker: Worker) -> None:
@@ -144,10 +137,10 @@ async def test_a_worker_is_presumed_gone_only_once_its_heartbeat_has_lapsed_long
     await asyncio.sleep(0.15)  # it beats again at its next poll
     assert await second.watch.worker_alive(first.watch.id)
     await crashes(first)
-    await asyncio.sleep(0.4)
+    await asyncio.sleep(0.6)
     # Its heartbeat has lapsed: from the first look that finds it missing, the lapse must last a while more.
     assert await second.watch.worker_alive(first.watch.id)
-    await asyncio.sleep(0.4)
+    await asyncio.sleep(0.6)
     assert not await second.watch.worker_alive(first.watch.id)
     assert await second.watch.worker_alive(second.watch.id)
 
@@ -254,9 +247,9 @@ async def test_the_docker_sweep_of_a_session_spares_a_live_worker_and_takes_a_cr
     await backend.destroy_for_session(str(chat))
     assert "parents" in docker._containers
     await crashes(first)
-    await asyncio.sleep(0.4)
+    await asyncio.sleep(0.6)
     await backend.destroy_for_session(str(chat))  # the first look starts the lapse
-    await asyncio.sleep(0.4)
+    await asyncio.sleep(0.6)
     await backend.destroy_for_session(str(chat))
     assert "parents" not in docker._containers
     await backend.aclose()
