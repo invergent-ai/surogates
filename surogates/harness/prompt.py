@@ -197,6 +197,20 @@ class PromptBuilder:
     # Public API
     # ------------------------------------------------------------------
 
+    def restrict_tools(self, offered: set[str] | frozenset[str]) -> None:
+        """Gate the tool-aware guidance on *offered* too: the tools the
+        session's schemas offer (``AgentHarness._tool_filter_for_session``).
+
+        The worker builds this builder from the registry's tools less what
+        it knows to drop, but a session's own ``excluded_tools`` and
+        ``allowed_tools`` are applied to the schemas only; without this the
+        prompt told the model how to use tools it could not call (the web
+        research guidance with every web tool excluded).  Only narrows:
+        ``has_whiteboard``, read for the schemas themselves, keeps the
+        worker's answer.
+        """
+        self._available_tools = self._available_tools & set(offered)
+
     def build(self) -> str:
         """Assemble the full system prompt.
 

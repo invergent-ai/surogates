@@ -1065,6 +1065,17 @@ class ContextReplayMixin:
 
     async def _build_system_prompt(self, session: Session) -> str:
         """Delegate to PromptBuilder, with per-session caching."""
+        # The tool guidance follows the tools the schemas offer this session
+        # (its excluded_tools / allowed_tools included), not the wider set
+        # the worker started the builder from; so does every later
+        # ``build()`` of this wake, such as the compaction measure.
+        # ``getattr``: some test harnesses skip ``__init__`` or stand in a
+        # prompt builder of their own.
+        restrict = getattr(self._prompt, "restrict_tools", None)
+        if restrict is not None and getattr(self, "_tools", None) is not None:
+            offered = self._tool_filter_for_session(session)
+            if offered is not None:
+                restrict(offered)
         cached = self._system_prompt_cache.get(session.id)
         if cached is not None:
             return cached
