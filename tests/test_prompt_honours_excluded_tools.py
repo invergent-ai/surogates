@@ -218,3 +218,8 @@ def test_a_coordinator_keeps_its_knowledge_base_roster():
                             available_tools={"kb_list_pages", "kb_read_page", "kb_search_pages", "spawn_task"})
     builder.restrict_tools({"spawn_task"})
     assert "kb-1" in builder._kb_section()
+    named = _chat({"coordinator": True, "strict_coordinator": True, "excluded_tools": ["terminal"]})
+    builder = PromptBuilder(_tenant(named), session=named, available_kbs=kbs,
+                            available_tools={"kb_list_pages", "kb_read_page", "kb_search_pages", "spawn_task"})
+    builder.restrict_tools({"spawn_task"})
+    assert builder._kb_section() == ""  # it names its tools: narrowed as under #632

@@ -990,9 +990,14 @@ class PromptBuilder:
         worker) so the agent can see what each KB covers instead of
         guessing from the name alone.
         """
-        # A coordinator keeps the roster without the KB tools: it names the
-        # knowledge base when it hands work to a worker that has them.
-        coordinator = bool(self._session is not None and (self._session.config or {}).get("coordinator"))
+        # A coordinator that names no tools of its own keeps the roster
+        # without the KB tools, as before: it names the knowledge base when
+        # it hands work to a worker that has them.  One whose config names
+        # its tools is narrowed like any session that does.
+        config = (self._session.config or {}) if self._session is not None else {}
+        coordinator = bool(
+            config.get("coordinator") and not (config.get("excluded_tools") or config.get("allowed_tools"))
+        )
         if not self._available_kbs or (
             not coordinator and self._restricted_away("kb_list_pages", "kb_read_page", "kb_search_pages")
         ):
