@@ -1155,6 +1155,25 @@ class SessionStore:
                 raise RerunRunning(f"a session of the tree of {session_id} is mid-turn")
             return await delete_session_rows(db, tree)
 
+    async def session_tree_tokens(self, session_id: UUID) -> int:
+        """The input and output tokens the session and every session under it used, from the rows' counters
+        alone: a sub-agent's budget (``harness.subagents``) reads it at each step."""
+        async with self._sf() as db:
+            used = (await db.execute(
+                text(
+                    """
+                    WITH RECURSIVE tree(id) AS (
+                        SELECT id FROM sessions WHERE id = :id
+                        UNION
+                        SELECT s.id FROM sessions s JOIN tree t ON s.parent_id = t.id
+                    )
+                    SELECT COALESCE(SUM(input_tokens + output_tokens), 0) FROM sessions WHERE id IN (SELECT id FROM tree)
+                    """
+                ),
+                {"id": session_id},
+            )).scalar_one()
+        return int(used)
+
     async def session_tree_usage(self, session_id: UUID) -> TreeUsage:
         """What the session and every session under it by ``parent_id`` used, at any depth.
 

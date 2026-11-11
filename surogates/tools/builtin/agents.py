@@ -27,7 +27,17 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from surogates.harness.agent_news import fenced
-from surogates.harness.subagents import DISPATCH_KEY, PARITY_KEY, dispatch_of, may_message
+from surogates.harness.subagents import (
+    AGENT_BUDGET_KEY,
+    DISPATCH_KEY,
+    PARITY_KEY,
+    budget_for_children,
+    budget_left,
+    budget_of,
+    dispatch_of,
+    may_message,
+    over_budget,
+)
 from surogates.runtime.turn_slots import turn_waiting
 from surogates.tools.registry import ToolRegistry, ToolSchema
 
@@ -135,10 +145,322 @@ _SEND_MESSAGE_SCHEMA = ToolSchema(
 )
 
 
+_LIST_AGENTS_SCHEMA = ToolSchema(
+    name="list_agents",
+    description=(
+        "List the agents you can reach: the ones you started (and theirs), the agent that started you, and the "
+        "other agents it started, each with its agent_id, task and status (running, completed, failed, stopped); "
+        "and the background commands you started that still run."
+    ),
+    parameters={"type": "object", "properties": {}, "additionalProperties": False},
+)
+
+_STOP_AGENT_SCHEMA = ToolSchema(
+    name="stop_agent",
+    description=(
+        "Stop an agent you started (with the agents it started), or a background command you started, by its id. "
+        "A stopped agent keeps its context: send_message resumes it."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "agent_id": {"type": "string", "description": "The agent_id of the agent, or the id of the background command."},
+            "reason": {"type": "string", "description": "Why it is stopped (optional)."},
+        },
+        "required": ["agent_id"],
+        "additionalProperties": False,
+    },
+)
+
+
+_MONITOR_SCHEMA = ToolSchema(
+    name="monitor",
+    description=(
+        "Watch a long-running command instead of polling it: the command runs in the background in your "
+        "workspace, and each new line it prints reaches you as a notification (lines that come together "
+        "arrive together, at most max_notifications_per_minute a minute). Use it to wait for an event: a "
+        "log line (e.g. `tail -f app.log | grep --line-buffered ERROR`), a file appearing, a server "
+        "answering (a loop that prints once the condition holds and exits). Print only what you want to "
+        "hear about. It ends when the command exits, when timeout_seconds pass, or with stop_agent on its "
+        "monitor_id. For a command that just runs to its end, use terminal."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "command": {"type": "string", "description": "The shell command to watch; each line it prints is a notification."},
+            "description": {"type": "string", "description": "What it waits for (3-5 words), shown with each notification."},
+            "timeout_seconds": {
+                "type": "integer", "minimum": 10, "maximum": 3600,
+                "description": "Stop watching (and kill the command) after this many seconds; default 600.",
+            },
+            "max_notifications_per_minute": {
+                "type": "integer", "minimum": 1, "maximum": 30,
+                "description": "The most notifications a minute; lines beyond wait for the next one. Default 6.",
+            },
+        },
+        "required": ["command", "description"],
+        "additionalProperties": False,
+    },
+)
+
+
 def register(registry: ToolRegistry) -> None:
     """Register the ``agent`` tool family."""
     registry.register(name="agent", schema=_AGENT_SCHEMA, handler=_agent_handler, toolset="core")
     registry.register(name="send_message", schema=_SEND_MESSAGE_SCHEMA, handler=_send_message_handler, toolset="core")
+    registry.register(name="list_agents", schema=_LIST_AGENTS_SCHEMA, handler=_list_agents_handler, toolset="core")
+    registry.register(name="stop_agent", schema=_STOP_AGENT_SCHEMA, handler=_stop_agent_handler, toolset="core")
+    registry.register(name="monitor", schema=_MONITOR_SCHEMA, handler=_monitor_handler, toolset="core")
+
+
+def _bounded(value: Any, default: int, low: int, high: int) -> int:
+    try:
+        number = int(value) if value is not None else default
+    except (TypeError, ValueError):
+        number = default
+    return max(low, min(high, number))
+
+
+async def _monitor_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
+    """Start *command* where the session's commands run, with its lines kept, and hand it to the worker's watch."""
+    from surogates.devices.binding import device_of
+    from surogates.harness.background_watch import HERE, MAX_MONITORS_PER_SESSION, background_watch, monitor_task
+    from surogates.harness.subagents import monitor_allowed
+    from surogates.sandbox.pool import SandboxPool, sandbox_session_key
+
+    session_store = kwargs.get("session_store")
+    me_id = kwargs.get("session_id")
+    if session_store is None or me_id is None:
+        return _error("monitor needs its session; none was given")
+    command = str(arguments.get("command") or "").strip()
+    if not command:
+        return _error("command is required")
+    description = " ".join(str(arguments.get("description") or "").split())[:80] or command[:60]
+    timeout = _bounded(arguments.get("timeout_seconds"), 600, 10, 3600)
+    cap = _bounded(arguments.get("max_notifications_per_minute"), 6, 1, 30)
+    me = await session_store.get_session(UUID(str(me_id)))
+    if device_of(me.config) is not None:
+        return _error("monitor runs in a cloud sandbox only; on your computer, use terminal with background=true")
+    if me.parent_id is not None or not monitor_allowed(me.config):
+        # A sub-agent's work ends with its report, and a thread's sandbox with its turn: neither outlives a monitor.
+        return _error("monitor is for the main session; here, use terminal and wait for the command")
+    if not background_watch.configured:
+        return _error("this worker cannot watch commands")
+    sandbox_pool = kwargs.get("sandbox_pool")
+    if isinstance(sandbox_pool, SandboxPool):
+        from surogates.harness.tool_exec import _build_session_sandbox_spec
+
+        owner = sandbox_session_key(me)
+        holds_copy = getattr(sandbox_pool, "holds_copy", None)
+        if holds_copy is not None and holds_copy(owner):
+            return _error("monitor is for the main session; here, use terminal and wait for the command")
+        spec = await _build_session_sandbox_spec(me, kwargs.get("tenant"), owner, credential_vault=kwargs.get("credential_vault"))
+        await sandbox_pool.ensure(owner, spec)
+        try:
+            # Counted where the commands run, the sandbox's registry: whichever worker runs a turn, a session
+            # has at most ``MAX_MONITORS_PER_SESSION`` running.
+            started = json.loads(await sandbox_pool.execute(owner, "_monitor", json.dumps({
+                "command": command, "task_id": monitor_task(me.id), "max_running": MAX_MONITORS_PER_SESSION,
+            })))
+        except (TypeError, ValueError):
+            started = {"error": "the sandbox gave no answer"}
+    else:
+        from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
+        from surogates.tools.workspace_io.local import LocalWorkspaceIO
+
+        from surogates.tools.utils.process_registry import process_registry
+
+        owner = HERE
+        if process_registry.running_count(monitor_task(me.id)) >= MAX_MONITORS_PER_SESSION:
+            started = {"error": f"{MAX_MONITORS_PER_SESSION} monitors already run"}
+        else:
+            try:
+                started = await LocalWorkspaceIO(workspace_path=kwargs.get("workspace_path")).start(
+                    command, workdir=None, task_id=monitor_task(me.id), pty=False,
+                    notify_on_complete=True, watcher_interval=None, watch_lines=True,
+                )
+            except WorkspaceSandboxError as exc:
+                started = {"error": str(exc)}
+    proc_id = started.get("session_id") if isinstance(started, dict) else None
+    if not proc_id:
+        error = str((started or {}).get("error") or "it did not start")
+        if "Unknown tool" in error:
+            error = "this sandbox cannot run monitors"
+        elif "monitors already run" in error:
+            error += ": stop one with stop_agent before you start another"
+        return _error(f"the monitor could not start: {error}")
+    background_watch.watch(owner=owner, proc_id=proc_id, session_id=me.id, command=command,
+                           monitor=(description, float(timeout), cap))
+    return json.dumps({
+        "monitor_id": proc_id, "status": "watching", "description": description, "timeout_seconds": timeout,
+        "note": (
+            f"Each new line it prints reaches you as a notification, at most {cap} a minute, until the command "
+            "exits, its timeout passes, or you stop it with stop_agent."
+        ),
+    })
+
+
+#: An agent's status, as the family names it, by its session's.
+_STATUS = {"active": "running", "processing": "running", "completed": "completed", "failed": "failed", "paused": "stopped"}
+
+
+async def _tree(kwargs: dict, root_id: UUID) -> list[dict]:
+    """*root_id* and every session under it: id, parent, org, status and ``agent_dispatch``, in one read."""
+    from sqlalchemy import text
+
+    async with kwargs["session_factory"]() as db:
+        rows = (await db.execute(text(
+            """
+            WITH RECURSIVE tree(id) AS (
+                SELECT id FROM sessions WHERE id = :id
+                UNION
+                SELECT s.id FROM sessions s JOIN tree t ON s.parent_id = t.id
+            )
+            SELECT s.id, s.parent_id, s.org_id, s.status, s.channel, s.config -> 'agent_dispatch' AS dispatch
+            FROM sessions s WHERE s.id IN (SELECT id FROM tree)
+            """
+        ), {"id": root_id})).mappings().all()
+    return [dict(row) for row in rows]
+
+
+def _family_below(rows: list[dict], top: UUID) -> list[dict]:
+    """The sessions under *top* reached through agents of the family only: each hop an ``agent_dispatch``."""
+    children: dict[UUID, list[dict]] = {}
+    for row in rows:
+        children.setdefault(row["parent_id"], []).append(row)
+    out, stack = [], [top]
+    while stack:
+        for row in children.get(stack.pop(), []):
+            if isinstance(row["dispatch"], dict):
+                out.append(row)
+                stack.append(row["id"])
+    return out
+
+
+async def _list_agents_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
+    """The agents the caller can reach: its own, at any depth, through agents of the family only; and, for an
+    agent of the family, its parent and its siblings.  Plus its background commands still running."""
+    from surogates.harness.background_watch import background_watch
+
+    session_store = kwargs.get("session_store")
+    me_id = kwargs.get("session_id")
+    if session_store is None or me_id is None or kwargs.get("session_factory") is None:
+        return _error("list_agents needs its session; none was given")
+    me = await session_store.get_session(UUID(str(me_id)))
+    found: list[tuple[dict, str]] = [(row, "yours") for row in _family_below(await _tree(kwargs, me.id), me.id)]
+    if me.parent_id is not None and dispatch_of(me) is not None:
+        siblings = await _tree(kwargs, me.parent_id)
+        parent = next((row for row in siblings if row["id"] == me.parent_id), None)
+        if parent is not None:
+            found.append((parent, "parent"))
+        found += [
+            (row, "sibling") for row in siblings
+            if row["parent_id"] == me.parent_id and row["id"] != me.id and isinstance(row["dispatch"], dict)
+        ]
+    agents = []
+    for row, relation in found:
+        if row["org_id"] != me.org_id or row["status"] == "archived":
+            continue
+        entry = {"agent_id": str(row["id"]), "relation": relation, "status": _STATUS.get(row["status"], row["status"])}
+        dispatch = row["dispatch"] if isinstance(row["dispatch"], dict) else None
+        if dispatch is not None:
+            entry["description"] = dispatch.get("description") or ""
+            entry["mode"] = dispatch.get("mode")
+            if relation == "yours" and row["parent_id"] != me.id:
+                entry["started_by"] = str(row["parent_id"])
+        agents.append(entry)
+    return json.dumps({"agents": agents, "background_commands": background_watch.running_for(me.id)})
+
+
+#: What the interrupt of an agent's stop says: a fixed word, never the model's, which the dispatcher reads.
+_STOP_SIGNAL = "stopped by agent"
+
+
+async def _stop_agent_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
+    """Stop an agent below the caller, with the agents of the family below it, or a background command the
+    caller started."""
+    from surogates.config import INTERRUPT_CHANNEL_PREFIX
+    from surogates.devices.operations import DeviceOperations
+    from surogates.harness.message_utils import extract_final_response
+    from surogates.harness.subagents import runs_in_background, tell_parent
+
+    session_store = kwargs.get("session_store")
+    me_id = kwargs.get("session_id")
+    redis = kwargs.get("redis")
+    session_factory = kwargs.get("session_factory")
+    target = str(arguments.get("agent_id") or "").strip()
+    if session_store is not None and me_id is not None and target.startswith("proc_"):
+        return await _stop_process(target, **kwargs)
+    if session_store is None or me_id is None or session_factory is None:
+        return _error("stop_agent needs its session; none was given")
+    reason = " ".join(str(arguments.get("reason") or "").split())[:200] or "stopped by the agent that started it"
+    me = await session_store.get_session(UUID(str(me_id)))
+    try:
+        target_id = UUID(target)
+    except ValueError:
+        target_id = None
+    mine = {row["id"]: row for row in _family_below(await _tree(kwargs, me.id), me.id)}
+    agent = mine.get(target_id)
+    if agent is None or agent["org_id"] != me.org_id:
+        return _error(f"no agent {target} that you started")
+    if agent["status"] not in ("active", "processing"):
+        return json.dumps({"status": _STATUS.get(agent["status"], agent["status"]), "agent_id": str(agent["id"]),
+                           "note": "It is not running: there is nothing to stop."})
+    stopped: list[UUID] = []
+    for row in [agent, *_family_below(list(mine.values()), agent["id"])]:
+        # Paused only from running, the status and its event in one write: a turn that ended meanwhile stays
+        # ended, and is told of once.
+        if await session_store.pause_if_active(row["id"], {
+            "reason": "stopped", "message": reason, "stopped_by": str(me.id),
+        }):
+            stopped.append(row["id"])
+    if not stopped:
+        return json.dumps({"status": "completed", "agent_id": target, "note": "It ended before the stop: there was nothing to stop."})
+    try:
+        # As the pause route does: what the stopped agents, and the helpers under them, left waiting on the
+        # user's computer is cancelled.
+        below = [row["id"] for row in await _tree(kwargs, agent["id"])]
+        await DeviceOperations(session_factory, redis).cancel(below, sparing=below)
+    except Exception:
+        logger.warning("Could not cancel the device operations of the agents %s stopped", me.id, exc_info=True)
+    for sid in stopped:
+        if redis is not None:
+            await redis.publish(f"{INTERRUPT_CHANNEL_PREFIX}:{sid}", json.dumps({"reason": _STOP_SIGNAL}))
+        session = await session_store.get_session(sid)
+        if runs_in_background(session):
+            # The stop tells the agent that started it, once: the turn it interrupts does not.
+            await tell_parent(
+                store=session_store, redis=redis, session=session, status="killed",
+                result=extract_final_response(await session_store.get_events(sid), fallback=""),
+            )
+    return json.dumps({"status": "stopped", "agent_id": target, "stopped": [str(sid) for sid in stopped],
+                       "note": "A stopped agent keeps its context: send_message resumes it."
+                       if agent["parent_id"] == me.id else "A stopped agent keeps its context."})
+
+
+async def _stop_process(proc_id: str, **kwargs: Any) -> str:
+    """Kill background command *proc_id* where the caller's commands run: its sandbox, or this process."""
+    from surogates.harness.background_watch import background_watch
+    from surogates.sandbox.pool import SandboxPool
+
+    session_store = kwargs["session_store"]
+    me = await session_store.get_session(UUID(str(kwargs["session_id"])))
+    if not background_watch.started_by(proc_id, me.id):
+        return _error(f"no background command {proc_id} that you started and that still runs")
+    sandbox_pool = kwargs.get("sandbox_pool")
+    args = json.dumps({"action": "kill", "session_id": proc_id})
+    owner = background_watch.owner_of(proc_id)
+    if owner and isinstance(sandbox_pool, SandboxPool) and sandbox_pool.sandbox_of(owner):
+        try:
+            result = json.loads(await sandbox_pool.execute(owner, "process", args))
+        except (TypeError, ValueError):
+            result = {"status": "error"}
+    else:
+        from surogates.tools.utils.process_registry import process_registry
+
+        result = process_registry.kill_process(proc_id)
+    return json.dumps({"status": result.get("status", "stopped"), "agent_id": proc_id,
+                       "note": "Its end reaches you as a notification."})
 
 
 async def _send_message_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
@@ -259,13 +581,22 @@ async def _why_not_resume(session_store: Any, sender: Any, target: Any, session_
     """
     from surogates.workstreams import is_project_thread
 
+    if budget_of(target) and await over_budget(session_store, target) is not None:
+        # Resumed, it would stop at its first step, and its parent be told again.
+        return "it used its token budget"
     if target.id == sender.parent_id:
         return None if target.status == "completed" else f"it is {target.status}: its user resumes it"
     if target.parent_id != sender.id:
         return "only the agent that started it resumes it"
     if getattr(sender, "channel", None) == "delegation" or is_project_thread(sender.config):
         return "a sub-agent does not resume agents: its parent does"
-    if target.status not in ("completed", "failed"):
+    if target.status == "paused":
+        # Only a stop of its own: one by the user, or by another agent, is theirs to lift.
+        from surogates.harness.subagents import stopped_by
+
+        if await stopped_by(session_store, target.id) != str(sender.id):
+            return "it was stopped by its user"
+    elif target.status not in ("completed", "failed"):
         return f"it is {target.status}"
     if session_factory is not None and sum(
         mode == "background" for mode, _ in await _running_agents(session_factory, sender.id)
@@ -311,6 +642,8 @@ async def _running_agents(session_factory: Any, parent_id: UUID) -> list[tuple[s
 #: Starts under way in this process, by parent, until their child is in the database: (mode, agent_type, mark).
 _STARTING: dict[UUID, list[tuple[str, str | None, str]]] = {}
 _START_LOCKS: dict[UUID, asyncio.Lock] = {}
+#: Tokens a sub-agent with a budget has handed to its agents still starting or running in this process, by its id.
+_BUDGET_HANDED: dict[UUID, int] = {}
 
 
 #: The most agents one session may have running in the background at once.
@@ -369,6 +702,40 @@ async def _agent_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
     if background and getattr(parent, "channel", None) == "delegation":
         # A helper's parent hears of its end once: work it left running would end after that.
         return _error("a sub-agent cannot start agents in the background: start it in the foreground")
+    # Its token budget: the deployment's, or its parent's key.  A sub-agent with a budget hands each agent it
+    # starts at most half of what it has left, less what its agents still running were handed: the calls of
+    # one response run at once, and it needs tokens of its own to read their reports.
+    child_tokens = budget_for_children(parent_config)
+    left = await budget_left(session_store, parent)
+    handed = 0
+    if left is not None:
+        share = (left - _BUDGET_HANDED.get(parent.id, 0)) // 2
+        if share <= 0:
+            return _error("your token budget is used up: finish with what you have")
+        child_tokens = handed = min(child_tokens, share) if child_tokens else share
+        _BUDGET_HANDED[parent.id] = _BUDGET_HANDED.get(parent.id, 0) + handed
+    try:
+        return await _start_agent(
+            kwargs, parent=parent, prompt=prompt, description=description, background=background,
+            fork=fork, agent_type=agent_type, model=model, depth=depth, budget=budget, child_tokens=child_tokens,
+        )
+    finally:
+        if handed:
+            _BUDGET_HANDED[parent.id] -= handed
+            if _BUDGET_HANDED[parent.id] <= 0:
+                _BUDGET_HANDED.pop(parent.id, None)
+
+
+async def _start_agent(
+    kwargs: dict[str, Any], *, parent: Any, prompt: str, description: str,
+    background: bool, fork: bool, agent_type: str | None, model: str | None, depth: int, budget: Any,
+    child_tokens: int,
+) -> str:
+    """Start the agent the checked call asks for, and wait for its report unless it runs in the background."""
+    from surogates.tools.builtin import delegate
+
+    session_store = kwargs.get("session_store")
+    tenant = kwargs.get("tenant")
     child_depth = depth + 1
     # Below the depth limit an agent may start agents of its own.
     role = "orchestrator" if child_depth < delegate._MAX_DELEGATION_DEPTH else "leaf"
@@ -415,7 +782,10 @@ async def _agent_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
         bundle=kwargs.get("bundle"),
         live_parent_config=kwargs.get("session_config"),
         leaf_tools=("delegate_task", "agent"),
-        extra_config={PARITY_KEY: True, DISPATCH_KEY: dispatch},
+        extra_config={
+            PARITY_KEY: True, DISPATCH_KEY: dispatch,
+            **({AGENT_BUDGET_KEY: {"tokens": child_tokens}} if child_tokens else {}),
+        },
         seed=seed,
         start_extra={"agent": True, "description": description, "mode": dispatch["mode"], "fork": fork,
                      "tool_call_id": tool_call_id},

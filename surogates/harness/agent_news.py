@@ -56,6 +56,23 @@ def notification_note(data: dict) -> dict:
             head = f"[Background process {work} finished with {said}: {command}]"
         # What it printed is the command's, not the harness's or the user's words: fenced off as its output.
         return {"role": "user", "content": f"{head}\nIts last output:\n{fenced(result)}" if result else head}
+    if data.get("kind") == "monitor":
+        named = f"Monitor {work} ({data.get('summary')})" if data.get("summary") else f"Monitor {work}"
+        count, dropped = data.get("lines") or 0, data.get("dropped") or 0
+        left_out = f"; {dropped} more line{'s' if dropped != 1 else ''} left out" if dropped else ""
+        code, reason = data.get("exit_code"), data.get("reason")
+        if status == "output":
+            head = f"[{named}: {count} new line{'s' if count != 1 else ''}{left_out}]"
+        elif status == "lost":
+            head = f"[{named} cannot be watched any more{f' ({reason})' if reason else ''}{left_out}]"
+        elif isinstance(code, int) and code < 0:
+            head = f"[{named} stopped: its command was killed{f' ({reason})' if reason else ''}{left_out}]"
+        elif code is not None:
+            head = f"[{named} ended: its command exited with code {code}{left_out}]"
+        else:
+            head = f"[{named} stopped{f': {reason}' if reason else ''}{left_out}]"
+        # Its lines are the command's output, fenced off as such.
+        return {"role": "user", "content": f"{head}\n{fenced(result)}" if result else head}
     if data.get("kind") == "agent":
         summary = data.get("summary")
         named = f"Agent {work} ({summary})" if summary else f"Agent {work}"
@@ -63,6 +80,8 @@ def notification_note(data: dict) -> dict:
             head = f"[{named} failed: {data.get('error') or 'unknown error'}]"
         elif status == "killed":
             head = f"[{named} was stopped before it finished]"
+        elif status == "budget":
+            head = f"[{named} stopped before it finished: it used its budget of {data.get('budget_tokens')} tokens]"
         elif data.get("reason"):
             head = f"[{named} ended before it finished ({data['reason']})]"
         else:
@@ -121,6 +140,8 @@ def started_notified_work(events: list) -> bool:
 def starts_notified_work(name: Any, arguments: Any) -> bool:
     """Whether a call of tool *name* with *arguments* starts background work that reports back when it ends:
     a ``terminal`` command with ``background`` and ``notify_on_complete``, or an ``agent`` in the background."""
+    if name == "monitor":
+        return True
     if name not in ("terminal", "agent"):
         return False
     if isinstance(arguments, str):

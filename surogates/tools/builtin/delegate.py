@@ -643,6 +643,11 @@ async def _run_single_delegation(
             if unkept := not_handed_back(done, copy="this copy"):
                 # Its hand-back failed: none of its work is in the thread's copy.
                 result_text += f"\n\n{unkept}"
+            from surogates.harness.subagents import BUDGET_REASON
+
+            if done.get("reason") == BUDGET_REASON:
+                # An agent of the ``agent`` tool with a token budget used it up: its words are what it had so far.
+                result_text += "\n\n[It stopped before it finished: it used its token budget.]"
             result = _format_result_with_trace_summary(result_text, trace, file_changes)
             # Last, once the result is made: this event says the call has the helper's result, so the helper's
             # own report is no news to the parent (``loop_pending.answered_helpers``).
@@ -739,6 +744,12 @@ async def _poll_child_completion(
                         }),
                     ),
                     "events": events,
+                }
+            if event.type == EventType.SESSION_PAUSE.value and (event.data or {}).get("stopped_by"):
+                # Stopped by an agent above it (``stop_agent``): the call has its answer, and waits no more.
+                return {
+                    "status": "failed",
+                    "reason": f"The agent was stopped: {(event.data or {}).get('message') or 'stopped'}",
                 }
             if event.type == EventType.SESSION_FAIL.value:
                 from surogates.harness.loop_context_replay import _listed

@@ -25,6 +25,13 @@ logger = logging.getLogger(__name__)
 PARITY_KEY = "subagent_parity"
 #: A sub-agent's config key: how the ``agent`` tool started it.
 DISPATCH_KEY = "agent_dispatch"
+#: A session's config key: the token budget of each agent it starts (``AgentsSettings.agent_token_budget``).
+BUDGET_KEY = "agent_token_budget"
+#: A sub-agent's config key: its own budget, ``{"tokens": N}``.
+AGENT_BUDGET_KEY = "agent_budget"
+#: The reason a turn ends with when its agent used its token budget: distinct from the iteration cap's
+#: ``budget_exhausted``, which says nothing of tokens.
+BUDGET_REASON = "token_budget_exhausted"
 
 #: The config keys of the family only the server writes: a client naming one could switch the family on
 #: against the deployment's setting, pose as another agent's sub-agent, or lift its own depth or budget.
@@ -40,9 +47,11 @@ STANDS_IN_FOR: dict[str, tuple[str, ...]] = {
 }
 
 #: The tools that go with ``agent``: offered to a session that may start agents, and to every agent it started.
-COMPANION_TOOLS: frozenset[str] = frozenset({"send_message"})
+COMPANION_TOOLS: frozenset[str] = frozenset({"send_message", "list_agents", "stop_agent"})
+#: Offered with the companions where the session runs commands (``terminal``), never on the user's computer.
+MONITOR_TOOL = "monitor"
 #: The tools of the family, offered only with parity on.
-PARITY_TOOLS: frozenset[str] = frozenset({"agent"}) | COMPANION_TOOLS
+PARITY_TOOLS: frozenset[str] = frozenset({"agent", MONITOR_TOOL}) | COMPANION_TOOLS
 #: The tool ``agent`` stands in for; with parity on it is no longer offered, but still callable.
 REPLACED_TOOL = "delegate_task"
 
@@ -61,14 +70,15 @@ def parity_enabled(config: dict | None) -> bool:
         return False
 
 
-def apply_parity(tools: set[str], config: dict | None) -> set[str]:
+def apply_parity(tools: set[str], config: dict | None, *, root: bool = True) -> set[str]:
     """*tools*, a session's offered set, with the family in or out.
 
     On: ``agent`` takes ``delegate_task``'s place wherever the session may
     delegate, so a policy that denies ``delegate_task`` denies ``agent``
     too.  Its companions (``COMPANION_TOOLS``) go to such a session and to
     every agent the ``agent`` tool started, unless the session's config
-    leaves them out by name.  Off: none of the family.
+    leaves them out by name; ``monitor`` only to a *root* session
+    (``monitor_allowed``).  Off: none of the family.
     """
     result = set(tools) - PARITY_TOOLS
     config = config or {}
@@ -81,11 +91,61 @@ def apply_parity(tools: set[str], config: dict | None) -> set[str]:
     if "agent" in result or isinstance(config.get(DISPATCH_KEY), dict):
         allowed = config.get("allowed_tools")
         excluded = set(config.get("excluded_tools") or ())
-        result |= {
-            name for name in COMPANION_TOOLS
-            if name not in excluded and (not allowed or name in allowed)
-        }
+        from surogates.devices.binding import device_of
+
+        companions = set(COMPANION_TOOLS)
+        if "terminal" in result and device_of(config) is None and root and monitor_allowed(config):
+            companions.add(MONITOR_TOOL)
+        result |= {name for name in companions if name not in excluded and (not allowed or name in allowed)}
     return result
+
+
+def monitor_allowed(config: dict | None) -> bool:
+    """Whether a session with *config* may run monitors: not a sub-agent, whose work ends with its report,
+    and not a project's thread or one under it, whose sandbox ends with its turn.  Either would be woken by
+    lines after its end.  Only a root session may (no ``parent_id``): every other session's end is someone's
+    news, a helper's, a worker's or a routine run's; the callers check that, from the session."""
+    from surogates.workstreams import under_a_thread
+
+    config = config or {}
+    return not isinstance(config.get(DISPATCH_KEY), dict) and not under_a_thread(config)
+
+
+def budget_for_children(config: dict | None) -> int:
+    """The token budget each agent a session with *config* starts gets: its own key, else the deployment's; 0 for none."""
+    value = (config or {}).get(BUDGET_KEY)
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    try:
+        from surogates.config import load_settings
+
+        return max(0, int(load_settings().agents.agent_token_budget))
+    except Exception:
+        return 0
+
+
+def budget_of(session: Any) -> int:
+    """The token budget of *session*, a sub-agent the ``agent`` tool started; 0 for none."""
+    value = ((getattr(session, "config", None) or {}).get(AGENT_BUDGET_KEY) or {})
+    tokens = value.get("tokens") if isinstance(value, dict) else None
+    return tokens if isinstance(tokens, int) and not isinstance(tokens, bool) and tokens > 0 else 0
+
+
+async def over_budget(store: Any, session: Any) -> int | None:
+    """The tokens *session* and the agents under it have used, when that reaches its budget; None otherwise."""
+    budget = budget_of(session)
+    if not budget:
+        return None
+    used = await store.session_tree_tokens(session.id)
+    return used if used >= budget else None
+
+
+async def budget_left(store: Any, session: Any) -> int | None:
+    """The tokens *session*, a sub-agent with a budget, may still use, its agents included; None for no budget."""
+    budget = budget_of(session)
+    if not budget:
+        return None
+    return max(budget - await store.session_tree_tokens(session.id), 0)
 
 
 def dispatch_of(session: Any) -> dict | None:
@@ -102,6 +162,21 @@ def runs_in_background(session: Any) -> bool:
 
 #: The reasons a turn ends with that are no early stop: it finished.
 _FINISHED = frozenset({"completed", "stop", "done", "complete"})
+async def stopped_by(store: Any, session_id: Any) -> str | None:
+    """The agent whose ``stop_agent`` paused the session last; None when its last stop was its user's.
+
+    The pause the harness writes as the stopped turn ends (``turn_ended``) is
+    not a stop of anyone's: the one before it is.
+    """
+    pauses = await store.get_events(session_id, types=[EventType.SESSION_PAUSE])
+    for pause in reversed(pauses):
+        data = pause.data or {}
+        if data.get("turn_ended"):
+            continue
+        return data.get("stopped_by") or None
+    return None
+
+
 async def lineage(store: Any, session: Any, *, limit: int = 8) -> list[Any]:
     """*session*'s ancestors, its parent first, at most *limit* of them."""
     chain: list[Any] = []
@@ -139,8 +214,8 @@ async def tell_parent(
 ) -> None:
     """Write the end of background sub-agent *session* to its parent as an ``agent.notification``, and wake it.
 
-    *status* is ``completed``, ``failed`` or ``killed``; *result* the agent's
-    last words.  Best effort: the agent's own log keeps its end whatever
+    *status* is ``completed``, ``failed``, ``killed`` or ``budget`` (it used
+    its token budget); *result* the agent's last words.  Best effort: the agent's own log keeps its end whatever
     becomes of this.
     """
     from surogates.harness.agent_news import MAX_RESULT_CHARS
@@ -151,6 +226,8 @@ async def tell_parent(
         "agent_id": str(session.id), "kind": "agent", "status": status,
         "summary": str(dispatch.get("description") or ""), "result": (result or "")[:MAX_RESULT_CHARS],
     }
+    if status == "budget":
+        payload["budget_tokens"] = budget_of(session)
     if error:
         payload["error"] = error[:2000]
     if reason and status == "completed" and reason not in _FINISHED:

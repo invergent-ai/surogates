@@ -294,7 +294,14 @@ from surogates.harness.loop_pending import (
     _waits_on_its_workers,
 )
 from surogates.harness.agent_news import agent_news_unread, started_notified_work, starts_notified_work
-from surogates.harness.subagents import REPLACED_TOOL, apply_parity, runs_in_background
+from surogates.harness.subagents import (
+    BUDGET_REASON,
+    REPLACED_TOOL,
+    apply_parity,
+    budget_of,
+    over_budget,
+    runs_in_background,
+)
 from surogates.harness.loop_tool_recovery import (
     _is_valid_json_args,
     build_partial_tool_call_recovery_results,
@@ -1574,6 +1581,15 @@ class AgentHarness(
             )
         if said:
             await self._tell_what_the_stop_left(session, left)
+        if current.status == "paused" and runs_in_background(session) and not await self._stopped_by_an_agent(session.id):
+            # A sub-agent started in the background was stopped by its user: the agent that started it hears so.
+            # A stop of an agent's (``stop_agent``) told it already, once.
+            from surogates.harness.subagents import tell_parent
+
+            await tell_parent(
+                store=self._store, redis=self._redis, session=session, status="killed",
+                result=extract_final_response(await self._store.get_events(session.id), fallback=""),
+            )
         # A channel /stop aborts out-of-band and leaves the session 'active'
         # (so the SESSION_PAUSE above never fires). The inbound handler only
         # posted an optimistic "Stopping…" ack, so emit a deliverable
@@ -1586,6 +1602,12 @@ class AgentHarness(
                 {"reason": "channel_stop", "worker_id": self._worker_id},
             )
         self._clear_interrupt()
+
+    async def _stopped_by_an_agent(self, session_id: UUID) -> bool:
+        """Whether the session's last stop was ``stop_agent``'s (``subagents.stopped_by``)."""
+        from surogates.harness.subagents import stopped_by
+
+        return await stopped_by(self._store, session_id) is not None
 
     async def _tell_what_the_stop_left(self, session: Session, left: list[dict]) -> None:
         """Tell a thread's master what its user's stop did not take back, as a thread's news reaches it: a report.
@@ -3270,6 +3292,15 @@ class AgentHarness(
             # --- Interrupt check at the top of each iteration ---
             if self._check_interrupt():
                 await self._abort_iteration_with_pause(session, saga, cost_tracker, lease=lease)
+                return
+
+            # --- A sub-agent's token budget, its own agents' use included ---
+            if budget_of(session) and await over_budget(self._store, session) is not None:
+                logger.info("Session %s: its token budget is used up; its turn ends here", session.id)
+                await self._complete_session(
+                    session, messages, lease, reason=BUDGET_REASON,
+                    cost_tracker=cost_tracker, turn_id=turn_id, user_message=request,
+                )
                 return
 
             # --- Mid-turn steering ---
@@ -6090,7 +6121,7 @@ class AgentHarness(
         # session gets the step tools, which every other session loses.
         # Then the sub-agent family: ``agent`` in ``delegate_task``'s place
         # with parity on, none of it with parity off.
-        return apply_parity(gate_case_tools(tool_filter, session), config)
+        return apply_parity(gate_case_tools(tool_filter, session), config, root=session.parent_id is None)
 
     @staticmethod
     def _dynamic_loop_wait_succeeded(
