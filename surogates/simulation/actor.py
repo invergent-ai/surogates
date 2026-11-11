@@ -59,6 +59,19 @@ _TAPS = {
     ),
 }
 
+#: Channels with one kind of tap: a bare tap is that kind, so it is wrapped
+#: instead of refused.
+_ONLY_TAP = {"telegram": "callback", "slack": "action"}
+_STRING_TAPS = ("button_reply", "list_reply", "quick_reply", "callback", "action")
+
+
+def _shape(channel: str, tap: dict[str, Any]) -> dict[str, Any]:
+    """The tap as the channel takes it: models drop the wrapper and write ids as numbers."""
+    if channel in _ONLY_TAP and not set(tap) & set(PersonMessage.model_fields):
+        tap = {_ONLY_TAP[channel]: tap}
+    return {k: {f: str(x) for f, x in v.items()} if k in _STRING_TAPS and isinstance(v, dict) else v
+            for k, v in tap.items()}
+
 
 class Move(BaseModel):
     """The person's next move."""
@@ -153,6 +166,7 @@ def _prompt(person, channel: str, thread, flows=None, refused: str | None = None
     system = (
         f"You are {person.name}, a real person writing to a business's assistant on {channel}. "
         f"Who you are and what you want:\n{person.persona}\n\n"
+        f"Today is {datetime.now(timezone.utc):%A %Y-%m-%d}; any date you give follows from it.\n"
         "Stay in character: write the way this person writes, in their language, short like a chat "
         "message, one message per move. Never say you are an AI or that this is a test. "
         "Answer what the assistant asks when your character would. "
@@ -296,7 +310,7 @@ class Actor:
         if move.action == "form":
             tap = {"form_reply": {**(move.form or {}), "flow_token": _form_token(thread)}}
         else:
-            tap = move.tap if move.action == "tap" else None
+            tap = _shape(run.channel, move.tap) if move.action == "tap" and move.tap else None
         body = PersonMessage(**tap) if tap else PersonMessage(text=move.text)
         if tap and not body.model_dump(exclude_none=True):
             raise RuntimeError(f"the move was refused: {json.dumps(tap)} is not a tap; "

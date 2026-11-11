@@ -375,16 +375,16 @@ async def test_a_tap_in_the_wrong_shape_is_refused_with_the_right_one(monkeypatc
         return False
 
     async def generate(**kw):
-        return actor.Move(action="tap", tap={"ts": "1.1", "action_id": "choice:0"})
+        return actor.Move(action="tap", tap={"id": "yes", "title": "Yes"})
 
     monkeypatch.setattr(store, "thread", thread)
     monkeypatch.setattr(store, "agent_working", idle)
     monkeypatch.setattr(actor, "generate_structured", generate)
     monkeypatch.setattr(actor, "_client", lambda settings: (_LLM(), "m"))
-    run = SimpleNamespace(created_at=datetime.now(timezone.utc), channel="slack", flows=None)
+    run = SimpleNamespace(created_at=datetime.now(timezone.utc), channel="whatsapp", flows=None)
     person = SimpleNamespace(id=1, name="Ana", persona="Ana", stands_for=None, task=None,
                              agent_typing_at=None, ai_acted_at=None)
-    with pytest.raises(RuntimeError, match='is not a tap; use a button: {"action"'):
+    with pytest.raises(RuntimeError, match='is not a tap; use a reply button: {"button_reply"'):
         await ai._move(run, person)
 
 
@@ -424,3 +424,19 @@ async def test_a_run_ends_only_with_people_and_after_a_quiet_moment(rsf):  # noq
                             body={}, wamid="wamid.relay")
     assert await store.done_runs(rsf, now) == []
     assert await store.done_runs(rsf, now + store.GRACE + timedelta(seconds=1)) == [run.id]
+
+
+def test_a_bare_tap_on_a_one_tap_channel_is_wrapped_and_ids_become_text():
+    assert actor._shape("telegram", {"message_id": 7, "data": "si:1"}) == {
+        "callback": {"message_id": "7", "data": "si:1"}}
+    assert actor._shape("telegram", {"callback": {"message_id": 7, "data": "x"}}) == {
+        "callback": {"message_id": "7", "data": "x"}}
+    assert actor._shape("slack", {"ts": 1.5, "action_id": "a"}) == {"action": {"ts": "1.5", "action_id": "a"}}
+    assert actor._shape("whatsapp", {"id": "yes"}) == {"id": "yes"}
+    assert actor._shape("slack", {"view": {"id": "v", "values": {"b": 1}}}) == {"view": {"id": "v", "values": {"b": 1}}}
+
+
+def test_the_person_knows_today_so_their_dates_are_plausible():
+    person = SimpleNamespace(name="Ana", persona="Had surgery two weeks ago")
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    assert today in actor._prompt(person, "whatsapp", [], None)[0]["content"]
