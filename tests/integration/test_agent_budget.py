@@ -180,10 +180,10 @@ async def test_a_budget_report_is_the_last_tools_off_reply_or_nothing():
     step = event(EventType.LLM_RESPONSE, message={"content": "Let me check the next file."})
     report = event(EventType.LLM_RESPONSE, message={"content": "Done so far: 4."}, finish_reason=BUDGET_REASON)
     # The call for the report failed: nothing, never the mid-step line.
-    assert budget_report([step]) == ""
-    assert budget_report([step, report]) == "Done so far: 4."
+    assert budget_report([step, event(EventType.SESSION_COMPLETE)]) == ""
+    assert budget_report([step, report, event(EventType.SESSION_COMPLETE)]) == "Done so far: 4."
     # A report of an earlier run is no report of this one.
-    assert budget_report([report, event(EventType.SESSION_COMPLETE), step]) == ""
+    assert budget_report([report, event(EventType.SESSION_COMPLETE), step, event(EventType.SESSION_COMPLETE)]) == ""
     # Events after the run's own end (a caption, a message) do not hide its report.
     later = event(EventType.COORDINATOR_MESSAGE, content="Also count the closed ones.")
     assert budget_report([step, report, event(EventType.SESSION_COMPLETE), later]) == "Done so far: 4."
