@@ -122,7 +122,9 @@ async def _detail(sf, run) -> dict[str, Any]:
                        "permissions": rights and {"receives": sorted(rights["receives"]),
                                                   "can": sorted(rights["can"]),
                                                   "handles": rights["handles"]},
-                       "address": person.address, "persona": person.persona,
+                       # A visitor's address holds their widget session's cookie.
+                       "address": "visitor" if person.channel == "website" else person.address,
+                       "persona": person.persona,
                        "driver": person.driver, "ai_state": person.ai_state,
                        "ai_note": person.ai_note,
                        "window_open": store.window_open(messages, now),

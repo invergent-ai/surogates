@@ -1475,3 +1475,7 @@ CREATE INDEX IF NOT EXISTS ix_simulation_runs_batch_id ON simulation_runs (batch
 
 -- Where a simulated person's program steps have got to when sent ahead of time.
 ALTER TABLE IF EXISTS simulation_people ADD COLUMN IF NOT EXISTS next_after timestamptz;
+
+-- A website simulation message is its session event, logged once whoever reads it first.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_simulation_messages_web_wamid
+    ON simulation_messages (run_id, wamid) WHERE wamid LIKE 'web:%';

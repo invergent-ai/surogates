@@ -3,6 +3,7 @@ API's own cache, and the visitor's session lands in the run's memory."""
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import timedelta
 from types import SimpleNamespace
@@ -205,7 +206,7 @@ async def test_autopilot_writes_as_a_visitor_and_reads_the_agent_once(rsf):  # n
     assert [e.data["content"] for e in said] == ["Salut"]
     [written] = await store.thread(rsf, person.id)
     assert (written.direction, written.body, written.wamid, written.status) == (
-        "in", {"text": "Salut"}, str(said[0].id), "delivered")
+        "in", {"text": "Salut"}, f"web:{said[0].id}", "delivered")
     assert await store.agent_working(rsf, person)
 
     # The same visitor writes again in the same conversation.
@@ -382,3 +383,51 @@ def _internal(rsf, state):  # noqa: F811
     for key, value in vars(state).items():
         setattr(app.state, key, value)
     return app
+
+
+@pytest.mark.asyncio
+async def test_a_visitors_widget_session_never_leaves_the_runtime(rsf):  # noqa: F811
+    state, run, person = await _visitor_world(rsf)
+    await simulation_website.send(state, run, person, "Salut")
+    [person] = await store.people(rsf, run.id)
+    assert simulation_website.visitor_session(person)
+    detail = await api._detail(rsf, run)
+    assert detail["people"][0]["address"] == "visitor"
+
+
+@pytest.mark.asyncio
+async def test_each_reply_is_logged_once_and_empty_questions_not_at_all(rsf):  # noqa: F811
+    state, run, person = await _visitor_world(rsf)
+    await simulation_website.send(state, run, person, "Salut")
+    [person] = await store.people(rsf, run.id)
+    session_id = uuid.UUID(simulation_website.visitor_session(person)[0])
+    await _agent_says(rsf, session_id, "Bună!")
+    await _agent_asks(rsf, session_id, "call_0", [])
+    # Two readers at once (the actor and a Studio write) log each event once.
+    await asyncio.gather(*(simulation_website.collect(state, run, person) for _ in range(3)))
+    assert [m.body for m in await store.thread(rsf, person.id) if m.direction == "out"] == [
+        {"text": "Bună!"}]
+    # The cursor moves past what is logged: the next reply is all that's read.
+    await _agent_says(rsf, session_id, "Cu ce vă ajut?")
+    await simulation_website.collect(state, run, person)
+    assert [m.body["text"] for m in await store.thread(rsf, person.id)] == [
+        "Salut", "Bună!", "Cu ce vă ajut?"]
+
+
+@pytest.mark.asyncio
+async def test_an_expired_widget_session_is_renewed_once(rsf):  # noqa: F811
+    state, run, person = await _visitor_world(rsf)
+    await simulation_website.send(state, run, person, "Salut")
+    [person] = await store.people(rsf, run.id)
+    first = simulation_website.visitor_session(person)
+    stale = " ".join((first[0], first[1], "expired"))
+    await store.update_person(rsf, person.id, address=stale)
+    person.address = stale
+    assert (await simulation_website.send(state, run, person, "Mai sunteți?"))["delivered"]
+    [person] = await store.people(rsf, run.id)
+    assert simulation_website.visitor_session(person)[0] != first[0]
+
+    # A key that no longer opens sessions: a clear refusal, not a silent loop.
+    person.address = stale
+    run.phone_number_id = "surg_wk_gone"
+    assert (await simulation_website.send(state, run, person, "Alo?"))["delivered"] is False

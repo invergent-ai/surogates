@@ -2990,6 +2990,12 @@ class SimulationMessage(Base):
     """One message in a world, in Meta's own shape."""
 
     __tablename__ = "simulation_messages"
+    __table_args__ = (
+        # A website message is logged by whoever reads the session first: the
+        # actor or a Studio write. Its event id makes the second log a no-op.
+        Index("uq_simulation_messages_web_wamid", "run_id", "wamid", unique=True,
+              postgresql_where=text("wamid LIKE 'web:%'"), sqlite_where=text("wamid LIKE 'web:%'")),
+    )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     run_id: Mapped[uuid.UUID] = mapped_column(
