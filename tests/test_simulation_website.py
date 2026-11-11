@@ -431,3 +431,32 @@ async def test_an_expired_widget_session_is_renewed_once(rsf):  # noqa: F811
     person.address = stale
     run.phone_number_id = "surg_wk_gone"
     assert (await simulation_website.send(state, run, person, "Alo?"))["delivered"] is False
+
+
+@pytest.mark.asyncio
+async def test_one_read_logs_every_new_reply_and_question_and_closes_answered_ones(rsf):  # noqa: F811
+    state, run, person = await _visitor_world(rsf)
+    await simulation_website.send(state, run, person, "Salut")
+    [person] = await store.people(rsf, run.id)
+    session_id = uuid.UUID(simulation_website.visitor_session(person)[0])
+    await _agent_says(rsf, session_id, "Bună!", "")
+    await _agent_asks(rsf, session_id, "call_1", [_DAY])
+    async with rsf() as db:
+        db.add(Event(session_id=session_id, type="tool.result", data={"tool_call_id": "call_1"}))
+        await db.commit()
+    await _agent_asks(rsf, session_id, "call_2", [_DAY])
+    await _agent_asks(rsf, session_id, "call_3", [])
+    await simulation_website.collect(state, run, person)
+    out = [m for m in await store.thread(rsf, person.id) if m.direction == "out"]
+    assert [(m.kind, m.body.get("text") or m.body["tool_call_id"], m.status) for m in out] == [
+        ("text", "Bună!", "delivered"), ("question", "call_1", "answered"), ("question", "call_2", "")]
+    assert all(m.created_at for m in out) and [m.wamid for m in out] == sorted(m.wamid for m in out)
+
+    # Nothing new said, but the open question was answered meanwhile.
+    async with rsf() as db:
+        db.add(Event(session_id=session_id, type="ask_user_question.response",
+                     data={"tool_call_id": "call_2"}))
+        await db.commit()
+    await simulation_website.collect(state, run, person)
+    assert [m.status for m in await store.thread(rsf, person.id) if m.direction == "out"] == [
+        "delivered", "answered", "answered"]

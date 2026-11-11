@@ -255,3 +255,53 @@ async def test_an_alert_reaches_a_telegram_stand_in_from_the_runs_own_bot(rsf): 
         [told] = (await db.execute(sa.select(OutreachMessageRow))).scalars().all()
     assert (told.user_id, told.platform, told.channel_identifier) == (
         stand_in.user_id, "telegram", run.phone_number_id)
+
+
+@pytest.mark.asyncio
+async def test_a_simulation_reads_as_its_runs_read_one_by_one(rsf):  # noqa: F811
+    from surogates.simulation.api import _detail, _details
+    from tests.test_simulation_store import line
+
+    org_id = await make_org(rsf)
+    doctor, nurse, batch = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    async with rsf() as db:
+        db.add(User(id=doctor, org_id=org_id, email="d@x", display_name="Dr Ana"))
+        db.add(User(id=nurse, org_id=org_id, email="n@x", display_name="Ioana"))
+        db.add(FollowupSettingsRow(
+            org_id=org_id, agent_id="a1", alert_recipient_user_ids=[str(doctor), str(nurse)],
+            team_permissions={str(nurse): {"receives": ["attention"], "can": ["see_people"]}},
+        ))
+        await db.commit()
+    runs = []
+    for ch in ("telegram", "whatsapp"):
+        runs.append(await store.create_run(
+            rsf, FakeVault(), org_id=org_id, agent_id="a1", created_by="u1", routing_config={},
+            provision=provision_into(rsf), channel=ch, batch_id=batch,
+            people=[line("Vasile", autopilot=True), line("Maria"),
+                    line("Ioana", member_id=nurse, autopilot=True)]))
+    runs.append(await store.create_run(rsf, FakeVault(), org_id=org_id, agent_id="a1", created_by="u1",
+                                       routing_config={}, channel="website", batch_id=batch,
+                                       people=[line("Cy")], provision=provision_into(rsf)))
+    for i, run in enumerate(runs[:2]):
+        vasile, maria, ioana = await store.people(rsf, run.id)
+        await store.log_message(rsf, run_id=run.id, person_id=vasile.id, direction="in", kind="text",
+                                body={"t": i}, wamid=f"w{i}a")
+        await store.log_message(rsf, run_id=run.id, person_id=vasile.id, direction="out", kind="text",
+                                body={"t": i}, wamid=f"w{i}b")
+        await store.log_message(rsf, run_id=run.id, person_id=ioana.id, direction="out", kind="text",
+                                body={"t": i}, wamid=f"w{i}c")
+        await followup_store.upsert_enrollment(
+            rsf, org_id=org_id, agent_id="a1", user_id=maria.user_id,
+            protocol="p", start_date=None, phase=None, enrolled_by="agent")
+        for subject in (vasile.user_id, maria.user_id):
+            await followup_store.queue_outreach(
+                rsf, org_id=org_id, agent_id="a1", user_id=ioana.user_id, platform="whatsapp",
+                channel_identifier="100", kind="alert", text=f"about {i}",
+                template_name=None, template_language=None, subject_user_id=subject)
+    together = await _details(rsf, runs)
+    assert together == [await _detail(rsf, r) for r in runs]
+    assert [len(r["team"]) for r in together] == [2, 2, 0]
+    assert [m["text"] for m in together[1]["team"]] == ["about 1", "about 1"]
+    by_name = {p["name"]: p for p in together[0]["people"]}
+    assert by_name["Maria"]["enrolled"] and not by_name["Vasile"]["enrolled"]
+    assert [m["wamid"] for m in by_name["Vasile"]["messages"]] == ["w0a", "w0b"]

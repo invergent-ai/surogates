@@ -14,7 +14,6 @@ those makes logging them idempotent when the actor and Studio collect at once.
 
 from __future__ import annotations
 
-import json
 import uuid
 from typing import Any
 
@@ -24,6 +23,7 @@ from sqlalchemy.dialects import postgresql, sqlite
 
 from surogates.channels.website_session import COOKIE_NAME, CSRF_HEADER_NAME
 from surogates.db.models import Event, SimulationMessage
+from surogates.harness.message_utils import tool_args
 from surogates.simulation import store
 
 ASK = "ask_user_question"
@@ -84,19 +84,9 @@ async def _post(state, run, person, path: str, body: dict) -> Any:
     raise HTTPException(status_code=502, detail="The visitor's widget session expired and could not be renewed")
 
 
-def _arguments(data: dict) -> dict:
-    args = data.get("arguments")
-    if isinstance(args, str):
-        try:
-            args = json.loads(args)
-        except ValueError:
-            args = None
-    return args if isinstance(args, dict) else {}
-
-
 def _question(data: dict) -> dict[str, Any]:
     """An ``ask_user_question`` call as the visitor sees it in the widget."""
-    args = _arguments(data)
+    args = tool_args(data.get("arguments"))
     body: dict[str, Any] = {"tool_call_id": data.get("tool_call_id"), "questions": [
         {"prompt": q.get("prompt"),
          "choices": [c.get("label") for c in q.get("choices") or [] if isinstance(c, dict)],
@@ -109,10 +99,11 @@ def _question(data: dict) -> dict[str, Any]:
     return body
 
 
-async def _closed(db, session_id: uuid.UUID) -> set[str]:
+async def _closed(db, session_id: uuid.UUID, after: int = 0) -> set[str]:
+    """The question calls closed in events after *after*: a call closes only after it is made."""
     return set((await db.execute(
         sa.select(Event.data["tool_call_id"].as_string())
-        .where(Event.session_id == session_id, Event.type.in_(_CLOSED))
+        .where(Event.session_id == session_id, Event.id > after, Event.type.in_(_CLOSED))
     )).scalars().all())
 
 
@@ -130,17 +121,24 @@ async def _open_question(sf, session) -> dict | None:
     return waiting[-1] if waiting else None
 
 
-async def _log(sf, run, person, *, event_id: int, direction: str, kind: str, body: dict,
-               status: str) -> None:
-    """One website message, once: a second log of the same event is dropped."""
+def _row(run, person, *, event_id: int, direction: str, kind: str, body: dict,
+         status: str) -> dict[str, Any]:
+    return {"run_id": run.id, "person_id": person.id, "direction": direction, "kind": kind,
+            "body": body, "wamid": f"{PREFIX}{event_id}", "status": status}
+
+
+async def _insert(db, rows: list[dict[str, Any]]) -> None:
+    """Website messages, once each: a second log of the same event is dropped."""
+    dialect = postgresql if (await db.connection()).dialect.name == "postgresql" else sqlite
+    await db.execute(
+        dialect.insert(SimulationMessage).values(rows)
+        .on_conflict_do_nothing(index_elements=["run_id", "wamid"],
+                                index_where=SimulationMessage.wamid.like(f"{PREFIX}%")))
+
+
+async def _log(sf, run, person, **message: Any) -> None:
     async with sf() as db:
-        dialect = postgresql if (await db.connection()).dialect.name == "postgresql" else sqlite
-        await db.execute(
-            dialect.insert(SimulationMessage)
-            .values(run_id=run.id, person_id=person.id, direction=direction, kind=kind, body=body,
-                    wamid=f"{PREFIX}{event_id}", status=status)
-            .on_conflict_do_nothing(index_elements=["run_id", "wamid"],
-                                    index_where=SimulationMessage.wamid.like(f"{PREFIX}%")))
+        await _insert(db, [_row(run, person, **message)])
         await db.commit()
 
 
@@ -225,20 +223,30 @@ async def collect(state, run, person) -> None:
                    | ((Event.type == "tool.call") & (Event.data["name"].as_string() == ASK)))
             .order_by(Event.id)
         )).all()
-        closed = await _closed(db, session_id)
         waiting = (await db.execute(_open_questions(person.id))).scalars().all()
+        if not said and not waiting:
+            return
+        # Every question logged or about to be was made after the oldest of these.
+        oldest = min([after, *(int(m.wamid[len(PREFIX):]) for m in waiting)])
+        closed = await _closed(db, session_id, oldest)
+        changed = False
         for m in waiting:
             if m.body.get("tool_call_id") in closed:
-                m.status = "answered"
-        await db.commit()
-    for event_id, kind, data in said:
-        if kind == "tool.call":
-            body = _question(data)
-            if body["questions"]:
-                await _log(sf, run, person, event_id=event_id, direction="out", kind="question",
-                           body=body, status="answered" if body["tool_call_id"] in closed else "")
-            continue
-        content = (data.get("message") or {}).get("content") or data.get("content")
-        if isinstance(content, str) and content.strip():
-            await _log(sf, run, person, event_id=event_id, direction="out", kind="text",
-                       body={"text": content}, status="delivered")
+                m.status, changed = "answered", True
+        rows = []
+        for event_id, kind, data in said:
+            if kind == "tool.call":
+                body = _question(data)
+                if body["questions"]:
+                    rows.append(_row(run, person, event_id=event_id, direction="out", kind="question",
+                                     body=body,
+                                     status="answered" if body["tool_call_id"] in closed else ""))
+                continue
+            content = (data.get("message") or {}).get("content") or data.get("content")
+            if isinstance(content, str) and content.strip():
+                rows.append(_row(run, person, event_id=event_id, direction="out", kind="text",
+                                 body={"text": content}, status="delivered"))
+        if rows:
+            await _insert(db, rows)
+        if rows or changed:
+            await db.commit()

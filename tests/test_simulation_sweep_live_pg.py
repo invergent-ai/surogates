@@ -138,6 +138,7 @@ async def test_sweep_ends_stale_runs_and_deletes_old_ones(pg):
     org_id = await make_org(sf)
     stale, _ = await _run(sf, vault, org_id, created=now - timedelta(hours=3), status="running")
     old, old_person = await _run(sf, vault, org_id, created=now - timedelta(days=91))
+    older, older_person = await _run(sf, vault, org_id, created=now - timedelta(days=120))
     recent, recent_person = await _run(sf, vault, org_id, created=now - timedelta(days=10))
     state = SimpleNamespace(session_factory=sf, vault=vault,
                             settings=SimpleNamespace(voice=SimpleNamespace(livekit_api_key="")))
@@ -145,7 +146,8 @@ async def test_sweep_ends_stale_runs_and_deletes_old_ones(pg):
     await store.sweep(state, now)
 
     assert (await store.get_run(sf, stale.id)).status == "ended"
-    assert await store.get_run(sf, old.id) is None
+    assert await store.get_run(sf, old.id) is None and await store.get_run(sf, older.id) is None
+    assert await _count(sf, User, User.id == older_person.user_id) == 0
     for model, column in ((SimulationPerson, SimulationPerson.run_id),
                           (SimulationMessage, SimulationMessage.run_id),
                           (SimulationMedia, SimulationMedia.run_id),

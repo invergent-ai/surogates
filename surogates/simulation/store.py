@@ -163,28 +163,22 @@ async def add_person(sf, run: SimulationRun, *, name: str, provision: Provision,
                      autopilot: bool = False) -> SimulationPerson:
     if run.channel == "website":
         # A visitor is anonymous: the widget's own cookie names them, no user row.
-        person = SimulationPerson(run_id=run.id, name=name, channel=run.channel, address="visitor",
-                                  about=about, test=test, persona=customer_persona(name, about, test),
-                                  driver="ai" if autopilot else "human",
-                                  ai_state="talking" if autopilot else None)
-        async with sf() as db:
-            db.add(person)
-            await db.commit()
-        return person
-    address = new_address(run.channel)
-    # The same call the inbound pipeline makes for an unknown sender: the
-    # pipeline then finds this identity, already marked as the run's.
-    identity = await provision(
-        sf, platform=run.channel, platform_user_id=address, org_id=run.org_id, display_name=name,
-    )
+        address, user_id = "visitor", None
+    else:
+        address = new_address(run.channel)
+        # The same call the inbound pipeline makes for an unknown sender: the
+        # pipeline then finds this identity, already marked as the run's.
+        user_id = (await provision(
+            sf, platform=run.channel, platform_user_id=address, org_id=run.org_id, display_name=name,
+        )).user_id
     person = SimulationPerson(run_id=run.id, name=name, channel=run.channel, address=address,
-                              user_id=identity.user_id, about=about, test=test,
+                              user_id=user_id, about=about, test=test,
                               persona=customer_persona(name, about, test),
                               driver="ai" if autopilot else "human",
                               ai_state="talking" if autopilot else None)
     async with sf() as db:
-        await db.execute(sa.update(User).where(User.id == identity.user_id)
-                         .values(simulation_run_id=run.id))
+        if user_id is not None:
+            await db.execute(sa.update(User).where(User.id == user_id).values(simulation_run_id=run.id))
         db.add(person)
         await db.commit()
     return person
@@ -317,6 +311,13 @@ async def message_counts(sf, run_ids: Sequence[uuid.UUID]) -> dict[uuid.UUID, in
 
 async def team_messages(sf, user_ids: Sequence[uuid.UUID]) -> list[dict[str, Any]]:
     """What the agent told its team about these people, oldest first."""
+    return [m for _, m in await team_messages_by_subject(sf, user_ids)]
+
+
+async def team_messages_by_subject(
+    sf, user_ids: Sequence[uuid.UUID],
+) -> list[tuple[uuid.UUID, dict[str, Any]]]:
+    """:func:`team_messages`, each with the person it is about."""
     if not user_ids:
         return []
     async with sf() as db:
@@ -330,9 +331,10 @@ async def team_messages(sf, user_ids: Sequence[uuid.UUID]) -> list[dict[str, Any
             .where(User.id.in_({row.user_id for row in rows}))
         )).all()) if rows else {}
     return [
-        {"id": str(row.id), "at": row.created_at.isoformat(), "kind": row.kind,
-         "platform": row.platform, "to": row.destination or names.get(row.user_id) or "The team",
-         "group": row.destination is not None, "text": row.text, "severity": row.severity}
+        (row.subject_user_id,
+         {"id": str(row.id), "at": row.created_at.isoformat(), "kind": row.kind,
+          "platform": row.platform, "to": row.destination or names.get(row.user_id) or "The team",
+          "group": row.destination is not None, "text": row.text, "severity": row.severity})
         for row in rows
     ]
 
@@ -539,6 +541,20 @@ async def thread(sf, person_id: uuid.UUID) -> Sequence[SimulationMessage]:
         )).scalars().all()
 
 
+async def threads(sf, person_ids: Sequence[uuid.UUID]) -> dict[uuid.UUID, list[SimulationMessage]]:
+    """:func:`thread` for each of *person_ids*, in one query."""
+    found: dict[uuid.UUID, list[SimulationMessage]] = {person_id: [] for person_id in person_ids}
+    if not person_ids:
+        return found
+    async with sf() as db:
+        for m in (await db.execute(
+            sa.select(SimulationMessage).where(SimulationMessage.person_id.in_(person_ids))
+            .order_by(SimulationMessage.id)
+        )).scalars():
+            found[m.person_id].append(m)
+    return found
+
+
 def with_template_definition(run: SimulationRun, body: dict[str, Any]) -> dict[str, Any]:
     """A template send, with the template's components as the account defines them."""
     sent = body.get("template") or {}
@@ -641,15 +657,21 @@ async def done_runs(sf, now: datetime) -> Sequence[uuid.UUID]:
 
 
 async def delete_run(sf, run_id: uuid.UUID) -> None:
-    """A run with its people, messages, media, stand-in users and their conversations."""
+    await delete_runs(sf, [run_id])
+
+
+async def delete_runs(sf, run_ids: Sequence[uuid.UUID]) -> None:
+    """Runs with their people, messages, media, stand-in users and their conversations."""
     from surogates.session.store import delete_missions, delete_session_rows
 
+    if not run_ids:
+        return
     async with sf() as db:
         users = (await db.execute(
-            sa.select(User.id).where(User.simulation_run_id == run_id))).scalars().all()
+            sa.select(User.id).where(User.simulation_run_id.in_(run_ids)))).scalars().all()
         tree = set((await db.execute(sa.select(Session.id).where(
             Session.user_id.in_(users)
-            | (Session.config["simulation_run_id"].as_string() == str(run_id))
+            | Session.config["simulation_run_id"].as_string().in_([str(r) for r in run_ids])
         ))).scalars().all())
         while True:  # sub-agents' sessions, at any depth
             children = set((await db.execute(sa.select(Session.id).where(
@@ -686,7 +708,7 @@ async def delete_run(sf, run_id: uuid.UUID) -> None:
                     await db.execute(sa.delete(table).where(where))
         await db.execute(sa.delete(User).where(User.id.in_(users)))
         # People, messages and media go with the run (ON DELETE CASCADE).
-        await db.execute(sa.delete(SimulationRun).where(SimulationRun.id == run_id))
+        await db.execute(sa.delete(SimulationRun).where(SimulationRun.id.in_(run_ids)))
         await db.commit()
 
 
@@ -705,8 +727,13 @@ async def sweep(state, now: datetime) -> None:
             await finish_run(state, run_id)
         except Exception:
             logger.exception("[simulation] could not end stale run %s", run_id)
-    for run_id in old:
-        try:
-            await delete_run(sf, run_id)
-        except Exception:
-            logger.exception("[simulation] could not delete old run %s", run_id)
+    try:
+        await delete_runs(sf, old)
+    except Exception:
+        # One run that fails to delete must not keep the others.
+        logger.warning("[simulation] could not delete old runs together; one by one", exc_info=True)
+        for run_id in old:
+            try:
+                await delete_run(sf, run_id)
+            except Exception:
+                logger.exception("[simulation] could not delete old run %s", run_id)

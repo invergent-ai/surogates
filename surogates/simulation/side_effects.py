@@ -22,6 +22,7 @@ from typing import Any, Awaitable, Callable
 from pydantic import BaseModel
 
 from surogates.channels.memory_boundary import SIMULATION_BOUNDARY_PREFIX
+from surogates.harness.message_utils import tool_args
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +49,7 @@ _decided: dict[str, tuple[bool, float]] = {}
 
 def is_simulated(config: dict | None) -> bool:
     config = config or {}
-    # A sub-agent inherits its parent's memory boundary but not the run id.
+    # A sub-agent made before it inherited the run id still has the run's memory boundary.
     return bool(config.get("simulation_run_id")) or str(config.get("memory_boundary") or "").startswith(
         SIMULATION_BOUNDARY_PREFIX
     )
@@ -111,12 +112,7 @@ async def decide(
 
 
 def router_slugs(args: Any) -> list[str]:
-    if isinstance(args, str):
-        try:
-            args = json.loads(args)
-        except ValueError:
-            return []
-    calls = args.get("tools") if isinstance(args, dict) else None
+    calls = tool_args(args).get("tools")
     if not isinstance(calls, list):
         return []
     slugs = [c.get("tool_slug") for c in calls if isinstance(c, dict)]

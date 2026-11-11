@@ -98,46 +98,61 @@ def _message(m) -> dict[str, Any]:
 
 
 async def _detail(sf, run) -> dict[str, Any]:
+    return (await _details(sf, [run]))[0]
+
+
+async def _details(sf, runs) -> list[dict[str, Any]]:
+    """Each run as Studio shows it; Studio polls a whole simulation every 2 s, so
+    every query here covers all *runs* at once."""
     from surogates.followup.store import get_settings, member_permissions
 
     now = datetime.now(timezone.utc)
-    people, user_ids = [], []
-    found = await store.people(sf, run.id)
-    settings = (await get_settings(sf, org_id=run.org_id, agent_id=run.agent_id)
-                if any(p.stands_for for p in found) else None)
-    enrolled = await store.enrolled(sf, run, [p.user_id for p in found if p.user_id])
-    for person in found:
-        if person.user_id:
-            user_ids.append(person.user_id)
-        messages = await store.thread(sf, person.id)
-        rights = member_permissions(settings, person.stands_for) if person.stands_for else None
-        people.append({"id": str(person.id), "name": person.name, "channel": person.channel,
-                       "team": person.stands_for is not None,
-                       "user_id": str(person.user_id) if person.user_id else None,
-                       "task": person.task,
-                       "stands_for": str(person.stands_for) if person.stands_for else None,
-                       "member_id": str(person.stands_for) if person.stands_for else None,
-                       "about": person.about, "test": person.test,
-                       "enrolled": person.user_id in enrolled if person.user_id else False,
-                       "permissions": rights and {"receives": sorted(rights["receives"]),
-                                                  "can": sorted(rights["can"]),
-                                                  "handles": rights["handles"]},
-                       # A visitor's address holds their widget session's cookie.
-                       "address": "visitor" if person.channel == "website" else person.address,
-                       "persona": person.persona,
-                       "driver": person.driver, "ai_state": person.ai_state,
-                       "ai_note": person.ai_note,
-                       "window_open": store.window_open(messages, now),
-                       "agent_typing": store.is_typing(person, now),
-                       "messages": [_message(m) for m in messages]})
-    return {"id": str(run.id), "agent_id": run.agent_id, "status": run.status,
+    everyone = await store.people_of(sf, [r.id for r in runs])
+    users = {r.id: [p.user_id for p in everyone[r.id] if p.user_id] for r in runs}
+    threads = await store.threads(sf, [p.id for r in runs for p in everyone[r.id]])
+    team = await store.team_messages_by_subject(sf, [u for r in runs for u in users[r.id]])
+    settings, enrolled = {}, {}
+    for key in {(r.org_id, r.agent_id) for r in runs}:
+        group = [r for r in runs if (r.org_id, r.agent_id) == key]
+        if any(p.stands_for for r in group for p in everyone[r.id]):
+            settings[key] = await get_settings(sf, org_id=key[0], agent_id=key[1])
+        enrolled[key] = await store.enrolled(sf, group[0], [u for r in group for u in users[r.id]])
+    details = []
+    for run in runs:
+        key, people = (run.org_id, run.agent_id), []
+        for person in everyone[run.id]:
+            messages = threads[person.id]
+            rights = member_permissions(settings.get(key), person.stands_for) if person.stands_for else None
+            people.append({"id": str(person.id), "name": person.name, "channel": person.channel,
+                           "team": person.stands_for is not None,
+                           "user_id": str(person.user_id) if person.user_id else None,
+                           "task": person.task,
+                           "stands_for": str(person.stands_for) if person.stands_for else None,
+                           "member_id": str(person.stands_for) if person.stands_for else None,
+                           "about": person.about, "test": person.test,
+                           "enrolled": person.user_id in enrolled[key] if person.user_id else False,
+                           "permissions": rights and {"receives": sorted(rights["receives"]),
+                                                      "can": sorted(rights["can"]),
+                                                      "handles": rights["handles"]},
+                           # A visitor's address holds their widget session's cookie.
+                           "address": "visitor" if person.channel == "website" else person.address,
+                           "persona": person.persona,
+                           "driver": person.driver, "ai_state": person.ai_state,
+                           "ai_note": person.ai_note,
+                           "window_open": store.window_open(messages, now),
+                           "agent_typing": store.is_typing(person, now),
+                           "messages": [_message(m) for m in messages]})
+        mine = set(users[run.id])
+        details.append({
+            "id": str(run.id), "agent_id": run.agent_id, "status": run.status,
             "channel": run.channel, "batch_id": str(run.batch_id) if run.batch_id else None,
             "phone_number_id": run.phone_number_id, "created_by": run.created_by,
             "via": run.via, "created_at": run.created_at.isoformat(),
             "ended_at": run.ended_at.isoformat() if run.ended_at else None, "people": people,
             "flows": run.flows or [],
             "review": run.review,
-            "team": await store.team_messages(sf, user_ids)}
+            "team": [m for subject, m in team if subject in mine]})
+    return details
 
 
 async def _run_in_org(request: Request, run_id: uuid.UUID, org_id: uuid.UUID):
@@ -278,7 +293,7 @@ async def _batch(request: Request, batch_id: uuid.UUID, org_id: uuid.UUID, agent
 async def get_batch(batch_id: uuid.UUID, org_id: uuid.UUID, agent_id: str, request: Request):
     sf = request.app.state.session_factory
     runs = await _batch(request, batch_id, org_id, agent_id)
-    return {"id": str(batch_id), "runs": [await _detail(sf, r) for r in runs]}
+    return {"id": str(batch_id), "runs": await _details(sf, runs)}
 
 
 @router.post("/batches/{batch_id}/end")

@@ -366,6 +366,16 @@ def coerce_message_content(message: dict[str, Any]) -> dict[str, Any]:
     return message
 
 
+def tool_args(raw: Any) -> dict:
+    """A tool call's arguments, sent as a JSON string or already a dict; ``{}`` when neither."""
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            return {}
+    return raw if isinstance(raw, dict) else {}
+
+
 def leading_json_object(content: Any) -> dict | None:
     """The JSON object *content* opens with, else ``None``.
 

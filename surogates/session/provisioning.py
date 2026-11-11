@@ -63,10 +63,12 @@ _WORKSPACE_SHARING_FIELDS = (
 )
 
 # Boundary fields a child session inherits verbatim from its parent so it
-# lands in the same partitioned workspace/memory as the rest of the thread.
+# lands in the same partitioned workspace/memory as the rest of the thread,
+# and inside the same simulation run.
 _BOUNDARY_SHARING_FIELDS = (
     "memory_boundary",
     "workspace_boundary",
+    "simulation_run_id",
 )
 
 

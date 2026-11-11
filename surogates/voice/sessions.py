@@ -21,6 +21,7 @@ from surogates.channels.inbound import build_principal_stamp
 from surogates.channels.memory_boundary import simulation_boundary
 from surogates.channels.constants import queue_priority
 from surogates.config import INTERRUPT_CHANNEL_PREFIX, enqueue_session
+from surogates.harness.message_utils import tool_args
 from surogates.session.events import EventType
 from surogates.session.interactive_input import try_resolve_text_answer
 from surogates.voice.lines import Lines, default_lines, language_name
@@ -79,12 +80,7 @@ def question_text(arguments: Any, said: str = "", choices_line: str = default_li
     The tool's schema (``tools/builtin/ask_user_question.py``) is
     ``{"questions": [{"prompt": str, "choices": [{"label": str}]}]}``.
     """
-    if isinstance(arguments, str):
-        try:
-            arguments = json.loads(arguments)
-        except ValueError:
-            return ""
-    questions = arguments.get("questions") if isinstance(arguments, dict) else None
+    questions = tool_args(arguments).get("questions")
     spoken, asked = [], said.rstrip().endswith("?")
     for q in questions if isinstance(questions, list) else []:
         if not isinstance(q, dict) or not str(q.get("prompt") or "").strip():

@@ -413,6 +413,7 @@ async def test_create_child_session_inherits_boundary_fields_from_parent():
             "workspace_path": "/workspace",
             "memory_boundary": "slack:c:G1",
             "workspace_boundary": "slack:c:G1",
+            "simulation_run_id": "run-1",
         },
     )
     store = SimpleNamespace(create_session=AsyncMock(return_value=SimpleNamespace(id=uuid4())))
@@ -421,6 +422,7 @@ async def test_create_child_session_inherits_boundary_fields_from_parent():
 
     cfg = store.create_session.await_args.kwargs["config"]
     assert cfg["memory_boundary"] == "slack:c:G1"
+    assert cfg["simulation_run_id"] == "run-1"
     assert cfg["workspace_boundary"] == "slack:c:G1"
     assert cfg["sandbox_root_session_id"] == str(parent.id)
 
@@ -435,11 +437,13 @@ async def test_create_child_session_drops_a_boundary_its_parent_lacks():
 
     await create_child_session(
         store=store, parent=parent, channel="worker",
-        config={"memory_boundary": "workstream:x", "workspace_boundary": "workstream:x"},
+        config={"memory_boundary": "workstream:x", "workspace_boundary": "workstream:x",
+                "simulation_run_id": "run-1"},
     )
 
     cfg = store.create_session.await_args.kwargs["config"]
     assert "memory_boundary" not in cfg and "workspace_boundary" not in cfg
+    assert "simulation_run_id" not in cfg
 
 
 @pytest.mark.asyncio
