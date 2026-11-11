@@ -114,10 +114,11 @@ async def test_agents_started_at_once_share_what_their_parent_has_left(chats, mo
         await asyncio.sleep(0.2)
         return "Done."
 
-    monkeypatch.setattr(delegate, "_run_single_delegation", run)
     chat = await a_chat(chats, BUDGETED)
     child = await a_background_agent(chats, chat)
     await chats.store.update_session_config_key(child.id, AGENT_BUDGET_KEY, {"tokens": 100})
+    # From here, the agents' starts are recorded, not run.
+    monkeypatch.setattr(delegate, "_run_single_delegation", run)
 
     def call(n):
         return agents_module._agent_handler(
