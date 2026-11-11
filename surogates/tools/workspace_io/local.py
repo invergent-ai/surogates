@@ -438,21 +438,25 @@ _SENSITIVE_PATH_PREFIXES = ("/etc/", "/boot/", "/usr/lib/systemd/")
 _SENSITIVE_EXACT_PATHS = {"/var/run/docker.sock", "/run/docker.sock"}
 
 
-def _check_sensitive_path(filepath: str) -> str | None:
-    """Return an error message if the path targets a sensitive system location."""
+def _check_sensitive_path(filepath: str, shown: str | None = None) -> str | None:
+    """Return an error message if the path targets a sensitive system location.
+
+    The message names *shown*, the path as the model wrote it, when given.
+    """
     try:
         resolved = os.path.realpath(os.path.expanduser(filepath))
     except (OSError, ValueError):
         resolved = filepath
+    named = filepath if shown is None else shown
     for prefix in _SENSITIVE_PATH_PREFIXES:
         if resolved.startswith(prefix):
             return (
-                f"Refusing to write to sensitive system path: {filepath}\n"
+                f"Refusing to write to sensitive system path: {named}\n"
                 "Use the terminal tool with sudo if you need to modify system files."
             )
     if resolved in _SENSITIVE_EXACT_PATHS:
         return (
-            f"Refusing to write to sensitive system path: {filepath}\n"
+            f"Refusing to write to sensitive system path: {named}\n"
             "Use the terminal tool with sudo if you need to modify system files."
         )
     return None
@@ -600,12 +604,17 @@ class LocalWorkspaceIO:
 
     async def check_write(self, path: str) -> str | None:
         refuse_nul(path)
+        target = path
         if self.root:
-            # ``/workspace/...`` is this workspace, as resolve() reads it.
-            path = in_workspace_terms(self.root, path)
-        if _is_write_denied(path):
+            # The file resolve() will write: ``/workspace/...`` is this
+            # workspace, and a relative path is relative to it, never to the
+            # worker's own working folder.
+            target = in_workspace_terms(self.root, os.path.expanduser(path))
+            if not os.path.isabs(target):
+                target = os.path.join(self.root, target)
+        if _is_write_denied(target):
             return f"Write denied: '{path}' is a protected system/credential file."
-        return _check_sensitive_path(path)
+        return _check_sensitive_path(target, shown=path)
 
     async def stat(self, key: str) -> FileStat | None:
         try:
