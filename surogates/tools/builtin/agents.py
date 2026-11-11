@@ -27,7 +27,17 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from surogates.harness.agent_news import fenced
-from surogates.harness.subagents import DISPATCH_KEY, PARITY_KEY, dispatch_of, may_message
+from surogates.harness.subagents import (
+    AGENT_BUDGET_KEY,
+    DISPATCH_KEY,
+    PARITY_KEY,
+    budget_for_children,
+    budget_left,
+    budget_of,
+    dispatch_of,
+    may_message,
+    over_budget,
+)
 from surogates.runtime.turn_slots import turn_waiting
 from surogates.tools.registry import ToolRegistry, ToolSchema
 
@@ -571,6 +581,9 @@ async def _why_not_resume(session_store: Any, sender: Any, target: Any, session_
     """
     from surogates.workstreams import is_project_thread
 
+    if budget_of(target) and await over_budget(session_store, target) is not None:
+        # Resumed, it would stop at its first step, and its parent be told again.
+        return "it used its token budget"
     if target.id == sender.parent_id:
         return None if target.status == "completed" else f"it is {target.status}: its user resumes it"
     if target.parent_id != sender.id:
@@ -629,6 +642,8 @@ async def _running_agents(session_factory: Any, parent_id: UUID) -> list[tuple[s
 #: Starts under way in this process, by parent, until their child is in the database: (mode, agent_type, mark).
 _STARTING: dict[UUID, list[tuple[str, str | None, str]]] = {}
 _START_LOCKS: dict[UUID, asyncio.Lock] = {}
+#: Tokens a sub-agent with a budget has handed to its agents still starting or running in this process, by its id.
+_BUDGET_HANDED: dict[UUID, int] = {}
 
 
 #: The most agents one session may have running in the background at once.
@@ -687,6 +702,40 @@ async def _agent_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
     if background and getattr(parent, "channel", None) == "delegation":
         # A helper's parent hears of its end once: work it left running would end after that.
         return _error("a sub-agent cannot start agents in the background: start it in the foreground")
+    # Its token budget: the deployment's, or its parent's key.  A sub-agent with a budget hands each agent it
+    # starts at most half of what it has left, less what its agents still running were handed: the calls of
+    # one response run at once, and it needs tokens of its own to read their reports.
+    child_tokens = budget_for_children(parent_config)
+    left = await budget_left(session_store, parent)
+    handed = 0
+    if left is not None:
+        share = (left - _BUDGET_HANDED.get(parent.id, 0)) // 2
+        if share <= 0:
+            return _error("your token budget is used up: finish with what you have")
+        child_tokens = handed = min(child_tokens, share) if child_tokens else share
+        _BUDGET_HANDED[parent.id] = _BUDGET_HANDED.get(parent.id, 0) + handed
+    try:
+        return await _start_agent(
+            kwargs, parent=parent, prompt=prompt, description=description, background=background,
+            fork=fork, agent_type=agent_type, model=model, depth=depth, budget=budget, child_tokens=child_tokens,
+        )
+    finally:
+        if handed:
+            _BUDGET_HANDED[parent.id] -= handed
+            if _BUDGET_HANDED[parent.id] <= 0:
+                _BUDGET_HANDED.pop(parent.id, None)
+
+
+async def _start_agent(
+    kwargs: dict[str, Any], *, parent: Any, prompt: str, description: str,
+    background: bool, fork: bool, agent_type: str | None, model: str | None, depth: int, budget: Any,
+    child_tokens: int,
+) -> str:
+    """Start the agent the checked call asks for, and wait for its report unless it runs in the background."""
+    from surogates.tools.builtin import delegate
+
+    session_store = kwargs.get("session_store")
+    tenant = kwargs.get("tenant")
     child_depth = depth + 1
     # Below the depth limit an agent may start agents of its own.
     role = "orchestrator" if child_depth < delegate._MAX_DELEGATION_DEPTH else "leaf"
@@ -733,7 +782,10 @@ async def _agent_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
         bundle=kwargs.get("bundle"),
         live_parent_config=kwargs.get("session_config"),
         leaf_tools=("delegate_task", "agent"),
-        extra_config={PARITY_KEY: True, DISPATCH_KEY: dispatch},
+        extra_config={
+            PARITY_KEY: True, DISPATCH_KEY: dispatch,
+            **({AGENT_BUDGET_KEY: {"tokens": child_tokens}} if child_tokens else {}),
+        },
         seed=seed,
         start_extra={"agent": True, "description": description, "mode": dispatch["mode"], "fork": fork,
                      "tool_call_id": tool_call_id},
