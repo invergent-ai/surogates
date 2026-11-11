@@ -143,7 +143,7 @@ async def test_a_chat_is_offered_monitor_and_woken_by_its_lines(chats, daemon_re
     try:
         chat = await a_chat(chats, PARITY)
         chats.replies = [
-            calling("monitor", "call_mon", command="sleep 1; echo deploy finished", description="Wait for the deploy"),
+            calling("monitor", "call_mon", command="sleep 4; echo deploy finished", description="Wait for the deploy"),
             _final_response("Watching the deploy."),
         ]
         await chats.says(chat, "Tell me when the deploy is done.")
