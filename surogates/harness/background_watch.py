@@ -338,8 +338,7 @@ class BackgroundWatch:
                 # waits on was started with no watch to hear it, and is dropped.
                 if entry.get("session_id") in self._owners.get(owner, {}):
                     ended.append((entry["session_id"], entry))
-            # Lines first read, then the ends: a command's last lines come before its end.
-            return ended, process_registry.drain_lines()
+            return ended, process_registry.drain_lines(set(self._owners.get(owner, {})))
         try:
             raw = await self._sandbox_pool.execute(owner, DRAIN, "{}")
         except ValueError:

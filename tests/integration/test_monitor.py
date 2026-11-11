@@ -8,6 +8,7 @@ import time
 from uuid import UUID
 
 import pytest
+import pytest_asyncio
 
 from surogates.harness import background_watch as watch_module
 from surogates.harness.agent_news import notification_note
@@ -39,12 +40,13 @@ async def until(check, seconds: float = 20.0):
     raise AssertionError("never happened")
 
 
-@pytest.fixture()
-def here_watch(api, monkeypatch):  # noqa: F811
+@pytest_asyncio.fixture(loop_scope="session")
+async def here_watch(api, monkeypatch):  # noqa: F811
     watch = BackgroundWatch(poll_seconds=0.05)
     watch.configure(store=api.app.state.session_store, redis=api.app.state.redis, sandbox_pool=None)
     monkeypatch.setattr(watch_module, "background_watch", watch)
     yield watch
+    await watch.close()
 
 
 async def start(api, session, command, **arguments):  # noqa: F811

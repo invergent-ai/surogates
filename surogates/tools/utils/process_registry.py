@@ -476,6 +476,11 @@ class ProcessRegistry:
         text = session._partial_line + strip_ansi(text).replace("\r\n", "\n")
         lines = text.split("\n")
         session._partial_line = "" if final else lines.pop()
+        if lines and lines[-1] == "logout":
+            # The login shell says it on exit: held back until more comes, and dropped at the end.
+            lines.pop()
+            if not final:
+                session._partial_line = "logout\n" + session._partial_line
         for line in lines:
             if not line.strip():
                 continue
@@ -484,13 +489,14 @@ class ProcessRegistry:
             else:
                 session.pending_lines.append(line[:2000])
 
-    def drain_lines(self) -> dict[str, dict]:
-        """The lines each watched process printed since the last drain, and how many were dropped."""
+    def drain_lines(self, ids: set[str] | None = None) -> dict[str, dict]:
+        """The lines each watched process (of *ids*, when given) printed since the last drain, and how many
+        were dropped."""
         with self._lock:
             sessions = list(self._running.values()) + list(self._finished.values())
         out: dict[str, dict] = {}
         for session in sessions:
-            if not session.watch_lines:
+            if not session.watch_lines or (ids is not None and session.id not in ids):
                 continue
             with session._lock:
                 if session.pending_lines or session.dropped_lines:
