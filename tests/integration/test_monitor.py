@@ -105,7 +105,7 @@ async def test_a_monitor_past_its_timeout_is_killed_and_says_so(api, here_watch)
         "while true; do echo tick; sleep 0.2; done", workdir=None, task_id="t", pty=False,
         notify_on_complete=True, watcher_interval=None, watch_lines=True,
     )
-    here_watch.watch(owner=HERE, proc_id=started["session_id"], session_id=chat, command="ticks",
+    await here_watch.watch(owner=HERE, proc_id=started["session_id"], session_id=chat, command="ticks",
                      monitor=("Watch the ticks", 0.8, 30))
     ended = await until(lambda: notes_until_end(store, chat))
     assert ended[-1]["status"] == "killed" and ended[-1]["reason"] == "its timeout passed"
@@ -249,7 +249,7 @@ async def test_a_daemon_answer_of_any_shape_never_stops_the_watch(api, monkeypat
     watch = BackgroundWatch(poll_seconds=0.05)
     watch.configure(store=store, redis=api.app.state.redis, sandbox_pool=Pool())
     try:
-        watch.watch(owner=owner, proc_id="proc_bad", session_id=chat, command="c", monitor=("d", 60.0, 30))
+        await watch.watch(owner=owner, proc_id="proc_bad", session_id=chat, command="c", monitor=("d", 60.0, 30))
         ended = await until(lambda: notes_until_end(store, chat))
         end = ended[-1]
         assert end["status"] == "completed" and "exit_code" not in end

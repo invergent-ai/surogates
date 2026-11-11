@@ -1548,6 +1548,10 @@ class AgentHarness(
             await self._pick_up_routine(session)
             await self._take_back_what_the_turn_handed_on(session)
             try:
+                # Its background commands on other workers go too, as this worker's go with its sandbox.
+                from surogates.harness.background_watch import background_watch
+
+                await background_watch.stop_session_elsewhere(session.id)
                 await self._sandbox_pool.destroy_for_session(str(session.id))
             except Exception:
                 logger.debug(
@@ -6643,9 +6647,12 @@ class AgentHarness(
         command wrote that event before its worker died: it is not written
         a second time.
         """
-        # Destroy the sandbox if one exists.
+        # Destroy the sandbox if one exists, and its background commands on other workers.
         if self._sandbox_pool is not None:
             try:
+                from surogates.harness.background_watch import background_watch
+
+                await background_watch.stop_session_elsewhere(session.id)
                 await self._sandbox_pool.destroy_for_session(str(session.id))
             except Exception:
                 logger.debug("Sandbox cleanup on /clear failed", exc_info=True)

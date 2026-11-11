@@ -1465,6 +1465,13 @@ async def run_worker(settings: Settings) -> None:
     from surogates.harness.background_watch import background_watch
 
     background_watch.configure(store=session_store, redis=redis_client, sandbox_pool=sandbox_pool)
+    # The commands a worker that died was watching: their sessions are told by the next sweep.
+    background_watch.start_sweeping()
+    claim_as = getattr(sandbox_backend, "claim_as", None)
+    if claim_as is not None:
+        # A session's turns and sub-agents run on any worker, each in that worker's own container for it (the
+        # Docker backend): a sweep of the session's containers spares a live worker's (the watch's heartbeat).
+        claim_as(background_watch.id, background_watch.worker_alive)
 
     # 4b. Browser pool -- one browser per session, lazily provisioned.
     browser_backend = _build_browser_backend(

@@ -161,7 +161,7 @@ async def test_a_background_command_is_listed_and_stopped_by_the_session_that_st
     proc = started["session_id"]
     from uuid import UUID
 
-    watch.watch(owner=HERE, proc_id=proc, session_id=UUID(mine), command="sleep 30")
+    await watch.watch(owner=HERE, proc_id=proc, session_id=UUID(mine), command="sleep 30")
     try:
         assert (await listed_api(api, mine))["background_commands"] == [{"id": proc, "command": "sleep 30", "status": "running"}]
         assert (await listed_api(api, theirs))["background_commands"] == []
