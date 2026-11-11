@@ -15,6 +15,7 @@ import asyncio
 import json
 import logging
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID
@@ -42,6 +43,10 @@ from surogates.tools.mcp.client import (
 )
 
 logger = logging.getLogger(__name__)
+
+#: How many tenants' approved tool fingerprints the pool keeps (least
+#: recently connected dropped first).  A tenant holds one SHA-256 per tool.
+_MAX_TENANT_APPROVALS = 10_000
 
 
 def _tenant_prefix(org_id: UUID, user_id: UUID, agent_id: str) -> str:
@@ -88,10 +93,11 @@ class PoolEntry:
     """Tracks a tenant's MCP server set and its last-access time.
 
     ``governance`` is the tenant-scoped :class:`MCPGovernance` instance
-    that holds this tenant's rug-pull fingerprints.  One per
-    ``(org_id, user_id)`` pool entry so fingerprints never leak across
-    tenants — a rug-pull in tenant A's server must not suppress a scan
-    in tenant B's differently-configured server with the same name.
+    that checks this tenant's tools against the fingerprints approved at
+    its earlier connections (:meth:`ConnectionPool._tenant_approvals`).
+    One per ``(org_id, user_id, agent_id)`` so fingerprints never leak
+    across tenants — a rug-pull in tenant A's server must not suppress a
+    scan in tenant B's differently-configured server with the same name.
     """
 
     org_id: UUID
@@ -128,10 +134,14 @@ class ConnectionPool:
     governance_enabled:
         When True, every advertised MCP tool is scanned for prompt
         injection, hidden instructions, invisible Unicode, etc. — and
-        tracked for rug-pull mutations on reconnect.  Each pool entry
-        gets its own :class:`MCPGovernance` instance so fingerprints
-        are tenant-scoped.  Unsafe tools are filtered out of the
-        advertised schema set.
+        tracked for rug-pull mutations on reconnect.  The fingerprints
+        approved at a tenant's first connection outlive its pool entry
+        (``_approvals``), so a later connection whose tool definitions
+        changed is caught, audited and left without those tools.  An
+        invalidation of the agent (its MCP attachments or runtime config
+        changed by an admin) clears them: the next connection is approved
+        anew.  They live in this process only; a restart approves anew.
+        Unsafe tools are filtered out of the advertised schema set.
     audit_store:
         Optional :class:`AuditStore` that receives
         ``policy.mcp_scan`` and ``policy.rug_pull`` entries per scanned
@@ -157,6 +167,10 @@ class ConnectionPool:
         self._eviction_task: asyncio.Task | None = None
         self._governance_enabled = governance_enabled
         self._audit_store = audit_store
+        # Per tenant, the fingerprints of the tools approved at its first
+        # connection: ``server.tool`` -> SHA-256.  Kept when the tenant's
+        # entry is evicted, so its next connection is checked against them.
+        self._approvals: OrderedDict[tuple[UUID, UUID, str], dict[str, str]] = OrderedDict()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -340,11 +354,12 @@ class ConnectionPool:
             tool_index: dict[str, tuple[str, str]] = {}
             utility_index: dict[str, str] = {}
 
-            # Per-tenant MCPGovernance — fingerprints are keyed by
-            # (server, tool) within this instance, never shared with
+            # Per-tenant MCPGovernance over the tenant's approved
+            # fingerprints, keyed by (server, tool), never shared with
             # other tenants even when server names collide.
             tenant_governance: MCPGovernance | None = (
-                MCPGovernance() if self._governance_enabled else None
+                MCPGovernance(fingerprints=self._tenant_approvals(key))
+                if self._governance_enabled else None
             )
 
             for schema in schemas:
@@ -461,6 +476,22 @@ class ConnectionPool:
     # ------------------------------------------------------------------
     # Governance scan helper
     # ------------------------------------------------------------------
+
+    def _tenant_approvals(self, key: tuple[UUID, UUID, str]) -> dict[str, str]:
+        """The fingerprints approved for tenant *key*, kept across its connections.
+
+        At most ``_MAX_TENANT_APPROVALS`` tenants are kept, the least
+        recently connected dropped first: a dropped tenant is approved anew
+        at its next connection.
+        """
+        approvals = self._approvals.get(key)
+        if approvals is None:
+            approvals = self._approvals[key] = {}
+            while len(self._approvals) > _MAX_TENANT_APPROVALS:
+                self._approvals.popitem(last=False)
+        else:
+            self._approvals.move_to_end(key)
+        return approvals
 
     async def _scan_and_record(
         self,
@@ -765,6 +796,10 @@ class ConnectionPool:
         scheduled on the running loop.
         """
         keys = [k for k in self._entries if k[2] == agent_id]
+        # An admin changed what the agent connects to: its next connection
+        # is approved anew, not held against the old definitions.
+        for key in [k for k in self._approvals if k[2] == agent_id]:
+            del self._approvals[key]
         entries: list[PoolEntry] = []
         for key in keys:
             entry = self._entries.pop(key, None)
@@ -783,19 +818,23 @@ class ConnectionPool:
                 await asyncio.sleep(60)
             except asyncio.CancelledError:
                 return
+            await self._evict_idle_once(time.monotonic())
 
-            now = time.monotonic()
-            evicted: list[tuple[UUID, UUID, str]] = []
+    async def _evict_idle_once(self, now: float) -> None:
+        """Evict the tenant connections idle at *now*.  Their approved
+        fingerprints stay (``_approvals``): the next connection is checked
+        against them."""
+        evicted: list[tuple[UUID, UUID, str]] = []
 
-            for key, entry in list(self._entries.items()):
-                if now - entry.last_used > self._idle_timeout:
-                    await self._disconnect_entry(entry)
-                    evicted.append(key)
+        for key, entry in list(self._entries.items()):
+            if now - entry.last_used > self._idle_timeout:
+                await self._disconnect_entry(entry)
+                evicted.append(key)
 
-            for key in evicted:
-                self._entries.pop(key, None)
-                self._locks.pop(key, None)
-                logger.info(
-                    "Evicted idle MCP connections for org=%s user=%s agent=%s",
-                    key[0], key[1], key[2],
-                )
+        for key in evicted:
+            self._entries.pop(key, None)
+            self._locks.pop(key, None)
+            logger.info(
+                "Evicted idle MCP connections for org=%s user=%s agent=%s",
+                key[0], key[1], key[2],
+            )

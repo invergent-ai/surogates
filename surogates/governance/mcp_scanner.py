@@ -86,8 +86,11 @@ class MCPGovernance:
     A tool must pass **both** layers to be considered safe.
     """
 
-    def __init__(self) -> None:
-        self._fingerprints: dict[str, str] = {}
+    def __init__(self, fingerprints: dict[str, str] | None = None) -> None:
+        # The approved fingerprints.  A caller that keeps them across
+        # connections (the MCP proxy's pool, per tenant) passes its own
+        # dict, which this instance then reads and writes.
+        self._fingerprints: dict[str, str] = {} if fingerprints is None else fingerprints
         self._agt_scanner = AGTScanner()
 
     # ------------------------------------------------------------------
@@ -180,16 +183,15 @@ class MCPGovernance:
     def register_fingerprint(self, tool_name: str, tool_def: dict) -> None:
         """Store the SHA-256 fingerprint of *tool_def* for future comparison.
 
-        Registers with both our own fingerprint store and AGT's scanner.
+        This store is the rug-pull check (:meth:`check_rug_pull`).  Nothing
+        is registered with AGT's scanner: its registry is keyed by
+        ``server::tool`` and looked up by the bare tool name, so a
+        registration under the qualified name never matched a scan and its
+        own rug-pull check never fired; registered under the bare name, its
+        cross-server checks would refuse any tool whose name is within two
+        edits of another server's (``get_user`` / ``get_users``).
         """
-        fp = _fingerprint(tool_def)
-        self._fingerprints[tool_name] = fp
-
-        # Also register with AGT for its rug-pull detection.
-        description = tool_def.get("description", "")
-        schema = tool_def.get("inputSchema") or tool_def.get("input_schema")
-        server_name = tool_def.get("_server_name", "unknown")
-        self._agt_scanner.register_tool(tool_name, description, schema, server_name)
+        self._fingerprints[tool_name] = _fingerprint(tool_def)
 
     def check_rug_pull(self, tool_name: str, tool_def: dict) -> bool:
         """Check whether *tool_def* still matches the stored fingerprint.
