@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import asyncio
 import base64
 import logging
@@ -48,7 +49,12 @@ from surogates.channels.constants import (
     outbound_dm,
     session_queue_priority,
 )
-from surogates.channels.memory_boundary import BUYER_BOUNDARY_PREFIX, CASE_AGENT_KEY, EVAL_BOUNDARY_PREFIX
+from surogates.channels.memory_boundary import (
+    BUYER_BOUNDARY_PREFIX,
+    CASE_AGENT_KEY,
+    END_USER_BOUNDARY_PREFIX,
+    EVAL_BOUNDARY_PREFIX,
+)
 from surogates.coding_agents.command import is_code_command
 from surogates.tools.owner_scope import is_ops_chat_service_account
 from surogates.config import INTERRUPT_CHANNEL_PREFIX, enqueue_session
@@ -629,8 +635,35 @@ async def _get_session_for_tenant(
 _EVAL_PARTITION_ID_RE = re.compile(r"[A-Za-z0-9._-]{1,64}")
 
 
+def _end_user_boundary(end_user: object, service_account_id: UUID | None) -> str:
+    """The memory partition of one end user an API key serves.
+
+    The caller names the end user as it knows them (any text up to 200
+    characters, on one line); the partition is a digest of it, under the
+    key's own service account, so names never reach a storage path and no
+    other key can reach the same partition by naming the same end user.
+    """
+    name = end_user.strip() if isinstance(end_user, str) else ""
+    if (
+        service_account_id is None
+        or not name
+        or len(end_user) > 200
+        or any(ord(c) < 32 or ord(c) == 127 for c in end_user)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="end_user must be 1-200 characters on one line, named by an API key.",
+        )
+    digest = hashlib.sha256(name.encode("utf-8")).hexdigest()[:32]
+    return f"{END_USER_BOUNDARY_PREFIX}{service_account_id}:{digest}"
+
+
 def apply_eval_isolation(
-    config: dict, *, channel: str, buyer_principal: bool = False,
+    config: dict,
+    *,
+    channel: str,
+    buyer_principal: bool = False,
+    service_account_id: UUID | None = None,
 ) -> dict:
     """Return *config* with the evaluation memory boundary resolved.
 
@@ -690,6 +723,16 @@ def apply_eval_isolation(
     resolved.pop(CASE_SCOPE_KEY, None)
     resolved.pop(CASE_AGENT_KEY, None)
     if channel not in (API_CHANNEL, BUY_PAGE_CHANNEL):
+        return resolved
+    if (
+        channel == API_CHANNEL
+        and "end_user" in resolved
+        and not resolved.get("eval_partition_id")
+        and not (buyer_principal and resolved.get("public_buyer_id"))
+    ):
+        resolved["memory_boundary"] = _end_user_boundary(
+            resolved["end_user"], service_account_id,
+        )
         return resolved
     if buyer_principal and resolved.get("public_buyer_id"):
         key, prefix = "public_buyer_id", BUYER_BOUNDARY_PREFIX
@@ -823,7 +866,9 @@ async def _require_eval_seeding(
     cannot grant itself; tracked as bug-16 in the team's eval bug folder.
     """
     boundary = str(
-        apply_eval_isolation(body.config, channel=channel).get("memory_boundary")
+        apply_eval_isolation(
+            {k: v for k, v in body.config.items() if k != "end_user"}, channel=channel,
+        ).get("memory_boundary")
         or ""
     )
     if not boundary.startswith(EVAL_BOUNDARY_PREFIX):
@@ -954,7 +999,10 @@ async def _create_session(
         )
 
     config = apply_eval_isolation(
-        body.config.copy(), channel=channel, buyer_principal=buyer_principal,
+        body.config.copy(),
+        channel=channel,
+        buyer_principal=buyer_principal,
+        service_account_id=service_account_id,
     )
     if body.system:
         config["system"] = body.system

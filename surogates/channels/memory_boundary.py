@@ -17,6 +17,7 @@ from surogates.channels.constants import WEBSITE_CHANNEL
 __all__ = [
     "MANAGED_CHANNELS",
     "BUYER_BOUNDARY_PREFIX",
+    "END_USER_BOUNDARY_PREFIX",
     "CASE_AGENT_KEY",
     "CASE_BOUNDARY_PREFIX",
     "CASE_RERUN_KEY",
@@ -60,6 +61,13 @@ PROJECT_BOUNDARY_PREFIX = "workstream:"
 # so without their own partition every buyer would share one memory. The
 # session route stamps ``buyer:<buyer id>`` only for that principal.
 BUYER_BOUNDARY_PREFIX = "buyer:"
+
+# A service holding an agent's API key (Surogate Portal, say) serves many
+# people through it, so without their own partition they would all share the
+# agent's memory. A session naming its ``end_user`` gets
+# ``enduser:<service account id>:<digest>``: the session route derives it from
+# the key's own account, so no other key can name its way into it.
+END_USER_BOUNDARY_PREFIX = "enduser:"
 
 # A public website's visitors all arrive anonymously through the agent's
 # one website channel, so without their own partition every visitor would
@@ -252,8 +260,9 @@ def session_memory_boundary(session: object) -> str | None:
     except an evaluation session, which carries an ``eval:`` boundary stamped
     by the session route, a project's session, which carries its
     project's ``workstream:`` boundary, a buyer's session, which carries
-    its ``buyer:`` boundary, and a case's session, which carries its case's
-    ``case:`` boundary.
+    its ``buyer:`` boundary, a case's session, which carries its case's
+    ``case:`` boundary, and an API key's session naming its end user, which
+    carries that end user's ``enduser:`` boundary.
 
     A website session always has a ``visitor:`` boundary: the one bootstrap
     stamped, or, for a session that has none, one of its own session, so an
@@ -272,7 +281,14 @@ def session_memory_boundary(session: object) -> str | None:
         )
     if channel not in MANAGED_CHANNELS:
         if is_eval_session(session) or persisted.startswith(
-            (PROJECT_BOUNDARY_PREFIX, BUYER_BOUNDARY_PREFIX, CASE_BOUNDARY_PREFIX)
+            (
+                PROJECT_BOUNDARY_PREFIX,
+                BUYER_BOUNDARY_PREFIX,
+                CASE_BOUNDARY_PREFIX,
+                # Stamped by the API session route; a sub-agent or worker the
+                # session starts inherits it on its own channel.
+                END_USER_BOUNDARY_PREFIX,
+            )
         ):
             return persisted
         return None
