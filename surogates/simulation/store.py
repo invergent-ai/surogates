@@ -8,6 +8,7 @@ account exactly as it serves a real one.
 
 from __future__ import annotations
 
+import logging
 import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -18,9 +19,14 @@ import sqlalchemy as sa
 from surogates.channels.identity import ResolvedIdentity, get_or_create_channel_identity
 from surogates.channels.platforms.whatsapp_api import DEFAULT_API_VERSION
 from surogates.db.models import (
+    AgentUser,
+    ChannelIdentity,
+    DeliveryOutbox,
     Event,
+    InboxItem,
     OutreachMessageRow,
     Session,
+    SessionCursor,
     SessionLease,
     SimulationMedia,
     SimulationMessage,
@@ -46,6 +52,14 @@ from surogates.simulation.ids import (
     new_wa_id,
     new_website_key,
 )
+
+logger = logging.getLogger(__name__)
+
+#: A run still running this long after it started was left open: nobody plays it.
+STALE_AFTER = timedelta(hours=2)
+KEEP_FOR = timedelta(days=90)
+#: How a person's part can end; a run whose people all ended is over.
+_ENDED = ("done", "gave_up", "no_reply", "failed")
 
 VAULT_CREDENTIALS = {
     "whatsapp": ("access_token", "app_secret", "verify_token", "phone_number_id", "api_version"),
@@ -507,3 +521,74 @@ async def end_run(sf, vault, run_id: uuid.UUID) -> SimulationRun | None:
     for name in VAULT_CREDENTIALS[run.channel]:
         await vault.delete(run.org_id, f"{run.channel}_{name}_{run.phone_number_id}")
     return run
+
+
+async def finish_run(state, run_id: uuid.UUID) -> SimulationRun | None:
+    """End the run and take its world down: credentials, Discord gateway, calls."""
+    from surogates.simulation import discord, voice
+
+    run = await end_run(state.session_factory, state.vault, run_id)
+    if run is None:
+        return None
+    if run.channel == "discord":
+        await discord.GATEWAYS.close(run.id)
+    if run.channel == "voice" and state.settings.voice.livekit_api_key:
+        try:
+            await voice.hang_up_all(state.settings, run)
+        except Exception:  # noqa: BLE001 - the run is ended; a call left ringing ends at its own limit
+            logger.warning("could not hang up the calls of simulation %s", run.id, exc_info=True)
+    return run
+
+
+async def done_runs(sf) -> Sequence[uuid.UUID]:
+    """Running runs the AI plays alone whose every person's part has ended."""
+    async with sf() as db:
+        return (await db.execute(sa.select(SimulationRun.id).where(
+            SimulationRun.status == "running",
+            ~sa.exists().where(
+                SimulationPerson.run_id == SimulationRun.id,
+                (SimulationPerson.driver != "ai")
+                | sa.func.coalesce(SimulationPerson.ai_state, "").notin_(_ENDED),
+            ),
+        ))).scalars().all()
+
+
+async def delete_run(sf, run_id: uuid.UUID) -> None:
+    """A run with its people, messages, media, stand-in users and their conversations."""
+    users = sa.select(User.id).where(User.simulation_run_id == run_id).scalar_subquery()
+    async with sf() as db:
+        sessions = (await db.execute(sa.select(Session.id).where(
+            Session.user_id.in_(users)
+            | (Session.config["simulation_run_id"].as_string() == str(run_id))
+        ))).scalars().all()
+        for model in (DeliveryOutbox, InboxItem, SessionLease, SessionCursor, Event):
+            await db.execute(sa.delete(model).where(model.session_id.in_(sessions)))
+        await db.execute(sa.delete(Session).where(Session.id.in_(sessions)))
+        for model in (InboxItem, ChannelIdentity, AgentUser):
+            await db.execute(sa.delete(model).where(model.user_id.in_(users)))
+        await db.execute(sa.delete(User).where(User.id.in_(users)))
+        # People, messages and media go with the run (ON DELETE CASCADE).
+        await db.execute(sa.delete(SimulationRun).where(SimulationRun.id == run_id))
+        await db.commit()
+
+
+async def sweep(state, now: datetime) -> None:
+    """End runs left running, and delete ended runs older than KEEP_FOR."""
+    sf = state.session_factory
+    async with sf() as db:
+        stale = (await db.execute(sa.select(SimulationRun.id).where(
+            SimulationRun.status == "running", SimulationRun.created_at < now - STALE_AFTER,
+        ))).scalars().all()
+        old = (await db.execute(sa.select(SimulationRun.id).where(
+            SimulationRun.status == "ended", SimulationRun.created_at < now - KEEP_FOR,
+        ))).scalars().all()
+    for run_id in stale:
+        try:
+            await finish_run(state, run_id)
+        except Exception:
+            logger.exception("[simulation] could not end stale run %s", run_id)
+    for run_id in old:
+        try:
+            await delete_run(sf, run_id)
+        except Exception:
+            logger.exception("[simulation] could not delete old run %s", run_id)

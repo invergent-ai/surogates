@@ -483,12 +483,5 @@ async def call_as_person(run_id: uuid.UUID, person_id: uuid.UUID, org_id: uuid.U
 async def end_run(run_id: uuid.UUID, org_id: uuid.UUID, request: Request):
     await _run_in_org(request, run_id, org_id)
     state = request.app.state
-    run = await store.end_run(state.session_factory, state.vault, run_id)
-    if run.channel == "discord":
-        await discord.GATEWAYS.close(run.id)
-    if run.channel == "voice" and state.settings.voice.livekit_api_key:
-        try:
-            await voice.hang_up_all(state.settings, run)
-        except Exception:  # noqa: BLE001 - the run is ended; a call left ringing ends at its own limit
-            logger.warning("could not hang up the calls of simulation %s", run.id, exc_info=True)
+    run = await store.finish_run(state, run_id)
     return await _detail(state.session_factory, run)

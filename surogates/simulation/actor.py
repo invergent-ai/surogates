@@ -203,9 +203,14 @@ class Actor:
                     if person.id not in self.busy:
                         self.busy.add(person.id)
                         asyncio.create_task(self._turn(run, person))
+                await self._finish_done_runs()
             except Exception:
                 logger.exception("[simulation] the AI people's loop failed a pass")
             await asyncio.sleep(TICK_SECONDS)
+
+    async def _finish_done_runs(self) -> None:
+        for run_id in await store.done_runs(self.state.session_factory):
+            await store.finish_run(self.state, run_id)
 
     async def _stop(self, person, state: str, note: str) -> None:
         await store.update_person(self.state.session_factory, person.id, ai_state=state, ai_note=note)

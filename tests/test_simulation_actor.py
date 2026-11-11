@@ -370,3 +370,19 @@ async def test_a_tap_in_the_wrong_shape_is_refused_with_the_right_one(monkeypatc
                              agent_typing_at=None, ai_acted_at=None)
     with pytest.raises(RuntimeError, match='is not a tap; use a button: {"action"'):
         await ai._move(run, person)
+
+
+async def test_a_run_ends_once_everyone_is_done(rsf):  # noqa: F811
+    from tests.test_simulation_store import FakeVault, make_run
+
+    vault = FakeVault()
+    done, talking, by_hand = [await make_run(rsf, vault) for _ in range(3)]
+    for run, driver, state in ((done, "ai", "gave_up"), (talking, "ai", "talking"),
+                               (by_hand, "human", "done")):
+        [person] = await store.people(rsf, run.id)
+        await store.update_person(rsf, person.id, driver=driver, ai_state=state)
+    ai = actor.Actor(SimpleNamespace(session_factory=rsf, vault=vault, settings=Settings))
+    await ai._finish_done_runs()
+    assert (await store.get_run(rsf, done.id)).status == "ended"
+    assert (await store.get_run(rsf, talking.id)).status == "running"
+    assert (await store.get_run(rsf, by_hand.id)).status == "running"
