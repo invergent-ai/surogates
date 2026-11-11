@@ -1007,6 +1007,7 @@ class ContextReplayMixin:
         messages: list[dict],
     ) -> list[dict]:
         """Apply context compression if needed."""
+        self._narrow_prompt_tools(session)
         system_prompt = self._prompt.build()
         if not self._compressor.should_compress(messages, system_prompt):
             return messages
@@ -1063,8 +1064,31 @@ class ContextReplayMixin:
             )
             return False, None
 
+    def _narrow_prompt_tools(self, session: Session) -> None:
+        """Gate the prompt's tool guidance on the tools the schemas offer,
+        for a session that names its own tools.
+
+        ``excluded_tools`` / ``allowed_tools``, which the worker does not
+        apply, are applied to the schemas only; without this the prompt
+        told the model how to use tools it could not call.  A session that
+        names none keeps the prompt it had.  Called before any ``build()``
+        of the wake (the compaction measure, the system prompt), and
+        idempotent.  ``getattr``: some test harnesses skip ``__init__`` or
+        stand in a prompt builder of their own.
+        """
+        config = session.config or {}
+        restrict = getattr(self._prompt, "restrict_tools", None)
+        if (
+            (config.get("excluded_tools") or config.get("allowed_tools"))
+            and restrict is not None and getattr(self, "_tools", None) is not None
+        ):
+            offered = self._tool_filter_for_session(session)
+            if offered is not None:
+                restrict(offered)
+
     async def _build_system_prompt(self, session: Session) -> str:
         """Delegate to PromptBuilder, with per-session caching."""
+        self._narrow_prompt_tools(session)
         cached = self._system_prompt_cache.get(session.id)
         if cached is not None:
             return cached

@@ -179,6 +179,8 @@ class PromptBuilder:
         # the regex injection scanner, so rendering once and reusing
         # across turns saves N×turns regex scans per wake cycle.
         self._available_agents_section_cache: str | None = None
+        # Tools :meth:`restrict_tools` took away (sections that name them stay out).
+        self._restricted_out: frozenset[str] = frozenset()
         # Prompt fragment library (markdown + frontmatter).  Injected
         # primarily so tests can swap in a library backed by a temp
         # directory; production always uses the package-bundled default.
@@ -196,6 +198,29 @@ class PromptBuilder:
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+
+    def restrict_tools(self, offered: set[str] | frozenset[str]) -> None:
+        """Gate the tool-aware guidance on *offered* too: the tools the
+        session's schemas offer (``AgentHarness._tool_filter_for_session``).
+
+        The worker builds this builder from the registry's tools less what
+        it knows to drop, but a session's own ``excluded_tools`` and
+        ``allowed_tools`` are applied to the schemas only; without this the
+        prompt told the model how to use tools it could not call (the web
+        research guidance with every web tool excluded).  Only narrows:
+        ``has_whiteboard``, read for the schemas themselves, keeps the
+        worker's answer.
+        """
+        kept = self._available_tools & set(offered)
+        self._restricted_out = self._restricted_out | frozenset(self._available_tools - kept)
+        self._available_tools = kept
+        # The agents section lists the spawn tools offered: rendered again.
+        self._available_agents_section_cache = None
+
+    def _restricted_away(self, *tools: str) -> bool:
+        """Whether, in a builder :meth:`restrict_tools` narrowed, none of
+        *tools* is offered (taken away here or never given)."""
+        return bool(self._restricted_out) and not (set(tools) & self._available_tools)
 
     def build(self) -> str:
         """Assemble the full system prompt.
@@ -575,7 +600,7 @@ class PromptBuilder:
         # the ``is_active_expert`` property.
         skill_defs = [s for s in self.skills if isinstance(s, SkillDef)]
         active = get_active_experts(skill_defs)
-        if not active:
+        if not active or self._restricted_away("consult_expert"):
             return ""
 
         # Domain experts first, the advisor last: a specialist beats a
@@ -967,7 +992,7 @@ class PromptBuilder:
         worker) so the agent can see what each KB covers instead of
         guessing from the name alone.
         """
-        if not self._available_kbs:
+        if not self._available_kbs or self._restricted_away("kb_list_pages", "kb_read_page", "kb_search_pages"):
             return ""
 
         def _render_kb(kb: dict) -> list[str]:
