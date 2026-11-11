@@ -396,7 +396,12 @@ class ProcessRegistry:
         first_chunk = True
         try:
             while True:
-                chunk = session.process.stdout.read(4096)
+                # A monitor's lines are news as each comes: a read of 4096
+                # waits for that much, or for the end.
+                chunk = (
+                    session.process.stdout.readline() if session.watch_lines
+                    else session.process.stdout.read(4096)
+                )
                 if not chunk:
                     break
                 if first_chunk:
@@ -476,6 +481,8 @@ class ProcessRegistry:
         text = session._partial_line + strip_ansi(text).replace("\r\n", "\n")
         lines = text.split("\n")
         session._partial_line = "" if final else lines.pop()
+        while final and lines and not lines[-1].strip():
+            lines.pop()
         if lines and lines[-1] == "logout":
             # The login shell says it on exit: held back until more comes, and dropped at the end.
             lines.pop()
