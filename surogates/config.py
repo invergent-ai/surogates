@@ -403,6 +403,21 @@ class LLMSettings(BaseSettings):
     # the window steps the session's window down for good.
     compression_threshold: float | None = Field(default=None, gt=0.0, le=0.95)
 
+    # Name the session on its model calls: ``x-surogates-session`` (the
+    # session's id) and ``x-surogates-root`` (the top of its ``parent_id``
+    # chain, the root the API's session tree shows: the session itself, or
+    # the session its sub-agent chain started from; a project's threads and
+    # a schedule's runs are children of the chat that made them, so they
+    # share its root).  Every client of the session's LLM bundle sends them:
+    # the main loop, compaction summaries, titles, the advisor, fallbacks,
+    # each sub-agent under its own id.  Not sent: video generation (a raw
+    # ``/videos`` request) and tenant experts with an endpoint of their own.
+    # A gateway in front of the model can then group a session tree's calls
+    # (training rollouts).  Headers only: the request body is the same
+    # either way.  Off by default, because the ids would otherwise reach
+    # whatever provider a slot points at, BYO keys included.
+    session_headers: bool = False
+
     summary_model: str = ""  # cheap model for context compression summaries
     summary_base_url: str = ""  # optional auxiliary endpoint for summaries
     summary_api_key: str = ""  # optional auxiliary API key for summaries

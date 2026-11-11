@@ -52,6 +52,7 @@ Surogates is configured via a YAML file merged with environment variables. Envir
 | `llm.provider` | `SUROGATES_LLM_PROVIDER` | auto-detected | Provider name override |
 | `llm.credential_pool` | -- | `[]` | Additional API keys for rotation |
 | `llm.fallback_providers` | -- | `[]` | Fallback provider chain |
+| `llm.session_headers` | `SUROGATES_LLM_SESSION_HEADERS` | `false` | Send `x-surogates-session` (the session's id) and `x-surogates-root` (the top of its `parent_id` chain, as in the session tree; a project's threads and a schedule's runs share their parent chat's root) on every call through the session's LLM clients: main loop, sub-agents, summaries, titles, advisor, fallbacks. Not on video generation or tenant experts with their own endpoint. Request bodies unchanged. Off by default: the ids would reach whatever provider a slot points at, BYO keys included |
 
 ## Sandbox (`sandbox`)
 
