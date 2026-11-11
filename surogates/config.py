@@ -1012,7 +1012,19 @@ def load_settings() -> Settings:
        (with ``SUROGATES_`` prefix)
     2. Real environment variables override YAML values
     3. pydantic-settings reads the final environment
+
+    Building them costs about 12 ms of CPU, and the worker reads them
+    several times a turn.  They are built again only when what they are
+    built from changed: the config file's bytes, or a ``SUROGATES_``
+    environment variable.  Otherwise the caller gets a deep copy of the
+    last ones built, never an object another caller holds.
     """
+    global _settings_cache
+    inputs = _settings_inputs()
+    cached = _settings_cache
+    if cached is not None and cached[0] == inputs:
+        return cached[1].model_copy(deep=True)
+
     yaml_config = _load_yaml_config()
     if yaml_config:
         flat = _flatten_yaml(yaml_config)
@@ -1020,4 +1032,26 @@ def load_settings() -> Settings:
             if key not in os.environ:
                 os.environ[key] = value
 
-    return Settings()
+    settings = Settings()
+    # Keyed by the environment after the file's values went into it.
+    _settings_cache = (_settings_inputs(), settings.model_copy(deep=True))
+    return settings
+
+
+#: The last settings built, keyed by what they were built from.
+_settings_cache: tuple[tuple, Settings] | None = None
+
+
+def _settings_inputs() -> tuple:
+    """Everything ``load_settings`` reads: the config file (its path and
+    bytes) and every ``SUROGATES_`` environment variable, matched without
+    regard to case as pydantic-settings matches them."""
+    path = get_config_path()
+    try:
+        content: bytes | None = path.read_bytes() if path.is_file() else None
+    except OSError:
+        content = None
+    env = frozenset(
+        (key, value) for key, value in os.environ.items() if key[:10].upper() == "SUROGATES_"
+    )
+    return str(path), content, env

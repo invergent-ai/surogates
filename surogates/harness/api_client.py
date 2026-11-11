@@ -15,6 +15,8 @@ from urllib.parse import quote
 
 import httpx
 
+from surogates.harness.tls import shared_ssl_context
+
 logger = logging.getLogger(__name__)
 
 
@@ -49,6 +51,8 @@ class HarnessAPIClient:
             base_url=base_url.rstrip("/"),
             headers={"Authorization": f"Bearer {token}"},
             timeout=timeout,
+            # One TLS context per process, not one per wake (``harness.tls``).
+            verify=shared_ssl_context(),
         )
         self._session_id = session_id
         self._agent_id = agent_id
