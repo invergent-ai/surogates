@@ -122,3 +122,106 @@ def test_nudge_names_the_missing_files():
     text = deliverable_nudge(["report.docx", "data.xlsx"])
     assert "report.docx" in text and "data.xlsx" in text
     assert text.startswith("[System:")
+
+
+
+# ---------------------------------------------------------------------------
+# Inputs are not deliverables
+# ---------------------------------------------------------------------------
+
+
+def test_an_input_already_in_the_workspace_is_not_asked_for():
+    """The model answered from data.csv without naming it in a tool call (a search, a script)."""
+    user = "What was the total in data.csv last quarter?"
+    messages = [_tool_call("terminal", '{"command": "python sum.py"}')]
+    assert missing_deliverables(user, messages, present={"data.csv"}) == []
+
+
+def test_an_output_asked_for_and_never_written_is_asked_for():
+    user = "Summarise the quarter and save it as summary.md."
+    assert missing_deliverables(user, [], present={"data.csv"}) == ["summary.md"]
+
+
+def test_an_output_asked_for_and_written_is_not_asked_for():
+    user = "Summarise the quarter and save it as summary.md."
+    messages = [_tool_call("write_file", '{"path": "summary.md"}')]
+    assert missing_deliverables(user, messages, present={"data.csv"}) == []
+
+
+def test_a_mixed_request_asks_only_for_the_output():
+    user = (
+        "Using sales.xlsx and the attached targets.csv, compare them with notes.md "
+        "and write the result to report.docx."
+    )
+    present = {"sales.xlsx", "targets.csv", "notes.md"}
+    assert missing_deliverables(user, [], present=present) == ["report.docx"]
+
+
+def test_inputs_named_by_phrasing_are_not_asked_for_even_outside_the_workspace():
+    user = "Using sales.xlsx, based on plan.md and from the uploaded log.txt, produce `review.pdf`."
+    assert missing_deliverables(user, []) == ["review.pdf"]
+
+
+def test_the_officeqa_prompt_asks_for_nothing():
+    """A pattern for documents behind tools, read through read_document by their real names."""
+    user = (
+        "You answer a question about real financial documents: U.S. Treasury Bulletins from 1939 "
+        "to 2025, one plain-text file per issue named treasury_bulletin_YYYY_MM.txt (tables are in "
+        "Markdown).\nThe bulletins are available only through the Treasury-bulletin corpus tools "
+        "(list_documents, search_documents, document_outline, grep_document, read_document); there is "
+        "no internet access for this task.\n\nQuestion: What were total national defense expenditures "
+        "in January 1941?"
+    )
+    messages = [_tool_call("mcp__officeqa__read_document", '{"name": "treasury_bulletin_1941_01.txt"}')]
+    assert missing_deliverables(user, messages) == []
+
+
+def test_a_name_with_one_upper_case_segment_is_still_a_name():
+    user = "Export the table to Q3_REPORT_MM_final.xlsx and README.md, one file per day as log_MM_DD.txt."
+    assert missing_deliverables(user, []) == ["Q3_REPORT_MM_final.xlsx", "README.md"]
+
+
+def test_a_year_placeholder_is_a_pattern():
+    assert missing_deliverables("Keep one summary per year, summary_YYYY.md.", []) == []
+
+
+async def test_the_harness_reads_the_workspace_file_names_once_there_is_something_to_ask_for():
+    from types import SimpleNamespace
+    from uuid import uuid4
+
+    from surogates.harness.loop import AgentHarness
+
+    listed: list = []
+
+    class Storage:
+        async def list_entries(self, bucket, prefix="", limit=None):
+            listed.append((bucket, prefix, limit))
+            return [{"key": prefix + "inputs/treasury_bulletin_1941_01.txt"}, {"key": prefix + "data.csv"},
+                    {"key": prefix + "inputs/"}]
+
+    harness = AgentHarness.__new__(AgentHarness)
+    harness._storage = Storage()
+    harness._sandbox_pool = None
+    session = SimpleNamespace(id=uuid4(), channel="web", config={"storage_bucket": "b"})
+    names = await harness._workspace_file_names(session)
+    assert names == {"treasury_bulletin_1941_01.txt", "data.csv"}
+    assert listed and listed[0][0] == "b" and str(session.id) in listed[0][1]
+
+
+async def test_a_session_whose_workspace_cannot_be_read_counts_no_inputs():
+    from types import SimpleNamespace
+    from uuid import uuid4
+
+    from surogates.harness.loop import AgentHarness
+
+    class Broken:
+        async def list_entries(self, bucket, prefix="", limit=None):
+            raise OSError("storage away")
+
+    harness = AgentHarness.__new__(AgentHarness)
+    harness._storage = Broken()
+    harness._sandbox_pool = None
+    session = SimpleNamespace(id=uuid4(), channel="web", config={"storage_bucket": "b"})
+    assert await harness._workspace_file_names(session) == frozenset()
+    harness._storage = None
+    assert await harness._workspace_file_names(session) == frozenset()

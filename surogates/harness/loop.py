@@ -21,6 +21,7 @@ import json
 import re
 import logging
 import os
+import posixpath
 import traceback
 from collections.abc import Sequence
 from datetime import datetime, timezone
@@ -225,6 +226,7 @@ from surogates.harness.loop_deliverables import (
 from surogates.harness.loop_constants import (
     _EMPTY_RESPONSE_NUDGE,
     _MAX_DELIVERABLE_RETRIES,
+    _WORKSPACE_NAMES_LIMIT,
     _MAX_SAVE_CLAIM_RETRIES,
     _MAX_SCHEDULE_CLAIM_RETRIES,
     _UNFINISHED_RESPONSE_NUDGE,
@@ -3948,9 +3950,16 @@ class AgentHarness(
                 # the guard above: costs nothing when the file is there,
                 # costs one turn when it is not.
                 if deliverable_retries < _MAX_DELIVERABLE_RETRIES:
-                    absent = missing_deliverables(
-                        _latest_user_event_text(all_events or []), messages
-                    )
+                    request_text = _latest_user_event_text(all_events or [])
+                    absent = missing_deliverables(request_text, messages)
+                    if absent:
+                        # A file already in the workspace is an input the
+                        # request named, not one it asked for (read only
+                        # when there is something to nudge about).
+                        absent = missing_deliverables(
+                            request_text, messages,
+                            present=await self._workspace_file_names(session),
+                        )
                     if absent:
                         deliverable_retries += 1
                         logger.info(
@@ -4756,6 +4765,32 @@ class AgentHarness(
             cost_tracker=cost_tracker,
             turn_id=turn_id,
             iteration_index=max(iteration - 1 - turn_base_iteration, 0),
+        )
+
+    async def _workspace_file_names(self, session: Session) -> frozenset[str]:
+        """The lower-cased names of the files in *session*'s workspace.
+
+        Empty when they cannot be told: no storage, a session on the user's
+        computer, a thread working in its copy, or a storage error.
+        """
+        cfg = session.config or {}
+        bucket = cfg.get("storage_bucket") or ""
+        storage = getattr(self, "_storage", None)
+        if storage is None or not bucket or device_of(cfg) is not None:
+            return frozenset()
+        try:
+            if has_copy(getattr(self, "_sandbox_pool", None), sandbox_session_key(session)):
+                return frozenset()
+            from surogates.session.attachment_ingest import workspace_root_id
+            from surogates.storage.tenant import boundary_workspace_key
+
+            prefix = boundary_workspace_key(cfg, session, workspace_root_id(session), "")
+            entries = await storage.list_entries(bucket, prefix, limit=_WORKSPACE_NAMES_LIMIT)
+        except Exception:
+            logger.debug("Session %s: workspace listing failed", session.id, exc_info=True)
+            return frozenset()
+        return frozenset(
+            posixpath.basename(e["key"]).lower() for e in entries if not str(e["key"]).endswith("/")
         )
 
     async def _read_workspace_image(

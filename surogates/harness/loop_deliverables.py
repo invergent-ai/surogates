@@ -14,6 +14,21 @@ shows up anywhere in the tool traffic is evidence enough that the file was
 handled. Both defaults fail silent, because a wrong nudge costs a turn and
 annoys someone whose work was already finished.
 
+A name the user gives for something that already exists is an input, not
+a deliverable, and is never asked for:
+
+- a file already in the session's workspace (an upload, an attachment, a
+  file an earlier turn wrote): the caller passes their names as *present*;
+- a name the user marks as an input -- "using data.csv", "from the
+  attached sales.xlsx", "based on notes.md";
+- a pattern rather than a name -- "one file per issue named
+  bulletin_YYYY_MM.txt".
+
+Counting only names the user asks to receive by phrasing ("save ... as X")
+would miss the cases this check exists for: the prompts that motivated it
+name the deliverable without such a verb ("the task requires these files by
+name: X").
+
 No model call: this is string matching over the transcript the loop
 already holds.
 """
@@ -23,6 +38,7 @@ from __future__ import annotations
 import json
 import posixpath
 import re
+from collections.abc import Collection
 
 from surogates.harness.tool_schemas import CRON_WRITE_TOOLS
 
@@ -68,11 +84,50 @@ def _tool_traffic(messages: list[dict]) -> str:
     return "\n".join(parts).lower()
 
 
+#: Words that, just before a filename, make it an input: "using data.csv",
+#: "from the attached sales.xlsx", "read notes.md".  ``on`` and ``to`` count
+#: only in "based on" and "according to".
+_INPUT_WORDS = frozenset({
+    "from", "read", "reading", "open", "opening", "load", "loading", "use", "using", "uses",
+    "analyse", "analyze", "analysing", "analyzing", "review", "reviewing", "parse", "parsing",
+    "attached", "uploaded", "provided", "given", "existing", "source", "input", "inputs",
+})
+#: Words passed over on the way back to the word that tells.
+_FILLER_WORDS = frozenset({"the", "a", "an", "this", "that", "these", "those", "file", "files",
+                           "document", "documents", "spreadsheet", "sheet", "data", "our", "my", "your"})
+_WORD_RE = re.compile(r"[A-Za-z]+")
+
+#: A filename pattern, not a name: a year placeholder ("bulletin_YYYY.txt"),
+#: or two placeholder segments in a row ("log_MM_DD.txt", "part_NN_XX.md").
+#: One segment alone ("Q3_MM_final.xlsx") may be a real name, and counts.
+_PLACEHOLDER = r"(?:YYYY|YY|MM|DD|HH|X{2,}|N{2,})"
+_PLACEHOLDER_RE = re.compile(
+    r"(?:^|[_\-.])(?:YYYY|YY(?=[_\-.]" + _PLACEHOLDER + r"))(?=[_\-.]|$)"
+    r"|(?:^|[_\-.])" + _PLACEHOLDER + r"[_\-.]" + _PLACEHOLDER + r"(?=[_\-.]|$)"
+)
+
+
+def _named_as_input(text_before: str) -> bool:
+    """Whether the words just before a filename make it an input."""
+    words = [w.lower() for w in _WORD_RE.findall(text_before[-120:])]
+    while words and words[-1] in _FILLER_WORDS:
+        words.pop()
+    if not words:
+        return False
+    last = words[-1]
+    if last in _INPUT_WORDS:
+        return True
+    previous = words[-2] if len(words) > 1 else ""
+    return (last, previous) in (("on", "based"), ("to", "according"))
+
+
 def missing_deliverables(
-    user_text: str, messages: list[dict], limit: int = 5
+    user_text: str, messages: list[dict], limit: int = 5, present: Collection[str] = (),
 ) -> list[str]:
     """Filenames the user named that the turn never touched.
 
+    Names that are inputs are left out (module docstring): *present* holds
+    the lower-cased names of the files already in the session's workspace.
     Returns at most *limit* names, in the order the user gave them, so a
     request listing many outputs produces a nudge the model can act on
     rather than a wall of filenames.
@@ -89,8 +144,15 @@ def missing_deliverables(
         if key in seen or key.startswith("."):
             continue
         seen.add(key)
-        if key not in traffic:
-            missing.append(name)
+        stem = name.rsplit(".", 1)[0]
+        if (
+            key in traffic
+            or key in present
+            or _PLACEHOLDER_RE.search(stem)
+            or _named_as_input(user_text[:match.start()])
+        ):
+            continue
+        missing.append(name)
         if len(missing) >= limit:
             break
     return missing
