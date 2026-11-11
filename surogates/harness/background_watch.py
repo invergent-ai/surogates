@@ -153,20 +153,6 @@ class BackgroundWatch:
             for watched in self._owners.values()
         )
 
-    def running_for(self, session_id: UUID) -> list[dict]:
-        """The commands session *session_id* started that this watch still waits on."""
-        return [
-            {"id": proc_id, "command": item.command[:200], "status": "running"}
-            for watched in self._owners.values() for proc_id, item in watched.items() if item.session_id == session_id
-        ]
-
-    def started_by(self, proc_id: str, session_id: UUID) -> bool:
-        """Whether this watch waits on command *proc_id* for session *session_id*."""
-        return any(
-            (item := watched.get(proc_id)) is not None and item.session_id == session_id
-            for watched in self._owners.values()
-        )
-
     def watch(self, *, owner: str, proc_id: str, session_id: UUID, command: str) -> None:
         """Wait for the end of process *proc_id*, which session *session_id* started in the registry *owner* keys:
         a sandbox's key, or ``HERE`` for this process's."""
