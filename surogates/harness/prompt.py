@@ -500,7 +500,7 @@ class PromptBuilder:
             return ""
 
         spawn_tools = [
-            f"``{name}``" for name in ("spawn_task", "spawn_worker", "delegate_task")
+            f"``{name}``" for name in ("spawn_task", "spawn_worker", "delegate_task", "agent")
             if name in self._available_tools
         ] or ["``spawn_task``", "``spawn_worker``", "``delegate_task``"]
         rendered = (

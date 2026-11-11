@@ -943,6 +943,7 @@ class Orchestrator:
         from surogates.harness.loop_artifact_completion import announce_failure
         from surogates.harness.loop_messages import _should_notify_parent_on_completion
         from surogates.session.execution_context import is_scheduled_run
+        from surogates.harness.subagents import runs_in_background
         from surogates.harness.worker_notify import is_delegated, notify_parent_on_failure
 
         session_id = session.id
@@ -951,6 +952,10 @@ class Orchestrator:
                 await announce_failure(self.session_store, session, error=error)
             except Exception:
                 logger.warning("Could not report the failure of scheduled run %s", session_id, exc_info=True)
+        elif _should_notify_parent_on_completion(session) and runs_in_background(session):
+            from surogates.harness.subagents import tell_parent
+
+            await tell_parent(store=self.session_store, redis=self.redis, session=session, status="failed", error=error)
         elif _should_notify_parent_on_completion(session):
             await notify_parent_on_failure(
                 session_store=self.session_store,

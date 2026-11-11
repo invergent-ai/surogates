@@ -753,7 +753,7 @@ async def test_every_tool_that_starts_a_session_is_named_as_handing_a_threads_co
     )
 
     # The tools whose step puts a thread's copy on its hand-off first, for the helper they start.
-    assert HELPER_STARTING_TOOLS == {"delegate_task", "spawn_worker", "spawn_task"}
+    assert HELPER_STARTING_TOOLS == {"delegate_task", "spawn_worker", "spawn_task", "agent"}
     # A thread schedules no routine: its runs would work on old files, and land only at the thread's next turn.
     # Nor does it dispatch a research run's experiments: its copy holds no repository to bundle for them.
     assert THREAD_REFUSED_TOOLS == {"cron_create", "dispatch_experiments"}

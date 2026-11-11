@@ -612,6 +612,12 @@ def unread_reports(events: list) -> list[dict]:
     return held
 
 
+def replayed_messages(events: list, workspace_path: str | None = None) -> list[dict]:
+    """The conversation *events* rebuild, as a wake's replay rebuilds it: ``ContextReplayMixin._rebuild_messages``,
+    which reads nothing of its harness.  A fork of a session starts from it (``tools.builtin.agents``)."""
+    return ContextReplayMixin._rebuild_messages(None, events, workspace_path)  # type: ignore[arg-type]
+
+
 def coalesce_user_messages(messages: list[dict]) -> dict:
     """Merge one or more rendered user-message dicts into a single user turn.
 

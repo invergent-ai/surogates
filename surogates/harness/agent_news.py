@@ -56,6 +56,18 @@ def notification_note(data: dict) -> dict:
             head = f"[Background process {work} finished with {said}: {command}]"
         # What it printed is the command's, not the harness's or the user's words: fenced off as its output.
         return {"role": "user", "content": f"{head}\nIts last output:\n{fenced(result)}" if result else head}
+    if data.get("kind") == "agent":
+        summary = data.get("summary")
+        named = f"Agent {work} ({summary})" if summary else f"Agent {work}"
+        if status == "failed":
+            head = f"[{named} failed: {data.get('error') or 'unknown error'}]"
+        elif status == "killed":
+            head = f"[{named} was stopped before it finished]"
+        elif data.get("reason"):
+            head = f"[{named} ended before it finished ({data['reason']})]"
+        else:
+            head = f"[{named} completed]"
+        return {"role": "user", "content": f"{head}\n{result}" if result else head}
     # Any other kind: its status and summary, in the harness's words.
     summary = data.get("summary")
     named = f"{work} ({summary})" if summary else work
@@ -107,14 +119,17 @@ def started_notified_work(events: list) -> bool:
 
 
 def starts_notified_work(name: Any, arguments: Any) -> bool:
-    """Whether a call of tool *name* with *arguments* starts background work that reports back when it ends."""
-    if name != "terminal":
+    """Whether a call of tool *name* with *arguments* starts background work that reports back when it ends:
+    a ``terminal`` command with ``background`` and ``notify_on_complete``, or an ``agent`` in the background."""
+    if name not in ("terminal", "agent"):
         return False
     if isinstance(arguments, str):
         try:
             arguments = json.loads(arguments)
         except (TypeError, ValueError):
             return False
-    return isinstance(arguments, dict) and bool(arguments.get("background")) and bool(
-        arguments.get("notify_on_complete"),
-    )
+    if not isinstance(arguments, dict):
+        return False
+    if name == "agent":
+        return arguments.get("run_in_background") is True
+    return bool(arguments.get("background")) and bool(arguments.get("notify_on_complete"))

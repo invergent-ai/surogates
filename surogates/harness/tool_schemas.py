@@ -32,6 +32,7 @@ from surogates.tools.builtin.terminal import DEVICE_GIT_NOTE, DEVICE_MAPPING_NOT
 
 _AGENT_TYPE_GATED_TOOLS: frozenset[str] = frozenset({
     "delegate_task",
+    "agent",
     "spawn_worker",
     "spawn_task",
 })

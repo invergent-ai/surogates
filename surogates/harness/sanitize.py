@@ -261,6 +261,7 @@ _MAX_DELEGATE_CALLS: int = 5
 _DELEGATION_TOOL_NAMES: frozenset[str] = frozenset({
     "delegate_task",
     "spawn_worker",
+    "agent",
 })
 
 

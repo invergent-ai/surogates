@@ -61,6 +61,7 @@ class ToolRuntime:
             send_form,
             team,
             voice_call,
+            agents,
             coding_agent,
             coordinator,
             cron,
@@ -141,6 +142,7 @@ class ToolRuntime:
             keel_process,  # process_read, process_history, process_waits, process_move_check, process_draft_form (a case agent on a process instance, through Keel)
             keel_designer,  # draft_files, draft_read, draft_main, draft_save_file, draft_save_scenario, draft_dry_run (the designer, through Keel)
             intake,  # start_case (an intake agent starts a case through Keel)
+            agents,  # agent (sub-agents in the foreground or background; offered only with sub-agent parity)
         ]
 
         for mod in modules:

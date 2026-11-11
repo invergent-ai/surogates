@@ -965,8 +965,26 @@ class KeelSettings(BaseSettings):
     max_file_bytes: int = 52428800
 
 
+class AgentsSettings(BaseSettings):
+    """Sub-agents as an agent dispatches them on its own.
+
+    ``subagent_parity`` gives every session the ``agent`` tool family (start
+    a sub-agent in the foreground or the background, or a fork of the
+    conversation) in place of ``delegate_task``, which stays callable under
+    its old name.  Off by default: the tools the model sees are unchanged.
+    A session's own ``subagent_parity`` config key, true or false, wins over
+    it, and its sub-agents inherit the session's.
+    """
+
+    model_config = {"env_prefix": "SUROGATES_AGENTS_"}
+
+    subagent_parity: bool = False
+
+
 class Settings(BaseSettings):
     model_config = {"env_prefix": "SUROGATES_"}
+
+    agents: AgentsSettings = Field(default_factory=AgentsSettings)
 
     db: DatabaseSettings = Field(default_factory=DatabaseSettings)
     ops_db: OpsDatabaseSettings = Field(default_factory=OpsDatabaseSettings)

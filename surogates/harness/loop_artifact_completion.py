@@ -28,6 +28,7 @@ from surogates.harness.delivery_manifest import (
     reconcile,
 )
 from surogates.harness.loop_constants import _BACKGROUND_DRAIN_TIMEOUT_SECONDS
+from surogates.harness.subagents import runs_in_background
 from surogates.harness.loop_messages import (
     _as_aware_utc,
     _last_assistant_message_excerpt,
@@ -1408,7 +1409,16 @@ class ArtifactCompletionMixin:
         # Notify parent session if this is a worker (child) session.
         # Scheduled loop runs use parent_id for traceability in the session
         # tree, but should not wake the parent as if they were sub-agent work.
-        if notify_parent and _should_notify_parent_on_completion(session):
+        if notify_parent and _should_notify_parent_on_completion(session) and runs_in_background(session):
+            # A sub-agent its parent started in the background: its parent hears of its end as a notification.
+            from surogates.harness.message_utils import extract_final_response
+            from surogates.harness.subagents import tell_parent
+
+            await tell_parent(
+                store=self._store, redis=self._redis, session=session, status="completed", reason=reason,
+                result=extract_final_response(await self._store.get_events(session.id), fallback=""),
+            )
+        elif notify_parent and _should_notify_parent_on_completion(session):
             from surogates.harness.worker_notify import is_delegated, notify_parent_on_completion
             try:
                 await notify_parent_on_completion(
@@ -1759,7 +1769,11 @@ class ArtifactCompletionMixin:
             )
         await self._release_unattended_browser(session)
 
-        if _should_notify_parent_on_completion(session):
+        if _should_notify_parent_on_completion(session) and runs_in_background(session):
+            from surogates.harness.subagents import tell_parent
+
+            await tell_parent(store=self._store, redis=self._redis, session=session, status="failed", error=error)
+        elif _should_notify_parent_on_completion(session):
             from surogates.harness.worker_notify import is_delegated, notify_parent_on_failure
             try:
                 await notify_parent_on_failure(

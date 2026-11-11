@@ -42,6 +42,7 @@ MUTATING_TOOL_NAMES = frozenset({
     "browser_evaluate",
     "send_message",
     "delegate_task",
+    "agent",
 })
 
 
