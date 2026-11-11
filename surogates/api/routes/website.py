@@ -44,6 +44,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
+from sqlalchemy import select, text
 from sse_starlette.sse import EventSourceResponse
 
 from surogates.channels.memory_boundary import simulation_boundary, visitor_boundary
@@ -67,6 +68,7 @@ from surogates.channels.website_session import (
     verify_csrf_token,
 )
 from surogates.config import Settings, enqueue_session
+from surogates.db.models import Event
 from surogates.api.routes.ask_user_question import (
     AskUserQuestionResponseReply,
     AskUserQuestionResponseRequest,
@@ -90,6 +92,7 @@ from surogates.session.interactive_input import (
     derive_is_other,
     resolve_input_response,
     response_event_exists,
+    valid_tool_call_id,
     wake_if_unattended,
 )
 from surogates.session.models import REUSABLE_SESSION_STATUSES
@@ -982,6 +985,20 @@ async def send_website_message(
     return SendMessageResponse(event_id=event_id)
 
 
+async def _tool_result_exists(store: SessionStore, *, session_id: UUID, tool_call_id: str) -> bool:
+    async with store._sf() as db:
+        row = await db.execute(
+            select(Event.id)
+            .where(
+                Event.session_id == session_id,
+                Event.type == EventType.TOOL_RESULT.value,
+                Event.data["tool_call_id"].as_string() == tool_call_id,
+            )
+            .limit(1),
+        )
+        return row.scalar_one_or_none() is not None
+
+
 @router.post(
     "/website/sessions/{session_id}/ask_user_question/{tool_call_id}/respond",
     response_model=AskUserQuestionResponseReply,
@@ -1004,6 +1021,9 @@ async def answer_website_question(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Missing or mismatched {CSRF_HEADER_NAME} header.",
         )
+    tc_id = valid_tool_call_id(tool_call_id)
+    if tc_id is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid tool_call_id.")
     store = get_session_store(request)
     try:
         session = await store.get_session(session_id)
@@ -1012,28 +1032,45 @@ async def answer_website_question(
     if session.org_id != claims.org_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found.")
     await _enforce_website_rate_limit(request, str(session.org_id), session.agent_id)
+    if session.status not in ("active", "idle", "failed", "paused", "completed"):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Session is in '{session.status}' state and cannot accept answers.",
+        )
+
+    gone = HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail="This question is no longer waiting for an answer.",
+    )
+    # A call that already has its result stopped waiting: an answer now
+    # would only wake a turn nobody asked for.
+    if await _tool_result_exists(store, session_id=session_id, tool_call_id=tc_id):
+        raise gone
 
     responses = [r.model_dump() for r in body.responses]
     event_id = await resolve_input_response(
-        store, session_id=session_id, tool_call_id=tool_call_id, responses=responses,
+        store, session_id=session_id, tool_call_id=tc_id, responses=responses,
     )
     if event_id is None:
         # An anonymous visitor's session has no principal to hold an inbox
         # row, so there is nothing to claim: the ask in the event log, not
-        # yet answered, is what makes the answer valid.
-        questions = await asked_questions(store, session_id=session_id, tool_call_id=tool_call_id)
-        if not questions or await response_event_exists(
-            store, session_id=session_id, tool_call_id=tool_call_id,
-        ):
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="This question is no longer waiting for an answer.",
+        # yet answered, is what makes the answer valid.  The lock makes
+        # check-then-emit one step for two racing submissions.
+        async with store._sf() as lock:
+            await lock.execute(
+                text("SELECT pg_advisory_xact_lock(hashtext(:key))"),
+                {"key": f"website-answer:{session_id}:{tc_id}"},
             )
-        event_id = await store.emit_event(
-            session_id,
-            EventType.ASK_USER_QUESTION_RESPONSE,
-            {"tool_call_id": tool_call_id, "responses": derive_is_other(questions, responses)},
-        )
+            questions = await asked_questions(store, session_id=session_id, tool_call_id=tc_id)
+            if not questions or await response_event_exists(
+                store, session_id=session_id, tool_call_id=tc_id,
+            ):
+                raise gone
+            event_id = await store.emit_event(
+                session_id,
+                EventType.ASK_USER_QUESTION_RESPONSE,
+                {"tool_call_id": tc_id, "responses": derive_is_other(questions, responses)},
+            )
         await wake_if_unattended(
             store, redis=getattr(request.app.state, "redis", None), session_id=session_id,
         )

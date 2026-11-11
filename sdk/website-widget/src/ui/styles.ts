@@ -160,6 +160,7 @@ export const WIDGET_STYLES = `
 .surg-question { display: flex; flex-direction: column; gap: 8px; }
 .surg-question-item { display: flex; flex-direction: column; gap: 6px; }
 .surg-question-prompt { font-weight: 600; }
+.surg-question-note { font-size: 12px; color: #64748b; }
 .surg-choice, .surg-question-send {
   font: inherit;
   text-align: left;

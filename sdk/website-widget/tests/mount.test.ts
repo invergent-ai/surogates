@@ -371,4 +371,90 @@ describe('mount() — the agent asks a question', () => {
     await waitFor(() => other.disabled);
     handle.destroy();
   });
+
+  it('sends several answers together, once each question has one', async () => {
+    const stub = happyFetch() as unknown as ReturnType<typeof vi.fn>;
+    const { handle, sr, src } = await startTurn(stub as unknown as typeof fetch);
+
+    src.emit(
+      SURG_EVENT.TOOL_CALL,
+      {
+        tool_call_id: 'tc-m',
+        name: 'ask_user_question',
+        arguments: {
+          questions: [
+            { prompt: 'Which plan?', choices: [{ label: 'Basic' }, { label: 'Pro' }], allow_other: false },
+            { prompt: 'Billing?', choices: [{ label: 'Monthly' }, { label: 'Yearly' }] },
+          ],
+        },
+      },
+      2,
+    );
+    await waitFor(() => sr.querySelectorAll('.surg-question-item').length === 2);
+    const send = sr.querySelector('.surg-question-send') as HTMLButtonElement;
+    const choice = (label: string) =>
+      Array.from(sr.querySelectorAll('.surg-choice')).find((b) => b.textContent === label) as HTMLButtonElement;
+
+    choice('Pro').click();
+    await waitFor(() => choice('Pro').classList.contains('surg-chosen'));
+    expect(send.disabled).toBe(true);
+    expect(answerCalls(stub)).toHaveLength(0);
+
+    const other = sr.querySelectorAll('.surg-question-item')[1]!.querySelector('.surg-other') as HTMLInputElement;
+    other.value = 'Quarterly';
+    other.dispatchEvent(new Event('input', { bubbles: true }));
+    await waitFor(() => !send.disabled);
+    send.click();
+
+    await waitFor(() => answerCalls(stub).length === 1);
+    expect(JSON.parse(String((answerCalls(stub)[0] as [string, RequestInit])[1].body))).toEqual({
+      responses: [
+        { question: 'Which plan?', answer: 'Pro', is_other: false },
+        { question: 'Billing?', answer: 'Quarterly', is_other: true },
+      ],
+    });
+    handle.destroy();
+  });
+
+  function answeringWith(status: number) {
+    const base = happyFetch() as unknown as (url: unknown, init?: RequestInit) => Promise<Response>;
+    return vi.fn(async (url: unknown, init?: RequestInit) =>
+      String(url).includes('/ask_user_question/') ? makeResponse(status, { detail: 'nope' }) : base(url, init),
+    );
+  }
+
+  async function askAndPick(stub: ReturnType<typeof vi.fn>) {
+    const { handle, sr, src } = await startTurn(stub as unknown as typeof fetch);
+    src.emit(
+      SURG_EVENT.TOOL_CALL,
+      { tool_call_id: 'tc-e', name: 'ask_user_question', arguments: { questions: [{ prompt: 'Which plan?', choices: [{ label: 'Pro' }] }] } },
+      2,
+    );
+    await waitFor(() => !!sr.querySelector('.surg-choice'));
+    (sr.querySelector('.surg-choice') as HTMLButtonElement).click();
+    await waitFor(() => answerCalls(stub).length === 1);
+    return { handle, sr };
+  }
+
+  it('closes a question the server says is no longer open', async () => {
+    const { handle, sr } = await askAndPick(answeringWith(409));
+    await waitFor(() => !!sr.querySelector('.surg-question-note'));
+    expect(sr.querySelector('.surg-question-note')?.textContent).toBe(
+      'This question was already answered or has expired.',
+    );
+    expect((sr.querySelector('.surg-choice') as HTMLButtonElement).disabled).toBe(true);
+    expect(sr.querySelector('.surg-error')).toBeNull();
+    handle.destroy();
+  });
+
+  it('asks for a reload when the answer is refused for auth', async () => {
+    const stub = answeringWith(403);
+    const { handle, sr } = await askAndPick(stub);
+    await waitFor(() => !!sr.querySelector('.surg-error'));
+    expect(sr.querySelector('.surg-error')?.textContent).toBe('Couldn’t send your answer. Please reload the page.');
+    expect((sr.querySelector('.surg-choice') as HTMLButtonElement).disabled).toBe(false);
+    // No fresh session minted behind the visitor's back.
+    expect(stub.mock.calls.filter(([url]) => /\/v1\/website\/sessions(\?|$)/.test(String(url)))).toHaveLength(1);
+    handle.destroy();
+  });
 });

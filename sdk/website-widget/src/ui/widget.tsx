@@ -9,7 +9,7 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 
 import type { WebsiteAgent } from '../agent.js';
-import { SurogatesAuthError, SurogatesRateLimitError } from '../errors.js';
+import { SurogatesAuthError, SurogatesError, SurogatesRateLimitError } from '../errors.js';
 import type { QuestionAnswer } from '../protocol.js';
 import { renderMarkdown } from './markdown.js';
 import { stripNextAction } from './next-action.js';
@@ -232,16 +232,17 @@ function QuestionCard({ item, sent, onAnswer }: QuestionCardProps) {
 
   return (
     <div class="surg-bubble surg-assistant surg-question">
-      {item.intro.map((text) => (
-        <div class="surg-question-intro" dangerouslySetInnerHTML={{ __html: renderMarkdown(text) }} />
+      {item.intro.map((text, i) => (
+        <div key={i} class="surg-question-intro" dangerouslySetInnerHTML={{ __html: renderMarkdown(text) }} />
       ))}
       {item.questions.map((q, i) => {
         const current = shown(i);
         return (
-          <div class="surg-question-item">
+          <div key={i} class="surg-question-item">
             <div class="surg-question-prompt">{q.prompt}</div>
             {q.choices.map((c) => (
               <button
+                key={c.label}
                 type="button"
                 class={`surg-choice${current?.answer === c.label && !current.is_other ? ' surg-chosen' : ''}`}
                 disabled={closed}
@@ -270,6 +271,9 @@ function QuestionCard({ item, sent, onAnswer }: QuestionCardProps) {
           </div>
         );
       })}
+      {answers?.length === 0 && (
+        <div class="surg-question-note">This question was already answered or has expired.</div>
+      )}
       {needsSend && !answers && (
         <button
           type="button"
@@ -371,7 +375,14 @@ export function Widget({ agent, config, registerOpenControl, onOpenChange }: Wid
       setSent((prev) => ({ ...prev, [toolCallId]: answers }));
       setError(null);
     } catch (err) {
-      setError(friendlyError(err));
+      const status = err instanceof SurogatesError ? err.status : undefined;
+      if (status === 409) {
+        setSent((prev) => ({ ...prev, [toolCallId]: [] }));
+      } else if (err instanceof SurogatesAuthError) {
+        setError('Couldn’t send your answer. Please reload the page.');
+      } else {
+        setError(friendlyError(err));
+      }
     }
   };
 
@@ -390,10 +401,13 @@ export function Widget({ agent, config, registerOpenControl, onOpenChange }: Wid
   // sentinel rather than relying on empty string.
   const subtitle = config.subtitle ?? DEFAULT_SUBTITLE;
   const welcomeText = config.welcomeMessage ?? DEFAULT_WELCOME;
-  const hasAssistant = messages.some((m) => m.role === 'assistant');
+  const hasAssistant = messages.some((m) => m.role !== 'user');
   const showWelcome = !!welcomeText && !hasAssistant;
   // A question waiting on the visitor is the agent's turn paused, not working.
-  const awaitingVisitor = messages.some((m) => m.role === 'question' && !m.answers && !sent[m.toolCallId]);
+  // Only the latest question can still be waiting; an older one left open
+  // was dropped by its turn.
+  const lastQuestion = [...messages].reverse().find((m): m is QuestionItem => m.role === 'question');
+  const awaitingVisitor = !!lastQuestion && !lastQuestion.answers && !sent[lastQuestion.toolCallId];
   const showTyping = running && !awaitingVisitor && messages[messages.length - 1]?.role !== 'assistant';
 
   if (!inline && !open) {
