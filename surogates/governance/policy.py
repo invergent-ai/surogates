@@ -406,9 +406,14 @@ class GovernanceGate:
                 continue
 
             # For relative paths, resolve against workspace root so the
-            # sandbox check uses the correct absolute path.
+            # sandbox check uses the correct absolute path.  ``/workspace``,
+            # where every sandbox mounts the session's files, is the
+            # workspace root too (a host folder with local storage), as the
+            # file tools read it (``in_workspace_terms``).
             import os
-            expanded = os.path.expanduser(raw_path)
+            from surogates.tools.utils.workspace_sandbox import in_workspace_terms
+
+            expanded = in_workspace_terms(workspace_path, os.path.expanduser(raw_path))
             if not os.path.isabs(expanded):
                 expanded = os.path.join(workspace_path, expanded)
 

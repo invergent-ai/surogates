@@ -55,6 +55,29 @@ def refuse_nul(*texts: str | None) -> None:
         raise ValueError(NUL_REFUSED)
 
 
+#: The path the model, the task texts and every sandbox know the workspace
+#: by: each sandbox mounts the session's files there.  With S3 storage the
+#: session's ``workspace_path`` is this path; with local storage it is a
+#: folder on the worker's host, which the Docker sandbox mounts here.
+WORKSPACE_MOUNT = "/workspace"
+
+
+def in_workspace_terms(workspace_root: str | Path, path: str) -> str:
+    """*path*, with a leading :data:`WORKSPACE_MOUNT` read as *workspace_root*.
+
+    Only ``/workspace`` itself and ``/workspace/...`` are read so
+    ("/workspace2" is left as written), by text alone: the containment check
+    that follows resolves ``..`` and symlinks in the result as in any other
+    path.  Where the workspace is ``/workspace`` (S3) nothing changes.
+    """
+    root = str(workspace_root).rstrip("/") or "/"
+    if path == root or path.startswith(root + "/"):
+        return path  # the workspace's own path (a host folder under /workspace, or /workspace)
+    if path == WORKSPACE_MOUNT or path.startswith(WORKSPACE_MOUNT + "/"):
+        return root + path[len(WORKSPACE_MOUNT):]
+    return path
+
+
 def validate_workspace_root(workspace_path: str | None) -> Path:
     """Validate and return the resolved workspace root.
 
@@ -84,16 +107,17 @@ def resolve_in_workspace(
     The path is resolved in this order:
 
     1. ``~`` expansion (``expanduser``).
-    2. If relative, joined to *workspace_root*.
-    3. Symlink resolution (``resolve()``).
-    4. Containment check (``is_relative_to``).
+    2. ``/workspace/...`` read as the workspace (:func:`in_workspace_terms`).
+    3. If relative, joined to *workspace_root*.
+    4. Symlink resolution (``resolve()``).
+    5. Containment check (``is_relative_to``).
 
     Returns the resolved absolute path.
 
     Raises :class:`WorkspaceSandboxError` if the resolved path escapes
     the workspace root.
     """
-    expanded = os.path.expanduser(user_path)
+    expanded = in_workspace_terms(workspace_root, os.path.expanduser(user_path))
     candidate = Path(expanded)
 
     # Relative paths are resolved against workspace root, not CWD.
