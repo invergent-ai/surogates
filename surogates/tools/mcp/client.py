@@ -740,7 +740,7 @@ class MCPServerTask:
         "_registry", "_on_tools_changed", "_circuit_failure_count",
         "_circuit_open_until", "_circuit_failure_threshold",
         "_circuit_cooldown_seconds", "_auth_recovery_lock",
-        "_last_auth_recovery_at",
+        "_last_auth_recovery_at", "_server_capabilities", "offers",
     )
 
     def __init__(self, name: str):
@@ -765,6 +765,11 @@ class MCPServerTask:
         self._circuit_cooldown_seconds = _DEFAULT_CIRCUIT_COOLDOWN_SECONDS
         self._auth_recovery_lock = threading.Lock()
         self._last_auth_recovery_at = 0.0
+        # What the server's initialize result declared (None until it is
+        # connected), and whether it has resources / prompts to offer: the
+        # utility tools are offered to the model only for what it has.
+        self._server_capabilities: Optional[Any] = None
+        self.offers: dict[str, bool] = {}
 
     def _is_http(self) -> bool:
         """Check if this server uses HTTP transport."""
@@ -809,9 +814,9 @@ class MCPServerTask:
     def _make_message_handler(self):
         """Build a ``message_handler`` callback for ``ClientSession``.
 
-        Dispatches on notification type.  Only ``ToolListChangedNotification``
-        triggers a refresh; prompt and resource change notifications are
-        logged as stubs for future work.
+        Dispatches on notification type.  ``ToolListChangedNotification``
+        triggers a refresh; a prompt or resource change refreshes the tools
+        when it changes whether the server has any to offer.
         """
         async def _handler(message):
             try:
@@ -826,10 +831,14 @@ class MCPServerTask:
                                 self.name,
                             )
                             await self._refresh_tools()
-                        case PromptListChangedNotification():
-                            logger.debug("MCP server '%s': prompts/list_changed (ignored)", self.name)
-                        case ResourceListChangedNotification():
-                            logger.debug("MCP server '%s': resources/list_changed (ignored)", self.name)
+                        case PromptListChangedNotification() | ResourceListChangedNotification():
+                            # The server's resources or prompts changed: offer
+                            # the utility tools anew if it now has, or no
+                            # longer has, any.
+                            before = dict(self.offers)
+                            await self._discover_offers()
+                            if self.offers != before:
+                                await self._refresh_tools()
                         case _:
                             pass
             except Exception:
@@ -906,7 +915,7 @@ class MCPServerTask:
 
         async with stdio_client(server_params) as (read_stream, write_stream):
             async with ClientSession(read_stream, write_stream, **sampling_kwargs) as session:
-                await session.initialize()
+                self._server_capabilities = getattr(await session.initialize(), "capabilities", None)
                 self.session = session
                 await self._discover_tools()
                 self._ready.set()
@@ -962,7 +971,7 @@ class MCPServerTask:
                     read_stream, write_stream, _get_session_id,
                 ):
                     async with ClientSession(read_stream, write_stream, **sampling_kwargs) as session:
-                        await session.initialize()
+                        self._server_capabilities = getattr(await session.initialize(), "capabilities", None)
                         self.session = session
                         await self._discover_tools()
                         self._ready.set()
@@ -979,14 +988,14 @@ class MCPServerTask:
                 read_stream, write_stream, _get_session_id,
             ):
                 async with ClientSession(read_stream, write_stream, **sampling_kwargs) as session:
-                    await session.initialize()
+                    self._server_capabilities = getattr(await session.initialize(), "capabilities", None)
                     self.session = session
                     await self._discover_tools()
                     self._ready.set()
                     await self._shutdown_event.wait()
 
     async def _discover_tools(self):
-        """Discover tools from the connected session."""
+        """Discover tools from the connected session, and what of resources and prompts it offers."""
         if self.session is None:
             return
         tools_result = await self.session.list_tools()
@@ -995,6 +1004,39 @@ class MCPServerTask:
             if hasattr(tools_result, "tools")
             else []
         )
+        await self._discover_offers()
+
+    async def _discover_offers(self) -> None:
+        """Whether the server has resources and prompts the model could ask for.
+
+        A kind counts only when the server's initialize result declares its
+        capability and its list (for resources, the resources or the resource
+        templates) is not empty.  Without this the ``read_resource`` /
+        ``get_prompt`` tools were offered for every server, since every client
+        session has those methods, and a model guessed names a server without
+        resources could never serve.  A list that cannot be read keeps the
+        kind offered, as before.
+        """
+        caps = self._server_capabilities
+        offers: dict[str, bool] = {}
+        for kind, listers in _OFFER_LISTERS.items():
+            if caps is None or getattr(caps, kind, None) is None:
+                offers[kind] = False
+                continue
+            offered = False
+            try:
+                for method, field in listers:
+                    listed = await asyncio.wait_for(
+                        getattr(self.session, method)(), timeout=_OFFER_LIST_TIMEOUT,
+                    )
+                    if getattr(listed, field, None):
+                        offered = True
+                        break
+            except Exception as exc:
+                logger.debug("MCP server '%s': could not list %s (%s); offering them", self.name, kind, exc)
+                offered = True
+            offers[kind] = offered
+        self.offers = offers
 
     async def run(self, config: dict):
         """Long-lived coroutine: connect, discover tools, wait, disconnect.
@@ -1593,6 +1635,23 @@ _UTILITY_CAPABILITY_METHODS = {
     "get_prompt": "get_prompt",
 }
 
+#: The kind of offering each utility tool needs the server to have.
+_UTILITY_OFFER = {
+    "list_resources": "resources",
+    "read_resource": "resources",
+    "list_prompts": "prompts",
+    "get_prompt": "prompts",
+}
+
+#: How a server's resources and prompts are listed: (session method, result field).
+_OFFER_LISTERS = {
+    "resources": (("list_resources", "resources"), ("list_resource_templates", "resourceTemplates")),
+    "prompts": (("list_prompts", "prompts"),),
+}
+
+#: How long one list call may take while a server's offers are found out.
+_OFFER_LIST_TIMEOUT = 10.0
+
 
 def _build_utility_schemas(server_name: str) -> List[dict]:
     """Build schemas for the MCP utility tools (resources and prompts).
@@ -1687,6 +1746,15 @@ def _select_utility_schemas(server_name: str, server: MCPServerTask, config: dic
                 server_name,
                 handler_key,
                 required_method,
+            )
+            continue
+        kind = _UTILITY_OFFER[handler_key]
+        if not getattr(server, "offers", {}).get(kind, False):
+            logger.debug(
+                "MCP server '%s': skipping utility '%s' (it offers no %s)",
+                server_name,
+                handler_key,
+                kind,
             )
             continue
         selected.append(entry)
