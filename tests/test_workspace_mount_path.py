@@ -12,11 +12,19 @@ now read it as the workspace; everything that escapes it is still refused.
 from __future__ import annotations
 
 import json
+import shutil
 
 import pytest
 
 from surogates.governance.policy import GovernanceGate
-from surogates.tools.builtin.file_ops import _read_file_handler, _write_file_handler
+from surogates.tools.builtin.file_ops import (
+    _list_files_handler,
+    _patch_handler,
+    _read_file_handler,
+    _search_files_handler,
+    _write_file_handler,
+)
+from surogates.tools.utils import workspace_sandbox
 from surogates.tools.builtin.terminal import _terminal_handler
 from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError, in_workspace_terms, validate_path
 
@@ -49,6 +57,7 @@ def test_the_gate_allows_the_mount_path_with_local_storage(host, path, tool):
 
 @pytest.mark.parametrize("path", [
     "/workspace/../x.txt",
+    "/workspace/../s1/input/a.txt",  # inside a sandbox: /s1/input/a.txt, not the workspace
     "/workspace/input/../../x.txt",
     "../x.txt",
     "/workspace/link/secret.txt",  # a symlink out
@@ -122,3 +131,63 @@ async def test_the_terminal_runs_in_a_mount_path_workdir(host):
     blocked = json.loads(await _terminal_handler({"command": "pwd", "workdir": "/workspace/link"},
                                                  workspace_path=str(root)))
     assert blocked["status"] == "blocked"
+
+
+def test_a_root_under_the_mount_path_is_read_as_a_sandbox_would(tmp_path, monkeypatch):
+    mount = tmp_path / "mnt"
+    root = mount / "a"
+    (root / "x").mkdir(parents=True)
+    (mount / "b").mkdir()
+    monkeypatch.setattr(workspace_sandbox, "WORKSPACE_MOUNT", str(mount))
+    for path in (f"{mount}/a/../b/x", f"{mount}/../x", f"{mount}/a/x/../../b"):
+        assert not _allowed(path, str(root)), path
+        with pytest.raises(WorkspaceSandboxError):
+            validate_path(str(root), path)
+    assert in_workspace_terms(str(root), f"{mount}/ab/x") == f"{root}/ab/x"
+    assert _allowed(f"{mount}/a/x", str(root)) and _allowed(f"{mount}/x", str(root))
+    assert in_workspace_terms("", "/workspace/x") == "/workspace/x"
+
+
+def test_a_symlink_loop_is_refused_not_raised(host):
+    root, _ = host
+    (root / "loop").symlink_to(root / "loop")
+    decision = GovernanceGate().check("read_file", {"path": "/workspace/loop/x"}, workspace_path=str(root))
+    assert not decision.allowed
+
+
+async def test_patch_on_the_mount_path(host):
+    root, _ = host
+    patched = json.loads(await _patch_handler(
+        {"path": "/workspace/input/a.txt", "old_string": "inside", "new_string": "changed"},
+        workspace_path=str(root),
+    ))
+    assert "error" not in patched, patched
+    assert (root / "input" / "a.txt").read_text(encoding="utf-8") == "changed"
+
+
+async def test_a_write_through_a_symlink_out_is_refused(host):
+    root, outside = host
+    raw = await _write_file_handler({"path": "/workspace/link/new.txt", "content": "owned"}, workspace_path=str(root))
+    assert "Path traversal blocked" in json.loads(raw)["error"]
+    assert not (outside / "new.txt").exists()
+
+
+async def test_a_safe_write_root_takes_the_mount_path_as_the_workspace(host, monkeypatch):
+    root, _ = host
+    monkeypatch.setenv("SUROGATES_WRITE_SAFE_ROOT", str(root))
+    raw = await _write_file_handler({"path": "/workspace/out/c.txt", "content": "made"}, workspace_path=str(root))
+    assert "error" not in json.loads(raw), raw
+    assert (root / "out" / "c.txt").read_text(encoding="utf-8") == "made"
+
+
+@pytest.mark.skipif(shutil.which("rg") is None, reason="search_files and list_files need ripgrep")
+async def test_search_and_list_on_the_mount_path(host):
+    root, _ = host
+    found = await _search_files_handler({"pattern": "inside", "path": "/workspace/input"}, workspace_path=str(root))
+    assert "a.txt" in found
+    escaped = await _search_files_handler({"pattern": "leak", "path": "/workspace/link"}, workspace_path=str(root))
+    assert "do not leak" not in escaped
+    listed = await _list_files_handler({"path": "/workspace/input"}, workspace_path=str(root))
+    assert "a.txt" in listed
+    raw = await _list_files_handler({"path": "/workspace/link"}, workspace_path=str(root))
+    assert "secret.txt" not in raw

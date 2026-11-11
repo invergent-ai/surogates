@@ -23,6 +23,7 @@ from typing import Any, BinaryIO
 from surogates.tools.utils.env_passthrough import is_env_passthrough
 from surogates.tools.utils.process_registry import process_registry
 from surogates.tools.utils.workspace_sandbox import (
+    in_workspace_terms,
     WorkspaceSandboxError,
     validate_path,
     validate_workdir,
@@ -599,6 +600,9 @@ class LocalWorkspaceIO:
 
     async def check_write(self, path: str) -> str | None:
         refuse_nul(path)
+        if self.root:
+            # ``/workspace/...`` is this workspace, as resolve() reads it.
+            path = in_workspace_terms(self.root, path)
         if _is_write_denied(path):
             return f"Write denied: '{path}' is a protected system/credential file."
         return _check_sensitive_path(path)

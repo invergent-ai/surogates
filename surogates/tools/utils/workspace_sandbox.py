@@ -27,6 +27,7 @@ or absolute paths (``/etc/shadow``) must be stopped at the tool layer.
 from __future__ import annotations
 
 import os
+import posixpath
 from pathlib import Path
 
 
@@ -65,17 +66,25 @@ WORKSPACE_MOUNT = "/workspace"
 def in_workspace_terms(workspace_root: str | Path, path: str) -> str:
     """*path*, with a leading :data:`WORKSPACE_MOUNT` read as *workspace_root*.
 
-    Only ``/workspace`` itself and ``/workspace/...`` are read so
-    ("/workspace2" is left as written), by text alone: the containment check
-    that follows resolves ``..`` and symlinks in the result as in any other
-    path.  Where the workspace is ``/workspace`` (S3) nothing changes.
+    Only a path that is ``/workspace`` or below it once its ``..`` are
+    collapsed is read so, as inside a sandbox: "/workspace2" and
+    "/workspace/../x" are left as written.  The text after ``/workspace``
+    is kept as written, so the containment check that follows resolves its
+    symlinks and ``..`` for real, as in any other path.  Where the workspace
+    is ``/workspace`` (S3), or holds the path already, nothing changes; with
+    no workspace, neither.
     """
-    root = str(workspace_root).rstrip("/") or "/"
+    root = str(workspace_root).rstrip("/")
+    if not root:
+        return path
     if path == root or path.startswith(root + "/"):
         return path  # the workspace's own path (a host folder under /workspace, or /workspace)
-    if path == WORKSPACE_MOUNT or path.startswith(WORKSPACE_MOUNT + "/"):
-        return root + path[len(WORKSPACE_MOUNT):]
-    return path
+    if not (path == WORKSPACE_MOUNT or path.startswith(WORKSPACE_MOUNT + "/")):
+        return path
+    collapsed = posixpath.normpath(path)
+    if not (collapsed == WORKSPACE_MOUNT or collapsed.startswith(WORKSPACE_MOUNT + "/")):
+        return path
+    return root + path[len(WORKSPACE_MOUNT):]
 
 
 def validate_workspace_root(workspace_path: str | None) -> Path:

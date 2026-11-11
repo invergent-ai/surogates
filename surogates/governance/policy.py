@@ -418,7 +418,11 @@ class GovernanceGate:
                 expanded = os.path.join(workspace_path, expanded)
 
             mode = "w" if tool_name in ("write_file", "patch") else "r"
-            if not sandbox.check_file_access(expanded, mode):
+            try:
+                allowed = sandbox.check_file_access(expanded, mode)
+            except RuntimeError:  # a symlink loop (Path.resolve on Python 3.12)
+                allowed = False
+            if not allowed:
                 return (
                     f"Workspace sandbox violation: '{raw_path}' resolves "
                     f"outside the session workspace. All file operations "
