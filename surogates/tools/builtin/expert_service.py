@@ -84,7 +84,9 @@ class ExpertConsultationService:
         tool_router: Any | None = None,
         sandbox_pool: Any | None = None,
         credential_vault: Any | None = None,
+        session_config: dict[str, Any] | None = None,
     ) -> None:
+        self._session_config = session_config
         self._tenant = tenant
         self._session_id = session_id
         self._tool_registry = tool_registry
@@ -143,6 +145,7 @@ class ExpertConsultationService:
                 tenant=self._tenant,
                 session_id=self._session_id,
                 session_store=self._session_store,
+                session_config=self._session_config,
                 api_key=api_key,
                 client=client,
             )
@@ -259,10 +262,12 @@ class _RegistryOnlyToolRouter:
         tenant: Any,
         session_id: UUID,
         workspace_path: str | None = None,
+        session_config: dict[str, Any] | None = None,
     ) -> str:
         return await self._registry.dispatch(
             name,
             arguments,
             tenant=tenant,
             session_id=session_id,
+            session_config=session_config,
         )

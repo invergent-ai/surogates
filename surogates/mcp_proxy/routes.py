@@ -12,14 +12,11 @@ import json
 import logging
 import time
 from typing import Any
-from uuid import UUID
 
-import sqlalchemy as sa
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
 
 from surogates.audit import AuditStore, AuditType
-from surogates.db.models import Session
 from surogates.mcp_proxy.auth import ProxyAuthContext, get_proxy_auth
 from surogates.mcp_proxy.loader import (
     COMPOSIO_SERVER_NAME,
@@ -33,7 +30,7 @@ from surogates.runtime import (
     agent_runtime_context_dep,
     rate_limit_dep,
 )
-from surogates.simulation.side_effects import decide, fake_result, is_simulated
+from surogates.simulation.side_effects import decide, fake_result, would_have
 from surogates.tools.mcp.client import _sanitize_error
 
 logger = logging.getLogger(__name__)
@@ -226,17 +223,19 @@ async def call_tool(
         )
     server_name, original_tool, server_config = target
 
-    if auth.simulation_read != body.name and await _simulated_session(
-        request.app.state.session_factory, auth.session_id,
-    ):
-        hints = next((s.get("annotations") for s in schemas if s.get("name") == body.name), None)
-        if await decide(body.name, hints, llm=None, args=body.arguments):
-            return ToolCallResponse(result=fake_result(body.name, body.arguments))
-
     audit_store: AuditStore | None = getattr(
         request.app.state, "audit_store", None,
     )
-    audit_user_id = None if auth.is_service_account else auth.user_id
+
+    if auth.simulated and auth.simulation_read != body.name:
+        hints = next((s.get("annotations") for s in schemas if s.get("name") == body.name), None)
+        if await decide(body.name, hints, llm=None, args=body.arguments):
+            await _audit_call(
+                audit_store, auth, ctx, server_name, original_tool, "simulated", 0,
+                would_have=would_have(body.name, body.arguments),
+            )
+            return ToolCallResponse(result=fake_result(body.name, body.arguments))
+
     call_start = time.monotonic()
     outcome = "success"
     result_text = ""
@@ -261,29 +260,7 @@ async def call_tool(
         raise
     finally:
         duration_ms = int((time.monotonic() - call_start) * 1000)
-        if audit_store is not None:
-            try:
-                # POLICY_MCP_CALL fires per call
-                # with the per-request ctx.agent_id so compliance can
-                # answer 'which agent invoked tool X on server Y,
-                # when, with what outcome' from the audit log alone.
-                await audit_store.emit(
-                    org_id=auth.org_id,
-                    agent_id=ctx.agent_id,
-                    user_id=audit_user_id,
-                    type=AuditType.POLICY_MCP_CALL,
-                    data={
-                        "server": server_name,
-                        "tool": original_tool,
-                        "outcome": outcome,
-                        "duration_ms": duration_ms,
-                    },
-                )
-            except Exception:  # noqa: BLE001 — emit is best-effort
-                logger.warning(
-                    "Failed to emit POLICY_MCP_CALL audit",
-                    exc_info=True,
-                )
+        await _audit_call(audit_store, auth, ctx, server_name, original_tool, outcome, duration_ms)
 
     # Strip the Composio brand from the router's tool output too, so the
     # model never reads (and echoes) it. ``debrand_composio_text`` leaves
@@ -299,29 +276,41 @@ async def call_tool(
     return ToolCallResponse(result=_sanitize_error(result_text))
 
 
-# session id -> part of a simulation.  ponytail: cleared wholesale when full.
-_simulated_sessions: dict[UUID, bool] = {}
-_SIMULATED_SESSIONS_CAP = 50_000
-
-
-async def _simulated_session(session_factory: Any, session_id: UUID) -> bool:
-    """Whether the caller's session plays in a simulation, so its changes are faked.
-
-    Every caller passes here: the worker's harness and experts name their own
-    session, a sandbox script its sandbox's root session.  A simulated
-    session, and every sub-agent under it, carries the run in its config.  A
-    session id with no row is not simulated: nothing ties it to a run (a
-    sandbox token minted before tokens named their root session).
-    """
-    known = _simulated_sessions.get(session_id)
-    if known is not None:
-        return known
-    async with session_factory() as db:
-        config = await db.scalar(sa.select(Session.config).where(Session.id == session_id))
-    if len(_simulated_sessions) >= _SIMULATED_SESSIONS_CAP:
-        _simulated_sessions.clear()
-    _simulated_sessions[session_id] = is_simulated(config)
-    return _simulated_sessions[session_id]
+async def _audit_call(
+    audit_store: AuditStore | None,
+    auth: ProxyAuthContext,
+    ctx: AgentRuntimeContext,
+    server_name: str,
+    tool: str,
+    outcome: str,
+    duration_ms: int,
+    **extra: Any,
+) -> None:
+    if audit_store is None:
+        return
+    try:
+        # POLICY_MCP_CALL fires per call
+        # with the per-request ctx.agent_id so compliance can
+        # answer 'which agent invoked tool X on server Y,
+        # when, with what outcome' from the audit log alone.
+        await audit_store.emit(
+            org_id=auth.org_id,
+            agent_id=ctx.agent_id,
+            user_id=None if auth.is_service_account else auth.user_id,
+            type=AuditType.POLICY_MCP_CALL,
+            data={
+                "server": server_name,
+                "tool": tool,
+                "outcome": outcome,
+                "duration_ms": duration_ms,
+                **extra,
+            },
+        )
+    except Exception:  # noqa: BLE001 — emit is best-effort
+        logger.warning(
+            "Failed to emit POLICY_MCP_CALL audit",
+            exc_info=True,
+        )
 
 
 # Outcome strings emitted on POLICY_MCP_CALL.audit_log rows.  Kept

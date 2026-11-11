@@ -203,6 +203,9 @@ async def _build_session_sandbox_spec(
     sandbox_spec.env["SUROGATES_IS_SERVICE_ACCOUNT"] = (
         "1" if is_service_account else "0"
     )
+    from surogates.simulation.side_effects import is_simulated
+
+    sandbox_spec.simulated = is_simulated(session.config)
     await _apply_ssh_access(session, tenant, sandbox_spec, credential_vault)
     return sandbox_spec
 
@@ -1940,6 +1943,7 @@ async def _run_single_tool(
     handed_on: list[bool] = []
     not_taken: list[str] = []
     simulated: dict[str, str] | None = None
+    simulation_changes: bool | None = None
     try:
         from surogates.tools.router import TOOL_LOCATIONS, ToolLocation
         from surogates.sandbox.pool import sandbox_session_key
@@ -2002,10 +2006,6 @@ async def _run_single_tool(
                     )
                     image_dispatched = True
 
-        simulation_changes = await _simulation_changes(
-            tool_name, tool_args, session, tools, summary_llm_client, summary_model,
-        )
-
         if image_dispatched:
             pass  # result_content already set by the image branch.
         elif (refused := thread_refuses(tool_name, tool_args, session.config)) is not None:
@@ -2019,7 +2019,9 @@ async def _run_single_tool(
             # tool also acts off it (it creates an artifact, it pays for a
             # model call), and running it again would do that again.
             result_content = interrupted(tool_name)
-        elif simulation_changes:
+        elif (simulation_changes := await _simulation_changes(
+            tool_name, tool_args, session, tools, summary_llm_client, summary_model,
+        )):
             from surogates.simulation.side_effects import fake_result, would_have
 
             result_content = fake_result(tool_name, tool_args)

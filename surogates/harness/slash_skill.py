@@ -256,6 +256,7 @@ async def expand_slash_skill(
             sandbox_pool=sandbox_pool,
             credential_vault=credential_vault,
             llm_client=llm_client,
+            session_config=session_config,
         )
 
     return await _expand_skill(
@@ -358,6 +359,7 @@ async def _expand_expert(
     sandbox_pool: Any | None,
     credential_vault: Any | None = None,
     llm_client: Any | None = None,
+    session_config: dict[str, Any] | None = None,
 ) -> tuple[str, str, str | None, Literal["skill", "expert"]] | None:
     """Run the expert mini-loop and inline the deliverable.
 
@@ -380,6 +382,7 @@ async def _expand_expert(
             session_store=session_store,
             sandbox_pool=sandbox_pool,
             credential_vault=credential_vault,
+            session_config=session_config,
         )
         # The built-in advisor rides the session's client -- its tier
         # comes from the model sentinel, not from an endpoint of its own.

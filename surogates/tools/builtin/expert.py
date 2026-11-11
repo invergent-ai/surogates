@@ -187,6 +187,7 @@ async def _consult_expert_handler(
         tool_router=tool_router,
         sandbox_pool=kwargs.get("sandbox_pool"),
         credential_vault=kwargs.get("credential_vault"),
+        session_config=kwargs.get("session_config"),
     )
     result = await service.consult(
         expert=expert,

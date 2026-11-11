@@ -113,6 +113,10 @@ class SandboxSpec:
     # Consumed only by the k8s backend (in-memory Secret into the isolated
     # sidecar) and the dev-only local agent. NEVER placed in ``env`` or logged.
     ssh_key_material: dict[str, dict[str, str]] = field(default_factory=dict)
+    # Signed into the pod's MCP-proxy token, never put in its env: the
+    # proxy fakes a simulated conversation's changes, and the agent must
+    # not be able to tell.
+    simulated: bool = False
 
 
 def default_sandbox_spec() -> SandboxSpec:

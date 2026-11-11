@@ -37,10 +37,8 @@ FETCH = "mcp__composio__GMAIL_FETCH_EMAILS"
 @pytest.fixture(autouse=True)
 def _fresh_cache():
     side_effects._decided.clear()
-    proxy_routes._simulated_sessions.clear()
     yield
     side_effects._decided.clear()
-    proxy_routes._simulated_sessions.clear()
 
 
 def test_annotations_win():
@@ -221,26 +219,10 @@ async def test_simulation_read_runs_for_real_and_says_so_to_the_proxy():
     assert "simulated" not in event
 
 
-# --- the proxy: every caller passes here ------------------------------------
+# --- the proxy: every caller passes here, told by a signed claim ------------
 
-ORG, USER = UUID(int=1), UUID(int=2)
-SIM_SESSION, REAL_SESSION = UUID(int=3), UUID(int=4)
-CONFIGS = {
-    SIM_SESSION: {"memory_boundary": "simulation:r1:whatsapp:+40"},
-    REAL_SESSION: {"memory_boundary": "whatsapp:+40"},
-}
-
-
-class _Db:
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc):
-        return False
-
-    async def scalar(self, stmt):
-        wanted = stmt.whereclause.right.value
-        return CONFIGS.get(wanted)
+ORG, USER, SESSION = UUID(int=1), UUID(int=2), UUID(int=3)
+SIM_CONFIG = {"memory_boundary": "simulation:r1:whatsapp:+40"}
 
 
 @pytest.fixture
@@ -252,16 +234,15 @@ def proxy(monkeypatch):
         proxy_routes, "_ensure_tenant_connected",
         AsyncMock(return_value=[{"name": SEND}, {"name": "mcp__x__frobnicate"}]),
     )
-    pool = SimpleNamespace(resolve_call_target=lambda *a: ("srv", "tool", {}))
     app = FastAPI()
     app.include_router(proxy_routes.router)
-    app.state.pool = pool
-    app.state.session_factory = _Db
+    app.state.pool = SimpleNamespace(resolve_call_target=lambda *a: ("srv", "tool", {}))
+    app.state.session_factory = None  # the claim decides: no database is read
+    app.state.audit_store = SimpleNamespace(emit=AsyncMock())
     app.dependency_overrides[agent_runtime_context_dep] = lambda: SimpleNamespace(
         agent_id="agent-A", mcp_server_ids=("s1",),
     )
     app.dependency_overrides[rate_limit_dep] = lambda: None
-    assert get_proxy_auth not in app.dependency_overrides  # the real signed token is read
     return app, upstream
 
 
@@ -269,8 +250,8 @@ def _http(app) -> httpx.AsyncClient:
     return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://proxy")
 
 
-async def _call(app, session_id: UUID, name: str, **claims) -> dict:
-    token = create_sandbox_token(ORG, USER, session_id, agent_id="agent-A", **claims)
+async def _call(app, name: str, **claims) -> dict:
+    token = create_sandbox_token(ORG, USER, SESSION, agent_id="agent-A", **claims)
     async with _http(app) as client:
         resp = await client.post(
             "/mcp/v1/tools/call", json={"name": name, "arguments": {"to": "a"}},
@@ -280,51 +261,116 @@ async def _call(app, session_id: UUID, name: str, **claims) -> dict:
     return resp.json()
 
 
-async def test_a_sandbox_script_in_a_simulation_never_reaches_upstream(proxy):
+async def test_a_simulated_call_never_reaches_upstream_and_is_audited(proxy):
     app, upstream = proxy
-    assert json.loads((await _call(app, SIM_SESSION, SEND))["result"]) == {"ok": True}
+    assert json.loads((await _call(app, SEND, simulated=True))["result"]) == {"ok": True}
     upstream.assert_not_awaited()
+    data = app.state.audit_store.emit.await_args.kwargs["data"]
+    assert data["outcome"] == "simulated"
+    assert data["would_have"] == would_have(SEND, {"to": "a"})
 
 
-async def test_a_real_session_reaches_upstream(proxy):
+async def test_a_token_without_the_claim_reaches_upstream(proxy):
     app, upstream = proxy
-    assert json.loads((await _call(app, REAL_SESSION, SEND))["result"]) == {"sent": True}
+    assert json.loads((await _call(app, SEND))["result"]) == {"sent": True}
     upstream.assert_awaited_once()
-
-
-async def test_an_unknown_session_is_not_simulated(proxy):
-    app, upstream = proxy
-    await _call(app, UUID(int=99), SEND)
-    upstream.assert_awaited_once()
+    assert app.state.audit_store.emit.await_args.kwargs["data"]["outcome"] == "success"
 
 
 async def test_the_proxy_fakes_unknown_tools_unless_the_harness_judged_a_read(proxy):
     app, upstream = proxy
-    await _call(app, SIM_SESSION, "mcp__x__frobnicate")
+    await _call(app, "mcp__x__frobnicate", simulated=True)
     upstream.assert_not_awaited()
-    await _call(app, SIM_SESSION, "mcp__x__frobnicate", simulation_read="mcp__x__frobnicate")
+    await _call(app, "mcp__x__frobnicate", simulated=True, simulation_read="mcp__x__frobnicate")
     upstream.assert_awaited_once()
     # A read claim for one tool lets no other through.
-    await _call(app, SIM_SESSION, SEND, simulation_read="mcp__x__frobnicate")
+    await _call(app, SEND, simulated=True, simulation_read="mcp__x__frobnicate")
     upstream.assert_awaited_once()
+
+
+def _proxy_client(app) -> tuple[ToolRegistry, McpProxyClient]:
+    registry = ToolRegistry()
+    mcp = McpProxyClient("http://proxy", registry)
+    mcp._client = _http(app)
+    for name in (SEND, FETCH):
+        registry.register(
+            name, ToolSchema(name=name, description="", parameters={}),
+            handler=mcp._make_proxy_handler(name), toolset="mcp",
+        )
+    return registry, mcp
+
+
+TENANT = SimpleNamespace(org_id=ORG, user_id=USER, service_account_id=None)
 
 
 async def test_an_expert_in_a_simulation_never_reaches_upstream(proxy):
     app, upstream = proxy
-    registry = ToolRegistry()
-    mcp = McpProxyClient("http://proxy", registry)
-    mcp._client = _http(app)
-    registry.register(
-        SEND, ToolSchema(name=SEND, description="", parameters={}),
-        handler=mcp._make_proxy_handler(SEND), toolset="mcp",
-    )
-    tenant = SimpleNamespace(org_id=ORG, user_id=USER, service_account_id=None)
+    registry, mcp = _proxy_client(app)
     try:
         # The expert loop's own path: tool_router.execute -> registry.dispatch, no harness guard.
         result = await _RegistryOnlyToolRouter(registry).execute(
-            name=SEND, arguments={"to": "a"}, tenant=tenant, session_id=SIM_SESSION,
+            name=SEND, arguments={"to": "a"}, tenant=TENANT, session_id=SESSION, session_config=SIM_CONFIG,
         )
     finally:
         await mcp.close()
     assert json.loads(result) == {"ok": True}
     upstream.assert_not_awaited()
+
+
+async def test_the_worker_signs_the_simulation_into_a_short_token(proxy, monkeypatch):
+    app, _ = proxy
+    minted: list[dict] = []
+    real = create_sandbox_token
+
+    def spy(*args, **kwargs):
+        minted.append(kwargs)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr("surogates.orchestrator.mcp_client.create_sandbox_token", spy)
+    registry, mcp = _proxy_client(app)
+    try:
+        await registry.dispatch(FETCH, {}, tenant=TENANT, session_id=SESSION, session_config=SIM_CONFIG,
+                                simulation_read=True)
+        await registry.dispatch(FETCH, {}, tenant=TENANT, session_id=SESSION, session_config={},
+                                simulation_read=True)
+    finally:
+        await mcp.close()
+    assert minted[0]["simulated"] is True and minted[0]["simulation_read"] == FETCH
+    assert minted[0]["expires_minutes"] == 2
+    assert minted[1]["simulated"] is False and minted[1]["simulation_read"] is None
+
+
+def _claims(token: str) -> dict:
+    from surogates.tenant.auth.jwt import decode_token
+
+    return decode_token(token)
+
+
+def test_sandbox_tokens_carry_the_simulation(monkeypatch):
+    from surogates.sandbox.base import SandboxSpec
+    from surogates.sandbox.docker import DockerSandbox
+    from surogates.sandbox.kubernetes import K8sSandbox
+
+    monkeypatch.setenv("SUROGATES_JWT_SECRET", "test-secret")
+    for simulated in (True, False):
+        spec = SandboxSpec(env={"ORG_ID": str(ORG), "USER_ID": str(USER)}, simulated=simulated)
+        docker_token = DockerSandbox._mint_mcp_token(SimpleNamespace(), spec, uuid4().hex)
+        assert _claims(docker_token).get("simulated", False) is simulated
+
+        pod = K8sSandbox(mcp_proxy_url="http://proxy")._build_pod_manifest(
+            uuid4().hex, "pod", "secret", spec, executor_token="t",
+        )
+        env = {e.name: e.value for e in pod.spec.containers[0].env}
+        assert _claims(env["MCP_PROXY_TOKEN"]).get("simulated", False) is simulated
+        # The pod's own environment must not tell the agent it is being tested.
+        assert not any("SIMULAT" in name for name in env)
+
+
+async def test_the_sandbox_spec_marks_a_simulated_session():
+    from surogates.harness.tool_exec import _build_session_sandbox_spec
+
+    for config, simulated in ((SIM_CONFIG, True), ({}, False)):
+        session = SimpleNamespace(id=uuid4(), config={"workspace_path": "", **config}, agent_id="a")
+        tenant = SimpleNamespace(org_id=ORG, user_id=USER, asset_root="/tmp/test")
+        spec = await _build_session_sandbox_spec(session, tenant, str(session.id))
+        assert spec.simulated is simulated
