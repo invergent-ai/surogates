@@ -403,6 +403,17 @@ class LLMSettings(BaseSettings):
     # the window steps the session's window down for good.
     compression_threshold: float | None = Field(default=None, gt=0.0, le=0.95)
 
+    # Name the session on every model call it makes: ``x-surogates-session``
+    # (the session's id) and ``x-surogates-root`` (the id of the root of its
+    # session tree, the session itself unless it is a sub-agent's).  Every
+    # slot of the session's LLM bundle sends them: the main loop, compaction
+    # summaries, titles, the advisor, fallbacks.  A gateway in front of the
+    # model can then group one user task's calls, its sub-agents' included
+    # (training rollouts, per-task accounting).  Headers only: the request
+    # body is the same either way.  Off by default, because the ids would
+    # otherwise reach whatever provider a slot points at.
+    session_headers: bool = False
+
     summary_model: str = ""  # cheap model for context compression summaries
     summary_base_url: str = ""  # optional auxiliary endpoint for summaries
     summary_api_key: str = ""  # optional auxiliary API key for summaries

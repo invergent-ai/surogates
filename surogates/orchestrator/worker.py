@@ -1319,6 +1319,45 @@ async def _resolve_speaker(
     return None
 
 
+#: Parents read at most, walking up to a session tree's root.
+_SESSION_TREE_MAX_DEPTH = 64
+
+
+async def _session_tree_root(session_store: Any, session: Any) -> UUID:
+    """The id of the root of *session*'s tree: its ancestor with no parent.
+
+    A root session is its own root and costs no read.  A parent that
+    cannot be read (deleted) ends the walk at its id, so the sessions under
+    it still share one root.
+    """
+    from surogates.session.store import SessionNotFoundError
+
+    seen = {session.id}
+    current = session
+    for _ in range(_SESSION_TREE_MAX_DEPTH):
+        parent_id = current.parent_id
+        if parent_id is None or parent_id in seen:
+            break
+        try:
+            current = await session_store.get_session(parent_id)
+        except SessionNotFoundError:
+            return parent_id
+        seen.add(current.id)
+    return current.id
+
+
+async def _llm_request_headers(
+    settings: Any, session_store: Any, session: Any,
+) -> dict[str, str] | None:
+    """The headers every model call of this wake sends (``llm.session_headers``)."""
+    if not settings.llm.session_headers:
+        return None
+    from surogates.harness.session_llm import session_request_headers
+
+    root_id = await _session_tree_root(session_store, session)
+    return session_request_headers(session.id, root_id)
+
+
 def _memory_user_id(session, tenant) -> str | None:
     """The user id whose personal memory this turn uses, or None for shared.
 
@@ -1781,6 +1820,7 @@ async def run_worker(settings: Settings) -> None:
             service_account_id=credential.service_account_id,
             settings=settings,
             session_config=session.config,
+            request_headers=await _llm_request_headers(settings, session_store, session),
         )
 
         if not llm_bundle.main.model:

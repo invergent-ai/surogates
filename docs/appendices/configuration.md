@@ -52,6 +52,7 @@ Surogates is configured via a YAML file merged with environment variables. Envir
 | `llm.provider` | `SUROGATES_LLM_PROVIDER` | auto-detected | Provider name override |
 | `llm.credential_pool` | -- | `[]` | Additional API keys for rotation |
 | `llm.fallback_providers` | -- | `[]` | Fallback provider chain |
+| `llm.session_headers` | `SUROGATES_LLM_SESSION_HEADERS` | `false` | Send `x-surogates-session` (the session's id) and `x-surogates-root` (its session tree's root id) on every model call of a session, sub-agents, summaries and titles included; request bodies unchanged |
 
 ## Sandbox (`sandbox`)
 

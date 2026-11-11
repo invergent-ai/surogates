@@ -15,6 +15,7 @@ does not accumulate one pool per processed session.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -25,6 +26,8 @@ from surogates.runtime.context import AgentRuntimeContext, LLMEndpoint
 from surogates.runtime.entitlements import entitled_model_tier
 
 __all__ = [
+    "ROOT_HEADER",
+    "SESSION_HEADER",
     "ResolvedLLM",
     "ResolvedVideoEndpoint",
     "SessionLLMClients",
@@ -32,10 +35,22 @@ __all__ = [
     "build_session_llm_clients",
     "resolve_org_llm",
     "resolve_video_endpoint",
+    "session_request_headers",
 ]
 
 
 logger = logging.getLogger(__name__)
+
+#: The session that makes a model call (``llm.session_headers``).
+SESSION_HEADER = "x-surogates-session"
+#: The root of that session's tree: the session itself, or the session
+#: that started the sub-agent chain it belongs to.
+ROOT_HEADER = "x-surogates-root"
+
+
+def session_request_headers(session_id: Any, root_session_id: Any) -> dict[str, str]:
+    """The headers that name a session on each of its model calls."""
+    return {SESSION_HEADER: str(session_id), ROOT_HEADER: str(root_session_id)}
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,6 +224,7 @@ async def build_session_llm_clients(
     service_account_id: Any = None,
     settings: Any = None,
     session_config: dict | None = None,
+    request_headers: Mapping[str, str] | None = None,
 ) -> SessionLLMClients:
     """Build the per-session LLM bundle.
 
@@ -216,6 +232,11 @@ async def build_session_llm_clients(
     ``ResolvedLLM`` — one ``AsyncOpenAI`` instance pointed at
     ``endpoint.base_url`` with the vault-resolved API key, paired
     with ``endpoint.model``.
+
+    ``request_headers`` (``session_request_headers``) go on every
+    request of every client the bundle builds, so each model call the
+    session makes names it, whatever slot or code path makes the call.
+    They never change a request's body.
 
     The slots are independent connection pools; mid-call
     failover lives in the harness, not here.  The
@@ -245,6 +266,8 @@ async def build_session_llm_clients(
         )
 
     resolved: list[ResolvedLLM] = []
+    # ``None`` leaves the client's own defaults in place.
+    headers = dict(request_headers) if request_headers else None
 
     async def _resolve(endpoint: LLMEndpoint) -> ResolvedLLM:
         # Resolve the model key under the session's credential principal
@@ -258,7 +281,10 @@ async def build_session_llm_clients(
             service_account_id=service_account_id,
         )
         # One TLS context for every slot and wake (``harness.tls``).
-        client = AsyncOpenAI(api_key=key, base_url=endpoint.base_url, http_client=llm_http_client())
+        client = AsyncOpenAI(
+            api_key=key, base_url=endpoint.base_url, http_client=llm_http_client(),
+            default_headers=headers,
+        )
         slot = ResolvedLLM(
             client=client, model=endpoint.model,
             context_window=endpoint.context_window,
@@ -285,6 +311,7 @@ async def build_session_llm_clients(
         client_kwargs: dict[str, Any] = {
             "api_key": llm.image_api_key or llm.api_key or "EMPTY",
             "http_client": llm_http_client(),
+            "default_headers": headers,
         }
         base_url = llm.image_base_url or llm.base_url
         if base_url:
