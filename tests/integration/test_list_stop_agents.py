@@ -85,7 +85,8 @@ async def test_stopping_a_running_agent_stops_it_and_tells_its_parent(chats):  #
     [note] = await chats.store.get_events(chat, types=[EventType.AGENT_NOTIFICATION])
     assert note.data["status"] == "killed" and note.data["agent_id"] == str(child.id)
     # The turn stopped at its next step: the model was not asked again.
-    assert not any("never asked" in str(m.get("content")) for m in (await chats.store.get_events(child.id, types=[EventType.LLM_RESPONSE])))
+    said = [e.data["message"]["content"] for e in await chats.store.get_events(child.id, types=[EventType.LLM_RESPONSE])]
+    assert "never asked" not in said
     # Stopped, it keeps its context: a message resumes it.
     resumed = json.loads(await agents_module._send_message_handler(
         {"to": str(child.id), "message": "Go on, after all.", "summary": "Go on"},
