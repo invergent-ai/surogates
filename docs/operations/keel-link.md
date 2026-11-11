@@ -354,7 +354,7 @@ The stream is server-sent events, framed as the runtime's own session stream fra
 2. `event: stream.start`, whose `id` is `after` and whose `data` is `{}`.
 3. Every event with an `id` greater than `after`, in `id` order, without `llm.delta`, each as `id: <event id>`, `event: <type>`, `data: <the event's data, as JSON>`.
 4. `event: stream.live` with `data: {}` and no `id`, once: from here on, what comes happens now.
-5. Each new event as it is written, `llm.delta` included, framed as in 3.
+5. Each new event as it is written, `llm.delta` included, framed as in 3. A runtime whose workers send deltas over Redis only (`SUROGATES_WORKER_DELTA_TRANSPORT=redis`) writes no `llm.delta` event: the stream sends each delta as a frame with `id: -N`, where `N` is the `id` of the last event the stream sent before it. A negative id is never an event's id; opening the stream again with `Last-Event-ID: -N` (or `after=N`) takes up after event `N`. A stream opened during a reply has only the part written after it opened, and every frame of a reply comes before the `llm.response` that holds all of it. A client that drops frames whose id is not a whole number (as Keel's link does today) sees each reply whole at its `llm.response` instead.
 
 While no frame goes out for 15 seconds, the stream sends a `: keepalive` comment.
 

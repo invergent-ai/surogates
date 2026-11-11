@@ -721,8 +721,9 @@ class AgentHarness(
       loop to stop, skipping remaining tool calls.
     """
 
-    # The worker's policy (``__init__`` sets it); a class default for harnesses
-    # built without ``__init__``, as some tests build them.
+    # The worker's policy (``__init__`` sets them); class defaults for
+    # harnesses built without ``__init__``, as some tests build them.
+    _worker_delta_policy: DeltaPolicy = DeltaPolicy()
     _delta_policy: DeltaPolicy = DeltaPolicy()
 
     def __init__(
@@ -937,9 +938,12 @@ class AgentHarness(
 
         # Streaming can be disabled via session config or env var.
         self._streaming_enabled: bool = True
-        # How often at most a streamed call writes an ``llm.delta`` event of
-        # one kind (WorkerSettings.delta_coalesce_ms).
-        self._delta_policy: DeltaPolicy = delta_policy or DeltaPolicy()
+        # Whether, where and how often at most a streamed call sends an
+        # ``llm.delta`` event of one kind: the worker's policy, which a
+        # session's config narrows at wake (``live_deltas``,
+        # ``delta_coalesce_ms``).
+        self._worker_delta_policy: DeltaPolicy = delta_policy or DeltaPolicy()
+        self._delta_policy: DeltaPolicy = self._worker_delta_policy
 
         # Interrupt support -- thread-safe because only a single bool/str
         # is mutated and Python's GIL makes these assignments atomic.
@@ -2191,6 +2195,7 @@ class AgentHarness(
             # Honour per-session streaming config.
             if not session.config.get("streaming", True):
                 self._streaming_enabled = False
+            self._delta_policy = self._worker_delta_policy.for_session(session.config)
 
             # 2. Acquire exclusive lease -- return silently if another
             # worker holds it.

@@ -21,6 +21,14 @@ from surogates.channels.constants import session_queue_priority
 from surogates.config import enqueue_session, load_settings
 from surogates.harness.outcomes import build_defined_outcome_from_event
 from surogates.session.events import EventType
+from surogates.session.live import (
+    DeltaGate,
+    LiveFrame,
+    Notification,
+    decode_message,
+    next_message,
+    session_channel,
+)
 from surogates.session.models import Event
 from surogates.session.store import SessionNotFoundError, SessionStore
 from surogates.tenant.auth.middleware import get_current_tenant
@@ -40,6 +48,12 @@ _TERMINAL_STATUSES = frozenset({"completed", "archived"})
 # What ends a watching stream (``watch=1``). A chat is ``completed`` between its
 # turns, and a watcher waits through that for the next turn.
 _WATCH_TERMINAL_STATUSES = frozenset({"archived"})
+
+# Events after which a live stream reads all there is at once, to end itself
+# without waiting for a quiet channel when the session's turn is over.
+_TURN_END_TYPES = frozenset(t.value for t in (
+    EventType.SESSION_COMPLETE, EventType.SESSION_FAIL, EventType.SESSION_PAUSE, EventType.SESSION_STOPPED,
+))
 
 # Maximum time (seconds) an SSE connection stays open before the server
 # closes it gracefully.  Clients are expected to reconnect.
@@ -107,28 +121,16 @@ def _get_session_store(request: Request) -> SessionStore:
     return store
 
 
-async def _wait_for_publish(pubsub, timeout: float) -> None:
-    """Wait up to *timeout* seconds for a publish on *pubsub*.
+def _last_event_id_cursor(header: str) -> int | None:
+    """The cursor a ``Last-Event-ID`` header resumes from, or None.
 
-    Subscribe replies wake nothing. A subscription that fails waits as a
-    stream without Redis does, a poll interval, so that the caller reads on
-    and misses nothing.
+    A persisted event's frame carries its id, ``N``.  A live ``llm.delta``
+    frame is written to no log and carries ``-N``, N being the id of the
+    persisted event sent before it: a stream that dropped on one resumes
+    after event N, as it would have on that event's own frame.
     """
-    loop = asyncio.get_event_loop()
-    deadline = loop.time() + timeout
-    while (remaining := deadline - loop.time()) > 0:
-        try:
-            message = await asyncio.wait_for(
-                pubsub.get_message(ignore_subscribe_messages=True, timeout=remaining),
-                timeout=remaining + 0.5,
-            )
-        except asyncio.TimeoutError:
-            break
-        except Exception:
-            await asyncio.sleep(min(remaining, _POLL_INTERVAL))
-            break
-        if message is not None:
-            break
+    digits = header[1:] if header.startswith("-") else header
+    return int(digits) if digits.isdigit() else None
 
 
 def _require_service_account_api_route(
@@ -321,6 +323,19 @@ async def session_event_stream(
     Redis comes from ``request.app.state``; without it, the stream polls.
     A ``Last-Event-ID`` header past *after* moves the cursor up to it.
 
+    Live, a worker whose deltas go over Redis (``delta_transport: redis``)
+    sends the ``llm.delta`` frames of the replies being written on the
+    session's channel only (:mod:`surogates.session.live`), and this stream
+    passes them on.  A stream without Redis has none and shows each reply
+    whole at its ``llm.response``; a stream opened mid-reply has the part
+    written after it opened.  Their ``id`` is ``-N``, N the id of the last
+    event the stream sent before them: never a persisted event's id, and a
+    reconnect with it resumes after event N.  The channel is read in order
+    and the log only up to the event a notification names, so every frame
+    of a model call goes out before the ``llm.response`` that ends it, and
+    none after it.  Deltas a worker writes to the log are events like any
+    other.
+
     ``session_event_stream`` does no access check: each caller checks first.
     """
     # Try to get Redis for pub/sub notifications (faster than polling).
@@ -328,21 +343,25 @@ async def session_event_stream(
     # A browser's EventSource reconnects to the URL it first opened, whose
     # ``after`` is stale by then; the id it last received rides along as
     # ``Last-Event-ID``, and resuming there replays nothing twice.
-    last_event_id = request.headers.get("last-event-id", "")
-    if last_event_id.isdigit():
-        after = max(after, int(last_event_id))
+    resume_at = _last_event_id_cursor(request.headers.get("last-event-id", ""))
+    if resume_at is not None:
+        after = max(after, resume_at)
+    # A live frame's id, -N, given back as the cursor: after event N.  A
+    # frame's id -1 (sent before the session's first event) given back as
+    # ``after`` still means "from now"; ``Last-Event-ID: -1`` does not.
+    if after < -1:
+        after = -after
     # after=-1: from the session's newest event on, with nothing to replay.
     from_now = after < 0
     cursor = await asyncio.shield(store.last_event_id(session_id)) if from_now else after
-    # Drop llm.delta events while draining the backlog.  Deltas are
-    # per-token chunks that exist only to animate live streaming; the
-    # corresponding llm.response carries the final content.  For a long
-    # conversation they can outnumber everything else 10:1, and pushing
-    # them through SSE during replay stretches the "streaming in" feel
-    # across seconds.  We filter at the SQL level (not just at yield
-    # time) so the rows never leave the database.  Once we catch up
-    # (first empty fetch), we switch to live mode and forward deltas
-    # unmodified.
+    # Replay leaves out the llm.delta rows a worker writes to the log: per-token
+    # chunks that existed only to animate live streaming; the corresponding
+    # llm.response carries the final content.  For a long conversation they
+    # can outnumber everything else 10:1, and pushing them through SSE
+    # during replay stretches the "streaming in" feel across seconds.  We
+    # filter at the SQL level (not just at yield time) so the rows never
+    # leave the database.  Once we catch up (first empty fetch), we switch
+    # to live mode.
     in_replay = not from_now
     terminal = _WATCH_TERMINAL_STATUSES if watch else _TERMINAL_STATUSES
     # Wide replay batch so catching up on a long conversation takes 1-2
@@ -350,6 +369,9 @@ async def session_event_stream(
     # batch since there's rarely more than a handful of pending events.
     REPLAY_LIMIT = 5000
     LIVE_LIMIT = 50
+    # Which live frames are still news: none of a call whose end this
+    # stream has already sent.
+    gate = DeltaGate()
 
     # Subscribe to Redis channel for this session (if available).
     pubsub = None
@@ -362,7 +384,7 @@ async def session_event_stream(
                 # as its live viewers, and leaves its check-ins and
                 # completions out of the inbox while one is there. A watch
                 # is no viewer.
-                await pubsub.psubscribe(f"surogates:session:{session_id}")
+                await pubsub.psubscribe(session_channel(session_id))
                 # redis-py sends the subscription without waiting for Redis
                 # to take it, and a watch waits long on the channel after
                 # its first read: a publish in between would be heard of
@@ -370,7 +392,7 @@ async def session_event_stream(
                 # Redis's reply.
                 await pubsub.get_message(timeout=_POLL_INTERVAL)
             else:
-                await pubsub.subscribe(f"surogates:session:{session_id}")
+                await pubsub.subscribe(session_channel(session_id))
         except Exception:
             pubsub = None
 
@@ -390,46 +412,78 @@ async def session_event_stream(
         # drops the connection and the live thread freezes until reload.
         loop = asyncio.get_event_loop()
         last_emit = loop.time()
-        # Wall clock, not a count of waits: a busy turn publishes every token,
-        # each publish ends a wait at once, and counting waits closed a live
+        # Wall clock, not a count of waits: a busy turn sends many frames,
+        # each ends a wait at once, and counting waits closed a live
         # stream after a few hundred tokens.
         deadline = last_emit + _MAX_STREAM_DURATION
+        # Whether the log is read before the next wait, and up to which
+        # event (None: all of it).  A live frame asks for no read: frames
+        # cost the database nothing.
+        must_read, read_until = True, None
+        # Live frames heard while waiting out a terminal status, sent at the
+        # next wait.
+        held: list[LiveFrame] = []
+        # The ``after`` of the last frame the stream read the log up to
+        # before sending it (once per call).
+        caught_up_to = -1
+        last_disconnect_check = float("-inf")
 
         while loop.time() < deadline:
-            # Check if client disconnected.
-            if await request.is_disconnected():
-                return
+            # Check if client disconnected: before each read of the log, and
+            # at most every poll interval while frames stream.
+            now = loop.time()
+            if must_read or now - last_disconnect_check >= _POLL_INTERVAL:
+                last_disconnect_check = now
+                if await request.is_disconnected():
+                    return
 
-            # Shield DB calls from cancellation so an in-flight query
-            # completes cleanly and the asyncpg connection returns to the
-            # pool instead of being terminated mid-statement (which SQLA
-            # logs as a noisy invalidation trace).
-            if in_replay:
-                events = await asyncio.shield(
-                    store.get_events(
-                        session_id,
-                        after=cursor,
-                        limit=REPLAY_LIMIT,
-                        exclude_types=[EventType.LLM_DELTA],
+            if must_read:
+                # Shield DB calls from cancellation so an in-flight query
+                # completes cleanly and the asyncpg connection returns to the
+                # pool instead of being terminated mid-statement (which SQLA
+                # logs as a noisy invalidation trace).
+                if in_replay:
+                    events = await asyncio.shield(
+                        store.get_events(
+                            session_id,
+                            after=cursor,
+                            limit=REPLAY_LIMIT,
+                            exclude_types=[EventType.LLM_DELTA],
+                        )
                     )
-                )
-            else:
-                events = await asyncio.shield(
-                    store.get_events(session_id, after=cursor, limit=LIVE_LIMIT)
-                )
+                else:
+                    events = await asyncio.shield(
+                        store.get_events(
+                            session_id, after=cursor, until=read_until, limit=LIVE_LIMIT,
+                        )
+                    )
 
-            for event in events:
-                yield {
-                    "id": str(event.id),
-                    "event": event.type,
-                    "data": json.dumps(event.data, default=str),
-                }
-                if event.id is not None:
-                    cursor = event.id
-            if events:
-                last_emit = loop.time()
+                ended = False
+                for event in events:
+                    yield {
+                        "id": str(event.id),
+                        "event": event.type,
+                        "data": json.dumps(event.data, default=str),
+                    }
+                    if event.id is not None:
+                        cursor = event.id
+                        gate.saw(event.type, event.id, synthetic=bool((event.data or {}).get("synthetic")))
+                    ended = ended or event.type in _TURN_END_TYPES
+                if events:
+                    last_emit = loop.time()
+                if read_until is not None and not in_replay:
+                    # A read up to a notification's event: what is after it
+                    # waits for its own notification.  Only a full page means
+                    # more up to the bound; a turn that ended is checked for
+                    # the end of the stream at once, by a read of all there is.
+                    if len(events) >= LIVE_LIMIT:
+                        continue
+                    must_read, read_until = ended, None
+                    continue
+                if events:
+                    continue
 
-            if not events:
+                must_read, read_until = False, None
                 if in_replay:
                     # The backlog is all sent: what follows happens now. The SDK opens a document only on a live edit.
                     yield {"event": "stream.live", "data": "{}"}
@@ -456,28 +510,21 @@ async def session_event_stream(
                     # re-check status — the POST may have flipped it
                     # back to active.
                     #
-                    # Loop on get_message until a real publish or the
-                    # deadline: redis-py queues the subscribe-confirm
-                    # message and ``get_message(ignore_subscribe_messages=
-                    # True)`` consumes it returning None, which without a
-                    # loop would collapse our grace window to zero on the
-                    # very first call after subscribe.
+                    # Wait for a real publish or the deadline: redis-py
+                    # queues the subscribe-confirm message, which
+                    # ``next_message`` skips, or the grace window would
+                    # collapse to zero on the very first call after
+                    # subscribe.  A live frame heard here is kept for the
+                    # next wait.
                     if pubsub is not None:
-                        grace_end = loop.time() + _POLL_INTERVAL
-                        while loop.time() < grace_end:
-                            remaining = max(0.0, grace_end - loop.time())
-                            try:
-                                msg = await asyncio.wait_for(
-                                    pubsub.get_message(
-                                        ignore_subscribe_messages=True,
-                                        timeout=remaining,
-                                    ),
-                                    timeout=remaining + 0.2,
-                                )
-                            except (asyncio.TimeoutError, Exception):
-                                break
-                            if msg is not None:
-                                break
+                        try:
+                            message = await next_message(pubsub, _POLL_INTERVAL)
+                        except Exception:
+                            message = None
+                        if isinstance(message, LiveFrame):
+                            held.append(message)
+                        elif message is not None:
+                            must_read = True
                         try:
                             session = await asyncio.shield(
                                 store.get_session(session_id)
@@ -493,6 +540,18 @@ async def session_event_stream(
                             return
 
                     if session.status in terminal:
+                        # A reader behind the channel may still have events to
+                        # send: they go out before the end.
+                        late = await asyncio.shield(
+                            store.get_events(
+                                session_id, after=cursor, limit=1,
+                                # a finished session's old delta rows past a replay are not news
+                                exclude_types=[EventType.LLM_DELTA],
+                            )
+                        )
+                        if late:
+                            must_read = True
+                            continue
                         yield {
                             "event": "session.done",
                             "data": json.dumps(
@@ -503,36 +562,84 @@ async def session_event_stream(
                         return
                     # Status flipped to active during grace window -- loop
                     # back so the next iteration fetches the new events.
+                    must_read = True
                     continue
 
-                # Wait for a Redis notification or fall back to polling.
-                if watch and pubsub is not None:
-                    # A watch sits through a chat's idle hours: it reads the
-                    # chat again only when a publish wakes it (every
-                    # emit_event publishes after its commit), or at the
-                    # keepalive, or as the stream ends.
-                    now = loop.time()
-                    await _wait_for_publish(
-                        pubsub,
-                        min(last_emit + _KEEPALIVE_INTERVAL - now, deadline - now),
-                    )
-                else:
-                    if pubsub is not None:
-                        try:
-                            msg = await asyncio.wait_for(
-                                pubsub.get_message(ignore_subscribe_messages=True, timeout=_POLL_INTERVAL),
-                                timeout=_POLL_INTERVAL + 0.5,
-                            )
-                        except (asyncio.TimeoutError, Exception):
-                            pass
-                    else:
-                        await asyncio.sleep(_POLL_INTERVAL)
-
-                # Keep the connection warm through proxy idle timeouts.
+            # Wait for the channel, or fall back to polling.
+            if held:
+                message = held.pop(0)
+            elif pubsub is None:
+                await asyncio.sleep(_POLL_INTERVAL)
+                message = None
+            else:
                 now = loop.time()
-                if now - last_emit >= _KEEPALIVE_INTERVAL:
-                    yield {"comment": "keepalive"}
-                    last_emit = now
+                # A watch sits through a chat's idle hours: it reads the
+                # chat again only when a publish wakes it (every
+                # emit_event publishes after its commit), or at the
+                # keepalive, or as the stream ends.  Any other stream
+                # reads the log every poll interval when the channel is
+                # quiet, as the fallback for a notification lost.
+                wait = (
+                    min(last_emit + _KEEPALIVE_INTERVAL - now, deadline - now)
+                    if watch else _POLL_INTERVAL
+                )
+                try:
+                    message = await next_message(pubsub, max(wait, 0.0))
+                except Exception:
+                    # A subscription that fails waits as a stream without
+                    # Redis does, a poll interval, then reads on.
+                    await asyncio.sleep(_POLL_INTERVAL)
+                    message = None
+
+            if isinstance(message, Notification):
+                # Several notifications waiting in a row make one read, up to
+                # the last of them; a live frame among them waits for it.
+                upto = message.event_id
+                while pubsub is not None and not held:
+                    try:
+                        queued = await pubsub.get_message(ignore_subscribe_messages=True, timeout=0)
+                    except Exception:
+                        break
+                    if queued is None:
+                        break
+                    following = decode_message(queued)
+                    if isinstance(following, Notification):
+                        upto = max(upto, following.event_id)
+                    elif isinstance(following, LiveFrame):
+                        held.append(following)
+                    else:
+                        upto = None
+                        break
+                if upto is None:
+                    must_read, read_until = True, None
+                elif upto > cursor:
+                    # Read the log up to the event the notification names: what
+                    # is written after it waits for its own notification, so a
+                    # call's live frames, published before it, go out first.
+                    must_read = True
+                    read_until = max(read_until or 0, upto)
+
+            elif isinstance(message, LiveFrame):
+                if message.after > cursor and message.after != caught_up_to:
+                    # The events before the frame's call (a notification lost,
+                    # or not read yet) go out before it.
+                    caught_up_to = message.after
+                    held.insert(0, message)
+                    must_read = True
+                    read_until = max(read_until or 0, message.after)
+                elif gate.admits(message):
+                    yield {"id": f"-{cursor}", "event": "llm.delta", "data": message.data_json}
+                    last_emit = loop.time()
+            else:
+                # Quiet channel (poll fallback), no channel, or a message of
+                # another shape: read everything there is.
+                must_read, read_until = True, None
+
+            # Keep the connection warm through proxy idle timeouts.
+            now = loop.time()
+            if now - last_emit >= _KEEPALIVE_INTERVAL:
+                yield {"comment": "keepalive"}
+                last_emit = now
 
         # Stream duration exceeded -- close gracefully.
         yield {
@@ -569,7 +676,8 @@ async def stream_events(
 
     The client provides ``after`` (the last event ID it received) and the
     server yields all subsequent events as they appear.  ``after=-1`` starts
-    at the session's newest event, with none of its past.  When the session
+    at the session's newest event, with none of its past; any other negative
+    ``after`` is a live frame's id, ``-N``, and resumes after event N.  When the session
     reaches a terminal status, a ``session.done`` event is emitted and the
     stream closes.
 

@@ -71,6 +71,7 @@ from surogates.session.acting_principal import (
 )
 from surogates.session.events import OPENER_SYNTHETIC_MARKERS, SILENT_REPLY, EventType
 from surogates.session.interactive_input import render_input_prompt
+from surogates.session.live import encode_live_frame, session_channel
 from surogates.session.inbox_payload import (
     ACKNOWLEDGE_ONLY_KINDS,
     ASK_USER_QUESTION_RESCUE_PREFIX,
@@ -1727,6 +1728,23 @@ class SessionStore:
         await self._announce_event(event)
         return event.id
 
+    async def publish_live_frame(self, session_id: UUID, data: dict, *, after: int, seq: int) -> None:
+        """Send *data* to the session's live viewers as an ``llm.delta`` frame; write nothing.
+
+        The frame goes out on the session's pub/sub channel only
+        (:mod:`surogates.session.live`): frame *seq* (from 0) of the model
+        call that began sending when the session's newest event was
+        *after*.  It is redacted as an event's data is.  Without Redis it
+        goes nowhere.  Best-effort: a publish that fails is dropped.
+        """
+        if self._redis is None:
+            return
+        frame = json.dumps(redact_sensitive_data(data), default=str)
+        try:
+            await self._redis.publish(session_channel(session_id), encode_live_frame(after, seq, frame))
+        except Exception:
+            pass
+
     async def _ready_event(self, session_id: UUID, event_type: EventType, data: dict) -> _EventWrite:
         """Make an event ready to be written: all of it that asks nothing of
         the database, done before the transaction that writes it opens."""
@@ -1857,7 +1875,7 @@ class SessionStore:
         if self._redis is not None:
             try:
                 await self._redis.publish(
-                    f"surogates:session:{session_id}",
+                    session_channel(session_id),
                     f"{event.id}:{event_type.value}",
                 )
             except Exception:
@@ -2169,12 +2187,14 @@ class SessionStore:
         session_id: UUID,
         *,
         after: int | None = None,
+        until: int | None = None,
         limit: int | None = None,
         types: list[EventType] | None = None,
         exclude_types: list[EventType] | None = None,
     ) -> list[Event]:
         """Read events from the append-only log, ordered by id ascending.
 
+        ``after`` and ``until`` bound the ids read (``until`` included).
         ``types`` restricts to the given event types; ``exclude_types`` drops
         them (used by the SSE endpoint to skip llm.delta during replay —
         pushing per-token chunks through the wire for a long conversation
@@ -2184,6 +2204,8 @@ class SessionStore:
 
         if after is not None:
             stmt = stmt.where(EventRow.id > after)
+        if until is not None:
+            stmt = stmt.where(EventRow.id <= until)
         if types:
             stmt = stmt.where(EventRow.type.in_([t.value for t in types]))
         if exclude_types:

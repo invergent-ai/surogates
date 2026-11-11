@@ -42,6 +42,8 @@ an SSH tunnel. Nothing here changes prod.
    - Call a number with no routing row (`caller.py --called +40371000000 "Alo"`): "Acest număr nu
      este disponibil", the call ends.
 8. **Where the time goes**: per turn, from the session's events (`surogates` DB):
-   `user.message → llm.request` is the harness wake, `→ first llm.delta` is the model's first token.
+   `user.message → llm.request` is the harness wake, `→ first llm.delta` is the model's first token
+   (with `delta_transport: redis` deltas are written to no table: `scenarios.py` then times them on
+   Redis as they go out, on this machine's clock).
 9. **Stop**: `docker rm -f lk-sip livekit lk-redis && docker network rm lkdev`, stop the worker,
    `DEV_MODE=local ./dev.sh stop`, and close the tunnel (`pkill -f 18001:`).

@@ -785,7 +785,8 @@ API server
 
                     ┌─ pop session from Redis, run harness loop ─┐
                     │                                             │
-Worker pod(s) ──────┘───────► PostgreSQL (appends llm.delta, tool.call, ...)
+Worker pod(s) ──────┘───────► PostgreSQL (appends llm.delta, tool.call, ...;
+                                         with delta_transport=redis, llm.delta goes over Redis only)
                                              │
                                              └─ Redis pub/sub nudges
                                                     │

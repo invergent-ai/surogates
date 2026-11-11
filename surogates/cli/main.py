@@ -245,6 +245,51 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     sys.exit(asyncio.run(_run()))
 
 
+def _at_least_one_hour(value: str) -> float:
+    hours = float(value)
+    if hours < 1:
+        raise argparse.ArgumentTypeError("must be 1 hour or more: a younger row may belong to a reply still streaming")
+    return hours
+
+
+def cmd_purge_llm_deltas(args: argparse.Namespace) -> None:
+    """Remove the ``llm.delta`` rows of finished replies from the event log (surogates.db.delta_purge)."""
+    from datetime import timedelta
+
+    from surogates.config import load_settings
+
+    settings = load_settings()
+    _configure_logging("WARNING")
+
+    async def _run() -> int:
+        from surogates.db.delta_purge import purge_llm_delta_rows
+        from surogates.db.engine import async_engine_from_settings
+
+        engine = async_engine_from_settings(settings.db)
+
+        def _progress(report) -> None:
+            print(f"thinking counts written {report.thinking_counts_written}, rows deleted {report.deleted}", flush=True)
+
+        try:
+            report = await purge_llm_delta_rows(
+                engine,
+                older_than=timedelta(hours=args.older_than_hours),
+                batch=args.batch,
+                execute=args.execute,
+                progress=_progress,
+            )
+        finally:
+            await engine.dispose()
+        print(f"llm.delta rows older than {args.older_than_hours} h: {report.candidates}")
+        if report.dry_run:
+            print("dry run: nothing changed (add --execute to delete them)")
+        else:
+            print(f"deleted {report.deleted}; llm.thinking counts written {report.thinking_counts_written}")
+        return 0
+
+    sys.exit(asyncio.run(_run()))
+
+
 #: What each refusal of a membership change says. No sentence carries an email.
 _MEMBERSHIP_REFUSALS = {
     "unknown-org": "no organisation has that id",
@@ -354,6 +399,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("simulation", help="Start the simulation worlds and their internal API")
 
+    # surogate purge-llm-deltas [--execute]
+    purge_parser = sub.add_parser(
+        "purge-llm-deltas",
+        help="Remove the llm.delta rows of finished replies from the event log (a dry run unless --execute)",
+    )
+    purge_parser.add_argument(
+        "--older-than-hours", type=_at_least_one_hour, default=24.0,
+        help="Only rows older than this, 1 at least (default 24): no reply still streaming is touched",
+    )
+    purge_parser.add_argument("--batch", type=int, default=5000, help="Rows per transaction (default 5000)")
+    purge_parser.add_argument(
+        "--execute", action="store_true",
+        help="Delete; without it the command only counts what it would delete",
+    )
+
     # surogate voice
     sub.add_parser("voice", help="Answer phone calls through LiveKit SIP")
 
@@ -387,6 +447,7 @@ COMMANDS = {
     "doctor": cmd_doctor,
     "channels": cmd_channels,
     "simulation": cmd_simulation,
+    "purge-llm-deltas": cmd_purge_llm_deltas,
     "voice": cmd_voice,
     "org-members": cmd_org_members,
 }

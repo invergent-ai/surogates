@@ -75,8 +75,13 @@ that message replay, training export, and cost tracking read.
 
 `llm.thinking` — extracted reasoning/thinking block (provider-dependent).
 
-`llm.delta` — a streaming token delta (optional, emitted only when
-streaming relay is enabled for the channel).
+`llm.delta` — a piece of a model reply still streaming (the `llm.response`
+that follows holds the whole reply).  Pieces are joined into one delta at
+most every `delta_coalesce_ms` (100 ms by default).  With the worker's
+`delta_transport: log` (the default) each delta is an event; with `redis` it
+reaches live viewers over Redis only and no row is written.  `live_deltas:
+false` sends none.  `surogates purge-llm-deltas` removes the rows of
+finished replies from the log.
 
 ### Tool execution
 
