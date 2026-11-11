@@ -786,6 +786,7 @@ def _entitlement_tool_exclusions(
     :func:`_resolve_mcp_entitlement_scope`).
     """
     from surogates.orchestrator.mcp_client import is_composio_router_name
+    from surogates.tools.mcp.names import mcp_tool_server
 
     excluded: set[str] = set()
     if not browser_enabled or not _entitlement_capability_allowed(session_config, "browser"):
@@ -816,9 +817,9 @@ def _entitlement_tool_exclusions(
                 if toolkit not in allowed_toolkits:
                     excluded.add(name)
                 continue
-            parts = name.split("__")
-            server = parts[1] if len(parts) >= 3 else ""
-            if server not in allowed_servers:
+            # The server a (possibly shortened) name stands for.
+            entry = tool_registry.get(name)
+            if mcp_tool_server(name, getattr(entry, "toolset", None)) not in allowed_servers:
                 excluded.add(name)
     return excluded
 

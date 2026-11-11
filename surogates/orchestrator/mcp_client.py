@@ -18,6 +18,7 @@ from uuid import UUID
 import httpx
 
 from surogates.tenant.auth.jwt import create_sandbox_token
+from surogates.tools.mcp.names import mcp_toolset
 from surogates.tools.registry import ToolRegistry, ToolSchema
 
 logger = logging.getLogger(__name__)
@@ -119,6 +120,9 @@ class McpProxyClient:
             if not name:
                 continue
             current.add(name)
+            # The proxy says the tool's server: a shortened name may hold
+            # only part of it, and the entitlement filter reads it here.
+            toolset = mcp_toolset(tool["server"]) if tool.get("server") else "mcp"
             schema = ToolSchema(
                 name=name,
                 description=tool.get("description", ""),
@@ -132,13 +136,13 @@ class McpProxyClient:
             # ponytail: one schema per tool name per worker; per-agent
             # schemas if two agents' same-named servers ever differ.
             existing = self._registry.get(name)
-            if existing is not None and existing.schema == schema:
+            if existing is not None and existing.schema == schema and existing.toolset == toolset:
                 continue
             self._registry.register(
                 name=name,
                 schema=schema,
                 handler=self._make_proxy_handler(name),
-                toolset="mcp",
+                toolset=toolset,
                 replace=True,
             )
 

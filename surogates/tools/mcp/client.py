@@ -49,6 +49,12 @@ import threading
 import time
 from typing import Any, Dict, List, Optional
 
+from surogates.tools.mcp.names import (  # noqa: F401 -- sanitize_mcp_name_component re-exported
+    mcp_tool_name,
+    mcp_toolset,
+    sanitize_mcp_name_component,
+)
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -741,7 +747,7 @@ class MCPServerTask:
         "_circuit_open_until", "_circuit_failure_threshold",
         "_circuit_cooldown_seconds", "_auth_recovery_lock",
         "_last_auth_recovery_at", "_server_capabilities", "offers",
-        "_utility_names",
+        "_utility_names", "_tool_names",
     )
 
     def __init__(self, name: str):
@@ -774,6 +780,7 @@ class MCPServerTask:
         # The utility tools registered for this server: registered name ->
         # what it does (``list_resources``, ``read_resource``, ...).
         self._utility_names: dict[str, str] = {}
+        self._tool_names: dict[str, str] = {}
 
     def _is_http(self) -> bool:
         """Check if this server uses HTTP transport."""
@@ -1535,16 +1542,6 @@ def _no_arguments() -> dict:
     return {"type": "object", "properties": {}, "additionalProperties": False}
 
 
-def sanitize_mcp_name_component(value: str) -> str:
-    """Return an MCP name component safe for tool and prefix generation.
-
-    Converts hyphens to underscores, and replaces any other character
-    outside ``[A-Za-z0-9_]`` with ``_`` so generated tool names are
-    compatible with provider validation rules.
-    """
-    return re.sub(r"[^A-Za-z0-9_]", "_", str(value or ""))
-
-
 def _convert_mcp_schema(server_name: str, mcp_tool) -> dict:
     """Convert an MCP tool listing to the Surogates registry schema format.
 
@@ -1556,11 +1553,9 @@ def _convert_mcp_schema(server_name: str, mcp_tool) -> dict:
     Returns:
         A dict suitable for ``registry.register(schema=...)``.
     """
-    safe_tool_name = sanitize_mcp_name_component(mcp_tool.name)
-    safe_server_name = sanitize_mcp_name_component(server_name)
-    prefixed_name = f"mcp__{safe_server_name}__{safe_tool_name}"
     return {
-        "name": prefixed_name,
+        # ``mcp__<server>__<tool>``, shortened when an engine would refuse it.
+        "name": mcp_tool_name(server_name, mcp_tool.name),
         "description": mcp_tool.description or f"MCP tool {mcp_tool.name} from {server_name}",
         "parameters": _normalize_mcp_input_schema(mcp_tool.inputSchema),
     }
@@ -1633,11 +1628,10 @@ def _build_utility_schemas(server_name: str) -> List[dict]:
 
     Returns a list of dicts with keys: schema, handler_key.
     """
-    safe_name = sanitize_mcp_name_component(server_name)
     return [
         {
             "schema": {
-                "name": f"mcp__{safe_name}__list_resources",
+                "name": mcp_tool_name(server_name, "list_resources"),
                 "description": f"List available resources from MCP server '{server_name}'",
                 "parameters": _no_arguments(),
             },
@@ -1645,7 +1639,7 @@ def _build_utility_schemas(server_name: str) -> List[dict]:
         },
         {
             "schema": {
-                "name": f"mcp__{safe_name}__read_resource",
+                "name": mcp_tool_name(server_name, "read_resource"),
                 "description": f"Read a resource by URI from MCP server '{server_name}'",
                 "parameters": {
                     "type": "object",
@@ -1662,7 +1656,7 @@ def _build_utility_schemas(server_name: str) -> List[dict]:
         },
         {
             "schema": {
-                "name": f"mcp__{safe_name}__list_prompts",
+                "name": mcp_tool_name(server_name, "list_prompts"),
                 "description": f"List available prompts from MCP server '{server_name}'",
                 "parameters": _no_arguments(),
             },
@@ -1670,7 +1664,7 @@ def _build_utility_schemas(server_name: str) -> List[dict]:
         },
         {
             "schema": {
-                "name": f"mcp__{safe_name}__get_prompt",
+                "name": mcp_tool_name(server_name, "get_prompt"),
                 "description": f"Get a prompt by name from MCP server '{server_name}'",
                 "parameters": {
                     "type": "object",
@@ -1755,7 +1749,11 @@ def _register_server_tools(
     from surogates.tools.registry import ToolSchema
 
     registered_names: List[str] = []
-    toolset_name = f"mcp-{name}"
+    toolset_name = mcp_toolset(name)
+    # Registered name -> the MCP name it calls (a server's own tool, or a
+    # utility's handler key): a name may be shortened, so it is never
+    # parsed back.
+    server._tool_names = {}
 
     # Selective tool loading: honour include/exclude lists from config.
     # Rules:
@@ -1802,6 +1800,7 @@ def _register_server_tools(
             is_async=False,
         )
         registered_names.append(tool_name_prefixed)
+        server._tool_names[tool_name_prefixed] = mcp_tool.name
 
     # Register MCP Resources & Prompts utility tools, filtered by config and
     # only when the server actually supports the corresponding capability.
@@ -1840,6 +1839,7 @@ def _register_server_tools(
         )
         registered_names.append(util_name)
         server._utility_names[util_name] = handler_key
+        server._tool_names[util_name] = handler_key
 
     return registered_names
 

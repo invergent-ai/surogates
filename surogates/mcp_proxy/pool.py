@@ -42,6 +42,7 @@ from surogates.tools.mcp.client import (
     discover_mcp_tools,
     sanitize_mcp_name_component,
 )
+from surogates.tools.mcp.names import mcp_tool_name
 
 logger = logging.getLogger(__name__)
 
@@ -411,38 +412,38 @@ class ConnectionPool:
 
             for schema in schemas:
                 clean = dict(schema)
+                # The proxy's own name for the tool, under the tenant-scoped
+                # server key (``mcp__{tenant_prefix}__{server}__{tool}``,
+                # shortened: it is never parsed back).
                 raw_name = clean.get("name", "")
-
-                # raw_name: mcp__{tenant_prefix}__{server}__{tool}
-                # clean:    mcp__{server}__{tool}
-                if raw_name.startswith(f"mcp__{tenant_pfx}__"):
-                    clean_name = "mcp__" + raw_name[len(f"mcp__{tenant_pfx}__"):]
-                    clean["name"] = clean_name
-                else:
-                    clean_name = raw_name
+                clean_name = raw_name
 
                 # Build reverse index for O(1) tool call routing.
-                # Find which prefixed server owns this tool.
+                # Find which prefixed server owns this tool, and the MCP
+                # name the tool is called by there.
                 owning_server_key: str | None = None
                 original_tool: str = ""
                 utility: str | None = None
                 with _lock:
                     for server_key, server in _servers.items():
-                        if hasattr(server, "_registered_tool_names") and raw_name in server._registered_tool_names:
-                            safe_key = sanitize_mcp_name_component(server_key)
-                            prefix = f"mcp__{safe_key}__"
-                            original_tool = raw_name[len(prefix):] if raw_name.startswith(prefix) else raw_name
+                        if raw_name in (getattr(server, "_registered_tool_names", None) or ()):
                             owning_server_key = server_key
+                            original_tool = (getattr(server, "_tool_names", None) or {}).get(raw_name, raw_name)
                             utility = (getattr(server, "_utility_names", None) or {}).get(raw_name)
                             break
                 if owning_server_key is not None:
+                    expected = f"{_tenant_prefix(org_id, user_id, agent_id)}__"
+                    plain = owning_server_key[len(expected):] if owning_server_key.startswith(expected) else owning_server_key
+                    # The name the agent knows: ``mcp__{server}__{tool}``,
+                    # shortened when an engine would refuse it.
+                    clean_name = mcp_tool_name(plain, original_tool)
+                    clean["server"] = plain
                     # A description the harness wrote (a utility's, or the
                     # stand-in for a tool the server left undescribed) names
                     # the server by the name the agent knows, not by the
                     # tenant-scoped key with its org / user / agent ids.
-                    expected = f"{_tenant_prefix(org_id, user_id, agent_id)}__"
-                    plain = owning_server_key[len(expected):] if owning_server_key.startswith(expected) else owning_server_key
                     clean["description"] = str(clean.get("description", "")).replace(owning_server_key, plain)
+                clean["name"] = clean_name
 
                 # Governance scan — run before adding the tool to the
                 # advertised schema set so unsafe tools never reach the
