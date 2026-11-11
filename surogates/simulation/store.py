@@ -405,6 +405,21 @@ async def agent_working(sf, person: SimulationPerson) -> bool:
         )))
 
 
+async def agent_turn_ended_at(sf, person: SimulationPerson) -> datetime | None:
+    """When the agent last finished a turn in one of *person*'s conversations."""
+    if person.user_id is None:
+        return None
+    async with sf() as db:
+        ended = await db.scalar(
+            sa.select(sa.func.max(Event.created_at))
+            .join(Session, Session.id == Event.session_id)
+            .where(Session.user_id == person.user_id, Event.type == "session.complete")
+        )
+    if ended is not None and ended.tzinfo is None:
+        ended = ended.replace(tzinfo=timezone.utc)
+    return ended
+
+
 async def left_unanswered(sf, person: SimulationPerson) -> bool:
     """Whether the agent's turn on *person*'s last message completed without a
     word to them: it chose to stay silent (a thank-you needs no answer)."""

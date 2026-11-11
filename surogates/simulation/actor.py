@@ -164,12 +164,24 @@ def _prompt(person, channel: str, thread, flows=None, refused: str | None = None
             {"role": "user", "content": f"The chat so far, oldest first:\n{chat}\n\nYour next move?"}]
 
 
-def _waiting(person, thread, now: datetime) -> str | None:
-    """Why the person can't move yet, or ``None`` when it's their turn."""
+def _owed(person, thread) -> bool:
+    """Whether the person moved and the agent hasn't written since."""
+    last = max((m.created_at for m in thread if m.direction == "out"), default=None)
+    return bool(person.ai_acted_at) and (last is None or last <= person.ai_acted_at)
+
+
+def _waiting(person, thread, now: datetime, turn_ended_at: datetime | None = None) -> str | None:
+    """Why the person can't move yet, or ``None`` when it's their turn.
+
+    Silence counts from the end of the agent's turn on the person's move, not
+    from the move: a cold worker can take minutes to pick a message up.
+    """
     agent = [m for m in thread if m.direction == "out"]
     last = agent[-1].created_at if agent else None
-    if person.ai_acted_at and (last is None or last <= person.ai_acted_at):
-        return "no_reply" if now - person.ai_acted_at > SILENCE else "agent"
+    if _owed(person, thread):
+        if turn_ended_at is None or turn_ended_at <= person.ai_acted_at:
+            return "agent"
+        return "no_reply" if now - turn_ended_at > SILENCE else "agent"
     if last and (now - last < QUIET or store.is_typing(person, now)):
         return "agent"
     return None
@@ -225,13 +237,17 @@ class Actor:
             return await self._stop(person, "gave_up", "The simulation ran out of time")
         if untouched:
             return
-        waiting = _waiting(person, thread, now)
-        if waiting == "agent":
-            return
+        owed = _owed(person, thread)
+        ended = await store.agent_turn_ended_at(sf, person) if owed else None
+        waiting = _waiting(person, thread, now, ended)
         # While the agent owes an answer the person waits, up to PATIENCE: what
         # the platform sends on its own, a disclosure or a receipt, is no answer.
         last_in = max((m.created_at for m in thread if m.direction == "in"), default=None)
         since = person.ai_acted_at or last_in or run.created_at
+        if waiting == "agent":
+            if owed and (ended is None or ended <= person.ai_acted_at) and now - since > PATIENCE:
+                return await self._stop(person, "no_reply", "The agent didn't answer in time")
+            return
         if now - since < PATIENCE and await store.agent_working(sf, person):
             return
         if waiting == "no_reply":

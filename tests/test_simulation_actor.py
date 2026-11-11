@@ -82,11 +82,50 @@ async def test_ai_person_writes_waits_answers_and_hands_over(rsf, monkeypatch): 
 def test_silent_agent_ends_the_part():
     now = datetime.now(timezone.utc)
     person = SimpleNamespace(ai_acted_at=now - timedelta(minutes=4), agent_typing_at=None)
-    assert actor._waiting(person, [], now) == "no_reply"
+    assert actor._waiting(person, [], now, turn_ended_at=now - timedelta(minutes=3, seconds=30)) == "no_reply"
     person.ai_acted_at = now - timedelta(seconds=30)
     assert actor._waiting(person, [], now) == "agent"
     person.ai_acted_at = None
     assert actor._waiting(person, [], now) is None
+
+
+def test_silence_counts_from_the_end_of_the_agents_turn():
+    """A cold worker takes minutes to pick a message up: that is no silence."""
+    now = datetime.now(timezone.utc)
+    person = SimpleNamespace(ai_acted_at=now - timedelta(minutes=5), agent_typing_at=None)
+    assert actor._waiting(person, [], now, turn_ended_at=now - timedelta(seconds=30)) == "agent"
+    assert actor._waiting(person, [], now, turn_ended_at=now - timedelta(minutes=4)) == "no_reply"
+    # The turn hasn't ended: PATIENCE governs, not SILENCE.
+    assert actor._waiting(person, [], now, turn_ended_at=None) == "agent"
+    # A turn that ended before the person's move is the previous one.
+    assert actor._waiting(person, [], now, turn_ended_at=now - timedelta(minutes=6)) == "agent"
+
+
+async def test_when_the_agent_last_finished_a_turn(rsf):  # noqa: F811
+    import uuid
+
+    from surogates.db.models import Event, Org, Session, User
+
+    org_id, user_id, session_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    async with rsf() as db:
+        db.add(Org(id=org_id, name="Org"))
+        await db.flush()
+        db.add(User(id=user_id, org_id=org_id, email="a@x", display_name="Ana"))
+        db.add(Session(id=session_id, org_id=org_id, agent_id="a1", channel="whatsapp",
+                       user_id=user_id, config={}))
+        await db.commit()
+    person = SimpleNamespace(user_id=user_id)
+    assert await store.agent_turn_ended_at(rsf, person) is None
+    ended = datetime(2026, 11, 11, 10, 0, tzinfo=timezone.utc)
+    async with rsf() as db:
+        db.add(Event(session_id=session_id, type="session.complete", data={}, created_at=ended))
+        db.add(Event(session_id=session_id, type="session.complete", data={},
+                     created_at=ended - timedelta(minutes=5)))
+        db.add(Event(session_id=session_id, type="user.message", data={},
+                     created_at=ended + timedelta(minutes=1)))
+        await db.commit()
+    assert await store.agent_turn_ended_at(rsf, person) == ended
+    assert await store.agent_turn_ended_at(rsf, SimpleNamespace(user_id=None)) is None
 
 
 @pytest.mark.asyncio
@@ -113,8 +152,12 @@ async def test_a_person_waits_while_the_agent_is_still_working(rsf, monkeypatch)
     async def answered(sf, p):
         return False
 
+    async def not_ended(sf, p):
+        return None
+
     monkeypatch.setattr(store, "agent_working", working)
     monkeypatch.setattr(store, "left_unanswered", answered)
+    monkeypatch.setattr(store, "agent_turn_ended_at", not_ended)
     await ai._move(run, person)
     assert stopped == []
     person.ai_acted_at = now - timedelta(minutes=11)
