@@ -118,13 +118,13 @@ _TARGET_WORDS = frozenset({
     "produce", "producing", "generate", "generating", "update", "updating", "edit",
     "editing", "overwrite", "export", "exporting", "append", "output", "deliver",
     "rewrite", "rewriting", "redo", "revise", "revising", "finalize", "finalise", "fix",
-    "complete", "correct", "amend", "draft", "drafting", "prepare", "compile", "assemble",
-    "make", "build",
+    "complete", "correct", "amend", "draft", "drafting", "prepare", "make", "build",
 })
 _TARGET_PAIRS = frozenset({("fill", "in"), ("fill", "out")})
 #: A list of required names: "the task requires these files by name, spelled
-#: exactly like this: `report.docx`".
+#: exactly like this: `report.docx`", read in the name's own sentence.
 _BY_NAME_RE = re.compile(r"\bfiles?\s+by\s+name\b", re.IGNORECASE)
+_SENTENCE_END_RE = re.compile(r"[.!?](?=\s)|\n")
 #: Words passed over on the way back to the word that tells.
 _FILLER_WORDS = frozenset({
     "the", "a", "an", "this", "that", "these", "those", "our", "my", "your", "its", "their",
@@ -184,7 +184,10 @@ def _role(user_text: str, start: int) -> str | None:
     pair = (words[-2], last) if len(words) > 1 else ("", last)
     if pair in _INPUT_PAIRS:
         return _INPUT
-    if last in _TARGET_WORDS or pair in _TARGET_PAIRS or _BY_NAME_RE.search(window):
+    if (
+        last in _TARGET_WORDS or pair in _TARGET_PAIRS
+        or _BY_NAME_RE.search(_SENTENCE_END_RE.split(window)[-1])
+    ):
         return _TARGET
     if last in _INPUT_WORDS or given:
         return _INPUT

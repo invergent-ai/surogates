@@ -236,6 +236,12 @@ def test_marked_up_names_and_single_letter_segments_are_names(user, want):
     ("The task requires these files by name, spelled exactly like this: `report.docx`.", {"report.docx"},
      ["report.docx"]),
     ("Revise report.docx with the new numbers.", {"report.docx"}, ["report.docx"]),
+    # ... and only in its own sentence.
+    ("The task requires these files by name: `out.docx`.\nYour inputs: data.csv and notes.md.",
+     {"data.csv", "notes.md"}, ["out.docx"]),
+    ("Write report.docx. The task requires these files by name: `report.docx`. Use the figures in data.csv.",
+     {"data.csv"}, ["report.docx"]),
+    ("Compile notes.md and ideas.md into summary.md", {"notes.md", "ideas.md"}, ["summary.md"]),
     # "to" and "as" in these pairs refer to an input.
     ("Refer to the attached policy.pdf when answering.", {"policy.pdf"}, []),
     ("Compared to budget.xlsx, how did we do?", {"budget.xlsx"}, []),
