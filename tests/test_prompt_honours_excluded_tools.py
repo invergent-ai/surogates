@@ -172,3 +172,49 @@ async def test_a_strict_coordinator_is_not_told_about_its_implementation_tools()
     offered = harness._tool_filter_for_session(strict)
     assert not {"web_search", "web_extract"} & offered
     assert WEB not in await harness._build_system_prompt(strict)
+
+
+async def test_an_ordinary_session_loses_only_the_orchestrator_skill():
+    """The golden delta for every ordinary session: the prompt as the worker's tools would have it, less the
+    skill index lines of the one in-tree skill whose tool (spawn_task) only a coordinator is offered."""
+    import difflib
+
+    from surogates.tools.loader import ResourceLoader
+    from surogates.tools.runtime import ToolRuntime
+
+    registry = ToolRegistry()
+    ToolRuntime(registry).register_builtins()
+    skills = ResourceLoader()._load_skills_from_dir("skills", "platform")
+    session = _chat({})
+    # The worker's tools for this session, as the worker hands them to the builder.
+    from surogates.orchestrator.worker import _filter_effective_tools
+
+    tools = _filter_effective_tools(tools=set(registry.tool_names), tenant=_tenant(session), session=session,
+                                    use_api_for_harness_tools=True)
+    before = PromptBuilder(_tenant(session), session=session, available_tools=set(tools), skills=skills).build()
+    after = await _real_harness(session, registry, skills, tools)._build_system_prompt(session)
+    gone = [line[1:] for line in difflib.ndiff(before.splitlines(), after.splitlines()) if line.startswith("- ")]
+    joined = [line for line in difflib.ndiff(before.splitlines(), after.splitlines()) if line.startswith("+ ")]
+    assert joined == []
+    assert [line.strip().split(":")[0] for line in gone] == ["kanban", "- subagent-task-orchestrator"]
+
+
+async def test_a_project_master_loses_the_web_and_artifact_guidance():
+    from surogates.tools.runtime import ToolRuntime
+
+    registry = ToolRegistry()
+    ToolRuntime(registry).register_builtins()
+    tools = set(registry.tool_names)
+    master = _chat({"coordinator": True, "strict_coordinator": True, "workstream_role": "coordinator"})
+    prompt = await _real_harness(master, registry, [], tools)._build_system_prompt(master)
+    assert WEB not in prompt and ARTIFACT not in prompt
+
+
+def test_a_coordinator_keeps_its_knowledge_base_roster():
+    """It names the knowledge base when it hands work to a worker that has the KB tools."""
+    kbs = [{"id": "kb-1", "name": "handbook", "display_name": "Handbook", "mode": "grounding"}]
+    strict = _chat({"coordinator": True, "strict_coordinator": True})
+    builder = PromptBuilder(_tenant(strict), session=strict, available_kbs=kbs,
+                            available_tools={"kb_list_pages", "kb_read_page", "kb_search_pages", "spawn_task"})
+    builder.restrict_tools({"spawn_task"})
+    assert "kb-1" in builder._kb_section()

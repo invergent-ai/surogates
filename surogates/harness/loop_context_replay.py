@@ -1072,17 +1072,21 @@ class ContextReplayMixin:
         what the session names (``excluded_tools`` / ``allowed_tools``) and
         what its kind never gets (the coordinator's tools outside a
         coordinator, the implementation tools of a strict one, ...).  The
-        guidance and the skill index follow the schemas, so the model is
-        never told about a tool it cannot call.  Called before any
-        ``build()`` of the wake (the compaction measure, the system prompt),
-        and idempotent.  ``getattr``: some test harnesses skip ``__init__``
-        or stand in a prompt builder of their own.
+        guidance and the skill index follow that set.  Per-turn narrowing
+        after it (``drop_unusable_tools``, the policy's ``offers``) is not
+        followed.  Done once per session and wake, before any ``build()``
+        (the compaction measure, the system prompt).  ``getattr``: some test
+        harnesses skip ``__init__`` or stand in a prompt builder of their
+        own.
         """
+        if getattr(self, "_prompt_narrowed_for", None) == session.id:
+            return
         restrict = getattr(self._prompt, "restrict_tools", None)
         if restrict is not None and getattr(self, "_tools", None) is not None:
             offered = self._tool_filter_for_session(session)
             if offered is not None:
                 restrict(offered)
+            self._prompt_narrowed_for = session.id
 
     async def _build_system_prompt(self, session: Session) -> str:
         """Delegate to PromptBuilder, with per-session caching."""
