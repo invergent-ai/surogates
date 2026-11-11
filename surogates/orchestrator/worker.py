@@ -397,7 +397,9 @@ def _filter_effective_tools(
     # off, as the harness offers the schemas (``AgentHarness._tool_filter_for_session_impl``).
     from surogates.harness.subagents import apply_parity
 
-    return apply_parity(gate_case_tools(result, session), session.config)
+    return apply_parity(
+        gate_case_tools(result, session), session.config, root=getattr(session, "parent_id", None) is None,
+    )
 
 
 _warned_missing_model_metadata: set[str] = set()

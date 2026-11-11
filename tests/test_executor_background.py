@@ -117,3 +117,49 @@ async def test_a_drain_is_answered_while_every_slot_runs_a_long_call(daemon):
         answer = await call(client, "_background")
         assert "known" in answer and time.monotonic() - started < 1.0
         await asyncio.gather(*slow)
+
+
+async def test_a_drain_for_some_commands_leaves_the_others_for_their_own_watch(daemon):
+    async with daemon as client:
+        mine = (await call(client, "terminal", command="exit 0", background=True, notify_on_complete=True))["session_id"]
+        theirs = (await call(client, "terminal", command="exit 0", background=True, notify_on_complete=True))["session_id"]
+        deadline = time.monotonic() + 5
+        for proc_id in (mine, theirs):
+            while (await call(client, "process", action="poll", session_id=proc_id))["status"] == "running":
+                assert time.monotonic() < deadline
+                await asyncio.sleep(0.05)
+        await asyncio.sleep(0.2)
+        # A worker that watches only its own command takes only its end.
+        answer = await call(client, "_background", ids=[mine])
+        assert [event["session_id"] for event in answer["events"]] == [mine]
+        # The other worker's drain still finds its own.
+        answer = await call(client, "_background", ids=[theirs])
+        assert [event["session_id"] for event in answer["events"]] == [theirs]
+
+
+def test_a_watched_command_that_ignores_the_stop_is_killed_after_a_grace(monkeypatch, tmp_path):
+    import queue
+
+    from surogates.tools.utils import process_registry as registry_module
+
+    registry = registry_module.process_registry
+    monkeypatch.setattr(registry_module, "KILL_GRACE_SECONDS", 0.3)
+    proc = registry.spawn("trap '' TERM; while true; do sleep 0.1; done", cwd=str(tmp_path), notify_on_complete=True)
+    time.sleep(0.5)
+    assert registry.kill_process(proc.id)["status"] == "killed"
+    deadline = time.monotonic() + 5
+    while proc.process.poll() is None:
+        assert time.monotonic() < deadline, "the command outlived its stop"
+        time.sleep(0.05)
+    # Its end, queued for a watch this test has not: taken off the queue the other tests drain.
+    time.sleep(0.2)
+    others = []
+    while True:
+        try:
+            entry = registry.completion_queue.get_nowait()
+        except queue.Empty:
+            break
+        if entry.get("session_id") != proc.id:
+            others.append(entry)
+    for entry in others:
+        registry.completion_queue.put(entry)

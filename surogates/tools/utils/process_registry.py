@@ -67,6 +67,9 @@ CHECKPOINT_PATH = _SUROGATES_HOME / "processes.json"
 MAX_OUTPUT_CHARS = 200_000      # 200KB rolling output buffer
 FINISHED_TTL_SECONDS = 1800     # Keep finished processes for 30 minutes
 MAX_PROCESSES = 64              # Max concurrent tracked processes (LRU pruning)
+MAX_PENDING_LINES = 1000        # Lines a watched process keeps for its next drain
+MAX_LINE_CHARS = 2000           # A watched process's line is cut here; one with no end in sight is sent in pieces
+KILL_GRACE_SECONDS = 5.0        # A watched command's group still running this long after SIGTERM gets SIGKILL
 
 
 # ---------------------------------------------------------------------------
@@ -155,6 +158,10 @@ class ProcessSession:
     watcher_thread_id: str = ""
     watcher_interval: int = 0                   # 0 = no watcher configured
     notify_on_complete: bool = False             # Queue agent notification on exit
+    watch_lines: bool = False                    # Keep each output line for drain_lines (a monitor)
+    pending_lines: List[str] = field(default_factory=list, repr=False)
+    dropped_lines: int = 0                       # Lines past MAX_PENDING_LINES since the last drain
+    _partial_line: str = field(default="", repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock)
     _reader_thread: Optional[threading.Thread] = field(default=None, repr=False)
     _pty: Any = field(default=None, repr=False)  # ptyprocess handle (when use_pty=True)
@@ -267,6 +274,7 @@ class ProcessRegistry:
         env_vars: dict | None = None,
         use_pty: bool = False,
         notify_on_complete: bool = False,
+        watch_lines: bool = False,
     ) -> ProcessSession:
         """Spawn a background process locally.
 
@@ -282,6 +290,8 @@ class ProcessRegistry:
             notify_on_complete: Queue the completion on ``completion_queue``.
                 Set before the reader thread starts, so a command that ends
                 at once is not missed.
+            watch_lines: Keep each complete output line for
+                :meth:`drain_lines` (a monitor reports them).
         """
         session = ProcessSession(
             id=f"proc_{uuid.uuid4().hex[:12]}",
@@ -291,7 +301,11 @@ class ProcessRegistry:
             cwd=cwd or os.getcwd(),
             started_at=time.time(),
             notify_on_complete=notify_on_complete,
+            watch_lines=watch_lines,
         )
+        if watch_lines and use_pty:
+            # A monitor reads its output by lines, which a terminal's echo and redraws would garble.
+            raise ValueError("a process whose lines are watched runs without a pty")
 
         if use_pty:
             # Try PTY mode for interactive CLI tools
@@ -387,9 +401,19 @@ class ProcessRegistry:
         first_chunk = True
         try:
             while True:
-                chunk = session.process.stdout.read(4096)
+                # A monitor's lines are news as each comes: a read of 4096
+                # waits for that much, or for the end.
+                chunk = (
+                    session.process.stdout.readline(MAX_LINE_CHARS) if session.watch_lines
+                    else session.process.stdout.read(4096)
+                )
                 if not chunk:
                     break
+                if first_chunk and session.watch_lines and any(
+                    noise in chunk for noise in self._SHELL_NOISE_SUBSTRINGS
+                ):
+                    # Read by lines, the shell's startup noise comes a line at a time.
+                    continue
                 if first_chunk:
                     chunk = self._clean_shell_noise(chunk)
                     first_chunk = False
@@ -399,8 +423,11 @@ class ProcessRegistry:
                         session.output_buffer = session.output_buffer[
                             -session.max_output_chars :
                         ]
+                    self._keep_lines(session, chunk)
         except Exception as e:
             logger.debug("Process stdout reader ended: %s", e)
+        with session._lock:
+            self._keep_lines(session, "", final=True)
 
         # Process exited
         try:
@@ -434,12 +461,15 @@ class ProcessRegistry:
                                 session.output_buffer = session.output_buffer[
                                     -session.max_output_chars :
                                 ]
+                            self._keep_lines(session, text)
                 except EOFError:
                     break
                 except Exception:
                     break
         except Exception as e:
             logger.debug("PTY stdout reader ended: %s", e)
+        with session._lock:
+            self._keep_lines(session, "", final=True)
 
         # Process exited
         try:
@@ -451,6 +481,51 @@ class ProcessRegistry:
             pty.exitstatus if hasattr(pty, "exitstatus") else -1
         )
         self._move_to_finished(session)
+
+    @staticmethod
+    def _keep_lines(session: ProcessSession, text: str, *, final: bool = False) -> None:
+        """Keep the complete lines of *text* for a watched process's next drain; with *final*, the last
+        partial line too.  Called under the session's lock."""
+        if not session.watch_lines:
+            return
+        text = session._partial_line + strip_ansi(text).replace("\r\n", "\n")
+        lines = text.split("\n")
+        session._partial_line = "" if final else lines.pop()
+        if len(session._partial_line) >= MAX_LINE_CHARS:
+            # Output with no line end in sight (a binary file, say) is never held whole: its pieces go as lines.
+            lines.append(session._partial_line)
+            session._partial_line = ""
+        while final and lines and not lines[-1].strip():
+            lines.pop()
+        if lines and lines[-1] == "logout":
+            # The login shell says it on exit: held back until more comes, and dropped at the end.
+            lines.pop()
+            if not final:
+                session._partial_line = "logout\n" + session._partial_line
+        for line in lines:
+            if not line.strip():
+                continue
+            # A line longer than the cap goes in pieces of the cap, none of it lost.
+            for start in range(0, len(line), MAX_LINE_CHARS):
+                if len(session.pending_lines) >= MAX_PENDING_LINES:
+                    session.dropped_lines += 1
+                else:
+                    session.pending_lines.append(line[start:start + MAX_LINE_CHARS])
+
+    def drain_lines(self, ids: set[str] | None = None) -> dict[str, dict]:
+        """The lines each watched process (of *ids*, when given) printed since the last drain, and how many
+        were dropped."""
+        with self._lock:
+            sessions = list(self._running.values()) + list(self._finished.values())
+        out: dict[str, dict] = {}
+        for session in sessions:
+            if not session.watch_lines or (ids is not None and session.id not in ids):
+                continue
+            with session._lock:
+                if session.pending_lines or session.dropped_lines:
+                    out[session.id] = {"lines": session.pending_lines, "dropped": session.dropped_lines}
+                    session.pending_lines, session.dropped_lines = [], 0
+        return out
 
     def _move_to_finished(self, session: ProcessSession) -> None:
         """Move a session from running to finished."""
@@ -658,9 +733,10 @@ class ProcessRegistry:
                     if _IS_WINDOWS:
                         session.process.terminate()
                     else:
-                        os.killpg(
-                            os.getpgid(session.process.pid), signal.SIGTERM
-                        )
+                        pgid = os.getpgid(session.process.pid)
+                        os.killpg(pgid, signal.SIGTERM)
+                        if session.notify_on_complete:
+                            self._kill_group_later(session.process, pgid)
                 except (ProcessLookupError, PermissionError):
                     session.process.kill()
             elif (
@@ -694,6 +770,25 @@ class ProcessRegistry:
             return {"status": "killed", "session_id": session.id}
         except Exception as e:
             return {"status": "error", "error": str(e)}
+
+    @staticmethod
+    def _kill_group_later(process: subprocess.Popen, pgid: int) -> None:
+        """SIGKILL group *pgid* if it outlives the SIGTERM by ``KILL_GRACE_SECONDS``: a watched command
+        that ignores the stop is not left running behind a note that says it was stopped."""
+
+        def kill() -> None:
+            try:
+                process.wait(timeout=KILL_GRACE_SECONDS)
+            except subprocess.TimeoutExpired:
+                pass
+            except Exception:
+                return
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+
+        threading.Thread(target=kill, daemon=True, name=f"kill-group-{pgid}").start()
 
     def write_stdin(self, session_id: str, data: str) -> dict:
         """Send raw data to a running process's stdin (no newline appended)."""
@@ -736,6 +831,11 @@ class ProcessRegistry:
     def submit_stdin(self, session_id: str, data: str = "") -> dict:
         """Send data + newline to a running process's stdin (like pressing Enter)."""
         return self.write_stdin(session_id, data + "\n")
+
+    def running_count(self, task_id: str) -> int:
+        """How many processes of *task_id* still run."""
+        with self._lock:
+            return sum(s.task_id == task_id and not s.exited for s in self._running.values())
 
     def list_sessions(self, task_id: str | None = None) -> list:
         """List all running and recently-finished processes."""

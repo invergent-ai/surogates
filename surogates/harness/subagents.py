@@ -41,8 +41,10 @@ STANDS_IN_FOR: dict[str, tuple[str, ...]] = {
 
 #: The tools that go with ``agent``: offered to a session that may start agents, and to every agent it started.
 COMPANION_TOOLS: frozenset[str] = frozenset({"send_message", "list_agents", "stop_agent"})
+#: Offered with the companions where the session runs commands (``terminal``), never on the user's computer.
+MONITOR_TOOL = "monitor"
 #: The tools of the family, offered only with parity on.
-PARITY_TOOLS: frozenset[str] = frozenset({"agent"}) | COMPANION_TOOLS
+PARITY_TOOLS: frozenset[str] = frozenset({"agent", MONITOR_TOOL}) | COMPANION_TOOLS
 #: The tool ``agent`` stands in for; with parity on it is no longer offered, but still callable.
 REPLACED_TOOL = "delegate_task"
 
@@ -61,14 +63,15 @@ def parity_enabled(config: dict | None) -> bool:
         return False
 
 
-def apply_parity(tools: set[str], config: dict | None) -> set[str]:
+def apply_parity(tools: set[str], config: dict | None, *, root: bool = True) -> set[str]:
     """*tools*, a session's offered set, with the family in or out.
 
     On: ``agent`` takes ``delegate_task``'s place wherever the session may
     delegate, so a policy that denies ``delegate_task`` denies ``agent``
     too.  Its companions (``COMPANION_TOOLS``) go to such a session and to
     every agent the ``agent`` tool started, unless the session's config
-    leaves them out by name.  Off: none of the family.
+    leaves them out by name; ``monitor`` only to a *root* session
+    (``monitor_allowed``).  Off: none of the family.
     """
     result = set(tools) - PARITY_TOOLS
     config = config or {}
@@ -81,11 +84,24 @@ def apply_parity(tools: set[str], config: dict | None) -> set[str]:
     if "agent" in result or isinstance(config.get(DISPATCH_KEY), dict):
         allowed = config.get("allowed_tools")
         excluded = set(config.get("excluded_tools") or ())
-        result |= {
-            name for name in COMPANION_TOOLS
-            if name not in excluded and (not allowed or name in allowed)
-        }
+        from surogates.devices.binding import device_of
+
+        companions = set(COMPANION_TOOLS)
+        if "terminal" in result and device_of(config) is None and root and monitor_allowed(config):
+            companions.add(MONITOR_TOOL)
+        result |= {name for name in companions if name not in excluded and (not allowed or name in allowed)}
     return result
+
+
+def monitor_allowed(config: dict | None) -> bool:
+    """Whether a session with *config* may run monitors: not a sub-agent, whose work ends with its report,
+    and not a project's thread or one under it, whose sandbox ends with its turn.  Either would be woken by
+    lines after its end.  Only a root session may (no ``parent_id``): every other session's end is someone's
+    news, a helper's, a worker's or a routine run's; the callers check that, from the session."""
+    from surogates.workstreams import under_a_thread
+
+    config = config or {}
+    return not isinstance(config.get(DISPATCH_KEY), dict) and not under_a_thread(config)
 
 
 def dispatch_of(session: Any) -> dict | None:

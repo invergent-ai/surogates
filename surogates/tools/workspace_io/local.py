@@ -808,7 +808,10 @@ class LocalWorkspaceIO:
         pty: bool,
         notify_on_complete: bool,
         watcher_interval: int | None,
+        watch_lines: bool = False,
     ) -> dict[str, Any]:
+        """See :meth:`WorkspaceIO.start`; *watch_lines* keeps each output line for a monitor
+        (``ProcessRegistry.drain_lines``), here only."""
         refuse_nul(command, workdir)
         cwd = self._workdir(workdir)
         env = _build_child_env()
@@ -818,7 +821,7 @@ class LocalWorkspaceIO:
         _setup_ssh_home(env)
         session = process_registry.spawn(
             command=command, cwd=cwd, task_id=task_id, use_pty=pty, env_vars=env,
-            notify_on_complete=notify_on_complete,
+            notify_on_complete=notify_on_complete, watch_lines=watch_lines,
         )
         if watcher_interval:
             session.watcher_interval = watcher_interval
