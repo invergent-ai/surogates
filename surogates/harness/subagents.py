@@ -40,7 +40,7 @@ STANDS_IN_FOR: dict[str, tuple[str, ...]] = {
 }
 
 #: The tools that go with ``agent``: offered to a session that may start agents, and to every agent it started.
-COMPANION_TOOLS: frozenset[str] = frozenset({"send_message"})
+COMPANION_TOOLS: frozenset[str] = frozenset({"send_message", "list_agents", "stop_agent"})
 #: The tools of the family, offered only with parity on.
 PARITY_TOOLS: frozenset[str] = frozenset({"agent"}) | COMPANION_TOOLS
 #: The tool ``agent`` stands in for; with parity on it is no longer offered, but still callable.

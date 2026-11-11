@@ -1574,6 +1574,14 @@ class AgentHarness(
             )
         if said:
             await self._tell_what_the_stop_left(session, left)
+        if current.status == "paused" and runs_in_background(session):
+            # A sub-agent started in the background was stopped: the agent that started it hears so.
+            from surogates.harness.subagents import tell_parent
+
+            await tell_parent(
+                store=self._store, redis=self._redis, session=session, status="killed",
+                result=extract_final_response(await self._store.get_events(session.id), fallback=""),
+            )
         # A channel /stop aborts out-of-band and leaves the session 'active'
         # (so the SESSION_PAUSE above never fires). The inbound handler only
         # posted an optimistic "Stopping…" ack, so emit a deliverable

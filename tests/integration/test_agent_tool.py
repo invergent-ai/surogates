@@ -30,7 +30,7 @@ pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 PARITY = {PARITY_KEY: True}
 #: The family's tools run for real; every other tool answers as the chats' stub does.
-REAL = frozenset({"agent", "send_message"})
+REAL = frozenset({"agent", "send_message", "list_agents", "stop_agent"})
 
 
 @pytest_asyncio.fixture(loop_scope="session")
@@ -48,8 +48,17 @@ async def chats(workers, monkeypatch):  # noqa: F811
             return await (real if name in REAL else stub)(name, arguments, **kw)
 
         harness._tools.dispatch = dispatch
+        wake = harness.wake
+
+        async def recorded(session_id):
+            # The harness that runs each session's turn, as a dispatcher keeps it to hand it interrupts.
+            workers.harnesses[session_id] = harness
+            return await wake(session_id)
+
+        harness.wake = recorded
         return harness
 
+    workers.harnesses = {}
     workers.worker = worker
     model = loop_module.call_llm_with_retry
 
