@@ -32,6 +32,11 @@ AGENT_BUDGET_KEY = "agent_budget"
 #: The reason a turn ends with when its agent used its token budget: distinct from the iteration cap's
 #: ``budget_exhausted``, which says nothing of tokens.
 BUDGET_REASON = "token_budget_exhausted"
+#: What an agent past its token budget is asked, in a last call with no tools: the report its parent receives.
+TOKEN_BUDGET_REPORT_REQUEST = (
+    "You have used the token budget you were given for this task, so you cannot call any more tools. Reply now "
+    "with your report to the agent that started you: what you found and did so far, and what is still left undone."
+)
 
 #: The config keys of the family only the server writes: a client naming one could switch the family on
 #: against the deployment's setting, pose as another agent's sub-agent, or lift its own depth or budget.
@@ -175,6 +180,30 @@ async def stopped_by(store: Any, session_id: Any) -> str | None:
             continue
         return data.get("stopped_by") or None
     return None
+
+
+async def stopped_by_an_agent_this_run(store: Any, session_id: Any) -> bool:
+    """Whether an agent's ``stop_agent`` stopped the session since its last resume (its run).  That stop told the
+    agent that started it, once: a pause of its user's after it is the same stop, and no second notice."""
+    events = await store.get_events(session_id, types=[EventType.SESSION_PAUSE, EventType.SESSION_RESUME])
+    for event in reversed(events):
+        if event.type == EventType.SESSION_RESUME.value:
+            return False
+        if (event.data or {}).get("stopped_by"):
+            return True
+    return False
+
+
+def budget_report(events: list[Any]) -> str:
+    """What an agent that ran out of tokens reports: the reply to its last tools-off call, or nothing; never a
+    line from the middle of a step."""
+    for event in reversed(events):
+        if event.type == EventType.LLM_RESPONSE.value and (event.data or {}).get("finish_reason") == BUDGET_REASON:
+            content = ((event.data or {}).get("message") or {}).get("content")
+            return content if isinstance(content, str) else ""
+        if event.type == EventType.SESSION_COMPLETE.value:
+            break
+    return ""
 
 
 async def lineage(store: Any, session: Any, *, limit: int = 8) -> list[Any]:

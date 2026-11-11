@@ -7,7 +7,14 @@ import json
 import pytest
 
 from surogates.harness.agent_news import notification_note
-from surogates.harness.subagents import AGENT_BUDGET_KEY, BUDGET_KEY, PARITY_KEY
+from surogates.harness.subagents import (
+    AGENT_BUDGET_KEY,
+    BUDGET_KEY,
+    BUDGET_REASON,
+    PARITY_KEY,
+    TOKEN_BUDGET_REPORT_REQUEST,
+    budget_report,
+)
 from surogates.session.events import EventType
 from tests.test_steer_loop import _final_response
 
@@ -27,15 +34,18 @@ async def test_a_background_agent_stops_on_its_budget_and_its_parent_is_told(cha
     chat = await a_chat(chats, BUDGETED)
     child = await a_background_agent(chats, chat)
     assert child.config[AGENT_BUDGET_KEY] == {"tokens": 3}
-    chats.replies = [TODO_CALL, TODO_CALL, _final_response("never asked")]
+    chats.replies = [TODO_CALL, TODO_CALL, _final_response("Report: 2 of 12 items counted.")]
     before = len(chats.requests)
     await chats.wake(child.id)
-    # Two calls, then the turn ended before a third.
-    assert len(chats.requests) - before == 2
+    # Two calls, then one last call asking for its report, with no tools.
+    assert len(chats.requests) - before == 3
+    assert chats.requests[-1][-1] == {"role": "user", "content": TOKEN_BUDGET_REPORT_REQUEST}
     [end] = await chats.store.get_events(child.id, types=[EventType.SESSION_COMPLETE])
     assert end.data["reason"] == "token_budget_exhausted"
     [note] = await chats.store.get_events(chat, types=[EventType.AGENT_NOTIFICATION])
     assert note.data["status"] == "budget" and note.data["budget_tokens"] == 3
+    # Its report, never a line from the middle of a step.
+    assert note.data["result"] == "Report: 2 of 12 items counted."
     assert notification_note(note.data)["content"].startswith(
         f"[Agent {child.id} (Count open items) stopped before it finished: it used its budget of 3 tokens]",
     )
@@ -48,6 +58,7 @@ async def test_a_foreground_agent_that_runs_out_says_so_in_its_result(chats):  #
     chat = await a_chat(chats, {PARITY_KEY: True, BUDGET_KEY: 1})
     chats.replies = [
         calling("agent", "call_agent", description="Read the tracker", prompt="Report the open items in the tracker."),
+        _final_response("Report: none counted yet."),
         _final_response("Done."),
     ]
     waker = await wake_children_as_they_come(chats, chat, [TODO_CALL])
@@ -57,7 +68,7 @@ async def test_a_foreground_agent_that_runs_out_says_so_in_its_result(chats):  #
     finally:
         waker.cancel()
     result = await tool_result(chats, chat, "call_agent")
-    assert "[It stopped before it finished: it used its token budget.]" in result
+    assert result.startswith("Report: none counted yet.\n\n[It stopped before it finished: it used its token budget.]")
 
 
 async def test_without_a_budget_an_agent_runs_as_before(chats):  # noqa: F811
@@ -73,7 +84,7 @@ async def test_without_a_budget_an_agent_runs_as_before(chats):  # noqa: F811
 async def test_an_agent_that_used_its_budget_is_not_resumed_by_a_message(chats):  # noqa: F811
     chat = await a_chat(chats, BUDGETED)
     child = await a_background_agent(chats, chat)
-    chats.replies = [TODO_CALL, TODO_CALL]
+    chats.replies = [TODO_CALL, TODO_CALL, _final_response("Report.")]
     await chats.wake(child.id)
     assert await chats.status(child.id) == "completed"
     answer = await send(chats, chat, child.id)
@@ -152,9 +163,24 @@ async def test_a_resumed_agent_that_runs_out_reports_this_runs_words_not_its_fir
     chats.replies = [_final_response("First report: 12 open items.")]
     await chats.wake(child.id)
     assert (await send(chats, chat, child.id))["status"] == "resumed"
-    chats.replies = [TODO_CALL, TODO_CALL]
+    chats.replies = [TODO_CALL, TODO_CALL, _final_response("Second report: 3 closed.")]
     await chats.wake(child.id)
     first, second = await chats.store.get_events(chat, types=[EventType.AGENT_NOTIFICATION])
     assert first.data["result"] == "First report: 12 open items."
-    assert second.data["status"] == "budget" and "First report" not in second.data["result"]
+    assert second.data["status"] == "budget" and second.data["result"] == "Second report: 3 closed."
     chats.replies = []
+
+
+async def test_a_budget_report_is_the_last_tools_off_reply_or_nothing():
+    from types import SimpleNamespace
+
+    def event(kind, **data):
+        return SimpleNamespace(type=kind.value, data=data)
+
+    step = event(EventType.LLM_RESPONSE, message={"content": "Let me check the next file."})
+    report = event(EventType.LLM_RESPONSE, message={"content": "Done so far: 4."}, finish_reason=BUDGET_REASON)
+    # The call for the report failed: nothing, never the mid-step line.
+    assert budget_report([step]) == ""
+    assert budget_report([step, report]) == "Done so far: 4."
+    # A report of an earlier run is no report of this one.
+    assert budget_report([report, event(EventType.SESSION_COMPLETE), step]) == ""

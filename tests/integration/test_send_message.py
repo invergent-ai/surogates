@@ -8,6 +8,7 @@ agent outside the sender's tree, nor another organisation's.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from uuid import uuid4
 
@@ -228,3 +229,46 @@ async def test_a_queued_message_never_brings_back_a_failed_parent(chats):  # noq
     before = len(chats.requests)
     await chats.wake(chat)
     assert len(chats.requests) == before and await chats.status(chat) == "failed"
+
+
+async def test_a_resume_and_a_start_at_once_stay_within_the_background_cap(chats, monkeypatch):  # noqa: F811
+    from surogates.tools.builtin import delegate
+
+    monkeypatch.setattr(agents_module, "MAX_RUNNING_IN_BACKGROUND", 2)
+    chat = await a_chat(chats, PARITY)
+    running = await a_background_agent(chats, chat, "Running")
+    chats.replies = [
+        calling("agent", "call_two", description="Done", prompt="Count the closed items.", run_in_background=True),
+        _final_response("Started."),
+    ]
+    await chats.says(chat, "And the closed ones.")
+    await chats.wake(chat)
+    done = next(c for c in await children(chats, chat) if c.id != running.id)
+    chats.replies = [_final_response("4 closed.")]
+    await chats.wake(done.id)
+    assert await chats.status(done.id) == "completed"
+
+    async def run(**kwargs):
+        # A start under way: its child is not in the database yet.
+        await asyncio.sleep(0.3)
+        return json.dumps({"agent_id": "a-new-one", "status": "running"})
+
+    monkeypatch.setattr(delegate, "_run_single_delegation", run)
+    start = agents_module._agent_handler(
+        {"description": "Third", "prompt": "Count the stale items.", "run_in_background": True},
+        session_store=chats.store, tenant=object(), session_id=str(chat), budget=None, tool_call_id="call_three",
+        session_factory=chats.api.app.state.session_factory, redis=chats.api.app.state.redis,
+    )
+    message = agents_module._send_message_handler(
+        {"to": str(done.id), "message": "Count the stale ones too.", "summary": "Stale too"},
+        session_store=chats.store, session_id=str(chat), redis=chats.api.app.state.redis,
+        session_factory=chats.api.app.state.session_factory,
+    )
+    starting = asyncio.create_task(start)
+    await asyncio.sleep(0.05)
+    sent = json.loads(await message)
+    started = await starting
+    # The start came first and is counted while it runs: the resume would make three.
+    assert json.loads(started)["status"] == "running"
+    assert sent["status"] == "queued" and "already run in the background" in sent["note"]
+    assert await chats.status(done.id) == "completed"

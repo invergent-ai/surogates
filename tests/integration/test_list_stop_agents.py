@@ -216,3 +216,22 @@ async def test_a_stop_reaches_only_agents_of_the_family(chats):  # noqa: F811
     )
     assert (await stop(chats, chat, hidden.id))["error"].startswith("no agent ")
     assert all(a["agent_id"] != str(hidden.id) for a in (await listed(chats, chat))["agents"])
+
+
+async def test_a_users_pause_during_an_agents_stop_brings_no_second_notice(chats):  # noqa: F811
+    chat = await a_chat(chats, PARITY)
+    child = await a_background_agent(chats, chat)
+
+    async def stopped_then_paused_by_its_user():
+        assert (await stop(chats, chat, child.id))["status"] == "stopped"
+        # The user stops it too, before its turn has ended: the same stop, told once.
+        paused = await chats.api.client.post(f"/v1/sessions/{child.id}/pause", headers=chats.api.auth())
+        assert paused.status_code == 200, paused.text
+        chats.harnesses[child.id].interrupt("stopped by agent")
+
+    chats.during_the_tool_call = stopped_then_paused_by_its_user
+    chats.replies = [TODO_CALL, _final_response("never asked")]
+    await chats.wake(child.id)
+    assert await chats.status(child.id) == "paused"
+    notes = await chats.store.get_events(chat, types=[EventType.AGENT_NOTIFICATION])
+    assert [n.data["status"] for n in notes] == ["killed"]

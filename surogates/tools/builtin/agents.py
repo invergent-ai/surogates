@@ -570,14 +570,20 @@ async def _send_message_handler(arguments: dict[str, Any], **kwargs: Any) -> str
     running = target.status in ("active", "processing")
     resumed, why_not = False, None
     if not running and target.status != "archived":
-        why_not = await _why_not_resume(session_store, sender, target, kwargs.get("session_factory"))
-        if why_not is None:
-            resumed = await session_store.resume_if_resting(
-                target.id, (target.status,), {"source": "agent_message", "from_agent": str(sender.id)},
-            )
-            if not resumed:
-                target = await session_store.get_session(target.id)
-                running = target.status in ("active", "processing")
+        # Checked and resumed under the lock the sender's starts take: a resume and the ``agent`` calls of one
+        # response run at once, and together they stay within the background cap.
+        async with _START_LOCKS.setdefault(sender.id, asyncio.Lock()):
+            why_not = await _why_not_resume(session_store, sender, target, kwargs.get("session_factory"))
+            if why_not is None:
+                resumed = await session_store.resume_if_resting(
+                    target.id, (target.status,), {"source": "agent_message", "from_agent": str(sender.id)},
+                )
+        lock = _START_LOCKS.get(sender.id)
+        if lock is not None and not lock.locked() and not _STARTING.get(sender.id):
+            _START_LOCKS.pop(sender.id, None)
+        if why_not is None and not resumed:
+            target = await session_store.get_session(target.id)
+            running = target.status in ("active", "processing")
     elif not running:
         why_not = "it was deleted"
     redis = kwargs.get("redis")
@@ -637,9 +643,9 @@ async def _why_not_resume(session_store: Any, sender: Any, target: Any, session_
             return "it was stopped by its user"
     elif target.status not in ("completed", "failed"):
         return f"it is {target.status}"
-    if session_factory is not None and sum(
-        mode == "background" for mode, _ in await _running_agents(session_factory, sender.id)
-    ) >= MAX_RUNNING_IN_BACKGROUND:
+    starting = [(mode, kind) for mode, kind, _ in _STARTING.get(sender.id, [])]
+    running = await _running_agents(session_factory, sender.id) if session_factory is not None else []
+    if sum(mode == "background" for mode, _ in running + starting) >= MAX_RUNNING_IN_BACKGROUND:
         return f"{MAX_RUNNING_IN_BACKGROUND} of your agents already run in the background"
     return None
 
