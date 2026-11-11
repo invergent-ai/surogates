@@ -308,3 +308,26 @@ async def test_a_chat_is_offered_monitor_and_woken_by_its_lines(chats, daemon_re
     finally:
         await background_watch.close()
         background_watch.configure(store=None, redis=None, sandbox_pool=None)
+
+
+async def test_an_older_sandbox_image_says_so_and_names_the_way_round(api, here_watch, daemon_registry, tmp_path, monkeypatch):  # noqa: F811
+    from surogates.sandbox.base import SandboxSpec
+    from surogates.sandbox.pool import SandboxPool
+
+    class OldDaemon(Daemon):
+        async def execute(self, sandbox_id, name, input, *, timeout=None):
+            if name == "_monitor":
+                return json.dumps({"error": "Unknown tool: _monitor"})
+            return await super().execute(sandbox_id, name, input, timeout=timeout)
+
+    async def spec(*args, **kwargs):
+        return SandboxSpec(env={})
+
+    monkeypatch.setattr("surogates.harness.tool_exec._build_session_sandbox_spec", spec)
+    chat = await a_session(api)
+    refused = json.loads(await agents_module._monitor_handler(
+        {"command": "tail -f build.log", "description": "Build"},
+        session_store=api.app.state.session_store, session_id=str(chat), sandbox_pool=SandboxPool(OldDaemon(tmp_path)),
+    ))
+    assert refused["error"].startswith("the monitor could not start: this sandbox's image is older than the monitor tool")
+    assert "notify_on_complete=true" in refused["error"]

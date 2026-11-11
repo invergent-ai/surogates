@@ -46,8 +46,10 @@ logger = logging.getLogger(__name__)
 
 #: What a fork reads before its brief: the conversation above is its parent's.
 FORK_NOTE = (
-    "[You are a fork of the conversation above, started to do one task. Do only the task below, "
-    "then end with your report: it is all your parent will see of your work.]"
+    "[You are a fork of the conversation above. The plan in it, and the work it lists, are your parent's: your "
+    "parent carries on with them, and may have started other forks for other parts. Your part is only the task "
+    "below. Do not redo, finish or check anything else from the conversation. End with your report: it is all "
+    "your parent will see of your work.]"
 )
 
 #: What a background agent's call returns, after its id.
@@ -66,7 +68,8 @@ _AGENT_DESCRIPTION = (
     "A new agent sees nothing of this conversation. Its prompt must stand alone: the goal, what is already "
     "known or ruled out, where to look, the scope, and what to report. Its report can be wrong in the same "
     "confident tone as a right one; check what matters. With fork=true it starts from a copy of this "
-    "conversation instead, and the prompt only says what to do.\n"
+    "conversation instead: the prompt then names exactly which part of the plan is the fork's, and what is "
+    "not, or the fork may redo the whole plan.\n"
     "By default the call waits for the report. With run_in_background=true it returns the agent_id at once "
     "and you get a notification when the agent ends; work on meanwhile, never redo the work you handed it, "
     "and never state its result before the notification comes. Start several independent agents in one "
@@ -112,7 +115,10 @@ _AGENT_SCHEMA = ToolSchema(
             },
             "fork": {
                 "type": "boolean",
-                "description": "true: the agent starts from a copy of this conversation. Default false: from the prompt alone.",
+                "description": (
+                    "true: the agent starts from a copy of this conversation; say in the prompt which part is its "
+                    "own. Default false: from the prompt alone."
+                ),
             },
         },
         "required": ["description", "prompt"],
@@ -313,7 +319,11 @@ async def _start_monitor(me: Any, command: str, description: str, timeout: int, 
     if not proc_id:
         error = str((started or {}).get("error") or "it did not start")
         if "Unknown tool" in error:
-            error = "this sandbox cannot run monitors"
+            # The sandbox's image predates the monitor (#629): the deployment's image is older than its runtime.
+            error = (
+                "this sandbox's image is older than the monitor tool. Run the command with terminal "
+                "(background=true, notify_on_complete=true) instead: its end reaches you as a notification"
+            )
         elif "monitors already run" in error:
             error += ": stop one with stop_agent before you start another"
         return _error(f"the monitor could not start: {error}")

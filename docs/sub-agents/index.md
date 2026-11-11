@@ -538,6 +538,17 @@ With it on, `agent` takes `delegate_task`'s place wherever the session may deleg
 | `stop_agent(agent_id)` | Stops an agent the caller started (with its own agents), or a background command it started. A stopped agent keeps its context: `send_message` from the agent that stopped it resumes it. A user's stop of it, later, is the user's to lift. |
 | `monitor(command, description, timeout_seconds?, max_notifications_per_minute?)` | Runs a command in the sandbox; each line it prints reaches the session as a notification, at most the given number a minute, until it exits, times out (killed), is stopped, or its session is stopped (killed). At most 4 run per session, counted in the sandbox. A worker sends a session at most 30 monitor notifications a minute; monitors started on different workers each count on their own worker. Offered to a root session where `terminal` is: never on a user's computer, to a session with a parent (a sub-agent, a helper, a worker, a routine run), or in a project's thread. |
 
+### Sandbox image
+
+The background commands and the monitor run in the sandbox's executor daemon, so the sandbox image must carry a surogates package at least as new as the runtime's:
+
+| Feature | Needs an executor from |
+|---|---|
+| `terminal` with `background` and `notify_on_complete` reaching the session | #622 (d93ab11c8) |
+| `monitor`, and drains by command id (several workers on one sandbox) | #629 (8f4f08340) |
+
+With an older image, `monitor` answers "this sandbox's image is older than the monitor tool" and points to `terminal` with `notify_on_complete`; a background command's end is reported as "cannot be watched any more".
+
 ### Notifications
 
 The end of background work reaches the session that started it as an `agent.notification` event `{agent_id, kind, status, summary, result, tool_call_id?}`:
