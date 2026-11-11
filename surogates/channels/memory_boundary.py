@@ -12,7 +12,7 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Mapping
 
-from surogates.channels.constants import API_CHANNEL, WEBSITE_CHANNEL
+from surogates.channels.constants import WEBSITE_CHANNEL
 
 __all__ = [
     "MANAGED_CHANNELS",
@@ -281,11 +281,15 @@ def session_memory_boundary(session: object) -> str | None:
         )
     if channel not in MANAGED_CHANNELS:
         if is_eval_session(session) or persisted.startswith(
-            (PROJECT_BOUNDARY_PREFIX, BUYER_BOUNDARY_PREFIX, CASE_BOUNDARY_PREFIX)
+            (
+                PROJECT_BOUNDARY_PREFIX,
+                BUYER_BOUNDARY_PREFIX,
+                CASE_BOUNDARY_PREFIX,
+                # Stamped by the API session route; a sub-agent or worker the
+                # session starts inherits it on its own channel.
+                END_USER_BOUNDARY_PREFIX,
+            )
         ):
-            return persisted
-        # Only an API key's sessions are an end user's.
-        if channel == API_CHANNEL and persisted.startswith(END_USER_BOUNDARY_PREFIX):
             return persisted
         return None
     if persisted:

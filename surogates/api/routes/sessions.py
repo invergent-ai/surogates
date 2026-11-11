@@ -851,7 +851,9 @@ async def _require_eval_seeding(
     cannot grant itself; tracked as bug-16 in the team's eval bug folder.
     """
     boundary = str(
-        apply_eval_isolation(body.config, channel=channel).get("memory_boundary")
+        apply_eval_isolation(
+            {k: v for k, v in body.config.items() if k != "end_user"}, channel=channel,
+        ).get("memory_boundary")
         or ""
     )
     if not boundary.startswith(EVAL_BOUNDARY_PREFIX):

@@ -113,6 +113,9 @@ When you create a session with `POST /v1/api/sessions`, name the person in `conf
 - **Nobody else's memory:** no other person's session, and no other key, can reach it.
 - **The workspace stays per session.**
 - **A malformed name** gets `422`. That is an empty name, a name over 200 characters, or one with a line break.
+- **What follows it:** the agent's sub-agents and workers in that session keep the same memory, and searching past sessions finds only that person's sessions.
+- **Only this endpoint:** `end_user` is a field of `POST /v1/api/sessions` alone. The OpenAI-compatible endpoint's `user` field keeps conversations apart, not memory.
+- **A new key starts over:** the partition belongs to the key's account. A key minted again starts every person's memory afresh.
 
 ### A system prompt that changes every request
 

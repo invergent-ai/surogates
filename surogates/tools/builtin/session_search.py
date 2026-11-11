@@ -28,7 +28,7 @@ from shlex import split as shlex_split
 from typing import Any, Dict, List, Union
 from uuid import UUID
 
-from surogates.channels.memory_boundary import CASE_BOUNDARY_PREFIX
+from surogates.channels.memory_boundary import CASE_BOUNDARY_PREFIX, END_USER_BOUNDARY_PREFIX
 from surogates.harness.auxiliary_llm import create_without_reasoning
 from surogates.harness.message_utils import content_as_text
 from surogates.tools.owner_scope import is_owner_scoped as _is_owner_scoped
@@ -377,8 +377,14 @@ async def _list_recent_sessions(
     current_session_id: UUID | None = None,
     service_account_id: UUID | None = None,
     owner_scope: bool = False,
+    end_user_boundary: str | None = None,
 ) -> str:
-    """Return metadata for the most recent sessions (no LLM calls)."""
+    """Return metadata for the most recent sessions (no LLM calls).
+
+    An end user's session lists only that end user's own sessions: the
+    service holding the key serves many people, and the key alone would
+    list them all.
+    """
     try:
         sessions = await session_store.list_sessions(
             org_id=org_id,
@@ -417,6 +423,8 @@ async def _list_recent_sessions(
                 continue
             # Skip hidden channels
             if s.channel in _HIDDEN_SESSION_CHANNELS:
+                continue
+            if end_user_boundary and (s.config or {}).get("memory_boundary") != end_user_boundary:
                 continue
 
             # Build a preview from the first user message event
@@ -498,6 +506,7 @@ async def session_search(
     auxiliary_fn: Any | None = None,
     transcript_budget: int | None = None,
     owner_scope: bool = False,
+    end_user_boundary: str | None = None,
 ) -> str:
     """Search past sessions and return focused summaries of matching conversations.
 
@@ -554,6 +563,7 @@ async def session_search(
             current_session_id,
             service_account_id=service_account_id,
             owner_scope=owner_scope,
+            end_user_boundary=end_user_boundary,
         )
 
     query = query.strip()
@@ -604,6 +614,11 @@ async def session_search(
                     "NOT LIKE :case_boundary"
                 )
                 params["case_boundary"] = f"{CASE_BOUNDARY_PREFIX}%"
+                # An end user of a key finds only their own sessions, never
+                # those of the other people the same key serves.
+                if end_user_boundary:
+                    case_clause += " AND s.config->>'memory_boundary' = :end_user_boundary"
+                    params["end_user_boundary"] = end_user_boundary
                 type_clause = "AND e.type IN ({})".format(
                     narrative_type_list_sql(type_filter)
                 )
@@ -912,6 +927,9 @@ async def _session_search_handler(
     owner_scope = await _is_owner_scoped(
         store, service_account_id, kwargs.get("session_config"),
     )
+    session_config = kwargs.get("session_config")
+    boundary = str((session_config or {}).get("memory_boundary") or "") if isinstance(session_config, dict) else ""
+    end_user_boundary = boundary if boundary.startswith(END_USER_BOUNDARY_PREFIX) else None
 
     return await session_search(
         query=arguments.get("query", ""),
@@ -926,4 +944,5 @@ async def _session_search_handler(
         auxiliary_fn=auxiliary_fn,
         transcript_budget=transcript_budget,
         owner_scope=owner_scope,
+        end_user_boundary=end_user_boundary,
     )

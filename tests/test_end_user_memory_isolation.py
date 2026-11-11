@@ -97,10 +97,11 @@ async def test_an_end_users_boundary_is_memory_only_and_cannot_be_named(monkeypa
     assert _memory_key(forged) == "agents/support-bot/shared/user.json"
 
 
-def test_only_an_api_session_honours_an_end_users_boundary():
+def test_a_sub_agent_of_an_end_users_session_keeps_their_memory():
+    """A child inherits the boundary on its own channel: it never falls back to the shared memory."""
     boundary = f"enduser:{uuid4()}:" + "a" * 32
-    web = SimpleNamespace(id="s-1", agent_id="support-bot", channel="web", config={"memory_boundary": boundary})
-    api = SimpleNamespace(id="s-2", agent_id="support-bot", channel="api", config={"memory_boundary": boundary})
-
-    assert session_memory_boundary(web) is None
-    assert session_memory_boundary(api) == boundary
+    for channel in ("delegation", "worker"):
+        child = SimpleNamespace(
+            id="s-2", agent_id="support-bot", channel=channel, config={"memory_boundary": boundary},
+        )
+        assert session_memory_boundary(child) == boundary

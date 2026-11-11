@@ -795,3 +795,45 @@ async def test_a_summary_client_without_a_model_falls_back_to_the_main_model(
 
     assert summary_client.requests == []
     assert len(_excerpts(main_client.requests[0])[0]) <= MAIN_MODEL_TRANSCRIPT_CHARS + 100
+
+
+async def test_an_end_user_of_a_key_finds_only_their_own_sessions(
+    session_store, session_factory,
+):
+    """A key serves many people: one person's search never reaches another's chats."""
+    org_id = await create_org(session_factory)
+    issued = await issue_service_account_token(session_factory, org_id)
+    ana_boundary = f"enduser:{issued.id}:" + "a" * 32
+    bo_boundary = f"enduser:{issued.id}:" + "b" * 32
+
+    async def chat(boundary: str, content: str):
+        session = await session_store.create_session(
+            user_id=None,
+            service_account_id=issued.id,
+            org_id=org_id,
+            agent_id="agent-a",
+            channel="api",
+            config={"memory_boundary": boundary},
+        )
+        await session_store.emit_event(session.id, EventType.USER_MESSAGE, {"content": content})
+        return session
+
+    ana = await chat(ana_boundary, "my IBAN is RO49 AAAA 1B31 0075 9384 0000")
+    bo = await chat(bo_boundary, "my IBAN is RO12 BBBB 0000 1111 2222 3333")
+    tenant = SimpleNamespace(org_id=org_id, user_id=None, service_account_id=issued.id)
+
+    async def search(query: str, boundary: str):
+        return json.loads(
+            await _session_search_handler(
+                {"query": query},
+                session_store=session_store,
+                tenant=tenant,
+                agent_id="agent-a",
+                session_config={"memory_boundary": boundary},
+            )
+        )
+
+    found = await search("IBAN", ana_boundary)
+    assert [r["session_id"] for r in found["results"]] == [str(ana.id)]
+    recent = await search("", bo_boundary)
+    assert [r["session_id"] for r in recent["results"]] == [str(bo.id)]
