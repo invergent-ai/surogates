@@ -21,7 +21,6 @@ import json
 import re
 import logging
 import os
-import posixpath
 import traceback
 from collections.abc import Sequence
 from datetime import datetime, timezone
@@ -119,7 +118,7 @@ from surogates.harness.tool_exec import (
     execute_tool_calls,
 )
 from surogates.harness.tool_guardrails import ToolGuardrailConfig, ToolGuardrails
-from surogates.sandbox.copy_files import has_copy, read_copy
+from surogates.sandbox.copy_files import has_copy, read_copy, writes_to_copy
 from surogates.sandbox.history import PRUNE_DAYS
 from surogates.sandbox.pool import sandbox_session_key
 from surogates.scheduled.schedule import local_iso
@@ -227,6 +226,7 @@ from surogates.harness.loop_constants import (
     _EMPTY_RESPONSE_NUDGE,
     _MAX_DELIVERABLE_RETRIES,
     _WORKSPACE_NAMES_LIMIT,
+    _WORKSPACE_NAMES_TIMEOUT,
     _MAX_SAVE_CLAIM_RETRIES,
     _MAX_SCHEDULE_CLAIM_RETRIES,
     _UNFINISHED_RESPONSE_NUDGE,
@@ -689,6 +689,12 @@ def rescue_context(reply: str | None, question: str) -> str:
     if at < 0:
         return context
     return (context[:at] + context[at + len(question):]).strip()
+
+#: The stamp before an uploaded file's own name: a chat upload's
+#: ``<ts>-<n>-`` (``channels/runner.py``), a fetched Slack file's ``<id>-``.
+_CHAT_UPLOAD_STAMP_RE = re.compile(r"^[0-9][0-9.]*-[0-9]+-")
+_SLACK_FETCH_STAMP_RE = re.compile(r"^[^-]+-")
+
 
 class AgentHarness(
     BoardMixin,
@@ -3950,16 +3956,9 @@ class AgentHarness(
                 # the guard above: costs nothing when the file is there,
                 # costs one turn when it is not.
                 if deliverable_retries < _MAX_DELIVERABLE_RETRIES:
-                    request_text = _latest_user_event_text(all_events or [])
-                    absent = missing_deliverables(request_text, messages)
-                    if absent:
-                        # A file already in the workspace is an input the
-                        # request named, not one it asked for (read only
-                        # when there is something to nudge about).
-                        absent = missing_deliverables(
-                            request_text, messages,
-                            present=await self._workspace_file_names(session),
-                        )
+                    absent = await self._absent_deliverables(
+                        session, _latest_user_event_text(all_events or []), messages,
+                    )
                     if absent:
                         deliverable_retries += 1
                         logger.info(
@@ -4767,11 +4766,33 @@ class AgentHarness(
             iteration_index=max(iteration - 1 - turn_base_iteration, 0),
         )
 
-    async def _workspace_file_names(self, session: Session) -> frozenset[str]:
-        """The lower-cased names of the files in *session*'s workspace.
+    async def _absent_deliverables(
+        self, session: Session, request_text: str, messages: list[dict],
+    ) -> list[str]:
+        """The files the request named and the turn never wrote.
 
-        Empty when they cannot be told: no storage, a session on the user's
-        computer, a thread working in its copy, or a storage error.
+        A file already in the workspace is an input the request named, not
+        one it asked for, unless the request asks for it to be written
+        (``missing_deliverables``).  The workspace is read only when there
+        is something to nudge about.
+        """
+        absent = missing_deliverables(request_text, messages)
+        if absent:
+            absent = missing_deliverables(
+                request_text, messages, present=await self._workspace_file_names(session),
+            )
+        return absent
+
+    async def _workspace_file_names(self, session: Session) -> frozenset[str]:
+        """The lower-cased names of the user's files in *session*'s workspace.
+
+        Those at its top level or one folder down, and every upload under
+        ``uploads/``, also under the name the user gave it (a chat upload is
+        stored as ``<ts>-<n>-<name>``, a fetched Slack file as
+        ``<id>-<name>``).  Platform paths are left out.  Empty when they
+        cannot be told: no storage, a session on the user's computer, one
+        that works on a thread's copy, a storage error, or a listing slower
+        than ``_WORKSPACE_NAMES_TIMEOUT`` seconds.
         """
         cfg = session.config or {}
         bucket = cfg.get("storage_bucket") or ""
@@ -4779,19 +4800,39 @@ class AgentHarness(
         if storage is None or not bucket or device_of(cfg) is not None:
             return frozenset()
         try:
-            if has_copy(getattr(self, "_sandbox_pool", None), sandbox_session_key(session)):
+            if writes_to_copy(getattr(self, "_sandbox_pool", None), sandbox_session_key(session), cfg):
                 return frozenset()
+            from surogates.harness.turn_summarizer import is_platform_path
             from surogates.session.attachment_ingest import workspace_root_id
             from surogates.storage.tenant import boundary_workspace_key
 
             prefix = boundary_workspace_key(cfg, session, workspace_root_id(session), "")
-            entries = await storage.list_entries(bucket, prefix, limit=_WORKSPACE_NAMES_LIMIT)
+            # Uploads listed on their own: in a large workspace the first
+            # listing's cap may end before ``uploads/`` (keys come in order).
+            listings = await asyncio.wait_for(
+                asyncio.gather(
+                    storage.list_entries(bucket, prefix, limit=_WORKSPACE_NAMES_LIMIT),
+                    storage.list_entries(bucket, f"{prefix}uploads/", limit=_WORKSPACE_NAMES_LIMIT),
+                ),
+                timeout=_WORKSPACE_NAMES_TIMEOUT,
+            )
         except Exception:
             logger.debug("Session %s: workspace listing failed", session.id, exc_info=True)
             return frozenset()
-        return frozenset(
-            posixpath.basename(e["key"]).lower() for e in entries if not str(e["key"]).endswith("/")
-        )
+        names: set[str] = set()
+        for entry in (e for listing in listings for e in listing):
+            key = str(entry.get("key") or "")
+            if not key.startswith(prefix) or key.endswith("/"):
+                continue
+            parts = key[len(prefix):].split("/")
+            name = parts[-1].lower()
+            if parts[0] == "uploads":
+                names.add(name)
+                stamp = _SLACK_FETCH_STAMP_RE if parts[1:3] == ["slack", "fetch"] else _CHAT_UPLOAD_STAMP_RE
+                names.add(stamp.sub("", name, count=1))
+            elif len(parts) <= 2 and not is_platform_path("/".join(parts)):
+                names.add(name)
+        return frozenset(names)
 
     async def _read_workspace_image(
         self,

@@ -5,6 +5,8 @@ the check: a report staged into tmp_ drafts and never assembled, and five
 sources read without anything written.
 """
 
+import pytest
+
 from surogates.harness.loop_deliverables import (
     deliverable_nudge,
     missing_deliverables,
@@ -185,43 +187,190 @@ def test_a_year_placeholder_is_a_pattern():
     assert missing_deliverables("Keep one summary per year, summary_YYYY.md.", []) == []
 
 
-async def test_the_harness_reads_the_workspace_file_names_once_there_is_something_to_ask_for():
-    from types import SimpleNamespace
-    from uuid import uuid4
+@pytest.mark.parametrize("user, want", [
+    # The clause ends at a colon, a comma, a sentence's end or a line break.
+    ("Create the report from the source: report.md", ["report.md"]),
+    ("Create a dashboard from the data, dashboard.html", ["dashboard.html"]),
+    ("Based on the provided data: report.docx", ["report.docx"]),
+    ("Summarize what you read.\n\nreport.docx", ["report.docx"]),
+    ("Make a checklist I can use: checklist.md", ["checklist.md"]),
+    ("Produce from the attached files: report.docx, summary.xlsx", ["report.docx", "summary.xlsx"]),
+    # Nouns are not the verbs that mark an input.
+    ("Write the review document review_notes.docx", ["review_notes.docx"]),
+    ("Generate the test input file test_input.json", ["test_input.json"]),
+    ("Use report_final.docx as the output file name", ["report_final.docx"]),
+    ("Turn the notes from the meeting into minutes.docx", ["minutes.docx"]),
+])
+def test_a_deliverable_near_an_input_word_is_still_asked_for(user, want):
+    assert missing_deliverables(user, []) == want
 
+
+@pytest.mark.parametrize("user", [
+    "Post this week's numbers to status.md",
+    "Update the existing tracker.xlsx",
+    "Fill in the attached budget.xlsx",
+    "Save the totals as summary.md",
+])
+def test_a_file_in_the_workspace_the_request_asks_to_write_is_still_asked_for(user):
+    name = user.rsplit(" ", 1)[-1]
+    assert missing_deliverables(user, [], present={name.lower()}) == [name]
+
+
+def test_every_mention_counts_not_only_the_first():
+    user = (
+        "Use summary.md as the output file. The task requires these files by name, "
+        "spelled exactly like this: `summary.md`."
+    )
+    assert missing_deliverables(user, []) == ["summary.md"]
+    user = "Read notes.md, then write notes.md again with the totals."
+    assert missing_deliverables(user, [], present={"notes.md"}) == ["notes.md"]
+
+
+def test_a_name_that_is_only_ever_an_input_is_not_asked_for():
+    user = "Using notes.md, list the totals. Everything you need is from notes.md."
+    assert missing_deliverables(user, []) == []
+
+
+@pytest.mark.parametrize("user", [
+    "One file per issue, treasury_bulletin_yyyy_mm.txt.",
+    "One file per day, app_YYYYMMDD.json.",
+    "One file per chapter, chapter_N.md.",
+    "Each run writes report_DATE.pdf.",
+    "Files are {TICKER}_10K.txt, <id>-notes.md and Q{n}_summary.md.",
+    "Look it up in a filing, e.g. 10K_2023.pdf.",
+])
+def test_patterns_templates_and_examples_are_not_names(user):
+    assert missing_deliverables(user, []) == []
+
+
+def test_a_pasted_listing_against_a_large_tool_output_stays_linear():
+    """A pasted log of file names and a megabyte of tool output: four times the
+    names cost about four times as much (thread CPU time, least of three runs)."""
+    import time
+
+    output = [{"role": "tool", "content": "x" * 1_000_000 + " part-000007.json"}]
+
+    def cost(lines: int) -> float:
+        user = "\n".join(f"loading part-{i:06d}.json" for i in range(lines))
+        runs = []
+        for _ in range(3):
+            start = time.thread_time()
+            missing_deliverables(user, output)
+            runs.append(time.thread_time() - start)
+        return min(runs)
+
+    small, large = cost(5_000), cost(20_000)
+    assert large < 8 * small, (small, large)
+
+
+# ---------------------------------------------------------------------------
+# The harness's side: the workspace's files
+# ---------------------------------------------------------------------------
+
+
+class _Storage:
+    def __init__(self, keys: list[str]):
+        self.keys = keys
+        self.listed: list[tuple] = []
+
+    async def list_entries(self, bucket, prefix="", limit=None):
+        self.listed.append((bucket, prefix, limit))
+        return [{"key": k} for k in sorted(self.keys) if k.startswith(prefix)][:limit]
+
+
+def _harness(storage, pool=None):
     from surogates.harness.loop import AgentHarness
-
-    listed: list = []
-
-    class Storage:
-        async def list_entries(self, bucket, prefix="", limit=None):
-            listed.append((bucket, prefix, limit))
-            return [{"key": prefix + "inputs/treasury_bulletin_1941_01.txt"}, {"key": prefix + "data.csv"},
-                    {"key": prefix + "inputs/"}]
 
     harness = AgentHarness.__new__(AgentHarness)
-    harness._storage = Storage()
-    harness._sandbox_pool = None
-    session = SimpleNamespace(id=uuid4(), channel="web", config={"storage_bucket": "b"})
-    names = await harness._workspace_file_names(session)
-    assert names == {"treasury_bulletin_1941_01.txt", "data.csv"}
-    assert listed and listed[0][0] == "b" and str(session.id) in listed[0][1]
+    harness._storage = storage
+    harness._sandbox_pool = pool
+    return harness
 
 
-async def test_a_session_whose_workspace_cannot_be_read_counts_no_inputs():
+def _session(**config):
     from types import SimpleNamespace
     from uuid import uuid4
 
-    from surogates.harness.loop import AgentHarness
+    return SimpleNamespace(id=uuid4(), channel="web", config={"storage_bucket": "b", **config})
+
+
+def _prefix(session) -> str:
+    from surogates.session.attachment_ingest import workspace_root_id
+    from surogates.storage.tenant import boundary_workspace_key
+
+    return boundary_workspace_key(session.config, session, workspace_root_id(session), "")
+
+
+async def test_the_workspace_names_are_the_users_files_and_uploads():
+    session = _session()
+    p = _prefix(session)
+    storage = _Storage([
+        p + "data.csv", p + "inputs/treasury_bulletin_1941_01.txt", p + "inputs/",
+        p + "vendor/lib/deep/README.md", p + ".agents/notes.md", p + "__pycache__/x.json",
+        p + "uploads/telegram/1712345678.5-0-budget.xlsx", p + "uploads/slack/fetch/F07ABC-plan.md",
+        p + "uploads/brief.pdf",
+    ])
+    names = await _harness(storage)._workspace_file_names(session)
+    assert names == {
+        "data.csv", "treasury_bulletin_1941_01.txt",
+        "1712345678.5-0-budget.xlsx", "budget.xlsx", "f07abc-plan.md", "plan.md", "brief.pdf",
+    }
+    # The uploads are listed on their own, past any cap on the whole workspace.
+    assert [prefix for _, prefix, _ in storage.listed] == [p, p + "uploads/"]
+
+
+async def test_a_helper_session_reads_its_roots_workspace():
+    from uuid import uuid4
+
+    root = uuid4()
+    session = _session(sandbox_root_session_id=str(root))
+    storage = _Storage([])
+    await _harness(storage)._workspace_file_names(session)
+    assert str(root) in storage.listed[0][1] and str(session.id) not in storage.listed[0][1]
+
+
+async def test_a_session_whose_workspace_cannot_be_read_counts_no_inputs(monkeypatch):
+    import asyncio
+
+    import surogates.harness.loop as loop
 
     class Broken:
         async def list_entries(self, bucket, prefix="", limit=None):
             raise OSError("storage away")
 
-    harness = AgentHarness.__new__(AgentHarness)
-    harness._storage = Broken()
-    harness._sandbox_pool = None
-    session = SimpleNamespace(id=uuid4(), channel="web", config={"storage_bucket": "b"})
-    assert await harness._workspace_file_names(session) == frozenset()
-    harness._storage = None
-    assert await harness._workspace_file_names(session) == frozenset()
+    class Stalled:
+        async def list_entries(self, bucket, prefix="", limit=None):
+            await asyncio.sleep(60)
+
+    session = _session()
+    assert await _harness(Broken())._workspace_file_names(session) == frozenset()
+    assert await _harness(None)._workspace_file_names(session) == frozenset()
+    monkeypatch.setattr(loop, "_WORKSPACE_NAMES_TIMEOUT", 0.05)
+    assert await _harness(Stalled())._workspace_file_names(session) == frozenset()
+
+
+async def test_a_thread_on_a_copy_counts_no_inputs(monkeypatch):
+    import surogates.harness.loop as loop
+
+    monkeypatch.setattr(loop, "writes_to_copy", lambda pool, owner, config: True)
+    storage = _Storage(["anything"])
+    assert await _harness(storage)._workspace_file_names(_session()) == frozenset()
+    assert storage.listed == []
+
+
+async def test_the_nudge_leaves_out_a_workspace_input_and_keeps_the_output():
+    session = _session()
+    p = _prefix(session)
+    storage = _Storage([p + "sales.xlsx", p + "tracker.xlsx"])
+    harness = _harness(storage)
+    user = "Total the year in sales.xlsx, update tracker.xlsx and write it up in report.docx."
+    assert await harness._absent_deliverables(session, user, []) == ["tracker.xlsx", "report.docx"]
+
+
+async def test_the_workspace_is_read_only_when_there_is_something_to_nudge_about():
+    session = _session()
+    storage = _Storage([])
+    harness = _harness(storage)
+    messages = [_tool_call("write_file", '{"path": "report.docx"}')]
+    assert await harness._absent_deliverables(session, "Write report.docx.", messages) == []
+    assert storage.listed == []
