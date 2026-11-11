@@ -130,6 +130,18 @@ async def _run_in_org(request: Request, run_id: uuid.UUID, org_id: uuid.UUID):
     return run
 
 
+@router.get("/channels")
+async def channels(request: Request):
+    """The channels a run can be started on here: a disabled adapter would never answer."""
+    settings = request.app.state.settings
+    found = ["whatsapp", "website"]
+    found += [k for k in ("telegram", "slack", "teams", "discord")
+              if getattr(settings.channels, k).enabled]
+    if settings.voice.livekit_api_key:
+        found.append("voice")
+    return {"channels": found}
+
+
 @router.post("/runs", status_code=201)
 async def start_run(body: StartRun, request: Request):
     state = request.app.state

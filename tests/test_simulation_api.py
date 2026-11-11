@@ -123,3 +123,22 @@ async def test_other_org_and_bad_token_are_refused(rsf):  # noqa: F811
     r = await client.get("/internal/runs", params={"org_id": str(org_id), "agent_id": "a1"},
                          headers={"Authorization": "Bearer wrong"})
     assert r.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_channels_are_the_ones_this_deployment_runs(rsf):  # noqa: F811
+    from types import SimpleNamespace as NS
+
+    _, client = await _client(rsf)
+    off, on = NS(enabled=False), NS(enabled=True)
+    client._transport.app.state.settings = NS(
+        simulation=Settings.simulation,
+        channels=NS(whatsapp=off, website=off, slack=on, teams=off, discord=on, telegram=off),
+        voice=NS(livekit_api_key=""),
+    )
+    r = await client.get("/internal/channels")
+    assert r.status_code == 200
+    assert r.json() == {"channels": ["whatsapp", "website", "slack", "discord"]}
+
+    client._transport.app.state.settings.voice.livekit_api_key = "key"
+    assert (await client.get("/internal/channels")).json()["channels"][-1] == "voice"
