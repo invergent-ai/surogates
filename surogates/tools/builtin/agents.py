@@ -524,6 +524,8 @@ async def _send_message_handler(arguments: dict[str, Any], **kwargs: Any) -> str
     await session_store.emit_event(target.id, EventType.COORDINATOR_MESSAGE, {
         "content": content, "kind": "agent_message",
         "from_agent": str(sender.id), "to_agent": str(target.id), "summary": summary,
+        # The sender's call: a message is joined to the turn that sent it.
+        "tool_call_id": kwargs.get("tool_call_id"),
     })
     # Read after the message is in its log: a turn that ended meanwhile has not read it, and is resumed for it
     # as one at rest is, if the rules let the sender.  No other wake takes it up (``_has_stranded_user_message``).

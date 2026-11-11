@@ -484,7 +484,9 @@ class SessionDispatch(BaseModel):
 
     tool_call_id: str | None = None
     description: str | None = None
-    mode: str | None = None  # foreground | background
+    # foreground | background, as it is now: a foreground agent messaged after its call returned runs on in
+    # the background.  The mode it was started in is in its parent's ``delegation.start``.
+    mode: str | None = None
     fork: bool = False
     budget_tokens: int | None = None
 

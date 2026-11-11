@@ -56,3 +56,4 @@ async def test_the_tree_and_the_logs_link_a_parent_and_its_agent_by_the_call_tha
     assert call["tool_call_id"] == start["tool_call_id"] == end["tool_call_id"] == "call_count"
     assert start["child_session_id"] == end["agent_id"] == str(child.id)
     assert (message["from_agent"], message["to_agent"], message["summary"]) == (str(child.id), str(chat), "Which items")
+    assert message["tool_call_id"] == "call_ask"
