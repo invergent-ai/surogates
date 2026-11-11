@@ -270,6 +270,8 @@ from surogates.harness.loop_mission_evaluator import (
 )
 from surogates.harness.outcomes import OutcomeState
 from surogates.harness.loop_pending import (
+    answered_helpers,
+    read_as_result,
     _actionable_pending_events,
     _awaited_report_unread,
     _aware,
@@ -1280,7 +1282,11 @@ class AgentHarness(
         """
         events = await self._store.get_events(
             session_id,
-            types=[EventType.LLM_REQUEST, EventType.WORKER_COMPLETE, EventType.WORKER_FAILED],
+            types=[
+                EventType.LLM_REQUEST, EventType.WORKER_COMPLETE, EventType.WORKER_FAILED,
+                # Which delegate_task helpers' reports are their calls' results (``answered_helpers``).
+                EventType.DELEGATION_COMPLETE, EventType.DELEGATION_FAILED,
+            ],
         )
         return bool(unread_reports(events))
 
@@ -1356,9 +1362,19 @@ class AgentHarness(
             events = [event for event in events if event.id < before]
         if not events:
             return held, after_event_id
+        answered = await self._answered_helpers(session, events)
         for event in events:
-            held = held_news(held, event)
+            held = held_news(held, event, answered)
         return held, max(event.id for event in events)
+
+    async def _answered_helpers(self, session: Session, events: list) -> frozenset[str]:
+        """The ``delegate_task`` helpers whose call got their result (``answered_helpers``), read from the log only
+        when *events* hold a report of one."""
+        if not any((event.data or {}).get("delegated") for event in events):
+            return frozenset()
+        return answered_helpers(await self._store.get_events(
+            session.id, types=[EventType.DELEGATION_COMPLETE, EventType.DELEGATION_FAILED],
+        ))
 
     async def _answer_file_waits(self, session: Session, events: list) -> None:
         """Retire the waits on you over its files that a project's thread
@@ -4145,10 +4161,12 @@ class AgentHarness(
                             session.id, after=min(steer_cursor, report_cursor),
                             types=[*MESSAGE_TYPES, EventType.WORKER_COMPLETE, EventType.WORKER_FAILED, EventType.HISTORY_REDO],
                         )
+                        answered = await self._answered_helpers(session, since)
                         unread = min((
                             event.id for event in since
                             if event.id > steer_cursor and self._is_plain_message(session, event)
                             or event.id > report_cursor and event.type not in MESSAGE_TYPES
+                            and not read_as_result(event, answered)
                         ), default=None)
                         await self._store.advance_harness_cursor(
                             session.id,
@@ -6547,12 +6565,13 @@ class AgentHarness(
                 # The run is at rest all the same: its answer is in its own log.
                 logger.warning("Failed to announce the end of run %s at a command", session.id, exc_info=True)
         if _should_notify_parent_on_completion(session) and not is_project_thread(session.config):
-            from surogates.harness.worker_notify import notify_parent_on_completion
+            from surogates.harness.worker_notify import is_delegated, notify_parent_on_completion
 
             await notify_parent_on_completion(
                 session_store=self._store, worker_session_id=session.id, parent_session_id=session.parent_id,
                 org_id=str(session.org_id), agent_id=session.agent_id, redis=self._redis,
                 task_id=getattr(session, "task_id", None), session_factory=self._session_factory,
+                delegated=is_delegated(session),
             )
 
     def _goal_waits(self, session: Session, events: list) -> bool:

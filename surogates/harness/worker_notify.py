@@ -35,6 +35,13 @@ _MAX_RESULT_CHARS: int = 10_000
 _MAX_LEFT_OUT_NAMED = 200
 
 
+def is_delegated(session: Any) -> bool:
+    """Whether *session* is a ``delegate_task`` helper: its parent waits for it in the tool call that started
+    it, and has its result as that call's result.  Its report says so (``delegated``), and the parent does not
+    read it a second time (``loop_context_replay.worker_news``)."""
+    return getattr(session, "channel", None) == "delegation"
+
+
 async def _thread_title(session_factory: Any | None, worker_session_id: UUID) -> str | None:
     """The title of the project's thread *worker_session_id*; None for any other worker."""
     if session_factory is None:
@@ -135,6 +142,7 @@ async def notify_parent_on_completion(
     landing: dict[str, Any] | None = None,
     unkept: dict[str, Any] | None = None,
     set_aside: dict[str, Any] | None = None,
+    delegated: bool = False,
 ) -> None:
     """Emit a ``WORKER_COMPLETE`` event into the parent session and re-enqueue it.
 
@@ -176,6 +184,8 @@ async def notify_parent_on_completion(
 
     A thread's helper whose hand-back failed reports *unkept*: ``kept``
     false, and ``left``, the files kept apart, which its thread's copy lacks.
+
+    A ``delegate_task`` helper's report is marked *delegated* (``is_delegated``).
     """
     try:
         from surogates.harness.message_utils import extract_final_response
@@ -188,6 +198,8 @@ async def notify_parent_on_completion(
             "result": final_response[:_MAX_RESULT_CHARS],
             **(unkept or {}),
         }
+        if delegated:
+            payload["delegated"] = True
         if task_id is not None:
             payload["task_id"] = str(task_id)
             # Override result/metadata with explicit handoff from
@@ -283,6 +295,7 @@ async def notify_parent_on_failure(
     session_factory: Any | None = None,
     not_taken: list[str] | None = None,
     set_aside: dict[str, Any] | None = None,
+    delegated: bool = False,
 ) -> None:
     """Emit a ``WORKER_FAILED`` event into the parent session and re-enqueue it.
 
@@ -302,6 +315,8 @@ async def notify_parent_on_failure(
             "worker_id": str(worker_session_id),
             "error": error[:2000],
         }
+        if delegated:
+            payload["delegated"] = True
         if task_id is not None:
             payload["task_id"] = str(task_id)
         title = await _thread_title(session_factory, worker_session_id)
