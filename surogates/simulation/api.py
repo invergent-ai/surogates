@@ -16,9 +16,11 @@ from datetime import datetime, timezone
 from typing import Any, Literal, Optional
 from urllib.parse import urlencode
 
+import sqlalchemy as sa
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from surogates.db.models import ProgramInvitationRow, ProgramScheduleRow
 from surogates.simulation import store
 from surogates.simulation import discord, slack, teams, voice
 from surogates.simulation.webhook import (
@@ -489,6 +491,63 @@ async def call_as_person(run_id: uuid.UUID, person_id: uuid.UUID, org_id: uuid.U
     if not state.settings.voice.livekit_api_key:
         raise HTTPException(status_code=503, detail="Phone calls are not set up on this deployment")
     return voice.call_token(state.settings, run, person)
+
+
+@router.post("/runs/{run_id}/people/{person_id}/next-step")
+async def next_step(run_id: uuid.UUID, person_id: uuid.UUID, org_id: uuid.UUID, request: Request):
+    """The person's next program check-in, sent now rather than when it falls due."""
+    from surogates.followup import store as followup_store
+    from surogates.followup.context import in_person_zone
+    from surogates.followup.eligibility import next_contact
+    from surogates.programs.materialize import identity_lookup_from, materialize_occurrence
+
+    state = request.app.state
+    sf = state.session_factory
+    run = await _run_in_org(request, run_id, org_id)
+    person = await _running_person(state, run, person_id)
+    enrolled = person.user_id and await followup_store.enrollments(
+        sf, org_id=run.org_id, agent_id=run.agent_id, user_id=person.user_id, status="active",
+    )
+    if not enrolled:
+        raise HTTPException(status_code=409, detail="Not enrolled in a program")
+    now = datetime.now(timezone.utc)
+    last = (await followup_store.last_inbound_by_person(
+        sf, org_id=run.org_id, user_ids=[person.user_id],
+    )).get(person.user_id)
+    async with sf() as db:
+        schedules = (await db.execute(
+            sa.select(ProgramScheduleRow)
+            .where(ProgramScheduleRow.org_id == run.org_id)
+            .where(ProgramScheduleRow.agent_id == run.agent_id)
+            .where(ProgramScheduleRow.active.is_(True))
+        )).scalars().all()
+    due = [
+        (found[0], schedule)
+        for schedule in schedules for e in enrolled
+        if (found := next_contact(
+            in_person_zone([schedule.config or {}], e), protocol=e.protocol,
+            start_date=e.start_date, phase=e.phase, enrolled_at=e.created_at,
+            last_inbound_at=last, now=now,
+        ))
+    ]
+    if not due:
+        raise HTTPException(status_code=409, detail="No program step is ahead for this person")
+    at, schedule = min(due, key=lambda d: d[0])
+    # Stamped now, not at the due slot: that slot's occurrence belongs to
+    # everyone else on the roster, and taking it would skip them.
+    occurrence_id = await materialize_occurrence(
+        schedule, session_factory=sf, identity_lookup=identity_lookup_from(sf),
+        now=at, only=person.user_id, stamped_at=now,
+    )
+    async with sf() as db:
+        row = (await db.execute(
+            sa.select(ProgramInvitationRow)
+            .where(ProgramInvitationRow.occurrence_id == occurrence_id)
+            .where(ProgramInvitationRow.user_id == person.user_id)
+        )).scalars().first()
+    sent = row is not None and row.delivery_state == "queued"
+    return {"sent": sent, "due_at": at.isoformat(),
+            "reason": None if sent else (row.reason if row else "Not due at that step")}
 
 
 @router.post("/runs/{run_id}/end")

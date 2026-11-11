@@ -169,8 +169,13 @@ async def materialize_occurrence(
     session_factory: Any,
     identity_lookup: Any,
     now: datetime,
+    only: uuid.UUID | None = None,
+    stamped_at: datetime | None = None,
 ) -> uuid.UUID:
     """Create the occurrence and one invitation per user.
+
+    *only* narrows the roster to one person, as due at *now*; *stamped_at*
+    records the occurrence at another instant than *now*.
 
     Idempotent at both levels — ``(program_id, scheduled_for)`` and
     ``(occurrence_id, user_id)`` — so a crashed or retried tick is harmless
@@ -189,7 +194,7 @@ async def materialize_occurrence(
     roster, last_by_user = await _roster(
         schedule, config, platform=platform, now=now,
         session_factory=session_factory, identity_lookup=identity_lookup,
-        with_last_inbound=pause is not None,
+        with_last_inbound=pause is not None, only=only,
     )
     if config.get("once_per_person"):
         reached = await _already_reached(
@@ -254,7 +259,7 @@ async def materialize_occurrence(
             program_id=schedule.program_id,
             org_id=schedule.org_id,
             agent_id=schedule.agent_id,
-            scheduled_for=now,
+            scheduled_for=stamped_at or now,
             skill_ref=config.get("skill_ref", ""),
             template_name=config.get("template_name"),
             template_language=config.get("template_language"),
@@ -265,7 +270,7 @@ async def materialize_occurrence(
             await db.flush()
         except IntegrityError:
             await db.rollback()
-            return await _existing_occurrence(db, schedule.program_id, now)
+            return await _existing_occurrence(db, schedule.program_id, stamped_at or now)
 
         open_configs: dict = {}
         open_people: dict[uuid.UUID, bool] = {}
@@ -331,6 +336,7 @@ async def _roster(
     session_factory: Any,
     identity_lookup: Any,
     with_last_inbound: bool = False,
+    only: uuid.UUID | None = None,
 ) -> tuple[list[tuple[uuid.UUID, Any, Any]], dict[uuid.UUID, datetime]]:
     """The people this occurrence is for, each with their channel identity
     and enrollment (``None`` on a fixed roster).
@@ -367,6 +373,8 @@ async def _roster(
         roster = []
         for user_id in config.get("users", []):
             uid = uuid.UUID(user_id)
+            if only is not None and uid != only:
+                continue
             roster.append(
                 (uid, await identity_lookup(schedule.org_id, platform, uid), None),
             )
@@ -387,7 +395,8 @@ async def _roster(
 
     enrollments = await followup_store.enrollments(
         session_factory, org_id=schedule.org_id, agent_id=schedule.agent_id,
-        protocol=audience.protocol, status="active",
+        protocol=audience.protocol, status="active", include_running_simulations=True,
+        user_id=only,
     )
     zones = {e.user_id: person_zone(e, config) for e in enrollments}
     if set(zones.values()) - {str(config.get("timezone") or "UTC")}:
