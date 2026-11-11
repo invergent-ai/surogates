@@ -536,7 +536,7 @@ With it on, `agent` takes `delegate_task`'s place wherever the session may deleg
 | `send_message(to, message, summary)` | To an agent the caller started, its parent (`"parent"`), or a sibling; same organisation only. A running agent reads it before its next step. One at rest resumes with its context and the message, if the caller may resume it: the agent that started it may resume a completed or failed one, or one it stopped itself; a sub-agent may resume its parent from a finished turn only, never from its user's stop. Otherwise the message waits in its log, unread until something else wakes it. |
 | `list_agents()` | The agents the caller can reach, with status, and the background commands it started. |
 | `stop_agent(agent_id)` | Stops an agent the caller started (with its own agents), or a background command it started. A stopped agent keeps its context: `send_message` from the agent that stopped it resumes it. A user's stop of it, later, is the user's to lift. |
-| `monitor(command, description, timeout_seconds?, max_notifications_per_minute?)` | Runs a command in the sandbox; each line it prints reaches the session as a notification, at most the given number a minute (30 a minute for all of a session's monitors), until it exits, times out (killed) or is stopped. At most 4 run per session. Offered where `terminal` is, never on a user's computer, to a sub-agent, or in a project's thread. |
+| `monitor(command, description, timeout_seconds?, max_notifications_per_minute?)` | Runs a command in the sandbox; each line it prints reaches the session as a notification, at most the given number a minute, until it exits, times out (killed), is stopped, or its session is stopped (killed). At most 4 run per session, counted in the sandbox. A worker sends a session at most 30 monitor notifications a minute; monitors started on different workers each count on their own worker. Offered to a root session where `terminal` is: never on a user's computer, to a session with a parent (a sub-agent, a helper, a worker, a routine run), or in a project's thread. |
 
 ### Notifications
 
@@ -549,7 +549,7 @@ The session reads it as news. A session at work reads it before its next model r
 
 ### Budget
 
-`agents.agent_token_budget` (env `SUROGATES_AGENTS_AGENT_TOKEN_BUDGET`) gives each agent the `agent` tool starts a budget of input and output tokens, its own sub-agents' included; 0, the default, sets none. A sub-agent's own agents get at most what it has left. Past its budget, the agent's turn ends at its next step (`session.complete` with reason `token_budget_exhausted`), and its parent is told: `status: budget` for a background agent, a note in the call's result for a foreground one. An agent that used its budget is not resumed by a message.
+`agents.agent_token_budget` (env `SUROGATES_AGENTS_AGENT_TOKEN_BUDGET`) gives each agent the `agent` tool starts a budget of input and output tokens, its own sub-agents' included; 0, the default, sets none. A sub-agent with a budget hands each agent it starts at most half of what it has left, less what its agents still running were handed, so parallel calls never share more than it has. Past its budget, the agent's turn ends at its next step (`session.complete` with reason `token_budget_exhausted`), and its parent is told: `status: budget` for a background agent, a note in the call's result for a foreground one. An agent that used its budget is not resumed by a message.
 
 ### Linking an episode for training
 
