@@ -20,7 +20,7 @@ from surogates.simulation import api, discord, store
 from surogates.simulation.ids import new_discord_bot_token, new_discord_id
 from tests.test_simulation_api import TOKEN
 from tests.test_simulation_models import rsf  # noqa: F401
-from tests.test_simulation_store import FakeVault, make_org, provision_into
+from tests.test_simulation_store import FakeVault, line, make_org, provision_into
 
 
 def test_only_a_simulation_token_reaches_the_world(monkeypatch):
@@ -117,7 +117,8 @@ async def test_discord_run(rsf, monkeypatch):  # noqa: F811
     try:
         await _until(lambda: asyncio.sleep(0, server.started))
         run = (await client.post("/internal/runs", json={
-            "org_id": str(org_id), "agent_id": "a1", "created_by": "u1", "person_name": "Ana",
+            "org_id": str(org_id), "agent_id": "a1", "created_by": "u1",
+            "batch_id": str(uuid.uuid4()), "people": [line("Ana")],
             "channel": "discord",
         })).json()
         org, person, app_id = {"org_id": str(org_id)}, run["people"][0], run["phone_number_id"]
@@ -185,7 +186,7 @@ async def test_an_ended_runs_gateway_closes_on_its_next_heartbeat(rsf):  # noqa:
     org_id = await make_org(rsf)
     vault = FakeVault()
     run = await store.create_run(rsf, vault, org_id=org_id, agent_id="a1", created_by="u1",
-                                 routing_config={}, person_name="Ana", provision=provision_into(rsf),
+                                 routing_config={}, people=[line("Ana")], provision=provision_into(rsf),
                                  channel="discord")
 
     class Socket:

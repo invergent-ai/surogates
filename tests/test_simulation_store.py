@@ -38,6 +38,12 @@ def provision_into(sf):
     return provision
 
 
+def line(name="Ana", **extra):
+    """One plan line: a customer the user plays by hand unless *extra* says otherwise."""
+    return {"name": name, "about": f"{name}, a customer", "test": "Gets an answer",
+            "autopilot": False, **extra}
+
+
 async def make_org(sf):
     org_id = uuid.uuid4()
     async with sf() as db:
@@ -50,7 +56,7 @@ async def make_run(sf, vault=None, routing_config=None):
     org_id = await make_org(sf)
     return await store.create_run(
         sf, vault or FakeVault(), org_id=org_id, agent_id="a1", created_by="u1",
-        routing_config=routing_config or {}, person_name="Ana", provision=provision_into(sf),
+        routing_config=routing_config or {}, people=[line("Ana")], provision=provision_into(sf),
     )
 
 
@@ -107,7 +113,7 @@ async def test_a_template_send_carries_its_definition(rsf):  # noqa: F811
     components = [{"type": "BODY", "text": "Bună {{1}}, ne vedem mâine."}]
     run = await store.create_run(
         rsf, FakeVault(), org_id=org_id, agent_id="a1", created_by="u1", routing_config={},
-        person_name="Ana", provision=provision_into(rsf),
+        people=[line("Ana")], provision=provision_into(rsf),
         templates=[{"name": "reminder", "language": "ro", "components": components}],
     )
     sent = {"type": "template", "template": {"name": "reminder", "language": {"code": "ro"}}}
@@ -140,7 +146,7 @@ async def test_finishing_a_run_closes_its_world(rsf, monkeypatch):  # noqa: F811
     for channel in ("discord", "voice"):
         runs[channel] = await store.create_run(
             rsf, vault, org_id=org_id, agent_id="a1", created_by="u1", routing_config={},
-            person_name="Ana", provision=provision_into(rsf), channel=channel,
+            people=[line("Ana")], provision=provision_into(rsf), channel=channel,
         )
     ended = await store.finish_run(state, runs["discord"].id)
     assert ended.status == "ended" and ended.ended_at is not None

@@ -33,7 +33,7 @@ from surogates.db.models import (
 from surogates.followup import store as followup_store
 from surogates.simulation import store
 from surogates.simulation.api import router
-from tests.test_simulation_store import FakeVault, make_org
+from tests.test_simulation_store import FakeVault, line, make_org
 from tests.test_simulation_sweep_live_pg import _provision
 
 URL = os.environ.get("SUROGATE_TEST_PG_URL")
@@ -60,7 +60,7 @@ async def _world(sf):
     """A running run with Ana, and a real person, both enrolled in post-op."""
     org_id = await make_org(sf)
     run = await store.create_run(sf, FakeVault(), org_id=org_id, agent_id="a1", created_by="u1",
-                                 routing_config={}, person_name="Ana", provision=_provision(sf))
+                                 routing_config={}, people=[line("Ana")], provision=_provision(sf))
     [ana] = await store.people(sf, run.id)
     real = User(org_id=org_id, email="real@x", display_name="Real", auth_provider="whatsapp",
                 external_id="40700000001")

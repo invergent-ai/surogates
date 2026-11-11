@@ -13,6 +13,7 @@ import respx
 from surogates.simulation import actor, store
 from tests.test_simulation_api import Settings, _client
 from tests.test_simulation_models import rsf  # noqa: F401
+from tests.test_simulation_store import line
 
 
 class _LLM:
@@ -25,8 +26,9 @@ async def test_ai_person_writes_waits_answers_and_hands_over(rsf, monkeypatch): 
     org_id, client = await _client(rsf)
     org = {"org_id": str(org_id)}
     r = await client.post("/internal/runs", json={
-        "org_id": str(org_id), "agent_id": "a1", "created_by": "u1", "person_name": "Ana",
-        "persona": "Ana, 60, back pain for a week, wants an appointment next week.",
+        "org_id": str(org_id), "agent_id": "a1", "created_by": "u1",
+        "batch_id": str(uuid4()), "people": [line("Ana", autopilot=True,
+                        about="Ana, 60, back pain for a week, wants an appointment next week.")],
     })
     assert r.status_code == 201
     run_json = r.json()
@@ -213,10 +215,12 @@ def test_a_form_is_filled_in_not_tapped():
 async def test_the_ai_only_writes_on_chat_channels(rsf):  # noqa: F811
     org_id, client = await _client(rsf)
     r = await client.post("/internal/runs", json={
-        "org_id": str(org_id), "agent_id": "a1", "created_by": "u1", "person_name": "Ana",
-        "persona": "Ana", "channel": "voice",
+        "org_id": str(org_id), "agent_id": "a1", "created_by": "u1",
+        "batch_id": str(uuid4()), "people": [line("Ana", autopilot=True)],
+        "channel": "voice",
     })
-    assert r.status_code == 422
+    assert r.json()["people"][0]["driver"] == "human"
+    assert not await store.ai_people(rsf)
 
 
 def test_a_sent_form_is_described_and_a_refusal_is_fed_back():
@@ -301,8 +305,9 @@ async def test_an_edited_placeholder_is_the_agents_answer(rsf):  # noqa: F811
     """Slack's "Thinking…" edited into the answer: the person's turn comes, not a timeout."""
     org_id, client = await _client(rsf)
     r = await client.post("/internal/runs", json={
-        "org_id": str(org_id), "agent_id": "a1", "created_by": "u1", "person_name": "Ana",
-        "persona": "Ana", "channel": "slack",
+        "org_id": str(org_id), "agent_id": "a1", "created_by": "u1",
+        "batch_id": str(uuid4()), "people": [line("Ana", autopilot=True)],
+        "channel": "slack",
     })
     import uuid
 

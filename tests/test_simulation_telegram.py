@@ -16,7 +16,7 @@ from surogates.channels.platforms.telegram import _bot_api_url
 from surogates.simulation import api, store, telegram
 from tests.test_simulation_api import TOKEN, Settings
 from tests.test_simulation_models import rsf  # noqa: F401
-from tests.test_simulation_store import FakeVault, make_org, provision_into
+from tests.test_simulation_store import FakeVault, line, make_org, provision_into
 
 
 def test_only_a_simulation_bot_reaches_the_world(monkeypatch):
@@ -47,7 +47,8 @@ async def _app(sf):
 async def test_telegram_run(rsf):  # noqa: F811
     org_id, vault, client = await _app(rsf)
     run = (await client.post("/internal/runs", json={
-        "org_id": str(org_id), "agent_id": "a1", "created_by": "u1", "person_name": "Ana",
+        "org_id": str(org_id), "agent_id": "a1", "created_by": "u1",
+        "batch_id": str(uuid.uuid4()), "people": [line("Ana")],
         "channel": "telegram",
     })).json()
     org = {"org_id": str(org_id)}

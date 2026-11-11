@@ -19,7 +19,7 @@ from surogates.voice.sessions import CallTarget, VoiceSessions
 from surogates.voice.worker import call_info, simulation_of
 from tests.test_simulation_api import TOKEN
 from tests.test_simulation_models import rsf  # noqa: F401
-from tests.test_simulation_store import FakeVault, make_org, provision_into
+from tests.test_simulation_store import FakeVault, line, make_org, provision_into
 
 
 class Settings:
@@ -54,7 +54,8 @@ async def test_voice_run_places_a_call_the_worker_reads_as_sip(rsf):  # noqa: F8
     client = httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://simulation",
                                headers={"Authorization": f"Bearer {TOKEN}"})
     run = (await client.post("/internal/runs", json={
-        "org_id": str(org_id), "agent_id": "a1", "created_by": "u1", "person_name": "Ana",
+        "org_id": str(org_id), "agent_id": "a1", "created_by": "u1",
+        "batch_id": str(uuid.uuid4()), "people": [line("Ana")],
         "channel": "voice",
     })).json()
     number, person, org = run["phone_number_id"], run["people"][0], {"org_id": str(org_id)}

@@ -13,7 +13,7 @@ from httpx import ASGITransport
 
 from surogates.simulation.api import router
 from tests.test_simulation_models import rsf  # noqa: F401
-from tests.test_simulation_store import FakeVault, make_org, provision_into
+from tests.test_simulation_store import FakeVault, line, make_org, provision_into
 
 TOKEN = "internal-token"
 
@@ -39,7 +39,8 @@ async def _client(sf):
 
 async def _start(client, org_id):
     r = await client.post("/internal/runs", json={
-        "org_id": str(org_id), "agent_id": "a1", "created_by": "u1", "person_name": "Ana",
+        "org_id": str(org_id), "agent_id": "a1", "created_by": "u1",
+        "batch_id": str(uuid.uuid4()), "people": [line("Ana")],
         "routing_config": {}, "flows": [{"id": "f1", "name": "intake", "json": {"screens": []}}],
     })
     assert r.status_code == 201
@@ -105,7 +106,7 @@ async def test_run_lifecycle(rsf):  # noqa: F811
     assert listed[0]["verdict"] == "mixed"
     assert listed[0]["changes"] == [{"title": "Never said when", "target": "skill", "name": "echipa",
                                      "applied_at": "2026-11-02T10:00:00+00:00"}]
-    assert listed[0]["persona"] is None and listed[0]["ended_at"] is None
+    assert listed[0]["ended_at"] is None
 
     ended = (await client.post(f"/internal/runs/{run['id']}/end", params=org)).json()
     assert ended["status"] == "ended"
@@ -142,3 +143,33 @@ async def test_channels_are_the_ones_this_deployment_runs(rsf):  # noqa: F811
 
     client._transport.app.state.settings.voice.livekit_api_key = "key"
     assert (await client.get("/internal/channels")).json()["channels"][-1] == "voice"
+
+
+@pytest.mark.asyncio
+async def test_a_run_starts_from_plan_lines(rsf):  # noqa: F811
+    from tests.test_simulation_store import line
+
+    org_id, client = await _client(rsf)
+    batch = str(uuid.uuid4())
+    start = {"org_id": str(org_id), "agent_id": "a1", "created_by": "u1", "batch_id": batch}
+    r = await client.post("/internal/runs", json={**start, "channel": "voice",
+                                                  "people": [line("Ana", autopilot=True)]})
+    assert r.status_code == 201
+    run = r.json()
+    [ana] = run["people"]
+    assert run["batch_id"] == batch and ana["driver"] == "human"
+    assert (ana["about"], ana["test"], ana["member_id"]) == ("Ana, a customer", "Gets an answer", None)
+    r = await client.put(f"/internal/runs/{run['id']}/people/{ana['id']}/driver",
+                         params={"org_id": str(org_id)}, json={"driver": "ai"})
+    assert r.status_code == 422
+
+    r = await client.post("/internal/runs", json={**start, "channel": "website",
+                                                  "people": [line("Bo", autopilot=True)]})
+    assert r.json()["people"][0]["driver"] == "human"
+
+    r = await client.post("/internal/runs", json={**start, "people": [
+        line("Ioana", member_id=str(uuid.uuid4()))]})
+    assert r.status_code == 422
+
+    r = await client.post("/internal/runs", json={**start, "people": []})
+    assert r.status_code == 422

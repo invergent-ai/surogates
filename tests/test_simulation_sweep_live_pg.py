@@ -36,7 +36,7 @@ from surogates.db.models import (
     User,
 )
 from surogates.simulation import store
-from tests.test_simulation_store import FakeVault, make_org, provision_into
+from tests.test_simulation_store import FakeVault, line, make_org, provision_into
 
 URL = os.environ.get("SUROGATE_TEST_PG_URL")
 pytestmark = [
@@ -74,7 +74,7 @@ def _provision(sf):
 
 async def _run(sf, vault, org_id, *, created, status="ended"):
     run = await store.create_run(sf, vault, org_id=org_id, agent_id="a1", created_by="u1",
-                                 routing_config={}, person_name="Ana", provision=_provision(sf))
+                                 routing_config={}, people=[line("Ana")], provision=_provision(sf))
     [person] = await store.people(sf, run.id)
     session_id = uuid.uuid4()
     async with sf() as db:

@@ -3,6 +3,7 @@ API's own cache, and the visitor's session lands in the run's memory."""
 
 from __future__ import annotations
 
+import uuid
 
 import httpx
 import pytest
@@ -18,7 +19,7 @@ from surogates.simulation.ids import is_simulation_id, is_simulation_website_key
 from tests.api.test_website_multi_session import _ORIGIN, _settings, _Storage, _Store
 from tests.test_simulation_api import TOKEN, Settings
 from tests.test_simulation_models import rsf  # noqa: F401
-from tests.test_simulation_store import FakeVault, make_org, provision_into
+from tests.test_simulation_store import FakeVault, line, make_org, provision_into
 
 
 def test_only_a_simulation_key_routes_from_the_runtime():
@@ -51,7 +52,7 @@ async def test_website_run(rsf):  # noqa: F811
                                headers={"Authorization": f"Bearer {TOKEN}"})
     run = (await client.post("/internal/runs", json={
         "org_id": str(org_id), "agent_id": "hero-agent", "created_by": "u1",
-        "person_name": "Ana", "channel": "website",
+        "batch_id": str(uuid.uuid4()), "people": [line("Ana")], "channel": "website",
         "routing_config": {"allowed_origins": [_ORIGIN]},
     })).json()
     key, person, org = run["phone_number_id"], run["people"][0], {"org_id": str(org_id)}

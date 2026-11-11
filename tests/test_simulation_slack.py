@@ -21,7 +21,7 @@ from surogates.simulation import api, slack, store
 from surogates.simulation.ids import new_slack_bot_token
 from tests.test_simulation_api import TOKEN, Settings
 from tests.test_simulation_models import rsf  # noqa: F401
-from tests.test_simulation_store import FakeVault, make_org, provision_into
+from tests.test_simulation_store import FakeVault, line, make_org, provision_into
 
 
 def test_only_a_simulation_token_reaches_the_world(monkeypatch):
@@ -51,7 +51,8 @@ async def test_slack_run(rsf):  # noqa: F811
     client = httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://simulation:8004",
                                headers={"Authorization": f"Bearer {TOKEN}"})
     run = (await client.post("/internal/runs", json={
-        "org_id": str(org_id), "agent_id": "a1", "created_by": "u1", "person_name": "Ana",
+        "org_id": str(org_id), "agent_id": "a1", "created_by": "u1",
+        "batch_id": str(uuid.uuid4()), "people": [line("Ana")],
         "channel": "slack",
     })).json()
     org, person, app_id = {"org_id": str(org_id)}, run["people"][0], run["phone_number_id"]

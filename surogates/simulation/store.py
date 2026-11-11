@@ -20,6 +20,7 @@ from surogates.channels.identity import ResolvedIdentity, get_or_create_channel_
 from surogates.channels.platforms.whatsapp_api import DEFAULT_API_VERSION
 from surogates.db.models import (
     Event,
+    FollowupEnrollmentRow,
     Mission,
     OutreachMessageRow,
     ScheduledSession,
@@ -85,18 +86,16 @@ Provision = Callable[..., Awaitable[ResolvedIdentity]]
 
 async def create_run(
     sf, vault, *, org_id: uuid.UUID, agent_id: str, created_by: str,
-    routing_config: dict[str, Any], person_name: str,
+    routing_config: dict[str, Any], people: list[dict[str, Any]],
     provision: Provision = get_or_create_channel_identity,
     templates: list[dict[str, Any]] | None = None,
     flows: list[dict[str, Any]] | None = None,
     channel: str = "whatsapp",
-    persona: str | None = None,
-    others: list[dict[str, str]] | None = None,
-    team_tasks: dict[str, str] | None = None,
+    batch_id: uuid.UUID | None = None,
     via: str | None = None,
 ) -> SimulationRun:
-    """A run with its first person, *others* (``{name, persona}``) beside them,
-    and on WhatsApp a stand-in for each team member, given their *team_tasks*."""
+    """A run with its plan's *people* (``{name, about, test, member_id?, autopilot?}``):
+    customers, and a stand-in for each team member a line names."""
     if channel == "telegram":
         account, token = new_bot_username(), new_bot_token()
     elif channel == "slack":
@@ -116,7 +115,7 @@ async def create_run(
         org_id=org_id, agent_id=agent_id, created_by=created_by, channel=channel,
         phone_number_id=account, access_token=token, app_secret=secrets.token_hex(16),
         routing_config=dict(routing_config or {}), templates=list(templates or []),
-        flows=list(flows or []), via=via,
+        flows=list(flows or []), via=via, batch_id=batch_id,
     )
     async with sf() as db:
         db.add(run)
@@ -140,43 +139,56 @@ async def create_run(
         }
     for name, value in creds.items():
         await vault.store(org_id, f"{channel}_{name}_{run.phone_number_id}", value)
-    await add_person(sf, run, name=person_name, provision=provision, persona=persona)
-    for other in others or []:
-        await add_person(sf, run, name=other["name"], provision=provision, persona=other["persona"])
+    for line in people:
+        if not line.get("member_id"):
+            await add_person(sf, run, name=line["name"], provision=provision, about=line.get("about"),
+                             test=line.get("test"), autopilot=bool(line.get("autopilot")))
     from surogates.simulation.team import add_team
 
-    await add_team(sf, run, provision, autopilot=persona is not None, tasks=team_tasks)
+    await add_team(sf, run, provision, members=[line for line in people if line.get("member_id")])
     return run
 
 
+def customer_persona(name: str, about: str | None, test: str | None) -> str:
+    """Who Autopilot plays for a customer line."""
+    return f"You are {name}. {about or ''} Stay in character; your aim in this chat: {test or about or ''}"
+
+
 async def add_person(sf, run: SimulationRun, *, name: str, provision: Provision,
-                     persona: str | None = None) -> SimulationPerson:
+                     about: str | None = None, test: str | None = None,
+                     autopilot: bool = False) -> SimulationPerson:
     if run.channel == "website":
         # A visitor is anonymous: the widget's own cookie names them, no user row.
-        person = SimulationPerson(run_id=run.id, name=name, channel=run.channel, address="visitor")
+        person = SimulationPerson(run_id=run.id, name=name, channel=run.channel, address="visitor",
+                                  about=about, test=test)
         async with sf() as db:
             db.add(person)
             await db.commit()
         return person
-    address = {"telegram": new_telegram_user_id, "slack": new_slack_user_id,
-               "teams": new_teams_user_id, "discord": new_discord_id,
-               "voice": new_voice_number}.get(
-        run.channel, new_wa_id)()
+    address = new_address(run.channel)
     # The same call the inbound pipeline makes for an unknown sender: the
     # pipeline then finds this identity, already marked as the run's.
     identity = await provision(
         sf, platform=run.channel, platform_user_id=address, org_id=run.org_id, display_name=name,
     )
     person = SimulationPerson(run_id=run.id, name=name, channel=run.channel, address=address,
-                             user_id=identity.user_id, persona=persona,
-                             driver="ai" if persona else "human",
-                             ai_state="talking" if persona else None)
+                              user_id=identity.user_id, about=about, test=test,
+                              persona=customer_persona(name, about, test),
+                              driver="ai" if autopilot else "human",
+                              ai_state="talking" if autopilot else None)
     async with sf() as db:
         await db.execute(sa.update(User).where(User.id == identity.user_id)
                          .values(simulation_run_id=run.id))
         db.add(person)
         await db.commit()
     return person
+
+
+def new_address(channel: str) -> str:
+    """A fresh person's address on *channel*."""
+    return {"telegram": new_telegram_user_id, "slack": new_slack_user_id,
+            "teams": new_teams_user_id, "discord": new_discord_id,
+            "voice": new_voice_number}.get(channel, new_wa_id)()
 
 
 async def ai_people(sf) -> Sequence[tuple[SimulationRun, SimulationPerson]]:
@@ -230,6 +242,20 @@ async def list_runs(sf, *, org_id: uuid.UUID, agent_id: str) -> Sequence[Simulat
             .order_by(SimulationRun.created_at.desc())
             .limit(50)
         )).scalars().all()
+
+
+async def enrolled(sf, run: SimulationRun, user_ids: Sequence[uuid.UUID]) -> set[uuid.UUID]:
+    """Which of *user_ids* the run's agent follows in a program right now."""
+    if not user_ids:
+        return set()
+    async with sf() as db:
+        return set((await db.scalars(
+            sa.select(FollowupEnrollmentRow.user_id)
+            .where(FollowupEnrollmentRow.org_id == run.org_id,
+                   FollowupEnrollmentRow.agent_id == run.agent_id,
+                   FollowupEnrollmentRow.status == "active",
+                   FollowupEnrollmentRow.user_id.in_(user_ids))
+        )).all())
 
 
 async def message_counts(sf, run_ids: Sequence[uuid.UUID]) -> dict[uuid.UUID, int]:
