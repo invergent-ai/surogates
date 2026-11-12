@@ -9,6 +9,8 @@ import re
 import unicodedata
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, unquote, urlparse
+from uuid import uuid4
 
 import httpx
 
@@ -16,6 +18,69 @@ import httpx
 # Playwright snippet below, the computer as its snapshot@1 (surogates.devices.browser),
 # so a ref means the same in both.
 SNAPSHOT_COLLECTOR = (Path(__file__).parent / "observe" / "snapshot.js").read_text(encoding="utf-8").strip()
+
+
+# Files a page is given are downloaded here, inside the browser's own container.
+_UPLOAD_DIR = "/tmp/surogates-uploads"
+_UPLOAD_MAX_BYTES = 2 * 1024**3
+_UPLOAD_SECONDS = 900
+
+# A page that opens a file picker gets no desktop dialog: Playwright holds the picker for the
+# next upload to answer. Armed once per page, on every navigation.
+_ARM_FILE_PICKER = (
+    "if (!page.__sgPickerArmed) { page.__sgPickerArmed = true;"
+    " page.on('filechooser', (fc) => { page.__sgPicker = fc; }); }\n"
+)
+
+_SET_FILES_SCRIPT = _ARM_FILE_PICKER + """
+const paths = __PATHS__;
+const picker = page.__sgPicker;
+page.__sgPicker = null;
+let target = picker ? picker.element() : null, to = "the file picker the page opened";
+if (!target) {
+  const inputs = [];
+  for (const f of page.frames()) {
+    try { inputs.push(...(await f.$$('input[type=file]'))); } catch (e) {}
+  }
+  if (!inputs.length) return {error: "no_file_input"};
+  target = inputs[inputs.length - 1];
+  to = "the page's file input";
+}
+// Playwright will not hand a browser it calls remote more than 50 MB, though the files are on the
+// browser's own disk: the DevTools protocol gives it their paths, and the browser reads them itself.
+const mark = "sg" + Math.random().toString(36).slice(2);
+await target.evaluate((e, m) => e.setAttribute("data-sg-upload", m), mark);
+const cdp = await page.context().newCDPSession(page);
+try {
+  const doc = await cdp.send("DOM.getDocument", {depth: -1, pierce: true});
+  let id = null;
+  (function walk(n) {
+    if (!n || id) return;
+    const a = n.attributes || [];
+    for (let i = 0; i < a.length; i += 2) if (a[i] === "data-sg-upload" && a[i + 1] === mark) id = n.backendNodeId;
+    for (const c of n.children || []) walk(c);
+    for (const r of n.shadowRoots || []) walk(r);
+    if (n.contentDocument) walk(n.contentDocument);
+  })(doc.root);
+  if (!id) return {error: "no_file_input"};
+  await cdp.send("DOM.setFileInputFiles", {files: paths, backendNodeId: id});
+} finally {
+  cdp.detach().catch(() => null);
+  await target.evaluate((e) => e.removeAttribute("data-sg-upload")).catch(() => null);
+}
+return {files: paths.length, to};
+"""
+
+
+def _upload_name(url: str, at: int) -> str:
+    """A safe file name for *url*: its ?name=, else its last path part, else file-<n>.
+
+    Pages judge a file by its extension, and a storage link often ends in a bare id.
+    """
+    parts = urlparse(url)
+    name = (parse_qs(parts.query).get("name") or [""])[0] or parts.path.rsplit("/", 1)[-1]
+    name = re.sub(r"[^A-Za-z0-9._-]", "_", unquote(name))[-120:].lstrip(".")
+    return name or f"file-{at + 1}"
 
 
 class ClickTimeoutError(RuntimeError):
@@ -450,12 +515,56 @@ return {
     async def navigate(self, url: str, *, wait_until: str = "load") -> dict[str, Any]:
         """Navigate to a URL and return the final URL and title."""
 
-        code = (
+        code = _ARM_FILE_PICKER + (
             "await page.goto({url!r}, {{waitUntil: {wait_until!r}}});\n"
             "return {{ url: page.url(), title: await page.title() }};"
         ).format(url=url, wait_until=wait_until)
         result = await self._playwright_execute(code)
         self._invalidate_snapshot_cache()
+        return result
+
+    async def set_input_files_from_urls(self, urls: list[str]) -> dict[str, Any]:
+        """Download each of *urls* inside the browser's own machine, then give them to the page.
+
+        The bytes go from the link straight to the browser's disk, never through the worker,
+        so a video of a gigabyte costs the worker nothing. The files go to the file picker the
+        page last opened, else to the page's last file input.
+        """
+        paths = []
+        for at, url in enumerate(urls):
+            # Its own folder, so the page sees the file's own name.
+            folder = f"{_UPLOAD_DIR}/{uuid4().hex[:12]}"
+            dest = f"{folder}/{_upload_name(url, at)}"
+            # The browser runs as its own user: the folder and the file must be readable by it.
+            response = await self._http.post(
+                "/process/exec",
+                json={
+                    "command": "sh",
+                    "args": [
+                        "-c",
+                        'mkdir -p -m 1777 "$1" && curl -fsSL --proto =http,https --max-time "$4" '
+                        '--max-filesize "$5" -o "$2" "$3" && chmod 0644 "$2"',
+                        "sh", folder, dest, url, str(_UPLOAD_SECONDS), str(_UPLOAD_MAX_BYTES),
+                    ],
+                    "timeout_sec": _UPLOAD_SECONDS + 30,
+                },
+                timeout=httpx.Timeout(connect=5.0, read=_UPLOAD_SECONDS + 60, write=10.0, pool=5.0),
+            )
+            response.raise_for_status()
+            body = response.json()
+            if body.get("exit_code") != 0:
+                why = base64.b64decode(body.get("stderr_b64") or b"").decode(errors="replace").strip()
+                raise RuntimeError(f"Could not download {url}: {why[:300] or 'curl exit ' + str(body.get('exit_code'))}")
+            paths.append(dest)
+        result = await self._playwright_execute(
+            _SET_FILES_SCRIPT.replace("__PATHS__", json.dumps(paths)), timeout_sec=120,
+        )
+        self._invalidate_snapshot_cache()
+        if not isinstance(result, dict) or result.get("error"):
+            raise RuntimeError(
+                "The page has no file input and opened no file picker. Open the page's upload "
+                "control (its media or attach button) first, then call this again."
+            )
         return result
 
     async def evaluate(self, code: str) -> Any:

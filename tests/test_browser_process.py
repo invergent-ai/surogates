@@ -101,6 +101,8 @@ class TestProvision:
         assert "31000:9222" in joined
         assert "32000:8080" in joined
         assert "surogates.session_id=" in joined
+        # A page the agent opens on a local server reaches it as the sandbox does.
+        assert "--add-host host.docker.internal:host-gateway" in joined
         assert run_call[-1] == "kernel-test:1"
 
     async def test_provision_retries_next_port_when_port_is_allocated(
