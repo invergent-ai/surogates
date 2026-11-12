@@ -832,8 +832,11 @@ def _probe_bwrap(rg: str) -> bool:
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10,
                 ).returncode == 0
             except subprocess.TimeoutExpired:
-                logger.warning("bubblewrap did not answer in time: this search is not confined, the next one asks again")
-                return False
+                # A slow box, most likely: this search is confined anyway (a
+                # bubblewrap that cannot run makes it fail, never run
+                # unconfined), and the next search asks again.
+                logger.warning("bubblewrap did not answer the probe in time: confining this search anyway")
+                return True
             except OSError:
                 _bwrap_works = False
         if not _bwrap_works:

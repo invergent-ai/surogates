@@ -204,9 +204,22 @@ async def test_a_fifo_or_a_folder_under_a_files_name_is_not_waited_on(places):
     os.mkfifo(ws / "a" / "b" / "pipe.pdf")
     wio = LocalWorkspaceIO(str(ws))
     key = await wio.resolve("a/b/pipe.pdf")
-    # In a thread, so a blocking open would fail the test by its timeout instead of hanging it.
-    with pytest.raises(OSError, match="Not a regular file"):
-        await asyncio.wait_for(asyncio.to_thread(lambda: asyncio.run(wio.read(key))), 5)
+    # In a daemon thread, so a blocking open would fail the test by its timeout instead of hanging it.
+    import threading
+
+    result: dict[str, BaseException] = {}
+
+    def read() -> None:
+        try:
+            asyncio.run(wio.read(key))
+        except BaseException as exc:  # noqa: BLE001 -- what the read raised is the result
+            result["error"] = exc
+
+    reader = threading.Thread(target=read, daemon=True)
+    reader.start()
+    reader.join(5)
+    assert not reader.is_alive(), "the read waited on the FIFO"
+    assert isinstance(result.get("error"), OSError) and "Not a regular file" in str(result["error"])
     with pytest.raises(OSError):
         async with wio.local_file(await wio.resolve("a/b/pipe.pdf")):
             pass
@@ -217,7 +230,6 @@ async def test_a_fifo_or_a_folder_under_a_files_name_is_not_waited_on(places):
 
 async def test_every_first_search_waits_for_the_one_bubblewrap_answer(monkeypatch):
     """Searches that start while bubblewrap is being asked are confined too: none runs unconfined meanwhile."""
-    import threading
     import time
 
     calls = []
@@ -235,7 +247,6 @@ async def test_every_first_search_waits_for_the_one_bubblewrap_answer(monkeypatc
     monkeypatch.setattr(local_module.subprocess, "run", run)
     answers = await asyncio.gather(*(local_module._bwrap_can_confine("/usr/bin/rg") for _ in range(4)))
     assert answers == [True] * 4 and calls == [1]
-    assert threading.active_count() >= 1
 
 
 async def test_a_bubblewrap_that_does_not_answer_is_asked_again(monkeypatch):
@@ -247,5 +258,6 @@ async def test_a_bubblewrap_that_does_not_answer_is_asked_again(monkeypatch):
     monkeypatch.setattr(local_module, "_BWRAP", "/usr/bin/bwrap")
     monkeypatch.setattr(local_module, "_bwrap_works", None)
     monkeypatch.setattr(local_module.subprocess, "run", slow)
-    assert not await local_module._bwrap_can_confine("/usr/bin/rg")
+    # This search is confined anyway (a bubblewrap that cannot run fails it); the next one asks again.
+    assert await local_module._bwrap_can_confine("/usr/bin/rg")
     assert local_module._bwrap_works is None
