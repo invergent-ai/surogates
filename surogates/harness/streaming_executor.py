@@ -68,6 +68,7 @@ logger = logging.getLogger(__name__)
 # truth for all tool execution policy).  Import here for use by the executor.
 from surogates.harness.sanitize import (  # noqa: E402 — after TYPE_CHECKING block
     cap_delegate_calls,
+    delegate_cap,
     deduplicate_tool_calls,
 )
 from surogates.harness.tool_exec import (  # noqa: E402 — after TYPE_CHECKING block
@@ -236,7 +237,7 @@ class StreamingToolExecutor:
         # stream ends -- here, before anything starts.  A duplicate or an
         # over-cap delegate that was already dispatched cannot be undone.
         batch =[t.tool_call for t in self._tracked] + [tool_call]
-        if len(cap_delegate_calls(deduplicate_tool_calls(batch))) == len(self._tracked):
+        if len(cap_delegate_calls(deduplicate_tool_calls(batch), delegate_cap(self._session.config))) == len(self._tracked):
             return
 
         fn = tool_call.get("function", {})

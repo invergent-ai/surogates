@@ -8,9 +8,16 @@ project's own, as before.
 
 from __future__ import annotations
 
-from uuid import UUID
+import json
+from types import SimpleNamespace
+from uuid import UUID, uuid4
 
 import pytest
+
+import surogates.harness.loop as loop_module
+from surogates.tools.registry import ToolRegistry
+from surogates.tools.runtime import ToolRuntime
+from tests.test_steer_loop import _final_response, _make_loop_harness
 
 from surogates.db.models import WorkstreamThread
 from surogates.session.events import EventType
@@ -114,12 +121,13 @@ async def test_a_masters_thread_takes_no_fork_type_or_name(api):
 async def test_propose_and_resolve_are_refused_outside_a_project(api):
     chat_id = UUID((await api.client.post("/v1/sessions", json={}, headers=api.auth())).json()["id"])
     chat = await api.app.state.session_store.get_session(chat_id)
-    for name, arguments in (
-        ("agent", {"description": "A", "prompt": "Do A.", "propose": True, "where": "cloud"}),
-        ("stop_agent", {"agent_id": "a1", "resolve": True}),
+    for name, arguments, instead in (
+        ("agent", {"description": "A", "prompt": "Do A.", "propose": True, "where": "cloud"},
+         "leave out propose and where to start a sub-agent"),
+        ("stop_agent", {"agent_id": "a1", "resolve": True}, "leave out resolve to stop an agent"),
     ):
         refused = await call_tool(api, chat, name, **arguments)
-        assert "only a project's master" in refused["error"], (name, refused)
+        assert "only a project's master" in refused["error"] and instead in refused["error"], (name, refused)
 
 
 async def test_a_master_reaches_a_thread_started_before_this_change(api):
@@ -159,3 +167,49 @@ async def test_a_masters_schemas_have_propose_and_resolve_and_a_chats_do_not():
     chat = properties({})
     assert {"propose", "where"} <= master["agent"] and "resolve" in master["stop_agent"]
     assert not {"propose", "where"} & chat["agent"] and "resolve" not in chat["stop_agent"]
+
+
+async def one_response(api, monkeypatch, session, calls: list[tuple[str, dict]], *, streamed: bool) -> None:
+    """One turn of *session* whose model makes all of *calls* in one response, then answers."""
+    registry = ToolRegistry()
+    ToolRuntime(registry).register_builtins()
+    state = api.app.state
+    harness = _make_loop_harness(session_store=state.session_store)
+    harness._tools = registry
+    harness._tenant = SimpleNamespace(org_id=session.org_id, user_id=session.user_id, asset_root="/tmp/test")
+    harness._streaming_enabled = streamed
+    harness._redis, harness._storage, harness._session_factory = state.redis, state.storage, state.session_factory
+    tool_calls = [
+        {"id": f"call_{i}", "type": "function", "function": {"name": name, "arguments": json.dumps(args)}}
+        for i, (name, args) in enumerate(calls)
+    ]
+    responses = iter([
+        ({"role": "assistant", "content": "", "tool_calls": tool_calls},
+         {"model": "test-model", "finish_reason": "tool_calls", "input_tokens": 1, "output_tokens": 1}),
+        _final_response("Proposed them."),
+    ])
+
+    async def llm(**kwargs):
+        message, usage = next(responses)
+        if message.get("tool_calls") and kwargs.get("on_tool_call_complete") is not None:
+            for call in message["tool_calls"]:
+                kwargs["on_tool_call_complete"](call)
+        return message, usage
+
+    monkeypatch.setattr(loop_module, "call_llm_with_retry", llm)
+    await harness._run_loop(
+        session, [{"role": "user", "content": "Plan the report"}], "system", SimpleNamespace(lease_token=uuid4()),
+        all_events=[],
+    )
+
+
+@pytest.mark.parametrize("streamed", [False, True], ids=["sequential", "streamed"])
+async def test_a_master_proposes_more_than_five_threads_in_one_response(api, monkeypatch, streamed):
+    # Each thread is one agent call: the cap on a response's agent calls is no master's.
+    master = await master_of(api, await create(api))
+    cards = [
+        ("agent", {"description": f"Draft part {n}", "prompt": f"Draft part {n}.", "propose": True, "where": "cloud"})
+        for n in range(7)
+    ]
+    await one_response(api, monkeypatch, master, cards, streamed=streamed)
+    assert len(await events_of(api, master.id, EventType.THREAD_PROPOSED)) == 7

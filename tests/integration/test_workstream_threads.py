@@ -200,7 +200,7 @@ async def test_only_a_master_starts_threads(api):
     chat = await api.client.post("/v1/sessions", json={}, headers=api.auth())
     session = await api.app.state.session_store.get_session(UUID(chat.json()["id"]))
     result = await call_tool(api, session, "agent", description="Draft A", prompt="Draft A.", propose=True, where="cloud")
-    assert result == {"error": "only a project's master starts, proposes and resolves threads"}
+    assert result == {"error": "only a project's master proposes threads: leave out propose and where to start a sub-agent"}
 
 
 async def test_archiving_a_project_archives_its_threads(api):
@@ -1885,7 +1885,7 @@ async def test_a_report_lists_at_most_twenty_files(api):
     # A thread proposes no threads, to a call that is well formed.
     (
         "agent", {"description": "Draft B", "prompt": "Draft the B memo.", "propose": True, "where": "cloud"},
-        "only a project's master starts, proposes and resolves threads",
+        "only a project's master proposes threads: leave out propose and where to start a sub-agent",
     ),
 ], ids=["cron_create", "propose"])
 async def test_a_thread_cannot_start_a_session_by_any_tool(api, tool, arguments, answer):

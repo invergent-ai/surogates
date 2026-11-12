@@ -87,3 +87,20 @@ async def test_a_session_whose_agents_run_lists_and_stops_them_under_a_policy_th
     assert [a["agent_id"] for a in json.loads(await tool_result(chats, chat, "call_list"))["agents"]] == [str(child.id)]
     assert json.loads(await tool_result(chats, chat, "call_stop"))["status"] == "stopped"
     assert "error" in json.loads(await tool_result(chats, chat, "call_more"))
+
+
+async def test_a_routine_run_is_offered_no_monitor_and_starts_no_background_agent(chats):  # noqa: F811
+    from uuid import uuid4
+
+    run = await a_chat(chats, {"scheduled_session_id": str(uuid4())})
+    chats.replies = [
+        calling("agent", "call_bg", description="Count rows", prompt="Count them.", run_in_background=True),
+        _final_response("Done."),
+    ]
+    # A run's prompt is written by the scheduler; its chat takes no typed message.
+    await chats.store.emit_event(run, EventType.USER_MESSAGE, {"content": "Count the rows."})
+    await chats.wake(run)
+    offered = set(chats.offered[-1])
+    assert "agent" in offered and "monitor" not in offered
+    refused = json.loads(await tool_result(chats, run, "call_bg"))
+    assert "foreground" in refused["error"], refused

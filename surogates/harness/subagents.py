@@ -144,11 +144,22 @@ def parent_only(config: dict | None, *, kept_only: bool = False) -> bool:
     return kept_only or (bool(allowed) and "send_message" not in allowed)
 
 
+def reports_elsewhere(session: Any) -> bool:
+    """Whether *session*'s end is reported somewhere other than to a person in it: a session with a parent to
+    its parent, a Keel case's step or work item to Keel, a routine's run where the routine says.  Work it left
+    running past its turn, an agent in the background or a monitor, would end after that report and wake a
+    turn that is no step's, no item's, or announce a second time: such a session's agents run in the
+    foreground, and it runs no monitor."""
+    from surogates.keel.steps import is_case_work
+    from surogates.session.execution_context import is_scheduled_run
+
+    return getattr(session, "parent_id", None) is not None or is_case_work(session) or is_scheduled_run(session)
+
+
 def monitor_allowed(config: dict | None) -> bool:
     """Whether a session with *config* may run monitors: not a sub-agent, whose work ends with its report,
     and not a project's thread or one under it, whose sandbox ends with its turn.  Either would be woken by
-    lines after its end.  Only a root session may (no ``parent_id``): every other session's end is someone's
-    news, a helper's, a worker's or a routine run's; the callers check that, from the session."""
+    lines after its end.  The callers also check the session itself (``reports_elsewhere``)."""
     from surogates.workstreams import under_a_thread
 
     config = config or {}

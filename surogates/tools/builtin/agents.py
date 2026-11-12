@@ -269,7 +269,7 @@ async def _monitor_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
     """Start *command* where the session's commands run, with its lines kept, and hand it to the worker's watch."""
     from surogates.devices.binding import device_of
     from surogates.harness.background_watch import MAX_MONITORS_PER_SESSION, background_watch
-    from surogates.harness.subagents import monitor_allowed
+    from surogates.harness.subagents import monitor_allowed, reports_elsewhere
 
     session_store = kwargs.get("session_store")
     me_id = kwargs.get("session_id")
@@ -284,7 +284,7 @@ async def _monitor_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
     me = await session_store.get_session(UUID(str(me_id)))
     if device_of(me.config) is not None:
         return _error("monitor runs in a cloud sandbox only; on your computer, use terminal with background=true")
-    if me.parent_id is not None or not monitor_allowed(me.config):
+    if reports_elsewhere(me) or not monitor_allowed(me.config):
         # A sub-agent's work ends with its report, and a thread's sandbox with its turn: neither outlives a monitor.
         return _error("monitor is for the main session; here, use terminal and wait for the command")
     if not background_watch.configured:
@@ -508,7 +508,7 @@ async def _stop_agent_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
         given = {"thread_id": target, **({"reason": arguments["reason"]} if arguments.get("reason") else {})}
         return json.dumps(_thread_answer(await threads._stop_thread_handler(given, **kwargs)))
     if arguments.get("resolve") is not None:
-        return _error(_NOT_A_MASTER)
+        return _error(_NOT_A_MASTER_RESOLVES)
     try:
         target_id = UUID(target)
     except ValueError:
@@ -849,7 +849,9 @@ THREAD_STARTED_NOTE = (
     "work yourself."
 )
 #: What a project-only argument answers outside a project's master.
-_NOT_A_MASTER = "only a project's master starts, proposes and resolves threads"
+#: What a session that is no project's master is told of a thread's arguments, and what to do instead.
+_NOT_A_MASTER_PROPOSES = "only a project's master proposes threads: leave out propose and where to start a sub-agent"
+_NOT_A_MASTER_RESOLVES = "only a project's master resolves threads: leave out resolve to stop an agent"
 
 
 def _thread_answer(raw: str) -> dict:
@@ -907,7 +909,7 @@ async def _agent_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
         # A project's master gives out threads.
         return await _master_agent(arguments, **kwargs)
     if arguments.get("propose") is not None or arguments.get("where") is not None:
-        return _error(_NOT_A_MASTER)
+        return _error(_NOT_A_MASTER_PROPOSES)
 
     prompt = str(arguments.get("prompt") or "").strip()
     if not prompt:
@@ -922,10 +924,13 @@ async def _agent_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
         return _error(_BAD_NAME)
 
     parent_config = parent.config or {}
-    # Omitted, an agent runs in the background for a main session; any other session reports its end to its
-    # parent once, so work it left running would end after that report: its agents wait.
+    # Omitted, an agent runs in the background for a main session; a session that reports its end elsewhere
+    # (to its parent, to Keel, where its routine says) would hear of it only after that report: its agents wait.
+    from surogates.harness.subagents import reports_elsewhere
+
     implicit = not isinstance(asked, bool)
-    background = asked is True or (implicit and parent.parent_id is None)
+    waits = reports_elsewhere(parent)
+    background = asked is True or (implicit and not waits)
     depth = int(parent_config.get("delegation_depth") or 0)
     if depth >= delegate._MAX_DELEGATION_DEPTH:
         return _error(
@@ -937,6 +942,12 @@ async def _agent_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
     if background and getattr(parent, "channel", None) == "delegation":
         # A helper's parent hears of its end once: work it left running would end after that.
         return _error("a sub-agent cannot start agents in the background: start it in the foreground")
+    if background and parent.parent_id is None and waits:
+        # A case's step or work item reports to Keel, a routine's run where the routine says, as its turn ends.
+        return _error(
+            "this session reports its work when its turn ends, so it cannot start agents in the background: "
+            "start it in the foreground"
+        )
     # Its token budget: the deployment's, or its parent's key.  A sub-agent with a budget hands each agent it
     # starts at most half of what it has left, less what its agents still running were handed: the calls of
     # one response run at once, and it needs tokens of its own to read their reports.

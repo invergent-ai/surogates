@@ -357,11 +357,9 @@ def _filter_effective_tools(
     # last (``AgentHarness._tool_filter_for_session_impl``).
     # Then the sub-agent family's companions, where ``agent`` is offered, as the harness offers the schemas
     # (``AgentHarness._tool_filter_for_session_impl``).
-    from surogates.harness.subagents import offer_family
+    from surogates.harness.subagents import offer_family, reports_elsewhere
 
-    return offer_family(
-        gate_case_tools(result, session), session.config, root=getattr(session, "parent_id", None) is None,
-    )
+    return offer_family(gate_case_tools(result, session), session.config, root=not reports_elsewhere(session))
 
 
 _warned_missing_model_metadata: set[str] = set()

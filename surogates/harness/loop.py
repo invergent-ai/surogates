@@ -92,6 +92,7 @@ from surogates.harness.resilience import (
 )
 from surogates.harness.sanitize import (
     cap_delegate_calls,
+    delegate_cap,
     deduplicate_tool_calls,
 )
 from surogates.harness.slash_skill import (
@@ -301,6 +302,7 @@ from surogates.harness.subagents import (
     budget_of,
     offer_family,
     over_budget,
+    reports_elsewhere,
     runs_in_background,
 )
 from surogates.harness.loop_tool_recovery import (
@@ -4381,7 +4383,7 @@ class AgentHarness(
             # streaming executor already applied both rules on add, so the
             # persisted message matches what executes on either path.
             tool_calls_raw = deduplicate_tool_calls(tool_calls_raw)
-            tool_calls_raw = cap_delegate_calls(tool_calls_raw)
+            tool_calls_raw = cap_delegate_calls(tool_calls_raw, delegate_cap(session.config))
             # A garbled name the model gave an unoffered call must not reach
             # the history: the server would refuse every later request.
             tool_calls_raw = neutralize_unsendable_tool_names(tool_calls_raw, offered_tools)
@@ -6069,7 +6071,7 @@ class AgentHarness(
         # sessions keep only the case's tools, and only its step's own
         # session gets the step tools, which every other session loses.
         # Then the sub-agent family's companions, where ``agent`` is offered.
-        return offer_family(gate_case_tools(tool_filter, session), config, root=session.parent_id is None)
+        return offer_family(gate_case_tools(tool_filter, session), config, root=not reports_elsewhere(session))
 
     @staticmethod
     def _dynamic_loop_wait_succeeded(

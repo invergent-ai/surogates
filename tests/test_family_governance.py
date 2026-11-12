@@ -75,3 +75,14 @@ def test_an_agent_definition_naming_an_unknown_tool_is_warned_about_once(caplog)
     assert len(warned) == 2
     assert any("delegate_task" in w and "old-reader" in w for w in warned)
     assert any("spawn_worker" in w for w in warned)
+
+
+def test_an_approval_rule_still_holds_for_a_kept_tool():
+    # Kept means a deny or an allow-list cannot take it away, as the protected tools were kept; an approval
+    # rule on it still asks first.
+    kept = gate(GovernanceGate(require_approval={"agent", "send_message"}), MASTER)
+    decision = kept.check("agent", {})
+    assert (decision.allowed, decision.overridable) == (False, True)
+    assert kept.offers("agent") and not kept.runs_unasked("agent")
+    # Denied by the policy, a kept tool runs with the floor's checks only.
+    assert gate(GovernanceGate(denied_tools={"agent"}), MASTER).check("agent", {}).allowed

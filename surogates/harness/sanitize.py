@@ -263,11 +263,23 @@ _DELEGATION_TOOL_NAMES: frozenset[str] = frozenset({
 })
 
 
+def delegate_cap(config: dict | None) -> int | None:
+    """The most ``agent`` calls a response of a session with *config* keeps; None for no cap.
+
+    A project's master has none: each of its ``agent`` calls starts or
+    proposes one thread, which runs on its own rather than as a child the
+    master waits on, and a user's plan can have more than five.
+    """
+    from surogates.workstreams import is_project_master
+
+    return None if is_project_master(config) else _MAX_DELEGATE_CALLS
+
+
 def cap_delegate_calls(
     tool_calls: list[dict],
-    max_delegates: int = _MAX_DELEGATE_CALLS,
+    max_delegates: int | None = _MAX_DELEGATE_CALLS,
 ) -> list[dict]:
-    """Cap the number of delegation calls in a single turn.
+    """Cap the number of delegation calls in a single turn (None: no cap).
 
     Limits ``agent`` calls to prevent
     unbounded fan-out.  Preserves all non-delegation calls.
@@ -281,7 +293,7 @@ def cap_delegate_calls(
         else:
             others.append(tc)
 
-    if len(delegates) > max_delegates:
+    if max_delegates is not None and len(delegates) > max_delegates:
         logger.warning(
             "Capping delegation calls from %d to %d",
             len(delegates), max_delegates,

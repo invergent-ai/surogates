@@ -697,9 +697,11 @@ def _strictest_egress_default(base: str | None, profile: str | None) -> str:
 
 class KeptFamilyGate:
     """An agent's policy (*inner*) as one session gets it: the family's tools in
-    *kept* (``subagents.kept_whatever_policy``) are offered and allowed whatever
-    the policy says, and meet only the platform floor's checks.  Everything else
-    is *inner*'s."""
+    *kept* (``subagents.kept_whatever_policy``) are offered whatever the policy
+    says.  A kept tool the policy would refuse (denied, or left off an
+    allow-list) meets only the platform floor's checks; one the policy offers
+    meets the policy's, so an approval rule on it still asks first.  Everything
+    else is *inner*'s."""
 
     def __init__(self, inner: GovernanceGate, kept: frozenset[str]) -> None:
         self._inner = inner
@@ -712,10 +714,10 @@ class KeptFamilyGate:
         return tool_name in self._kept or self._inner.offers(tool_name)
 
     def runs_unasked(self, tool_name: str) -> bool:
-        return tool_name in self._kept or self._inner.runs_unasked(tool_name)
+        return self.kept_only(tool_name) or self._inner.runs_unasked(tool_name)
 
     def check(self, tool_name: str, arguments: dict[str, Any] | None = None, **kwargs: Any) -> PolicyDecision:
-        if tool_name in self._kept:
+        if self.kept_only(tool_name):
             from surogates.runtime.governance import floor_gate
 
             return floor_gate().check(tool_name, arguments, **kwargs)
