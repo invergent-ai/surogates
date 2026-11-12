@@ -18,6 +18,7 @@ from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +28,7 @@ _CACHE_DISABLED_ENV = "READ_IMAGE_CACHE_DISABLED"
 
 
 class _ImageCache:
-    """In-memory LRU.  Worker-process scoped."""
+    """In-memory LRU.  Worker-process scoped: every key names its session (see :func:`_build_key`)."""
 
     def __init__(
         self,
@@ -64,25 +65,64 @@ class _ImageCache:
 _CACHE = _ImageCache()
 
 
-def _build_key(path: str, kwargs: dict[str, Any]) -> tuple | None:
-    """Build a cache key for ``path``.
+async def _build_key(path: str, kwargs: dict[str, Any]) -> tuple | None:
+    """The cache key of *path* as this session's ``vision_analyze`` would read it, or ``None``.
 
-    Local workspaces key on ``(abs_path, mtime_ns, size)``; storage-backed
-    workspaces fall back to ``(session_id, workspace_key)`` so multiple
-    reads of the same uploaded image within a session share an entry.
-    Returns ``None`` if neither shape is reachable (the cache is then
-    bypassed).
+    The key names the session, the image's place in its workspace and this
+    version of the image, so a session never gets another session's analysis
+    and a changed image is analyzed anew, whether the path given was relative
+    or absolute.  The path is checked first, as ``vision_analyze`` checks it:
+    nothing is stat'ed, resolved or looked up in the cache for a path it
+    refuses, and such a path has no key (``vision_analyze`` then refuses it).
+
+    ``None`` too, so the cache is bypassed, without a session, for a read
+    through a ``workspace_io``, for a URL (no version to key on), for a
+    thread's copy of the workspace, and wherever the image cannot be stat'ed.
     """
-    if os.path.exists(path):
-        try:
-            st = os.stat(path)
-            return ("local", os.path.realpath(path), st.st_mtime_ns, st.st_size)
-        except OSError:
-            return None
     session_id = kwargs.get("session_id")
-    if session_id is not None:
-        return ("storage", session_id, path)
-    return None
+    if session_id is None or kwargs.get("workspace_io") is not None:
+        return None
+    if path.startswith("data:") or urlparse(path).scheme in {"http", "https"}:
+        return None
+
+    # Lazy, as file_ops below: these pull in the tool registry.
+    from surogates.sandbox.copy_files import has_copy
+    from surogates.storage.tenant import boundary_workspace_key, workspace_session_shim
+    from surogates.tools.builtin.vision import _validate_workspace_storage_path
+    from surogates.tools.utils.workspace_sandbox import validate_path
+    from surogates.tools.workspace_io.local import LocalWorkspaceIO
+
+    workspace_path = kwargs.get("workspace_path")
+    storage = kwargs.get("storage")
+    session_config = kwargs.get("session_config")
+    bucket = (session_config or {}).get("storage_bucket")
+    try:
+        if storage is not None and bucket:
+            # The session's object in its bucket, as vision_analyze reads it.
+            relative = _validate_workspace_storage_path(path, workspace_path=workspace_path)
+            if has_copy(kwargs.get("sandbox_pool"), kwargs.get("task_id")):
+                return None
+            object_key = boundary_workspace_key(
+                session_config,
+                workspace_session_shim(session_config, session_id),
+                session_id,
+                relative,
+            )
+            info = await storage.stat(bucket, object_key)
+            return (
+                "storage", str(session_id), bucket, object_key,
+                info.get("size"), str(info.get("modified")), info.get("etag"),
+            )
+        # A file of this host's workspace: contained first (no workspace, or a
+        # path out of it, is refused here), then stat'ed as vision_analyze
+        # reads it, one folder at a time with no link followed (#655).
+        resolved = validate_path(workspace_path, path)
+        found = await LocalWorkspaceIO(workspace_path).stat(resolved)
+    except Exception:  # no key, so no cache: vision_analyze gives its own answer
+        return None
+    if found is None or found.is_dir:
+        return None
+    return ("local", str(session_id), str(workspace_path), resolved, found.revision)
 
 
 async def handle_image_read(
@@ -113,7 +153,7 @@ async def handle_image_read(
     limit = min(arguments.get("limit", get_max_lines()), get_max_lines())
 
     cache_disabled = os.environ.get(_CACHE_DISABLED_ENV) == "1"
-    key = None if cache_disabled else _build_key(path, kwargs)
+    key = None if cache_disabled else await _build_key(path, kwargs)
 
     analysis: str | None = None
     cached_hit = False
@@ -147,7 +187,9 @@ async def handle_image_read(
                 ),
             }, ensure_ascii=False)
         analysis = parsed.get("analysis") or ""
-        if key is not None and analysis:
+        # Kept only if the image is still the version the key names: one
+        # changed while it was analyzed is analyzed anew on the next read.
+        if key is not None and analysis and await _build_key(path, kwargs) == key:
             _CACHE.put(key, analysis)
 
     filename = Path(path).name
