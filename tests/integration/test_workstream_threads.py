@@ -1081,12 +1081,6 @@ async def test_a_late_report_of_a_delegated_child_wakes_no_one(api, monkeypatch)
     await not_woken(api, monkeypatch, chat, "completed")
 
 
-@pytest.mark.parametrize("key, value", [
-    # A routine's run announces its result where the routine says: woken again, it would announce a second one.
-    ("scheduled_session_id", str(uuid4())),
-    # A mission's coordinator: past its verdict, a straggling task's report would give it one stray turn.
-    ("strict_coordinator", True),
-], ids=["a scheduled run", "a strict coordinator"])
 TODO_CALL = (
     {"role": "assistant", "content": "", "tool_calls": [
         {"id": "call_todo", "type": "function", "function": {"name": "todo", "arguments": "{}"}},
