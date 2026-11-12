@@ -684,7 +684,8 @@ def _replace_file(dir_fd: int | None, name: str, data: bytes) -> None:
             with contextlib.suppress(OSError):
                 st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
                 if stat_module.S_ISREG(st.st_mode):
-                    os.fchmod(fh.fileno(), stat_module.S_IMODE(st.st_mode))
+                    # Its permission bits, never set-id or sticky bits a planted file carries.
+                    os.fchmod(fh.fileno(), stat_module.S_IMODE(st.st_mode) & 0o777)
         os.replace(tmp, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
     except Exception:
         with contextlib.suppress(OSError):
@@ -854,6 +855,28 @@ async def _bwrap_can_confine(rg: str) -> bool:
     return await asyncio.to_thread(_probe_bwrap, rg)
 
 
+def write_in_workspace(workspace_path: str, key: str, data: bytes) -> None:
+    """Replace the file *key* (a resolve()d path in *workspace_path*) with
+    *data*, as :meth:`LocalWorkspaceIO.write` does: its folder reached from
+    the workspace one folder at a time with no link followed (missing ones
+    made), the bytes written to a temporary file made new beside it
+    (O_EXCL | O_NOFOLLOW) and renamed over it.  A link planted at the name
+    or at ``<name>.tmp``, or a folder swapped for one after the path was
+    checked, cannot carry the bytes outside the workspace.  For writers that
+    are not handed a WorkspaceIO (generated media, browser screenshots)."""
+    if not _BY_FOLDER:
+        os.makedirs(os.path.dirname(key) or ".", exist_ok=True)
+        _replace_file(None, key, data)
+        return
+    real_root = os.path.realpath(workspace_path)
+    folder, name = _contained_parts(real_root, key)
+    dir_fd = _open_folder(real_root, folder, create=True)
+    try:
+        _replace_file(dir_fd, name, data)
+    finally:
+        os.close(dir_fd)
+
+
 class LocalWorkspaceIO:
     """WorkspaceIO over this host, contained to *workspace_path* when one is set."""
 
@@ -956,13 +979,7 @@ class LocalWorkspaceIO:
         # renamed in that folder.  resolve() checked the path, but a folder
         # on it swapped for a link meanwhile (by a command still running in
         # the workspace) would otherwise carry the write outside it.
-        real_root = self._real_root()
-        folder, name = _contained_parts(real_root, key)
-        dir_fd = _open_folder(real_root, folder, create=True)
-        try:
-            _replace_file(dir_fd, name, data)
-        finally:
-            os.close(dir_fd)
+        write_in_workspace(self._real_root(), key, data)
 
     async def delete(self, key: str) -> None:
         refuse_nul(key)

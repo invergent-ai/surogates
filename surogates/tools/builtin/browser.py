@@ -6,7 +6,6 @@ import functools
 import json
 import logging
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlsplit
 from uuid import UUID, uuid4
@@ -81,7 +80,8 @@ from surogates.devices.workspace import DeviceOperationError, said
 from surogates.session.events import EventType
 from surogates.tools.registry import ToolRegistry, ToolSchema
 from surogates.tools.utils.tool_result_storage import WORKSPACE_STORAGE_DIR, keep_out_of_git
-from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
+from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError, validate_path
+from surogates.tools.workspace_io.local import write_in_workspace
 
 logger = logging.getLogger(__name__)
 
@@ -1252,16 +1252,14 @@ def _save_screenshot_to_workspace(
     if not workspace_path:
         return None
 
-    workspace = Path(workspace_path).resolve()
-    target = workspace / relative_path
-    target_dir = target.parent
     try:
-        target_dir.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(png_bytes)
-    except OSError as exc:
+        # Never by path: a link planted at the screenshot's name, or a folder
+        # swapped for one, would carry the page's pixels outside (#651).
+        write_in_workspace(workspace_path, validate_path(workspace_path, relative_path), png_bytes)
+    except (OSError, WorkspaceSandboxError) as exc:
         logger.warning(
             "Could not save browser screenshot to workspace path %s: %s",
-            target,
+            relative_path,
             exc,
         )
         return None
