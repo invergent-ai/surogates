@@ -2708,7 +2708,7 @@ class AgentHarness(
             # 10b. /deep-research <topic> -- rewrite the user message to
             # a deterministic delegation directive so the base LLM hands
             # the topic to the ``deep-research`` sub-agent via
-            # delegate_task rather than running the research itself.
+            # an ``agent`` call rather than running the research itself.
             # No early return: the rewritten message flows into step 11
             # so the LLM still runs this turn.
             elif (
@@ -3124,7 +3124,7 @@ class AgentHarness(
         partial_tool_call_retries = 0  # retries for truncated tool-call arguments
         # One-shot safety net for the deep-research planner.  Fires when
         # the planner ends a turn with no tool calls AND has never
-        # called ``delegate_task(agent_type="research-writer")`` in any
+        # called ``agent(agent_type="research-writer")`` in any
         # prior turn -- the model described the handoff in prose but
         # forgot to emit the actual tool call.  We inject a synthetic
         # user message reminding it that prose is not a tool call and
@@ -4251,7 +4251,7 @@ class AgentHarness(
 
                 # One-shot deep-research orphan-completion guard.  The
                 # planner is supposed to end its work by calling
-                # ``delegate_task(agent_type="research-writer")``.  In
+                # ``agent(agent_type="research-writer")``.  In
                 # the wild we have seen the model describe the handoff
                 # in prose without emitting the tool call -- it stops,
                 # the harness completes the session, and the report is

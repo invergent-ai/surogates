@@ -103,53 +103,44 @@ def parse_deep_research_command(text: str) -> str | None:
 
 
 def build_deep_research_message(*, topic: str) -> str:
-    """Rewrite ``/deep-research <topic>`` into a delegation directive.
+    """Rewrite ``/deep-research <topic>`` into a directive to start the planner.
 
-    The base agent's system prompt advertises a ``deep-research`` sub-agent
-    when the agent has the deep-research workflow enabled (its AGENT.md is
-    in the published bundle).  This builder produces an unambiguous
-    instruction so the LLM picks the planner via ``delegate_task`` instead
-    of doing the research itself.
+    The base agent's prompt lists a ``deep-research`` sub-agent when the
+    agent has the deep-research workflow enabled (its AGENT.md is in the
+    published bundle).  The directive makes the model start that planner
+    with one ``agent`` call rather than research the topic itself, and
+    forbids the failure modes that used to turn one prompt into a runaway
+    fleet: retrying after a failure, and splitting the topic into several
+    planners.
 
-    The directive also explicitly forbids the two failure modes that
-    used to turn one prompt into a runaway fleet:
-
-      * retrying ``delegate_task`` on a timeout or error result (the
-        model's default "try harder" behaviour decomposes the goal
-        and spawns more children, each burning the full timeout);
-
-      * batching multiple ``goals`` into a single call (one call
-        producing N concurrent planners multiplies the same problem).
-
-    A missing topic ("/deep-research" alone) is still rewritten -- the
-    LLM is told to ask the user for a topic; this matches the UX of
-    other slash commands where empty args degrade to a prompt rather
-    than a silent no-op.
+    A missing topic ("/deep-research" alone) is still rewritten: the model
+    is told to ask the user for one, as other slash commands degrade to a
+    prompt rather than a silent no-op.
     """
     topic = topic.strip()
     if not topic:
         return (
             "The user invoked `/deep-research` without a topic. "
-            "Ask the user what they would like researched, then once "
-            "they reply, delegate the topic to the `deep-research` "
-            "sub-agent via `delegate_task` using a SINGLE call with "
-            "one `goal` (not batched `goals`).  If that one delegation "
-            "fails or times out, report the failure to the user "
-            "verbatim and stop -- do NOT retry."
+            "Ask the user what they would like researched. Once they reply, "
+            "start the research with ONE `agent` call: "
+            '`agent_type="deep-research"`, a short `description`, and the '
+            "topic as the `prompt`. If that agent fails, report the failure "
+            "to the user verbatim and stop -- do NOT retry."
         )
     return (
         "The user invoked the `/deep-research` workflow.\n\n"
-        "Call `delegate_task` EXACTLY ONCE with "
-        "`agent_type=\"deep-research\"` and a single `goal` carrying "
-        "the topic below.  Do not batch multiple `goals`, do not "
-        "split the topic into sub-tasks, do not attempt to research "
-        "it yourself -- the sub-agent is responsible for planning, "
-        "web search, evidence curation, and handing off to the "
-        "`research-writer` sub-agent for the final report.\n\n"
-        "If the delegation returns an error or times out, report the "
-        "failure verbatim to the user and stop.  Do NOT retry, do NOT "
-        "decompose the topic into smaller deep-research calls -- "
-        "another attempt would just burn the same budget again.\n\n"
+        "Start the research with EXACTLY ONE `agent` call: "
+        '`agent_type="deep-research"`, a short `description`, and the topic '
+        "below as the `prompt`. Do not split the topic into several agents "
+        "and do not research it yourself -- the planner plans, searches the "
+        "web, curates the evidence and hands off to the `research-writer` "
+        "for the final report.\n\n"
+        "It runs in the background: its report reaches you as a "
+        "notification. Until then, do not state or guess its findings. When "
+        "the notification arrives, relay the report to the user.\n\n"
+        "If the call or the agent fails, report the failure verbatim to the "
+        "user and stop. Do NOT retry, and do NOT start smaller deep-research "
+        "agents -- another attempt would just spend the same budget again.\n\n"
         f"Topic: {topic}"
     )
 
