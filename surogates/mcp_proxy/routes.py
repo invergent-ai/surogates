@@ -14,7 +14,7 @@ import time
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from surogates.audit import AuditStore, AuditType
 from surogates.mcp_proxy.auth import ProxyAuthContext, get_proxy_auth
@@ -23,15 +23,17 @@ from surogates.mcp_proxy.loader import (
     debrand_composio_text,
     load_mcp_configs,
 )
-from surogates.mcp_proxy.pool import ConnectionPool
+from surogates.mcp_proxy.pool import AgentChangedDuringConnect, ConnectionPool
 from surogates.mcp_proxy.sandbox import MCPCallSandbox
 from surogates.runtime import (
     AgentRuntimeContext,
     agent_runtime_context_dep,
+    build_agent_runtime_context,
     rate_limit_dep,
 )
 from surogates.simulation.side_effects import decide, fake_result, would_have
 from surogates.tools.mcp.client import _sanitize_error, call_utility
+from surogates.tools.mcp.names import sanitize_mcp_name_component
 
 logger = logging.getLogger(__name__)
 
@@ -73,10 +75,26 @@ class ToolSchema(BaseModel):
     server: str | None = None
 
 
+class UnavailableServer(BaseModel):
+    """An attached MCP server that could not be connected for this list."""
+
+    # As the agent knows it: the ``{server}`` of its ``mcp__{server}__{tool}``
+    # names.  Never the tenant-scoped key or anything from its config.
+    name: str
+    # ``timeout``, ``refused`` or ``error``.
+    reason: str
+
+
 class ToolListResponse(BaseModel):
     """Response body for ``POST /mcp/v1/tools/list``."""
 
     tools: list[ToolSchema]
+    # The attached servers whose tools are missing from ``tools`` because
+    # they could not be connected; they are tried again in the background.
+    # Sent only
+    # when there are any (the route excludes unset fields), so the body is
+    # unchanged otherwise and an older worker ignores it.
+    unavailable: list[UnavailableServer] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -91,11 +109,16 @@ async def _ensure_tenant_connected(
     *,
     agent_id: str,
     allowed_ids: frozenset[str],
+    retry_unavailable: bool = False,
 ) -> list[dict[str, Any]]:
     """Load MCP configs and ensure the tenant is connected.
 
     Returns cached schemas if the tenant is already connected, otherwise
-    loads configs from DB + platform and connects.
+    loads configs from DB + platform and connects.  With
+    *retry_unavailable* (a tool list), the cached answer also starts a
+    background retry of the servers that could not be connected, once their
+    cooldown is over (:meth:`ConnectionPool.retry_unavailable_servers`); the
+    list never waits for it.
 
     ``agent_id`` flows from the proxy route (where
     ``agent_runtime_context_dep`` resolves the per-request
@@ -103,11 +126,64 @@ async def _ensure_tenant_connected(
     credential.access audit emit carries the requesting agent's id.
     ``list_tools`` is a metadata probe with no agent in scope and
     passes ``None``.
+
+    An agent invalidated while it connected is connected once more, with
+    its attached servers and configs read anew; a second invalidation
+    meanwhile leaves the request without MCP tools.
     """
+    try:
+        return await _connect_tenant(
+            pool, auth, request, agent_id=agent_id, allowed_ids=allowed_ids,
+            retry_unavailable=retry_unavailable,
+        )
+    except AgentChangedDuringConnect:
+        pass
+    try:
+        return await _connect_tenant(
+            pool, auth, request, agent_id=agent_id,
+            allowed_ids=await _attached_server_ids(request, agent_id),
+            retry_unavailable=retry_unavailable,
+        )
+    except AgentChangedDuringConnect:
+        logger.warning("MCP connect for agent %s dropped twice: the agent kept changing", agent_id)
+        return []
+
+
+async def _attached_server_ids(request: Request, agent_id: str) -> frozenset[str]:
+    """The agent's attached MCP server ids as its runtime config says now
+    (every invalidation clears the cached copy): none when it cannot be
+    read, or when the agent is gone or stopped."""
+    cache = getattr(request.app.state, "runtime_config_cache", None)
+    if cache is None:
+        return frozenset()
+    try:
+        ctx = build_agent_runtime_context(await cache.get(agent_id))
+    except Exception:
+        logger.warning("Runtime config of agent %s unreadable after it changed", agent_id, exc_info=True)
+        return frozenset()
+    return frozenset(ctx.mcp_server_ids) if ctx.enabled else frozenset()
+
+
+async def _connect_tenant(
+    pool: ConnectionPool,
+    auth: ProxyAuthContext,
+    request: Request,
+    *,
+    agent_id: str,
+    allowed_ids: frozenset[str],
+    retry_unavailable: bool,
+) -> list[dict[str, Any]]:
+    """One pass of :func:`_ensure_tenant_connected`: the cached schemas, or
+    the configs loaded and connected (raises
+    :class:`AgentChangedDuringConnect` if the agent changes meanwhile)."""
     cached = pool.get_cached_schemas(auth.org_id, auth.user_id, agent_id)
     if cached is not None:
+        if retry_unavailable:
+            pool.retry_unavailable_servers(auth.org_id, auth.user_id, agent_id)
         return cached
 
+    # Read before the configs: an invalidation after it voids them.
+    epoch = pool.agent_epoch(agent_id)
     configs = await load_mcp_configs(
         org_id=auth.org_id,
         user_id=auth.user_id,
@@ -130,6 +206,7 @@ async def _ensure_tenant_connected(
         agent_id=agent_id,
         configs=configs,
         is_service_account=auth.is_service_account,
+        epoch=epoch,
     )
 
 
@@ -154,7 +231,11 @@ def _bind_agent(auth: ProxyAuthContext, ctx: AgentRuntimeContext) -> None:
 # ---------------------------------------------------------------------------
 
 
-@router.post("/mcp/v1/tools/list", response_model=ToolListResponse)
+@router.post(
+    "/mcp/v1/tools/list",
+    response_model=ToolListResponse,
+    response_model_exclude_unset=True,
+)
 async def list_tools(
     request: Request,
     auth: ProxyAuthContext = Depends(get_proxy_auth),
@@ -163,7 +244,10 @@ async def list_tools(
     """Discover the MCP tools available to the requesting agent.
 
     A server's resource / prompt tools are listed only when it has
-    resources / prompts (:meth:`ConnectionPool.visible_schemas`).
+    resources / prompts (:meth:`ConnectionPool.visible_schemas`).  An
+    attached server that could not be connected is named in
+    ``unavailable``, and tried again in the background once its cooldown is
+    over.
     """
     _bind_agent(auth, ctx)
     pool: ConnectionPool = request.app.state.pool
@@ -171,8 +255,19 @@ async def list_tools(
         pool, auth, request,
         agent_id=ctx.agent_id,
         allowed_ids=frozenset(ctx.mcp_server_ids),
+        retry_unavailable=True,
     )
     schemas = pool.visible_schemas(auth.org_id, auth.user_id, ctx.agent_id, schemas)
+    # Named as in the agent's tool names (debranded, as those are).
+    unavailable = [
+        UnavailableServer(
+            name=debrand_composio_text(sanitize_mcp_name_component(name))[:64],
+            reason=reason,
+        )
+        for name, reason in sorted(
+            pool.unavailable_servers(auth.org_id, auth.user_id, ctx.agent_id).items()
+        )
+    ]
 
     return ToolListResponse(
         tools=[
@@ -184,7 +279,8 @@ async def list_tools(
                 server=s.get("server"),
             )
             for s in schemas
-        ]
+        ],
+        **({"unavailable": unavailable} if unavailable else {}),
     )
 
 

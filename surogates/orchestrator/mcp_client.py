@@ -19,7 +19,7 @@ import httpx
 
 from surogates.simulation.side_effects import is_simulated
 from surogates.tenant.auth.jwt import create_sandbox_token
-from surogates.tools.mcp.names import mcp_toolset
+from surogates.tools.mcp.names import mcp_toolset, sanitize_mcp_name_component
 from surogates.tools.registry import ToolRegistry, ToolSchema
 
 logger = logging.getLogger(__name__)
@@ -35,6 +35,30 @@ COMPOSIO_TOOL_ROUTER_PREFIXES: tuple[str, ...] = (
 #: The toolset the Composio tool-router's tools are registered under
 #: (``mcp-<server>``, the server being the proxy's ``composio-tool-router``).
 COMPOSIO_TOOL_ROUTER_TOOLSET = "mcp-composio-tool-router"
+
+
+#: Why an MCP server could not be connected, as the proxy says it (anything
+#: else reads as ``error``).
+UNAVAILABLE_REASONS = frozenset({"timeout", "refused", "error"})
+
+
+def _unavailable_servers(data: dict[str, Any]) -> list[tuple[str, str]]:
+    """The ``(server, reason)`` pairs of a tool list's ``unavailable`` field.
+
+    The name is cut to the characters of a tool name and the reason to a
+    known word: both reach the model's prompt.  A proxy without the field
+    names none.
+    """
+    pairs: list[tuple[str, str]] = []
+    for item in data.get("unavailable") or ():
+        if not isinstance(item, dict):
+            continue
+        name = sanitize_mcp_name_component(item.get("name") or "")[:64]
+        if not name:
+            continue
+        reason = item.get("reason")
+        pairs.append((name, reason if reason in UNAVAILABLE_REASONS else "error"))
+    return pairs
 
 
 def is_composio_router_name(name: str, toolset: str | None = None) -> bool:
@@ -67,8 +91,12 @@ class McpProxyClient:
         # Subset of the above that came from the Composio tool-router, so the
         # harness can hide a channel agent's own-platform Composio toolkit.
         self._composio_by_agent: dict[str, set[str]] = {}
-        # Opt-in per-session reuse of a discovery (``cache_ttl``): session_id -> (when, names).
-        self._session_tools: dict[UUID, tuple[float, list[str]]] = {}
+        # Opt-in per-session reuse of a discovery (``cache_ttl``):
+        # session_id -> (when, names, unavailable servers).
+        self._session_tools: dict[UUID, tuple[float, list[str], list[tuple[str, str]]]] = {}
+        # The servers a session's last discovery named unavailable, until the
+        # worker takes them (``take_unavailable_servers``).
+        self._unavailable_by_session: dict[UUID, list[tuple[str, str]]] = {}
 
     async def discover_and_register(
         self,
@@ -95,9 +123,12 @@ class McpProxyClient:
         """
         # A phone call wakes the harness on every caller turn; its tool list does not change
         # mid-call, so with a ``cache_ttl`` the proxy round trip is paid once per session.
+        self._unavailable_by_session.pop(session_id, None)
         if cache_ttl > 0:
             cached = self._session_tools.get(session_id)
             if cached is not None and time.monotonic() - cached[0] < cache_ttl:
+                if cached[2]:
+                    self._unavailable_by_session[session_id] = list(cached[2])
                 return list(cached[1])
 
         token = create_sandbox_token(
@@ -122,6 +153,7 @@ class McpProxyClient:
 
         data = resp.json()
         tools = data.get("tools", [])
+        unavailable = _unavailable_servers(data)
         current: set[str] = set()
         composio: set[str] = set()
 
@@ -162,16 +194,28 @@ class McpProxyClient:
         self._discovered_by_agent[agent_id] = current
         self._composio_by_agent[agent_id] = composio
         registered = sorted(current)
+        if unavailable:
+            self._unavailable_by_session[session_id] = unavailable
+            logger.warning(
+                "Agent %s: MCP server(s) unavailable via proxy: %s",
+                agent_id, ", ".join(f"{name} ({reason})" for name, reason in unavailable),
+            )
         if cache_ttl > 0:
             now = time.monotonic()
             self._session_tools = {sid: v for sid, v in self._session_tools.items() if now - v[0] < cache_ttl}
-            self._session_tools[session_id] = (now, registered)
+            self._session_tools[session_id] = (now, registered, unavailable)
         if registered:
             logger.info(
                 "Agent %s has %d MCP tool(s) via proxy: %s",
                 agent_id, len(registered), ", ".join(registered),
             )
         return registered
+
+    def take_unavailable_servers(self, session_id: UUID) -> list[tuple[str, str]]:
+        """The ``(server, reason)`` pairs *session_id*'s last discovery named
+        unavailable, forgotten once taken: the worker takes them right after
+        :meth:`discover_and_register`, for the session's prompt."""
+        return self._unavailable_by_session.pop(session_id, [])
 
     def composio_tool_names_for_agent(self, agent_id: str) -> frozenset[str]:
         """Return *agent_id*'s discovered Composio tool-router tool names."""

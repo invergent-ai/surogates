@@ -135,6 +135,19 @@ if _MCP_AVAILABLE and not _MCP_MESSAGE_HANDLER_SUPPORTED:
 
 _DEFAULT_TOOL_TIMEOUT = 120      # seconds for tool calls
 _DEFAULT_CONNECT_TIMEOUT = 60    # seconds for initial connection per server
+# A server whose connect fails at discovery on a timeout or a refusal is tried
+# again after these pauses (seconds), each retry within its connect_timeout;
+# under load a connect can time out once and succeed a moment later.
+_CONNECT_RETRY_DELAYS = (2.0, 5.0)
+# Every connect attempt of one discovery ends within this many seconds, the
+# first one included, so the MCP proxy answers its caller (who waits 120 s
+# for a tool list) in time.  A retry with less than
+# _MIN_CONNECT_RETRY_SECONDS left is not started.
+_CONNECT_BUDGET_SECONDS = 100.0
+_MIN_CONNECT_RETRY_SECONDS = 5.0
+# The failures (``_connect_failure_kind``) worth trying again.  A config,
+# auth or policy error ("error") fails the same way the next time.
+TRANSIENT_CONNECT_FAILURES = frozenset({"timeout", "refused"})
 _MAX_RECONNECT_RETRIES = 5
 _MAX_BACKOFF_SECONDS = 60
 _DEFAULT_CIRCUIT_FAILURE_THRESHOLD = 3
@@ -320,6 +333,42 @@ def _format_connect_error(exc: BaseException) -> str:
         if item not in deduped:
             deduped.append(item)
     return _sanitize_error("; ".join(deduped[:3]))
+
+
+def _connect_failure_kind(exc: BaseException) -> str:
+    """What a failed connect amounted to, in one word an agent may read:
+    ``timeout``, ``refused`` or ``error``.
+
+    Never the error's text, which can carry a URL, a command or a credential.
+    The error nearest the top that says which wins.  A ``CancelledError``
+    counts as a timeout only when nothing says otherwise: it is what a
+    transport's own connect timeout surfaces as (seen at exactly the connect
+    timeout).
+    """
+    cancelled = False
+    seen: set[int] = set()
+    queue: List[BaseException] = [exc]
+    while queue:
+        current = queue.pop(0)
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        text = str(current).lower()
+        if (
+            isinstance(current, (TimeoutError, asyncio.TimeoutError))
+            or "Timeout" in type(current).__name__
+            or "timed out" in text
+        ):
+            return "timeout"
+        if isinstance(current, ConnectionRefusedError) or "connection refused" in text:
+            return "refused"
+        cancelled = cancelled or isinstance(current, asyncio.CancelledError)
+        queue.extend(getattr(current, "exceptions", None) or ())
+        for attr in ("__cause__", "__context__"):
+            nested = getattr(current, attr, None)
+            if isinstance(nested, BaseException):
+                queue.append(nested)
+    return "timeout" if cancelled else "error"
 
 
 # ---------------------------------------------------------------------------
@@ -1168,11 +1217,16 @@ class MCPServerTask:
 
 _servers: Dict[str, MCPServerTask] = {}
 
+# Why each server that discovery could not connect failed, by server name:
+# ``timeout``, ``refused`` or ``error`` (``_connect_failure_kind``).  Dropped
+# when the server connects; the MCP proxy pool takes its tenants' entries.
+_connect_failures: Dict[str, str] = {}
+
 # Dedicated event loop running in a background daemon thread.
 _mcp_loop: Optional[asyncio.AbstractEventLoop] = None
 _mcp_thread: Optional[threading.Thread] = None
 
-# Protects _mcp_loop, _mcp_thread, and _servers.
+# Protects _mcp_loop, _mcp_thread, _servers and _connect_failures.
 _lock = threading.Lock()
 
 
@@ -1869,7 +1923,15 @@ async def _connect_server(name: str, config: dict) -> MCPServerTask:
         Exception: on connection or initialization failure.
     """
     server = MCPServerTask(name)
-    await server.start(config)
+    try:
+        await server.start(config)
+    except BaseException:
+        # A connect that timed out (or failed) leaves no Task behind: it
+        # could still connect later, outside ``_servers``, where nothing
+        # ever shuts it down -- once per retry.
+        if server._task is not None and not server._task.done():
+            server._task.cancel()
+        raise
     return server
 
 
@@ -1877,19 +1939,31 @@ async def _discover_and_register_server(
     name: str,
     config: dict,
     registry: Any,
+    *,
+    connect_timeout: Optional[float] = None,
 ) -> List[str]:
     """Connect to a single MCP server, discover tools, and register them.
 
-    Returns list of registered tool names.
+    *connect_timeout* bounds this connect (default: the server's own
+    ``connect_timeout``).  Returns list of registered tool names.
     """
-    connect_timeout = config.get("connect_timeout", _DEFAULT_CONNECT_TIMEOUT)
+    if connect_timeout is None:
+        connect_timeout = config.get("connect_timeout", _DEFAULT_CONNECT_TIMEOUT)
     server = await asyncio.wait_for(
         _connect_server(name, config),
         timeout=connect_timeout,
     )
-    server._registry = registry
     with _lock:
-        _servers[name] = server
+        first = _servers.get(name)
+        if first is None:
+            server._registry = registry
+            _servers[name] = server
+        _connect_failures.pop(name, None)
+    if first is not None:
+        # Another discovery connected it meanwhile: that connection stays
+        # (it may already be listed), this one is closed, not leaked.
+        await server.shutdown()
+        return _register_server_tools(name, first, config, registry)
 
     registered_names = _register_server_tools(name, server, config, registry)
     server._registered_tool_names = list(registered_names)
@@ -1910,6 +1984,8 @@ async def _discover_and_register_server(
 def discover_mcp_tools(
     servers: Dict[str, dict],
     registry: Any,
+    *,
+    retry: bool = True,
 ) -> List[str]:
     """Connect to MCP servers, discover tools, and register them.
 
@@ -1920,7 +1996,11 @@ def discover_mcp_tools(
     empty list).
 
     Idempotent for already-connected servers. If some servers failed on a
-    previous call, only the missing ones are retried.
+    previous call, only the missing ones are retried.  Within one call a
+    server whose connect fails on a timeout or a refusal is tried again after
+    each pause in ``_CONNECT_RETRY_DELAYS`` (not with ``retry=False``); every
+    attempt ends within ``_CONNECT_BUDGET_SECONDS``.  A server that still
+    fails is logged and its reason kept in ``_connect_failures``.
 
     Args:
         servers: Mapping of ``{server_name: server_config}``.
@@ -1959,29 +2039,67 @@ def discover_mcp_tools(
     # Start the background event loop for MCP connections
     _ensure_mcp_loop()
 
-    async def _discover_one(name: str, cfg: dict) -> List[str]:
-        """Connect to a single server and return its registered tool names."""
-        return await _discover_and_register_server(name, cfg, registry)
+    async def _discover_one(name: str, cfg: dict, limit: float) -> List[str]:
+        """Connect to a single server and return its registered tool names.
+
+        The connect ends by *limit* seconds (the time left in the budget)."""
+        timeout = min(float(cfg.get("connect_timeout", _DEFAULT_CONNECT_TIMEOUT)), max(limit, 0.0))
+        return await _discover_and_register_server(name, cfg, registry, connect_timeout=timeout)
 
     async def _discover_all():
-        server_names = list(new_servers.keys())
-        # Connect to all servers in PARALLEL
-        results = await asyncio.gather(
-            *(_discover_one(name, cfg) for name, cfg in new_servers.items()),
-            return_exceptions=True,
-        )
-        for name, result in zip(server_names, results):
-            if isinstance(result, Exception):
-                command = new_servers.get(name, {}).get("command")
+        # Connect to all servers in PARALLEL.  Those that fail on a timeout
+        # or a refusal are tried again after each pause in
+        # _CONNECT_RETRY_DELAYS while the budget lasts; those that connected
+        # are not touched again.
+        deadline = time.monotonic() + _CONNECT_BUDGET_SECONDS
+        attempts = 1 + len(_CONNECT_RETRY_DELAYS) if retry else 1
+        pending = dict(new_servers)
+        limit = deadline - time.monotonic()
+        failed: Dict[str, BaseException] = {}
+        for attempt in range(1, attempts + 1):
+            results = await asyncio.gather(
+                *(_discover_one(name, cfg, limit) for name, cfg in pending.items()),
+                return_exceptions=True,
+            )
+            retryable: Dict[str, BaseException] = {}
+            for name, result in zip(pending, results):
+                if not isinstance(result, BaseException):
+                    continue
+                if _connect_failure_kind(result) in TRANSIENT_CONNECT_FAILURES:
+                    retryable[name] = result
+                else:
+                    failed[name] = result
+            if not retryable or attempt == attempts:
+                failed.update(retryable)
+                break
+            delay = _CONNECT_RETRY_DELAYS[attempt - 1]
+            limit = deadline - time.monotonic() - delay
+            if limit < _MIN_CONNECT_RETRY_SECONDS:
+                failed.update(retryable)
+                break
+            for name, result in retryable.items():
                 logger.warning(
-                    "Failed to connect to MCP server '%s'%s: %s",
-                    name,
-                    f" (command={command})" if command else "",
+                    "MCP server '%s': connect attempt %d of %d failed (%s) -- retrying in %.0fs: %s",
+                    name, attempt, attempts, _connect_failure_kind(result), delay,
                     _format_connect_error(result),
                 )
+            await asyncio.sleep(delay)
+            pending = {name: new_servers[name] for name in retryable}
 
-    # Per-server timeouts are handled inside _discover_and_register_server.
-    # The outer timeout is generous: 120s total for parallel discovery.
+        for name, result in failed.items():
+            with _lock:
+                _connect_failures[name] = _connect_failure_kind(result)
+            command = new_servers.get(name, {}).get("command")
+            logger.warning(
+                "Failed to connect to MCP server '%s'%s: %s",
+                name,
+                f" (command={command})" if command else "",
+                _format_connect_error(result),
+            )
+
+    # Per-server timeouts are handled inside _discover_and_register_server,
+    # retries within _CONNECT_BUDGET_SECONDS.  The outer timeout is
+    # generous: 120s total for parallel discovery.
     _run_on_mcp_loop(_discover_all(), timeout=120)
 
     # Log a summary so callers get visibility into what was registered.

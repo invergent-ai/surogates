@@ -830,6 +830,41 @@ def _entitlement_tool_exclusions(
     return excluded
 
 
+def _unavailable_mcp_in_scope(
+    unavailable: list[tuple[str, str]],
+    *,
+    session_config: dict | None,
+    mcp_scope: tuple[set[str], set[str]] | None,
+) -> list[tuple[str, str]]:
+    """The unavailable MCP servers (``(server, reason)``) whose tools this
+    session would have been offered, so its prompt names no other.
+
+    Scoped as :func:`_entitlement_tool_exclusions` scopes the tools (a
+    ``None`` scope with a restricted dimension keeps none), and by a session
+    that names its tools (``allowed_tools``): only a server one of them
+    belongs to.
+    """
+    from surogates.orchestrator.mcp_client import COMPOSIO_TOOL_ROUTER_PREFIXES
+    from surogates.tools.mcp.names import sanitize_mcp_name_component
+
+    kept = list(unavailable)
+    if kept and dimension_allowlist(session_config, "mcp_server_ids") is not None:
+        servers = {sanitize_mcp_name_component(s) for s in (mcp_scope[0] if mcp_scope is not None else ())}
+        toolkits = mcp_scope[1] if mcp_scope is not None else set()
+        kept = [
+            (server, reason) for server, reason in kept
+            if server in servers or (toolkits and f"mcp__{server}__" in COMPOSIO_TOOL_ROUTER_PREFIXES)
+        ]
+    config = session_config or {}
+    allowed = config.get("allowed_tools")
+    if kept and allowed and not config.get("coordinator"):
+        kept = [
+            (server, reason) for server, reason in kept
+            if any(str(name).startswith(f"mcp__{server}__") for name in allowed)
+        ]
+    return kept
+
+
 def _media_tool_exclusions(media_gen_config: Any) -> set[str]:
     """Media tools with no model behind them for this session.
 
@@ -1769,6 +1804,9 @@ async def run_worker(settings: Settings) -> None:
         # platform/copilot MCP tools go missing in that case.
         discovered_mcp_tools: set[str] = set()
         composio_mcp_tools: frozenset[str] = frozenset()
+        # Attached MCP servers the proxy could not connect: the prompt says
+        # so, instead of the agent meeting a toolset without them.
+        mcp_unavailable: list[tuple[str, str]] = []
         if mcp_proxy_client is not None:
             try:
                 principal_user_id, is_service_account = principal_subject(credential)
@@ -1787,6 +1825,7 @@ async def run_worker(settings: Settings) -> None:
                     composio_mcp_tools = mcp_proxy_client.composio_tool_names_for_agent(
                         ctx.agent_id
                     )
+                    mcp_unavailable = mcp_proxy_client.take_unavailable_servers(session.id)
             except Exception:
                 logger.warning(
                     "MCP proxy tool discovery failed for session %s; "
@@ -2233,6 +2272,11 @@ async def run_worker(settings: Settings) -> None:
             slash_commands=ctx.slash_commands,
             speaker=await _resolve_speaker(
                 session, acting, session_store, session_factory,
+            ),
+            mcp_unavailable=_unavailable_mcp_in_scope(
+                mcp_unavailable,
+                session_config=session.config,
+                mcp_scope=mcp_entitlement_scope,
             ),
             # The gate is agent-level AND package-level: a plan without
             # the brainstorming capability turns the guidance off for
