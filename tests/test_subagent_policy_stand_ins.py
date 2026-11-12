@@ -49,8 +49,17 @@ def test_a_deny_on_spawn_worker_blocks_agent(arguments):
     gate = GovernanceGate(denied_tools={"spawn_worker"})
     assert not gate.check("agent", arguments).allowed
     assert not gate.offers("agent")
-    # The policy names spawn_worker only: delegate_task stays allowed.
+    # The policy names spawn_worker only: the gate allows delegate_task.  (With parity on it is not offered,
+    # since agent is not: such a session loses delegation, as the PR states.)
     assert gate.check("delegate_task", {"goal": "Look at the logs."}).allowed
+
+
+def test_a_stored_policy_denying_spawn_worker_blocks_agent_on_the_production_path():
+    from surogates.runtime.governance import build_governance_gate
+
+    gate = build_governance_gate({"denied_tools": ["spawn_worker"]})
+    assert not gate.check("agent", {**AGENT_CALL, "run_in_background": True}).allowed
+    assert not gate.offers("agent") and not gate.runs_unasked("agent")
 
 
 def test_worker_message_and_stop_rules_reach_send_message_and_stop_agent():
