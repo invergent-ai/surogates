@@ -89,7 +89,8 @@ class ToolListResponse(BaseModel):
 
     tools: list[ToolSchema]
     # The attached servers whose tools are missing from ``tools`` because
-    # they could not be connected; the next list tries them again.  Sent only
+    # they could not be connected; a list after their cooldown tries them
+    # again.  Sent only
     # when there are any (the route excludes unset fields), so the body is
     # unchanged otherwise and an older worker ignores it.
     unavailable: list[UnavailableServer] = Field(default_factory=list)
@@ -114,8 +115,8 @@ async def _ensure_tenant_connected(
     Returns cached schemas if the tenant is already connected, otherwise
     loads configs from DB + platform and connects.  With
     *retry_unavailable* (a tool list), a server that could not be
-    connected is tried again; a tool call goes on with the servers that are
-    connected.
+    connected is tried again once its cooldown is over; a tool call goes on
+    with the servers that are connected.
 
     ``agent_id`` flows from the proxy route (where
     ``agent_runtime_context_dep`` resolves the per-request
@@ -125,7 +126,7 @@ async def _ensure_tenant_connected(
     passes ``None``.
     """
     cached = pool.get_cached_schemas(
-        auth.org_id, auth.user_id, agent_id, complete_only=retry_unavailable,
+        auth.org_id, auth.user_id, agent_id, retry_unavailable=retry_unavailable,
     )
     if cached is not None:
         return cached
@@ -190,8 +191,8 @@ async def list_tools(
 
     A server's resource / prompt tools are listed only when it has
     resources / prompts (:meth:`ConnectionPool.visible_schemas`).  An
-    attached server that could not be connected is tried again, and named
-    in ``unavailable`` if it still cannot be.
+    attached server that could not be connected is named in
+    ``unavailable``, and tried again once its cooldown is over.
     """
     _bind_agent(auth, ctx)
     pool: ConnectionPool = request.app.state.pool

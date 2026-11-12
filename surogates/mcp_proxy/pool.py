@@ -60,6 +60,11 @@ _MAX_TENANT_APPROVALS = 10_000
 #: names starves only itself.
 _MAX_APPROVALS_PER_SERVER = 1_000
 _MAX_APPROVALS_PER_TENANT = 20_000
+#: Seconds after a server's last connect attempt failed before a tool list
+#: tries it again.  Within them a list answers at once, still naming the
+#: server unavailable: a server that stays down would otherwise cost every
+#: wake its connect retries (up to ~100 s).
+_UNAVAILABLE_RETRY_COOLDOWN = 120.0
 
 
 class _ApprovalRoom:
@@ -169,11 +174,20 @@ class PoolEntry:
     # Configured servers that could not be connected: original name -> why
     # (``timeout``, ``refused`` or ``error``).  An entry with any is kept for
     # the servers that did connect (their calls, eviction, invalidation) but
-    # is never a cached tool list: the next ``ensure_connected`` tries those
-    # servers again.
+    # is never a complete tool list: once a server's cooldown is over
+    # (``retry_due``) the next tool list tries it again.
     unavailable: dict[str, str] = field(default_factory=dict)
-    # When the connect attempt that built this entry ended.
-    attempted_at: float = field(default_factory=time.monotonic)
+    # When each unavailable server's last connect attempt failed
+    # (``time.monotonic``).
+    failed_at: dict[str, float] = field(default_factory=dict)
+
+    def retry_due(self, now: float) -> bool:
+        """Whether an unavailable server's cooldown
+        (``_UNAVAILABLE_RETRY_COOLDOWN``) is over at *now*."""
+        return any(
+            now - self.failed_at.get(name, float("-inf")) >= _UNAVAILABLE_RETRY_COOLDOWN
+            for name in self.unavailable
+        )
 
 
 class ConnectionPool:
@@ -273,16 +287,17 @@ class ConnectionPool:
     # ------------------------------------------------------------------
 
     def get_cached_schemas(
-        self, org_id: UUID, user_id: UUID, agent_id: str, *, complete_only: bool = False,
+        self, org_id: UUID, user_id: UUID, agent_id: str, *, retry_unavailable: bool = False,
     ) -> list[dict[str, Any]] | None:
         """Return cached tool schemas if the agent is connected, else None.
 
-        With *complete_only*, None too while a configured server is
-        unavailable (``PoolEntry.unavailable``): a tool list tries it again,
-        while a tool call goes on with the servers that are connected.
+        With *retry_unavailable* (a tool list), None too once an unavailable
+        server's cooldown is over (``PoolEntry.retry_due``): the list tries it
+        again.  Within the cooldown, and for a tool call, the servers that are
+        connected answer.
         """
         entry = self._entries.get((org_id, user_id, agent_id))
-        if entry is None or (complete_only and entry.unavailable):
+        if entry is None or (retry_unavailable and entry.retry_due(time.monotonic())):
             return None
         entry.last_used = time.monotonic()
         self._touch_approvals((org_id, user_id, agent_id))
@@ -375,11 +390,11 @@ class ConnectionPool:
         """Ensure MCP servers for this tenant are connected and return
         their tool schemas.
 
-        Idempotent — if already connected, returns cached schemas.  While a
-        configured server is unavailable (it could not be connected), each
-        call tries it again; the servers that are connected stay connected
-        and their tools stay listed.  A call that waited for another's
-        attempt takes that attempt's result.
+        Idempotent — if already connected, returns cached schemas.  A
+        configured server that could not be connected is tried again by the
+        first call after its cooldown (``_UNAVAILABLE_RETRY_COOLDOWN``); within
+        it the cached schemas are returned.  The servers that are connected
+        stay connected and their tools stay listed.
 
         ``is_service_account`` marks ``user_id`` as a service-account id
         rather than a real ``users.id``; downstream audit writes use
@@ -387,17 +402,26 @@ class ConnectionPool:
         """
         key = (org_id, user_id, agent_id)
         lock = self._locks.setdefault(key, asyncio.Lock())
-        asked_at = time.monotonic()
 
         async with lock:
+            now = time.monotonic()
             entry = self._entries.get(key)
-            if entry is not None and (not entry.unavailable or entry.attempted_at >= asked_at):
-                entry.last_used = time.monotonic()
+            if entry is not None and not entry.retry_due(now):
+                entry.last_used = now
                 self._touch_approvals(key)
                 return entry.tool_schemas
+            # Unavailable servers still in their cooldown are not tried this
+            # time: they stay unavailable as they were.
+            cooling: dict[str, tuple[str, float]] = {}
             if entry is not None:
                 # Its connected servers are reused below: not idle meanwhile.
-                entry.last_used = time.monotonic()
+                entry.last_used = now
+                cooling = {
+                    name: (why, entry.failed_at[name])
+                    for name, why in entry.unavailable.items()
+                    if name in configs
+                    and now - entry.failed_at.get(name, float("-inf")) < _UNAVAILABLE_RETRY_COOLDOWN
+                }
 
             # Prefix each server name for tenant isolation.  The resource /
             # prompt utility tools are registered for every server here; a
@@ -418,21 +442,31 @@ class ConnectionPool:
             # connection.
             with _lock:
                 live = {pname: _servers[pname] for pname in prefixed if pname in _servers}
+            live_names: list[str] = []
             for pname, server in live.items():
-                _register_server_tools(pname, server, prefixed[pname], temp_registry)
+                live_names += _register_server_tools(pname, server, prefixed[pname], temp_registry)
+            names_by_key = dict(zip(prefixed, original_names))
             registered = await asyncio.to_thread(
                 discover_mcp_tools,
-                servers=prefixed,
+                servers={pname: cfg for pname, cfg in prefixed.items() if names_by_key[pname] not in cooling},
                 registry=temp_registry,
             )
-            # The enabled servers left without a connection, and why.
+            registered = [*registered, *live_names]
+            # The enabled servers left without a connection, and why; those
+            # still cooling down keep their reason and failure time.
+            failed_at = time.monotonic()
             with _lock:
                 unavailable = {
                     name: _connect_failures.pop(pname, "error")
-                    for pname, name in zip(prefixed, original_names)
-                    if pname not in _servers
+                    for pname, name in names_by_key.items()
+                    if name not in cooling
+                    and pname not in _servers
                     and _parse_boolish(configs[name].get("enabled", True), default=True)
                 }
+            failed = {name: failed_at for name in unavailable}
+            for name, (why, when) in cooling.items():
+                unavailable[name] = why
+                failed[name] = when
 
             # ``ToolRegistry.get_schemas`` emits OpenAI's nested
             # ``{"type":"function","function":{"name",...}}`` shape; the
@@ -587,10 +621,11 @@ class ConnectionPool:
                 governance=tenant_governance,
                 utility_index=utility_index,
                 unavailable=unavailable,
+                failed_at=failed,
             )
             # Kept even with a server unavailable, so the connected ones are
-            # evicted and invalidated with it; ``unavailable`` makes the next
-            # tool list try again rather than take this one.
+            # evicted and invalidated with it; ``unavailable`` makes a tool
+            # list after the cooldown try again rather than take this one.
             self._entries[key] = entry
 
             logger.info(
@@ -602,9 +637,10 @@ class ConnectionPool:
             if unavailable:
                 logger.warning(
                     "MCP server(s) unavailable for org=%s user=%s agent=%s: %s "
-                    "-- not cached, the next tool list tries again",
+                    "-- not cached, a tool list after %.0fs tries again",
                     org_id, user_id, agent_id,
                     ", ".join(f"{name} ({why})" for name, why in sorted(unavailable.items())),
+                    _UNAVAILABLE_RETRY_COOLDOWN,
                 )
             return clean_schemas
 
