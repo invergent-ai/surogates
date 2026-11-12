@@ -49,10 +49,12 @@ _JSON_FIELD_RE = re.compile(
     rf'("{_JSON_KEY_NAMES}")\s*:\s*"([^"]+)"',
     re.IGNORECASE,
 )
-# The token, then any closing punctuation after it ("... Bearer <jwt>)."),
-# which is prose and stays as written.
+# The token (a placeholder such as "<access token>" may hold spaces), then
+# any closing punctuation after it ("... Bearer <jwt>`)."), which is prose
+# and stays as written.
 _AUTH_HEADER_RE = re.compile(
-    r"(Authorization:\s*Bearer\s+)(\S+?)([).,;:!?'\"]*)(?=\s|$)", re.IGNORECASE,
+    r"(Authorization:\s*Bearer\s+)(<[A-Za-z][A-Za-z _-]{0,39}>|\S+?)([).,;:!?'\"`]*)(?=\s|$)",
+    re.IGNORECASE,
 )
 _TELEGRAM_RE = re.compile(r"(bot)?(\d{8,}):([-A-Za-z0-9_]{30,})")
 _PRIVATE_KEY_RE = re.compile(
