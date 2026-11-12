@@ -51,7 +51,7 @@ _ENV_ASSIGN_RE = re.compile(
 # Matched whole; anything else (a password with a bracket in it,
 # ``hunter2()``, ``Zx9Yw8['ab']``) is still a value.
 _CODE_VALUE_RE = re.compile(
-    r"[a-z_][A-Za-z_]*[_.][A-Za-z_.]*\(\)"
+    r"[a-z_](?=[A-Za-z_.]*[_.])[A-Za-z_.]*+\(\)"
     r"|[a-z_][A-Za-z_.]*[(\[](['\"])[A-Za-z_][\w.-]*\1(?:[)\]]|,)?"
 )
 # A count, not a secret: ``MAX_TOKENS = 4096``, ``MAX_NEW_TOKENS=512``.

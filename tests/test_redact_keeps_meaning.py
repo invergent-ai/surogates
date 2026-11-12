@@ -125,6 +125,7 @@ def test_long_inputs_redact_in_linear_time() -> None:
         "Authorization: Bearer a" + "." * 50_000 + "x",
         "TOKEN_" * 8_000 + "X",
         "A_" * 25_000 + "TOKEN_X",
+        "TOKEN=" + "a_" * 50_000,
     ):
         started = time.perf_counter()
         redact_sensitive_data(text, phones=False)
