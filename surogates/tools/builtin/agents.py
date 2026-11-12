@@ -6,11 +6,14 @@ delegation channel, started through ``delegate_task``'s own path
 (``delegate._run_single_delegation``): the same tool inheritance, depth limit,
 iteration cap and events.
 
-- Foreground (the default): the call waits for the agent and returns its
-  final report, with its ``agent_id``.
-- ``run_in_background``: the call returns the ``agent_id`` at once.  When the
-  agent ends, its parent gets an ``agent.notification`` with the report,
-  read at its next request, or as the input of a new turn when it rests.
+- Background (the default for a main session): the call returns the
+  ``agent_id`` at once.  When the agent ends, its parent gets an
+  ``agent.notification`` with the report, read at its next request, or as the
+  input of a new turn when it rests.  Over the background limit, a call that
+  did not ask for the background waits instead.
+- Foreground (``run_in_background=false``, and the default for any session
+  with a parent, which reports its own end once): the call waits for the
+  agent and returns its final report, with its ``agent_id``.
 - ``fork``: the agent starts from a copy of this conversation up to the
   call, then the brief, instead of from the brief alone.
 
@@ -72,9 +75,10 @@ _AGENT_DESCRIPTION = (
     "confident tone as a right one; check what matters. With fork=true it starts from a copy of this "
     "conversation instead: the prompt then names exactly which part of the plan is the fork's, and what is "
     "not, or the fork may redo the whole plan.\n"
-    "By default the call waits for the report. With run_in_background=true it returns the agent_id at once "
-    "and you get a notification when the agent ends; work on meanwhile, never redo the work you handed it, "
-    "and never state its result before the notification comes. Start several independent agents in one "
+    "In a main session the call returns the agent_id at once and you get a notification when the agent ends; "
+    "work on meanwhile, never redo the work you handed it, and never state its result before the notification "
+    "comes. Pass run_in_background=false when your next step needs the report: the call then waits for it. "
+    "In a session that was itself started by another, the call waits unless you pass true. Start several independent agents in one "
     "response to run them in parallel. To give an agent more work, a correction or a follow-up question, "
     "use send_message with its agent_id: it keeps everything it has read, which a new agent would not."
 )
@@ -113,7 +117,10 @@ _AGENT_SCHEMA = ToolSchema(
             },
             "run_in_background": {
                 "type": "boolean",
-                "description": "true: return the agent_id at once and be notified when it ends. Default false: wait for its report.",
+                "description": (
+                    "true: return the agent_id at once and get its report as a notification. false: wait here for "
+                    "the report. Omitted: a main session's agent runs in the background, any other session's waits."
+                ),
             },
             "fork": {
                 "type": "boolean",
@@ -770,7 +777,7 @@ async def _agent_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
     if not prompt:
         return _error("prompt is required: the brief the agent works on")
     description = " ".join(str(arguments.get("description") or "").split())[:80] or " ".join(prompt.split()[:5])
-    background = arguments.get("run_in_background") is True
+    asked = arguments.get("run_in_background")
     fork = arguments.get("fork") is True
     agent_type = str(arguments.get("agent_type") or "").strip() or None
     model = str(arguments.get("model") or "").strip() or None
@@ -780,6 +787,10 @@ async def _agent_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
 
     parent = await session_store.get_session(UUID(str(parent_id)))
     parent_config = parent.config or {}
+    # Omitted, an agent runs in the background for a main session; any other session reports its end to its
+    # parent once, so work it left running would end after that report: its agents wait.
+    implicit = not isinstance(asked, bool)
+    background = asked is True or (implicit and parent.parent_id is None)
     depth = int(parent_config.get("delegation_depth") or 0)
     if depth >= delegate._MAX_DELEGATION_DEPTH:
         return _error(
@@ -807,7 +818,7 @@ async def _agent_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
         return await _start_agent(
             kwargs, parent=parent, prompt=prompt, description=description, background=background,
             fork=fork, agent_type=agent_type, model=model, depth=depth, budget=budget, child_tokens=child_tokens,
-            name=name,
+            name=name, implicit=implicit,
         )
     finally:
         if handed:
@@ -819,7 +830,7 @@ async def _agent_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
 async def _start_agent(
     kwargs: dict[str, Any], *, parent: Any, prompt: str, description: str,
     background: bool, fork: bool, agent_type: str | None, model: str | None, depth: int, budget: Any,
-    child_tokens: int, name: str | None = None,
+    child_tokens: int, name: str | None = None, implicit: bool = False,
 ) -> str:
     """Start the agent the checked call asks for, and wait for its report unless it runs in the background."""
     from surogates.tools.builtin import delegate
@@ -835,6 +846,28 @@ async def _start_agent(
     seed = await fork_seed(session_store, parent, tool_call_id) if fork else None
     if fork and seed is None:
         return _error("this call cannot be forked from: start the agent with a brief instead")
+    # Checked and counted under one lock per parent: the calls of one response run at once, and none of their
+    # children is in the database yet.  The mode is settled here, before anything records it: a child stamped
+    # for the background that ran in the foreground would report twice.
+    async with _start_lock(parent.id):
+        # The starts under way first, then the database: one inserted meanwhile is in one of the two.
+        starting = [(mode, kind) for mode, kind, _ in _STARTING.get(parent.id, [])]
+        running = await _running_agents(kwargs.get("session_factory"), parent.id) if kwargs.get("session_factory") else []
+        under_way = running + starting
+        if background and sum(mode == "background" for mode, _ in under_way) >= MAX_RUNNING_IN_BACKGROUND:
+            if not implicit:
+                return _error(
+                    f"{MAX_RUNNING_IN_BACKGROUND} of your agents already run in the background: wait for their "
+                    "reports, or stop one, before starting another",
+                )
+            # Not asked for the background: it waits here instead.
+            background = False
+        if agent_type in delegate._NON_RECURSIVE_AGENT_TYPES and any(kind == agent_type for _, kind in under_way):
+            return _error(f"an agent of type {agent_type!r} already runs: one at a time")
+        # This start, until its child is in the database: (mode, agent_type, a mark of its own).
+        start = ("background" if background else "foreground", agent_type, uuid4().hex)
+        _STARTING.setdefault(parent.id, []).append(start)
+
     dispatch = {
         "description": description,
         "mode": "background" if background else "foreground",
@@ -844,8 +877,6 @@ async def _start_agent(
         **({"name": name} if name else {}),
     }
     started: list[UUID] = []
-    # This start, until its child is in the database: (mode, agent_type, a mark of its own).
-    start = ("background" if background else "foreground", agent_type, uuid4().hex)
 
     async def on_started(child: Any) -> str | None:
         started.append(child.id)
@@ -882,23 +913,6 @@ async def _start_agent(
                      "tool_call_id": tool_call_id},
         on_started=on_started,
     )
-    # Checked and counted under one lock per parent: the calls of one response
-    # run at once, and none of their children is in the database yet.
-    async with _start_lock(parent.id):
-        # The starts under way first, then the database: one inserted meanwhile is in one of the two.
-        starting = [(mode, kind) for mode, kind, _ in _STARTING.get(parent.id, [])]
-        running = await _running_agents(kwargs.get("session_factory"), parent.id) if kwargs.get("session_factory") else []
-        under_way = running + starting
-        if background and sum(mode == "background" for mode, _ in under_way) >= MAX_RUNNING_IN_BACKGROUND:
-            run.close()
-            return _error(
-                f"{MAX_RUNNING_IN_BACKGROUND} of your agents already run in the background: wait for their "
-                "reports, or stop one, before starting another",
-            )
-        if agent_type in delegate._NON_RECURSIVE_AGENT_TYPES and any(kind == agent_type for _, kind in under_way):
-            run.close()
-            return _error(f"an agent of type {agent_type!r} already runs: one at a time")
-        _STARTING.setdefault(parent.id, []).append(start)
     try:
         if background:
             return await run

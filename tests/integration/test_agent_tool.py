@@ -163,10 +163,11 @@ async def test_a_background_agent_returns_its_id_at_once_and_its_report_wakes_it
     assert chats.requests[-1][: len(request)] == request
 
 
-async def wake_children_as_they_come(chats, chat: UUID, replies: list) -> asyncio.Task:
-    """Wake each sub-agent of *chat* once it is created, answering its first request with the next of *replies*."""
+async def wake_children_as_they_come(chats, chat: UUID, replies: list, skip=frozenset()) -> asyncio.Task:
+    """Wake each sub-agent of *chat* once it is created, answering its first request with the next of *replies*;
+    never one whose id is in *skip*."""
     async def run():
-        woken: set[UUID] = set()
+        woken: set[UUID] = set(skip)
         while True:
             for child in await children(chats, chat):
                 if child.id not in woken:
@@ -181,7 +182,7 @@ async def wake_children_as_they_come(chats, chat: UUID, replies: list) -> asynci
 async def test_a_foreground_agent_returns_its_report_and_its_id(chats):
     chat = await a_chat(chats, PARITY)
     chats.replies = [
-        calling("agent", "call_agent", description="Read the tracker", prompt="Report the open items in the tracker."),
+        calling("agent", "call_agent", description="Read the tracker", prompt="Report the open items in the tracker.", run_in_background=False),
         _final_response("Done."),
     ]
     waker = await wake_children_as_they_come(chats, chat, [_final_response("Open: A, B and C.")])
@@ -205,7 +206,7 @@ async def test_a_fork_starts_from_its_parents_conversation_up_to_the_call(chats)
     chats.replies = [_final_response("Noted.")]
     await chats.wake(chat)
     chats.replies = [
-        calling("agent", "call_fork", description="Count open items", prompt="Count the open items.", fork=True),
+        calling("agent", "call_fork", description="Count open items", prompt="Count the open items.", fork=True, run_in_background=False),
         _final_response("Done."),
     ]
     waker = await wake_children_as_they_come(chats, chat, [_final_response("7 open items, archived ones skipped.")])
@@ -332,3 +333,99 @@ async def test_the_parent_is_told_even_when_its_log_cannot_be_closed(chats, monk
     await tell_parent(store=chats.store, redis=None, session=child, status="completed", result="12.")
     [note] = await chats.store.get_events(chat, types=[EventType.AGENT_NOTIFICATION])
     assert note.data["result"] == "12."
+
+
+async def test_an_agent_runs_in_the_background_unless_asked_to_wait(chats, monkeypatch):  # noqa: F811
+    # Before the change the call would wait for a report nothing writes: fail fast instead.
+    monkeypatch.setattr(delegate_module, "_DELEGATION_TIMEOUT_SECONDS", 2)
+    chat = await a_chat(chats, PARITY)
+    chats.replies = [calling("agent", "call_a", description="Count", prompt="Count."), _final_response("Started.")]
+    await chats.says(chat, "Count them.")
+    await chats.wake(chat)
+    assert json.loads(await tool_result(chats, chat, "call_a"))["status"] == "running"
+    [child] = await children(chats, chat)
+    assert child.config[DISPATCH_KEY]["mode"] == "background"
+
+
+async def test_an_agent_started_without_the_flag_that_ends_mid_turn_is_read_before_the_next_request(chats, monkeypatch):  # noqa: F811
+    monkeypatch.setattr(delegate_module, "_DELEGATION_TIMEOUT_SECONDS", 2)
+    chat = await a_chat(chats, PARITY)
+    asked = "Count them, then note it."
+    chats.replies = [
+        calling("agent", "call_a", description="Count open items", prompt="Count them."),
+        calling("todo", "call_t", todos=[]),
+        _final_response("Done."),
+    ]
+
+    async def the_agent_ends():
+        # While the chat's own tool call runs, its agent's turn completes.
+        [child] = await children(chats, chat)
+        chats.replies.insert(0, _final_response("There are 12."))
+        await chats.wake(child.id)
+
+    chats.during_the_tool_call = the_agent_ends
+    before = len(chats.requests)
+    await chats.says(chat, asked)
+    await chats.wake(chat)
+    [note] = await chats.store.get_events(chat, types=[EventType.AGENT_NOTIFICATION])
+    mine = [r for r in chats.requests[before:] if any(m.get("content") == asked for m in r)]
+    assert notification_note(note.data) in mine[-1] and notification_note(note.data) not in mine[-2]
+    sent = mine[-1]
+    await chats.says(chat, "Thanks.")
+    await chats.wake(chat)
+    assert chats.requests[-1][: len(sent)] == sent
+
+
+async def test_a_sub_agent_that_does_not_say_starts_its_agent_in_the_foreground(chats, monkeypatch):  # noqa: F811
+    # Guards the default for a session with a parent: its call waits for the report.
+    monkeypatch.setattr(delegate_module, "_DELEGATION_TIMEOUT_SECONDS", 2)
+    chat = await a_chat(chats, PARITY)
+    chats.replies = [
+        calling("agent", "call_a", description="Count open items", prompt="Count them.", run_in_background=True),
+        _final_response("Started."),
+    ]
+    await chats.says(chat, "Count them.")
+    await chats.wake(chat)
+    [child] = await children(chats, chat)
+    chats.replies = [
+        calling("agent", "call_inner", description="Read the log", prompt="Report the last line of the log."),
+        _final_response("Counted."),
+    ]
+    waker = await wake_children_as_they_come(chats, child.id, [_final_response("The last line is OK.")])
+    try:
+        await chats.wake(child.id)
+    finally:
+        waker.cancel()
+    [grandchild] = await children(chats, child.id)
+    result = await tool_result(chats, child.id, "call_inner")
+    assert grandchild.config[DISPATCH_KEY]["mode"] == "foreground"
+    assert "error" not in result and result.startswith("The last line is OK.")
+
+
+async def test_a_sixth_agent_without_the_flag_runs_in_the_foreground(chats, monkeypatch):  # noqa: F811
+    monkeypatch.setattr(delegate_module, "_DELEGATION_TIMEOUT_SECONDS", 2)
+    monkeypatch.setattr(agents_module, "MAX_RUNNING_IN_BACKGROUND", 1)
+    chat = await a_chat(chats, PARITY)
+    chats.replies = [
+        calling("agent", "call_a", description="Count open items", prompt="Count them.", run_in_background=True),
+        _final_response("Started."),
+    ]
+    await chats.says(chat, "Count them.")
+    await chats.wake(chat)
+    [first] = await children(chats, chat)
+    # The first is never woken, so it keeps the limit full.
+    chats.replies = [
+        calling("agent", "call_b", description="Read the log", prompt="Report the last line of the log."),
+        _final_response("Done."),
+    ]
+    waker = await wake_children_as_they_come(chats, chat, [_final_response("The last line is OK.")], skip={first.id})
+    try:
+        await chats.says(chat, "And the log?")
+        await chats.wake(chat)
+    finally:
+        waker.cancel()
+    [second] = [c for c in await children(chats, chat) if c.id != first.id]
+    assert second.config[DISPATCH_KEY]["mode"] == "foreground"
+    assert (await tool_result(chats, chat, "call_b")).startswith("The last line is OK.")
+    assert [n for n in await chats.store.get_events(chat, types=[EventType.AGENT_NOTIFICATION])
+            if n.data["agent_id"] == str(second.id)] == []

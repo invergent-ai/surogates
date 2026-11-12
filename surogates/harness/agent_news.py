@@ -273,5 +273,7 @@ def starts_notified_work(name: Any, arguments: Any) -> bool:
     if not isinstance(arguments, dict):
         return False
     if name == "agent":
-        return arguments.get("run_in_background") is True
+        # Counted unless it asks to wait: an omitted flag runs a main session's agent in the background, and a
+        # call that ends up waiting only arms a live read for nothing, while a missed one loses its notification.
+        return arguments.get("run_in_background") is not False
     return bool(arguments.get("background")) and bool(arguments.get("notify_on_complete"))

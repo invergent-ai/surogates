@@ -58,7 +58,8 @@ async def test_a_foreground_agent_that_runs_out_says_so_in_its_result(chats):  #
 
     chat = await a_chat(chats, {PARITY_KEY: True, BUDGET_KEY: 1})
     chats.replies = [
-        calling("agent", "call_agent", description="Read the tracker", prompt="Report the open items in the tracker."),
+        calling("agent", "call_agent", description="Read the tracker", prompt="Report the open items in the tracker.",
+                run_in_background=False),
         _final_response("Report: none counted yet."),
         _final_response("Done."),
     ]
