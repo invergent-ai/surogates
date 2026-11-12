@@ -186,3 +186,96 @@ def _strip_top_level_combinators(
             )
             out.pop(key, None)
     return out
+
+
+def restore_json_nulls(arguments: Any, schema: Any) -> Any:
+    """Turn the string ``"null"`` back into JSON null where the schema admits null.
+
+    The schemas the model sees have nullable unions collapsed to their non-null
+    branch plus ``nullable: true`` (``strip_nullable_unions`` above), so a
+    ``string | null`` parameter reads as a plain string.  A tool-call parser that
+    types each value from the schema then hands the model's literal ``null`` to
+    the tool as the four-character string ``"null"``; AutomationBench's
+    ``api_fetch(body=None)`` got ``"null"`` thousands of times and its Drive
+    listing failed on every one.  Only the exact string ``"null"``, only for a
+    value whose own schema admits null (``nullable: true``, a ``null`` type, a
+    ``null`` branch of ``anyOf`` / ``oneOf``, or ``None`` in an ``enum``) and
+    does not list the string ``"null"`` itself as a value.  Nested objects and
+    arrays are walked through ``properties`` / ``items``, and through an
+    ``anyOf`` / ``oneOf`` only when exactly one branch has them; ``$ref``,
+    ``allOf``, ``additionalProperties`` and ``patternProperties`` are not walked.
+    A nested value is restored on the same terms, although there a ``"null"``
+    is what the model wrote.  Everything else, ``"NULL"`` or ``"None"`` and a
+    ``"null"`` for a plain string among them, is passed on as written.  Returns
+    *arguments* itself when nothing changes; never changes it in place.
+    """
+    if isinstance(arguments, dict):
+        props = _branch_with(schema, "properties")
+        if props is None:
+            return arguments
+        changed: dict[str, Any] | None = None
+        for key, value in arguments.items():
+            sub = props.get(key)
+            if not isinstance(sub, dict):
+                continue
+            new = None if _is_restorable(value, sub) else restore_json_nulls(value, sub)
+            if new is not value:
+                if changed is None:
+                    changed = dict(arguments)
+                changed[key] = new
+        return arguments if changed is None else changed
+    if isinstance(arguments, list):
+        items = _branch_with(schema, "items")
+        if items is None:
+            return arguments
+        restored = [None if _is_restorable(value, items) else restore_json_nulls(value, items) for value in arguments]
+        return arguments if all(a is b for a, b in zip(restored, arguments)) else restored
+    return arguments
+
+
+def _is_restorable(value: Any, schema: dict[str, Any]) -> bool:
+    if value != "null" or not _admits_null(schema):
+        return False
+    enum = schema.get("enum")
+    if isinstance(enum, list) and "null" in enum or schema.get("const") == "null":
+        return False  # the string "null" is one of the values the parameter takes
+    logger.debug("tool argument: the string 'null' passed as null (the schema admits null)")
+    return True
+
+
+def _admits_null(schema: Any) -> bool:
+    if not isinstance(schema, dict):
+        return False
+    if schema.get("nullable") is True:
+        return True
+    kind = schema.get("type")
+    if kind == "null" or (isinstance(kind, list) and "null" in kind):
+        return True
+    enum = schema.get("enum")
+    if isinstance(enum, list) and None in enum:
+        return True
+    for combinator in ("anyOf", "oneOf"):
+        variants = schema.get(combinator)
+        if isinstance(variants, list) and any(_admits_null(item) for item in variants):
+            return True
+    return False
+
+
+def _branch_with(schema: Any, key: str) -> dict[str, Any] | None:
+    """``schema[key]``, or that of the one ``anyOf`` / ``oneOf`` branch that has it.
+
+    With several branches that have it the right one depends on the value, so
+    none is taken: a ``"null"`` restored by the wrong branch's rule would break
+    the promise that a plain string keeps it.
+    """
+    if not isinstance(schema, dict):
+        return None
+    if isinstance(schema.get(key), dict):
+        return schema[key]
+    found: list[dict[str, Any]] = []
+    for combinator in ("anyOf", "oneOf"):
+        variants = schema.get(combinator)
+        if not isinstance(variants, list):
+            continue
+        found += [item[key] for item in variants if isinstance(item, dict) and isinstance(item.get(key), dict)]
+    return found[0] if len(found) == 1 else None
