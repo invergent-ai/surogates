@@ -139,6 +139,7 @@ async def test_a_listing_of_a_very_deep_tree_needs_no_recursion(tmp_path):
     assert await backend.list_keys("b") == []  # the bottom file is past any key a bucket holds
     assert time.monotonic() - started < 5
     shallow = await backend.list_entries("b", "", limit=10_000)
+    # The cap is on folders; with 1-character names a file adds 2 bytes.
     assert max(len(e["key"].encode()) for e in shallow) <= 1024 + 2
 
 

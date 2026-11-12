@@ -935,7 +935,9 @@ def _walk() -> Any:
     return local
 
 
-#: S3's longest key, in bytes: a listing walks no folder deeper.
+#: S3's longest key, in bytes: a listing walks into no folder whose keys
+#: would be longer.  The cap is on folders; a file in the deepest folder
+#: walked may still have a longer key (its name adds up to 255 bytes).
 _MAX_KEY_BYTES = 1024
 
 
@@ -968,7 +970,7 @@ def _replace_in(folder: int, name: str, src: Any, if_tag: str | None, if_absent:
     *if_tag* or *if_absent*, only where *name* is still the plain file of
     that tag, or still none, as it is looked at right before the rename:
     :class:`Changed` otherwise, and nothing written."""
-    tmp = f".{name}.tmp.{os.urandom(6).hex()}"
+    tmp = f".{name}.tmp.{os.urandom(4).hex()}"  # as long as mkstemp's names
     fd = os.open(
         tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0), 0o600,
         dir_fd=folder,
