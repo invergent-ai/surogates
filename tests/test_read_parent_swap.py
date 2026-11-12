@@ -142,6 +142,7 @@ async def test_ripgrep_runs_in_the_folder_the_walk_reached(places, monkeypatch):
         return _Proc()
 
     monkeypatch.setattr(local_module, "_RIPGREP_PATH", "rg")
+    monkeypatch.setattr(local_module, "_bwrap_works", False)  # the unconfined path: started in the folder
     monkeypatch.setattr(asyncio, "create_subprocess_exec", exec_)
     inode = os.stat(ws / "a").st_ino
     out_text = await wio.ripgrep(folder, mode="files", pattern="*.txt")
@@ -150,3 +151,63 @@ async def test_ripgrep_runs_in_the_folder_the_walk_reached(places, monkeypatch):
     _swap(ws, out)
     with pytest.raises(PermissionError):
         await wio.ripgrep(folder, mode="files", pattern="*.txt")
+
+
+def _fake_rg(tmp_path: Path) -> str:
+    """A stand-in for ripgrep (there is none on the test box) that does what a walk by path does: it reads a file
+    through a folder that is a link to outside the workspace by the time it gets there."""
+    rg = tmp_path / "rg"
+    rg.write_text("#!/bin/sh\ncat ./sub/secret.txt 2>/dev/null\nfind . -name '*.txt' -type f | sort\n")
+    rg.chmod(0o755)
+    return str(rg)
+
+
+@pytest.mark.skipif(not local_module._PROC_FDS or local_module._BWRAP is None, reason="needs /proc and bubblewrap")
+async def test_ripgreps_own_walk_is_confined_to_the_folder_it_searches(places, tmp_path, monkeypatch):
+    ws, out = places
+    (ws / "a" / "sub").symlink_to(out / "b", target_is_directory=True)  # swapped in during ripgrep's own walk
+    wio = LocalWorkspaceIO(str(ws))
+    folder = await wio.resolve("a")
+    monkeypatch.setattr(local_module, "_RIPGREP_PATH", _fake_rg(tmp_path))
+    monkeypatch.setattr(local_module, "_bwrap_works", None)
+    if not await local_module._bwrap_can_confine(local_module._RIPGREP_PATH):
+        pytest.skip("bubblewrap cannot run here")
+    found = await wio.ripgrep(folder, mode="files", pattern="*.txt")
+    assert "SECRET" not in found
+    assert found.splitlines() == [f"{folder}/b/notes.txt"]
+    # Without the confinement, the same walk reads through the link.
+    monkeypatch.setattr(local_module, "_bwrap_works", False)
+    assert "SECRET" in await wio.ripgrep(folder, mode="files", pattern="*.txt")
+
+
+async def test_a_folder_that_reappears_during_the_check_counts_as_swapped(places, monkeypatch):
+    """The open saw a link, and by the check the folder is back: still refused, never "not a folder"."""
+    ws, out = places
+    wio = LocalWorkspaceIO(str(ws))
+    key = await wio.resolve("a/b/notes.txt")
+    _swap(ws, out)
+    real_stat = os.stat
+
+    def stat(path, *args, dir_fd=None, follow_symlinks=True):
+        if dir_fd is not None and path == "a" and not follow_symlinks:
+            (ws / "a").unlink()
+            (ws / "a.old").rename(ws / "a")  # swapped back just before the check
+        return real_stat(path, *args, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(os, "stat", stat)
+    with pytest.raises(PermissionError, match="replaced after the path was checked"):
+        await wio.read(key)
+
+
+async def test_a_fifo_or_a_folder_under_a_files_name_is_not_waited_on(places):
+    ws, _ = places
+    os.mkfifo(ws / "a" / "b" / "pipe.pdf")
+    wio = LocalWorkspaceIO(str(ws))
+    with pytest.raises(OSError, match="Not a regular file"):
+        await asyncio.wait_for(wio.read(await wio.resolve("a/b/pipe.pdf")), 5)
+    with pytest.raises(OSError):
+        async with wio.local_file(await wio.resolve("a/b/pipe.pdf")):
+            pass
+    with pytest.raises(IsADirectoryError):
+        async with wio.local_file(await wio.resolve("a/b")):
+            pass

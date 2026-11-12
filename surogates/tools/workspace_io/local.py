@@ -693,7 +693,14 @@ def _replace_file(dir_fd: int | None, name: str, data: bytes) -> None:
 #: Where a descriptor of this process can be opened again by path (Linux):
 #: what lets a parser or ripgrep, which take a path, read exactly the file or
 #: folder the walk reached.  Without it they get the path, as before.
-_PROC_FDS = os.path.isdir("/proc/self/fd")
+def _own_proc() -> bool:
+    try:
+        return os.readlink("/proc/self") == str(os.getpid())
+    except OSError:
+        return False
+
+
+_PROC_FDS = os.path.isdir("/proc/self/fd") and _own_proc()
 
 
 def _fd_path(fd: int) -> str:
@@ -724,13 +731,21 @@ def _open_in(real_root: str, key: str, flags: int) -> int:
     try:
         try:
             fd = os.open(name or ".", flags | _O_NOFOLLOW | _O_CLOEXEC, dir_fd=dir_fd)
-            # O_PATH | O_NOFOLLOW opens a link itself rather than refusing it.
-            if name is not None and stat_module.S_ISLNK(os.fstat(fd).st_mode):
+            try:
+                # O_PATH | O_NOFOLLOW opens a link itself rather than refusing it.
+                is_link = name is not None and stat_module.S_ISLNK(os.fstat(fd).st_mode)
+            except BaseException:
+                os.close(fd)
+                raise
+            if is_link:
                 os.close(fd)
                 raise PermissionError(errno.EACCES, f"Refused: {_SWAPPED}.")
             return fd
         except OSError as exc:
-            if name is not None and exc.errno in (errno.ELOOP, errno.ENOTDIR):
+            if name is not None and exc.errno == errno.ELOOP:
+                # O_NOFOLLOW met a link at the name itself.
+                raise PermissionError(errno.EACCES, f"Refused: {_SWAPPED}.") from None
+            if name is not None and exc.errno == errno.ENOTDIR:
                 try:
                     mode = os.stat(name, dir_fd=dir_fd, follow_symlinks=False).st_mode
                     # A link, or (for a folder that was not one at the open) a folder again: being swapped.
@@ -749,10 +764,16 @@ def _open_in(real_root: str, key: str, flags: int) -> int:
 def _open_to_read(real_root: str, key: str) -> BinaryIO:
     """The file *key* open to read, reached as :func:`_open_in` does; a folder
     raises IsADirectoryError, as opening it by path did."""
-    fd = _open_in(real_root, key, os.O_RDONLY)
+    # Opened without waiting, so a FIFO planted under a file's name cannot
+    # hold the call until a writer comes; only a regular file is read.
+    fd = _open_in(real_root, key, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
     try:
-        if stat_module.S_ISDIR(os.fstat(fd).st_mode):
+        mode = os.fstat(fd).st_mode
+        if stat_module.S_ISDIR(mode):
             raise IsADirectoryError(errno.EISDIR, "Is a directory")
+        if not stat_module.S_ISREG(mode):
+            raise OSError(errno.EINVAL, "Not a regular file")
+        os.set_blocking(fd, True)
         return os.fdopen(fd, "rb")
     except BaseException:
         os.close(fd)
@@ -770,6 +791,46 @@ def _paths_back(out: str, given: str, key: str, mode: str) -> str:
         key + line[len(given):] if line.startswith(given) else line
         for line in out.splitlines(keepends=True)
     )
+
+
+#: bubblewrap, which confines ripgrep to the folder it searches (the worker
+#: image has it for srt); None where it is missing or cannot run here.
+_BWRAP: str | None = shutil.which("bwrap")
+_bwrap_works: bool | None = None
+#: What a confined ripgrep sees of the host: the system's programs and
+#: libraries, read-only, and nothing else but the folder it searches.
+_BWRAP_SYSTEM = (
+    "--ro-bind", "/usr", "/usr",
+    "--ro-bind-try", "/bin", "/bin", "--ro-bind-try", "/lib", "/lib",
+    "--ro-bind-try", "/lib64", "/lib64", "--ro-bind-try", "/lib32", "/lib32",
+    "--dev", "/dev",
+)
+_SEARCHED = "/surogates-search"
+_RG_IN_BWRAP = "/run/surogates-rg"
+
+
+async def _bwrap_can_confine(rg: str) -> bool:
+    """Whether bubblewrap can run ripgrep confined here (asked once per
+    process): a container without user namespaces cannot."""
+    global _bwrap_works
+    if _bwrap_works is None:
+        _bwrap_works = False
+        if _BWRAP is not None:
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    _BWRAP, "--die-with-parent", "--unshare-all", *_BWRAP_SYSTEM,
+                    "--ro-bind", rg, _RG_IN_BWRAP, _RG_IN_BWRAP, "--version",
+                    stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+                )
+                _bwrap_works = await asyncio.wait_for(proc.wait(), 10) == 0
+            except (OSError, asyncio.TimeoutError):
+                _bwrap_works = False
+        if not _bwrap_works:
+            logger.warning(
+                "bubblewrap cannot confine ripgrep on this host: a search starts in the folder the walk reached, "
+                "but its walk below it goes by path",
+            )
+    return _bwrap_works
 
 
 class LocalWorkspaceIO:
@@ -914,7 +975,13 @@ class LocalWorkspaceIO:
         # The parser opens a path: it gets one that opens the very file the
         # walk reached (through this process's descriptor), under the file's
         # own name, so its suffix still tells the parser what it is.
-        with _open_to_read(self._real_root(), key) as fh, tempfile.TemporaryDirectory() as folder:
+        real_root = self._real_root()
+        base = tempfile.gettempdir()
+        if os.path.realpath(base) == real_root or os.path.realpath(base).startswith(real_root + os.sep):
+            base = "/tmp"  # never a link a command in the workspace could swap
+        with _open_to_read(real_root, key) as fh, tempfile.TemporaryDirectory(
+            dir=base, ignore_cleanup_errors=True,
+        ) as folder:
             local = Path(folder) / Path(key).name
             os.symlink(_fd_path(fh.fileno()), local)
             yield local
@@ -954,37 +1021,53 @@ class LocalWorkspaceIO:
             args += ["-e", pattern]
 
         # With a workspace, ripgrep starts from what the walk reached: in the
-        # folder itself (its working folder, by this process's descriptor) or
-        # on the file's descriptor, and its paths are written back as keys.
-        # A folder swapped for a link after resolve() cannot point it outside.
-        cwd: str | None = None
-        fd: int | None = None
-        given = ""
+        # folder itself or on the file's descriptor, and its paths are written
+        # back as keys.  A folder swapped for a link after resolve() cannot
+        # point it outside.  Below a folder, ripgrep walks by path: there,
+        # bubblewrap confines it to that folder (a link swapped in during its
+        # walk leads nowhere); where bubblewrap cannot run, that walk is by
+        # path on the host, as before.
+        program, cwd, fd, given, printed_as = _RIPGREP_PATH, None, None, "", key
         if self.root and _BY_FOLDER and _PROC_FDS:
             fd = _open_in(self._real_root(), key, getattr(os, "O_PATH", os.O_RDONLY))
-            if stat_module.S_ISDIR(os.fstat(fd).st_mode):
-                cwd, given, target = _fd_path(fd), "./", "."
-                printed_as = key.rstrip(os.sep) + os.sep
-            else:
-                given = target = printed_as = _fd_path(fd)
+            try:
+                is_dir = stat_module.S_ISDIR(os.fstat(fd).st_mode)
+                fd_in_child = f"/proc/self/fd/{fd}"  # the child's own: pass_fds keeps the number
+                if is_dir:
+                    given, target = "./", "."
+                    printed_as = key.rstrip(os.sep) + os.sep
+                    if await _bwrap_can_confine(_RIPGREP_PATH):
+                        program = _BWRAP
+                        args = [
+                            "--die-with-parent", "--unshare-all", *_BWRAP_SYSTEM,
+                            "--ro-bind", _RIPGREP_PATH, _RG_IN_BWRAP,
+                            "--ro-bind", fd_in_child, _SEARCHED, "--chdir", _SEARCHED,
+                            _RG_IN_BWRAP, *args,
+                        ]
+                    else:
+                        cwd = fd_in_child
+                else:
+                    given = target = fd_in_child
+            except BaseException:
+                os.close(fd)
+                raise
         else:
             target = key
         args.append(target)
         try:
             proc = await asyncio.create_subprocess_exec(
-                _RIPGREP_PATH, *args,
+                program, *args,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=cwd,
+                pass_fds=() if fd is None else (fd,),
             )
             stdout, stderr = await proc.communicate()
         finally:
             if fd is not None:
                 os.close(fd)
         if given:
-            stdout = _paths_back(
-                stdout.decode("utf-8", errors="replace"), given, printed_as if cwd else key, mode,
-            ).encode("utf-8")
+            stdout = _paths_back(stdout.decode("utf-8", errors="replace"), given, printed_as, mode).encode("utf-8")
         rc = proc.returncode or 0
         if rc not in (0, 1):
             message = f"rg exited {rc}: {stderr.decode('utf-8', errors='replace')[:200]}"
