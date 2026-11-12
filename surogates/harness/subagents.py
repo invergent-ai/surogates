@@ -255,6 +255,42 @@ async def _usage(store: Any, session: Any, status: str) -> dict[str, int]:
     }
 
 
+async def resolve_agent(store: Any, session_factory: Any, caller: Any, to: str, *, own_only: bool = False) -> Any | None:
+    """The session *to* names for *caller*: ``parent`` (any case), an id, or an agent's name.
+
+    A name is looked for among the agents of the family *caller* can reach
+    (its own at any depth, its parent and its siblings, as ``list_agents``
+    shows them; with *own_only*, its own only), and the newest one with it
+    answers.  Who may be messaged is ``may_message``'s to decide.
+    """
+    from uuid import UUID
+
+    to = (to or "").strip()
+    if to.lower() == "parent":
+        return await store.get_session(caller.parent_id) if getattr(caller, "parent_id", None) else None
+    try:
+        session_id = UUID(to)
+    except ValueError:
+        session_id = None
+    if session_id is not None:
+        try:
+            return await store.get_session(session_id)
+        except Exception:
+            return None
+    if not to or session_factory is None:
+        return None
+    from surogates.tools.builtin.agents import reachable_agents
+
+    rows = [
+        row for row, relation in await reachable_agents(session_factory, caller)
+        if (not own_only or relation == "yours") and (row["dispatch"] or {}).get("name") == to
+    ]
+    if not rows:
+        return None
+    newest = max(rows, key=lambda row: (row["created_at"], str(row["id"])))
+    return await store.get_session(newest["id"])
+
+
 async def lineage(store: Any, session: Any, *, limit: int = 8) -> list[Any]:
     """*session*'s ancestors, its parent first, at most *limit* of them."""
     chain: list[Any] = []

@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import weakref
 from typing import Any
 from uuid import UUID, uuid4
@@ -38,6 +39,7 @@ from surogates.harness.subagents import (
     dispatch_of,
     may_message,
     over_budget,
+    resolve_agent,
 )
 from surogates.runtime.turn_slots import turn_waiting
 from surogates.tools.registry import ToolRegistry, ToolSchema
@@ -119,6 +121,10 @@ _AGENT_SCHEMA = ToolSchema(
                     "true: the agent starts from a copy of this conversation; say in the prompt which part is its "
                     "own. Default false: from the prompt alone."
                 ),
+            },
+            "name": {
+                "type": "string",
+                "description": "Optional short name to address the agent by in send_message and stop_agent (letters, digits, - and _).",
             },
         },
         "required": ["description", "prompt"],
@@ -339,6 +345,23 @@ async def _start_monitor(me: Any, command: str, description: str, timeout: int, 
     })
 
 
+#: An agent's name: a letter, then letters, digits, - and _, 40 at most.
+_NAME = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,39}")
+#: What a call with a name that cannot be one is answered.
+_BAD_NAME = 'name must start with a letter and use only letters, digits, - and _ (at most 40); "parent" is taken'
+
+
+def valid_name(name: str) -> bool:
+    """Whether *name* can address an agent: never ``parent``, an id's shape, or a background command's."""
+    if not _NAME.fullmatch(name) or name.lower() == "parent" or name.startswith("proc_"):
+        return False
+    try:
+        UUID(name)
+    except ValueError:
+        return True
+    return False
+
+
 #: An agent's status, as the family names it, by its session's.
 _STATUS = {"active": "running", "processing": "running", "completed": "completed", "failed": "failed", "paused": "stopped"}
 
@@ -355,7 +378,7 @@ async def _tree(kwargs: dict, root_id: UUID) -> list[dict]:
                 UNION
                 SELECT s.id FROM sessions s JOIN tree t ON s.parent_id = t.id
             )
-            SELECT s.id, s.parent_id, s.org_id, s.status, s.channel, s.config -> 'agent_dispatch' AS dispatch
+            SELECT s.id, s.parent_id, s.org_id, s.status, s.channel, s.created_at, s.config -> 'agent_dispatch' AS dispatch
             FROM sessions s WHERE s.id IN (SELECT id FROM tree)
             """
         ), {"id": root_id})).mappings().all()
@@ -376,16 +399,11 @@ def _family_below(rows: list[dict], top: UUID) -> list[dict]:
     return out
 
 
-async def _list_agents_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
-    """The agents the caller can reach: its own, at any depth, through agents of the family only; and, for an
-    agent of the family, its parent and its siblings.  Plus its background commands still running."""
-    from surogates.harness.background_watch import background_watch
-
-    session_store = kwargs.get("session_store")
-    me_id = kwargs.get("session_id")
-    if session_store is None or me_id is None or kwargs.get("session_factory") is None:
-        return _error("list_agents needs its session; none was given")
-    me = await session_store.get_session(UUID(str(me_id)))
+async def reachable_agents(session_factory: Any, me: Any) -> list[tuple[dict, str]]:
+    """The sessions *me* can reach, each with its relation: its own agents at any depth, through agents of the
+    family only (``yours``); and, for an agent of the family, its parent (``parent``) and its siblings
+    (``sibling``).  Only those of its organisation, none deleted."""
+    kwargs = {"session_factory": session_factory}
     found: list[tuple[dict, str]] = [(row, "yours") for row in _family_below(await _tree(kwargs, me.id), me.id)]
     if me.parent_id is not None and dispatch_of(me) is not None:
         siblings = await _tree(kwargs, me.parent_id)
@@ -396,13 +414,25 @@ async def _list_agents_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
             (row, "sibling") for row in siblings
             if row["parent_id"] == me.parent_id and row["id"] != me.id and isinstance(row["dispatch"], dict)
         ]
+    return [(row, relation) for row, relation in found if row["org_id"] == me.org_id and row["status"] != "archived"]
+
+
+async def _list_agents_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
+    """The agents the caller can reach (``reachable_agents``), plus its background commands still running."""
+    from surogates.harness.background_watch import background_watch
+
+    session_store = kwargs.get("session_store")
+    me_id = kwargs.get("session_id")
+    if session_store is None or me_id is None or kwargs.get("session_factory") is None:
+        return _error("list_agents needs its session; none was given")
+    me = await session_store.get_session(UUID(str(me_id)))
     agents = []
-    for row, relation in found:
-        if row["org_id"] != me.org_id or row["status"] == "archived":
-            continue
+    for row, relation in await reachable_agents(kwargs["session_factory"], me):
         entry = {"agent_id": str(row["id"]), "relation": relation, "status": _STATUS.get(row["status"], row["status"])}
         dispatch = row["dispatch"] if isinstance(row["dispatch"], dict) else None
         if dispatch is not None:
+            if dispatch.get("name"):
+                entry["name"] = dispatch["name"]
             entry["description"] = dispatch.get("description") or ""
             entry["mode"] = dispatch.get("mode")
             if relation == "yours" and row["parent_id"] != me.id:
@@ -437,7 +467,9 @@ async def _stop_agent_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
     try:
         target_id = UUID(target)
     except ValueError:
-        target_id = None
+        # A name: the newest of the caller's own agents with it, never a sibling's.
+        found = await resolve_agent(session_store, session_factory, me, target, own_only=True)
+        target_id = found.id if found is not None else None
     mine = {row["id"]: row for row in _family_below(await _tree(kwargs, me.id), me.id)}
     agent = mine.get(target_id)
     if agent is None or agent["org_id"] != me.org_id:
@@ -454,7 +486,7 @@ async def _stop_agent_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
         }):
             stopped.append(row["id"])
     if not stopped:
-        return json.dumps({"status": "completed", "agent_id": target, "note": "It ended before the stop: there was nothing to stop."})
+        return json.dumps({"status": "completed", "agent_id": str(agent["id"]), "note": "It ended before the stop: there was nothing to stop."})
     try:
         # As the pause route does: what the stopped agents, and the helpers under them, left waiting on the
         # user's computer is cancelled.
@@ -472,7 +504,7 @@ async def _stop_agent_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
                 store=session_store, redis=redis, session=session, status="killed",
                 result=extract_final_response(await session_store.get_events(sid), fallback=""),
             )
-    return json.dumps({"status": "stopped", "agent_id": target, "stopped": [str(sid) for sid in stopped],
+    return json.dumps({"status": "stopped", "agent_id": str(agent["id"]), "stopped": [str(sid) for sid in stopped],
                        "note": "A stopped agent keeps its context: send_message resumes it."
                        if agent["parent_id"] == me.id else "A stopped agent keeps its context."})
 
@@ -534,17 +566,10 @@ async def _send_message_handler(arguments: dict[str, Any], **kwargs: Any) -> str
     if not to or not message:
         return _error("to and message are required")
     sender = await session_store.get_session(UUID(str(sender_id)))
-    if to.lower() == "parent":
-        if sender.parent_id is None:
-            return _error("you were not started by another agent: there is no parent to message")
-        target_id = sender.parent_id
-    else:
-        try:
-            target_id = UUID(to)
-        except ValueError:
-            return _error(f"{to!r} is not an agent_id")
+    if to.lower() == "parent" and sender.parent_id is None:
+        return _error("you were not started by another agent: there is no parent to message")
     try:
-        target = await session_store.get_session(target_id)
+        target = await resolve_agent(session_store, kwargs.get("session_factory"), sender, to)
     except Exception:
         target = None
     if target is None or not await may_message(session_store, sender, target):
@@ -749,6 +774,9 @@ async def _agent_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
     fork = arguments.get("fork") is True
     agent_type = str(arguments.get("agent_type") or "").strip() or None
     model = str(arguments.get("model") or "").strip() or None
+    name = str(arguments.get("name") or "").strip() or None
+    if name is not None and not valid_name(name):
+        return _error(_BAD_NAME)
 
     parent = await session_store.get_session(UUID(str(parent_id)))
     parent_config = parent.config or {}
@@ -779,6 +807,7 @@ async def _agent_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
         return await _start_agent(
             kwargs, parent=parent, prompt=prompt, description=description, background=background,
             fork=fork, agent_type=agent_type, model=model, depth=depth, budget=budget, child_tokens=child_tokens,
+            name=name,
         )
     finally:
         if handed:
@@ -790,7 +819,7 @@ async def _agent_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
 async def _start_agent(
     kwargs: dict[str, Any], *, parent: Any, prompt: str, description: str,
     background: bool, fork: bool, agent_type: str | None, model: str | None, depth: int, budget: Any,
-    child_tokens: int,
+    child_tokens: int, name: str | None = None,
 ) -> str:
     """Start the agent the checked call asks for, and wait for its report unless it runs in the background."""
     from surogates.tools.builtin import delegate
@@ -812,6 +841,7 @@ async def _start_agent(
         "fork": fork,
         "tool_call_id": tool_call_id,
         "parent": str(parent.id),
+        **({"name": name} if name else {}),
     }
     started: list[UUID] = []
     # This start, until its child is in the database: (mode, agent_type, a mark of its own).
