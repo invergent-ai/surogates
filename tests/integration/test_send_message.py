@@ -100,6 +100,10 @@ async def test_a_finished_agent_resumes_with_its_context_and_reports_again_as_a_
     }
     notes = await chats.store.get_events(chat, types=[EventType.AGENT_NOTIFICATION])
     assert [n.data["result"] for n in notes] == ["There are 12 open items.", "There are 4 closed items."]
+    # Usage: tokens are the agent's so far, so its second run's report has more; each has its run's duration.
+    first, second = (n.data["usage"] for n in notes)
+    assert second["subagent_tokens"] > first["subagent_tokens"]
+    assert first["duration_ms"] >= 0 and second["duration_ms"] >= 0
 
 
 async def test_a_foreground_agent_continued_by_a_message_reports_as_a_notification(chats):  # noqa: F811
@@ -135,10 +139,11 @@ async def test_an_agent_messages_the_agent_that_started_it(chats):  # noqa: F811
     chats.replies = [_final_response("Use the open list.")]
     await chats.wake(chat)
     # Its message, then the notification of its turn's end, which came after it.
-    assert chats.requests[before][-2:] == [
-        {"role": "user", "content": f"[Message from agent {child.id} (Count open items): Which list]\n```\nThe tracker has two lists; which one?\n```"},
-        {"role": "user", "content": f"[Agent {child.id} (Count open items) completed]\nWaiting for an answer."},
-    ]
+    message, note = chats.requests[before][-2:]
+    assert message == {"role": "user", "content": f"[Message from agent {child.id} (Count open items): Which list]\n```\nThe tracker has two lists; which one?\n```"}
+    assert note["role"] == "user"
+    assert f'<summary>Agent {child.id} ("Count open items") finished</summary>' in note["content"]
+    assert "<result>\nWaiting for an answer.\n</result>" in note["content"]
 
 
 async def test_a_message_reaches_only_the_senders_own_tree_and_organisation(chats):  # noqa: F811

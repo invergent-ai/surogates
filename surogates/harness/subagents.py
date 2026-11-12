@@ -215,6 +215,46 @@ def budget_report(events: list[Any]) -> str:
     return ""
 
 
+def run_events(events: list[Any], status: str) -> list[Any]:
+    """The events of the run of an agent that just ended with *status*.
+
+    A ``completed`` or ``budget`` end has already written its run's
+    ``session.complete``, so the run is after the one before it; a
+    ``failed`` or ``killed`` end writes none, so the run is after the last
+    one.  With no earlier end, the whole log.
+    """
+    def kind(event: Any) -> str:
+        value = getattr(event, "type", None)
+        return str(getattr(value, "value", value))
+
+    ends = [at for at, event in enumerate(events) if kind(event) == EventType.SESSION_COMPLETE.value]
+    if status in ("completed", "budget"):
+        start = ends[-2] + 1 if len(ends) >= 2 else 0
+    else:
+        start = ends[-1] + 1 if ends else 0
+    return events[start:]
+
+
+async def _usage(store: Any, session: Any, status: str) -> dict[str, int]:
+    """What agent *session* used: tokens over it and its own agents so far, its tool calls so far, and the
+    duration of the run that just ended."""
+    from datetime import datetime, timezone
+
+    fresh = await store.get_session(session.id)
+    events = await store.get_events(session.id, exclude_types=[EventType.LLM_DELTA])
+    run = run_events(events, status)
+    started = getattr(run[0], "created_at", None) if run else None
+    started = started or getattr(fresh, "created_at", None)
+    if started is not None and started.tzinfo is not None:
+        started = started.astimezone(timezone.utc).replace(tzinfo=None)
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    return {
+        "subagent_tokens": int(await store.session_tree_tokens(session.id)),
+        "tool_uses": int(getattr(fresh, "tool_call_count", 0) or 0),
+        "duration_ms": max(0, int((now - started).total_seconds() * 1000)) if started is not None else 0,
+    }
+
+
 async def lineage(store: Any, session: Any, *, limit: int = 8) -> list[Any]:
     """*session*'s ancestors, its parent first, at most *limit* of them."""
     chain: list[Any] = []
@@ -256,7 +296,7 @@ async def tell_parent(
     its token budget); *result* the agent's last words.  Best effort: the agent's own log keeps its end whatever
     becomes of this.
     """
-    from surogates.harness.agent_news import MAX_RESULT_CHARS
+    from surogates.harness.agent_news import MAX_RESULT_CHARS, mark_format
     from surogates.harness.worker_notify import notify_parent_of_task_event
 
     dispatch = dispatch_of(session) or {}
@@ -273,6 +313,13 @@ async def tell_parent(
         payload["reason"] = reason
     if dispatch.get("tool_call_id"):
         payload["tool_call_id"] = dispatch["tool_call_id"]
+    if dispatch.get("name"):
+        payload["name"] = dispatch["name"]
+    try:
+        payload["usage"] = await _usage(store, session, status)
+    except Exception:
+        # Best effort: without its usage the notification still goes.
+        logger.warning("Could not measure what agent %s used", session.id, exc_info=True)
     try:
         # The parent's log closes the agent's run as it closes a foreground one: what training and viewers join
         # on.  Before the notification, so the turn it gives reads past them; on their own, so a failure here
@@ -305,6 +352,7 @@ async def tell_parent(
     except Exception:
         logger.warning("Could not close the run of agent %s in its parent's log", session.id, exc_info=True)
     try:
+        payload = await mark_format(store, session.parent_id, payload)
         await notify_parent_of_task_event(
             session_store=store, parent_session_id=session.parent_id,
             event_type=EventType.AGENT_NOTIFICATION, payload=payload, redis=redis,

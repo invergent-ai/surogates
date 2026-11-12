@@ -15,7 +15,7 @@ import pytest
 import pytest_asyncio
 
 import surogates.harness.loop as loop_module
-from surogates.harness.agent_news import notification_note
+from surogates.harness.agent_news import NEW_FORMAT, notification_note
 from surogates.harness.subagents import COMPANION_TOOLS, DISPATCH_KEY, PARITY_KEY, PARITY_TOOLS
 from surogates.session.events import EventType
 from surogates.tools.builtin import agents as agents_module
@@ -142,10 +142,14 @@ async def test_a_background_agent_returns_its_id_at_once_and_its_report_wakes_it
     chats.replies = [_final_response("There are 12 open items.")]
     await chats.wake(child.id)
     [note] = await chats.store.get_events(chat, types=[EventType.AGENT_NOTIFICATION])
-    assert note.data == {
+    assert {k: v for k, v in note.data.items() if k not in ("usage", "format")} == {
         "agent_id": str(child.id), "kind": "agent", "status": "completed", "summary": "Count open items",
         "result": "There are 12 open items.", "tool_call_id": "call_agent",
     }
+    assert note.data["format"] == NEW_FORMAT
+    usage = note.data["usage"]
+    assert set(usage) == {"subagent_tokens", "tool_uses", "duration_ms"}
+    assert all(isinstance(value, int) for value in usage.values()) and usage["duration_ms"] >= 0
     assert await queued(chats.api, await chats.session(chat))
 
     before = len(chats.requests)
@@ -153,7 +157,7 @@ async def test_a_background_agent_returns_its_id_at_once_and_its_report_wakes_it
     await chats.wake(chat)
     request = chats.requests[before]
     assert request[-1] == notification_note(note.data)
-    assert request[-1]["content"] == f"[Agent {child.id} (Count open items) completed]\nThere are 12 open items."
+    assert f'<summary>Agent {child.id} ("Count open items") finished</summary>' in request[-1]["content"]
     await chats.says(chat, "Thanks.")
     await chats.wake(chat)
     assert chats.requests[-1][: len(request)] == request
@@ -301,9 +305,9 @@ async def test_a_background_agent_that_ends_early_says_why_and_closes_its_run_in
     await tell_parent(store=chats.store, redis=None, session=child, status="completed", result="Partial.",
                       reason="tool_loop_halt")
     [note] = await chats.store.get_events(chat, types=[EventType.AGENT_NOTIFICATION])
-    assert notification_note(note.data)["content"] == (
-        f"[Agent {child.id} (Count open items) ended before it finished (tool_loop_halt)]\nPartial."
-    )
+    content = notification_note(note.data)["content"]
+    assert f'<summary>Agent {child.id} ("Count open items") ended early (tool_loop_halt); its result may be partial</summary>' in content
+    assert "<result>\nPartial.\n</result>" in content
     [closed] = await chats.store.get_events(chat, types=[EventType.DELEGATION_COMPLETE])
     assert (closed.data["child_session_id"], closed.data["tool_call_id"]) == (str(child.id), "call_agent")
 

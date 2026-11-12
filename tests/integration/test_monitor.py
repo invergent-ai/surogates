@@ -11,8 +11,9 @@ import pytest
 import pytest_asyncio
 
 from surogates.harness import background_watch as watch_module
-from surogates.harness.agent_news import notification_note
+from surogates.harness.agent_news import NEW_FORMAT, notification_note
 from surogates.harness.background_watch import HERE, BackgroundWatch
+from surogates.harness.subagents import PARITY_KEY
 from surogates.session.events import EventType
 from surogates.tools.builtin import agents as agents_module
 from tests.test_steer_loop import _final_response
@@ -76,6 +77,20 @@ async def test_each_line_reaches_the_session_then_the_end(api, here_watch):  # n
     assert notification_note(end)["content"].startswith(f"[Monitor {started['monitor_id']} (Watch the ticks) ended: its command exited with code 3")
     assert notification_note(outputs[0])["content"].startswith(f"[Monitor {started['monitor_id']} (Watch the ticks): 1 new line]\n```\nfirst\n```")
     assert await queued(api, await store.get_session(chat))
+
+
+async def test_a_flagged_sessions_command_end_is_marked_and_reads_in_the_new_format(api, here_watch):  # noqa: F811
+    # The API drops the family's keys a client sends: the flag is the server's to write.
+    store = api.app.state.session_store
+    chat = await a_session(api)
+    await store.update_session_config_key(chat, PARITY_KEY, True)
+    started = await start(api, chat, "echo done; exit 0")
+    ended = await until(lambda: notes_until_end(store, chat))
+    end = ended[-1]
+    assert end["format"] == NEW_FORMAT
+    content = notification_note(end)["content"]
+    assert content.startswith("[SYSTEM NOTIFICATION - NOT USER INPUT]\n")
+    assert f"<summary>Monitor {started['monitor_id']} (Watch the ticks) ended: its command exited with code 0</summary>" in content
 
 
 async def notes_until_end(store, chat):

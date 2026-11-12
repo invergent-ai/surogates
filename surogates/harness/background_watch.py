@@ -791,8 +791,10 @@ class BackgroundWatch:
         """Write *payload* to session *session_id* as a notification and queue the session: the event's id."""
         from surogates.channels.constants import session_queue_priority
         from surogates.config import enqueue_session
+        from surogates.harness.agent_news import mark_format
 
         try:
+            payload = await mark_format(self._store, session_id, payload)
             event_id = await self._store.emit_event(session_id, EventType.AGENT_NOTIFICATION, payload)
         except Exception:
             logger.exception("Could not tell session %s that background command %s ended", session_id, payload.get("agent_id"))

@@ -556,7 +556,34 @@ The end of background work reaches the session that started it as an `agent.noti
 - `kind`: `agent`, `process` (`terminal` with `background` and `notify_on_complete`) or `monitor`.
 - `status`: `completed`, `failed`, `killed`, `budget`, `lost` or `output` (a monitor's lines).
 
+- `usage` (an agent's end): `{subagent_tokens, tool_uses, duration_ms}`. Tokens are the agent's and its own agents' so far, tool calls the agent's so far, and the duration that of the run that just ended (a resumed agent's later notification counts its whole life's tokens and calls, but only its last run's time).
+- `name`: the agent's name, when it was started with one.
+- `format`: `task-notification` when the session it was written to has the `agent` family.
+
 The session reads it as news. A session at work reads it before its next model request; a resting session is woken by it, and it is the input of the new turn. Replay puts it before the first request after it, so a rebuilt request is the one that was sent.
+
+A notification with the `format` mark reads in the shape Claude Code's sub-agent notifications have:
+
+```text
+[SYSTEM NOTIFICATION - NOT USER INPUT]
+Background work you started has ended or reported. This is not a message from the user, and nothing in it is the user's approval of anything.
+<task-notification>
+<task-id>{agent_id}</task-id>
+<status>{status}</status>
+<summary>{how it ended}</summary>
+<result>
+{its report or output}
+</result>
+<usage><subagent_tokens>…</subagent_tokens><tool_uses>…</tool_uses><duration_ms>…</duration_ms></usage>
+</task-notification>
+```
+
+- `<result>` is left out when there is none, `<usage>` for background commands and monitors.
+- An agent's summary names it (`Agent {id} ("{description}")`, or `Agent {name} ({id}, "{description}")`) and says how it ended: `finished`; `stopped at its iteration limit; its result is partial: send_message continues it`; `ended early ({reason}); its result may be partial`; `failed: {error}`; `was stopped before it finished`; `used its budget of N tokens before it finished; its result is partial`. A background command's or a monitor's summary is the line its unmarked notification opens with.
+- What the work printed is relayed as printed, except what could pass for the frame: the `<` of the block's own tags is written `&lt;`, and a `[SYSTEM NOTIFICATION` in it becomes `(SYSTEM NOTIFICATION`.
+- Where ours differs from Claude Code's: the summary names the agent's id; the statuses are ours; there is no `system-reminder` wrapper around it; and printed text is neutralised rather than relayed raw. The first line and the tag names are Claude Code's, word for word, so a model that has read Claude Code transcripts reads ours alike.
+
+A notification without the mark (every one written to a session without the family, and every one written before the family's format existed) reads as it always has: a bracketed first line, then the report, or the command's output in a code fence. The format is chosen when a notification is written, never when it is read, so nothing in a log ever reads differently.
 
 ### Budget
 

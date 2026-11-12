@@ -46,9 +46,10 @@ async def test_a_background_agent_stops_on_its_budget_and_its_parent_is_told(cha
     assert note.data["status"] == "budget" and note.data["budget_tokens"] == 3
     # Its report, never a line from the middle of a step.
     assert note.data["result"] == "Report: 2 of 12 items counted."
-    assert notification_note(note.data)["content"].startswith(
-        f"[Agent {child.id} (Count open items) stopped before it finished: it used its budget of 3 tokens]",
-    )
+    assert (
+        f'<summary>Agent {child.id} ("Count open items") used its budget of 3 tokens before it finished; '
+        "its result is partial</summary>"
+    ) in notification_note(note.data)["content"]
     chats.replies = []
 
 
