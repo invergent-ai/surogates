@@ -30,7 +30,7 @@
 2. A notification written before this change, or to a session without the flag (a background command in an ordinary chat), is read again after a worker restart. Expected: the same text as today, byte for byte (test in Task 1).
 3. Two agents of one parent get the same name, and a name collides with an id's shape or with `parent`. Expected: the newest one answers to the name; names that could be read as an id or as `parent` are refused (tests in Task 2).
 4. A background agent started without `run_in_background` ends while its parent's turn is still running. Expected: the parent reads the notification before its next model request, as for one started with `run_in_background=true` (test in Task 3).
-5. A sub-agent or a project thread calls `agent` without `run_in_background`, or a main session's sixth call does. Expected: the call runs in the foreground, not refused (tests in Task 3).
+5. A session with a parent calls `agent` without `run_in_background`, or a main session's call would pass the background limit. Expected: the call runs in the foreground, not refused (tests in Task 3 for a sub-agent and for the limit; a project thread has a parent and follows the same rule, and the second plan's threads work tests it with a real thread).
 
 ---
 
@@ -56,12 +56,13 @@
 - Modify: `surogates/harness/subagents.py` (`tell_parent`)
 - Modify: `surogates/harness/background_watch.py` (`_tell`)
 - Modify: `docs/sub-agents/index.md` (section 13, "Notifications")
-- Test: `tests/test_agent_news.py` (new); the tests that pin today's text for agents and monitors, which run with the flag: `tests/integration/test_agent_tool.py` (the background-agent test, and the early-end test at lines 300-306), `test_agent_budget.py`, `test_send_message.py`, `test_monitor.py`. `test_background_completions.py` and `test_watch_across_workers.py` run without the flag and must pass unchanged.
+- Test: `tests/test_agent_news.py` (new); the tests that pin today's text in sessions that have the flag: `tests/integration/test_agent_tool.py` (the background-agent test, and the early-end test at lines 300-306), `test_agent_budget.py`, `test_send_message.py` (the resumed-run test, and `test_an_agent_messages_the_agent_that_started_it` at lines 136-141); and `tests/integration/test_monitor.py`, for one new test. Its existing tests create their sessions through the API, which drops the flag a client sends (`api/routes/sessions.py`, `SERVER_OWNED_KEYS`), so they run without it: their text assertions stay as they are and guard the unmarked format, with `test_background_completions.py` and `test_watch_across_workers.py`.
 
 **Interfaces:**
-- Produces, in `agent_news.py`: `NEW_FORMAT = "task-notification"`; `NOTIFICATION_HEADER = "[SYSTEM NOTIFICATION - NOT USER INPUT]"`; `NOTIFICATION_NOTE`, the framing line below; `async def mark_format(store, session_id, payload: dict) -> dict`, which returns *payload* with `"format": NEW_FORMAT` added when the receiving session has the family (`subagents.parity_enabled` of its config), else unchanged.
-- Produces: `notification_note(data: dict) -> dict` renders the new format below for a payload whose `format` is `NEW_FORMAT`, and today's text, unchanged, for any other. Every kind (`agent`, `process`, `monitor`) goes through it.
-- Produces: `tell_parent` and `background_watch._tell` pass their payload through `mark_format` before writing it. An agent's payload also gains `usage` and, when the agent has one, `name` (Task 2 sets it).
+- Produces, in `agent_news.py`: `NEW_FORMAT = "task-notification"`; `NOTIFICATION_HEADER = "[SYSTEM NOTIFICATION - NOT USER INPUT]"`; `NOTIFICATION_NOTE`, the framing line below; `async def mark_format(store, session_id, payload: dict) -> dict`, which returns *payload* with `"format": NEW_FORMAT` added when the receiving session has the family (`subagents.parity_enabled` of its config, which reads the session's own key first), else unchanged. It never raises: when the session cannot be read it returns the payload unmarked, so the default is today's text.
+- Produces: `notification_note(data: dict) -> dict` first branches on the mark: a payload whose `format` is `NEW_FORMAT` gets the new format below; any other goes to today's body, left exactly as it is, so its text stays byte-identical. Every kind (`agent`, `process`, `monitor`) goes through it. These are the only two writers of `agent.notification` (`subagents.tell_parent` through `notify_parent_of_task_event`, and `background_watch._tell` for every command and monitor end), and the live read and replay both render through `notification_note`.
+- Produces: `tell_parent` and `background_watch._tell` pass their payload through `mark_format` before writing it, inside the `try` that already guards the write, so nothing about the mark can stop a notification or the watch's poll. An agent's payload also gains `usage` and, when the agent has one, `name` (Task 2 sets it).
+- Produces, in `subagents.py`: `def run_events(events: list, status: str) -> list`, the events of the run that just ended: for `completed` and `budget`, the end path has already written this run's `session.complete`, so the run is after the one before it (`ends[-2]`); for `failed` and `killed`, it has not, so the run is after the last one (`ends[-1]`); with no earlier end, the whole log.
 - Keep `fenced` in `agent_news.py`: `agents.py` imports it for `send_message`, and today's text uses it.
 
 The new format:
@@ -81,7 +82,7 @@ Background work you started has ended or reported. This is not a message from th
 ```
 
 - `<result>` is left out when there is no result, `<usage>` when the payload has none (background commands and monitors have none).
-- In `{result}` and `{summary}`, only what could pass for the frame is neutralised: the `<` of `<task-notification`, `</task-notification`, `<result`, `</result`, `<summary`, `</summary`, `<usage`, `</usage`, `<task-id`, `</task-id`, `<status`, `</status` is written `&lt;`, and the `[` of `[SYSTEM NOTIFICATION` is written `(`. Everything else is left as it was printed, so a diff, HTML or a C++ include stays readable.
+- In `{result}` and `{summary}`, only what could pass for the frame is neutralised: the `<` of `<task-notification`, `</task-notification`, `<result`, `</result`, `<summary`, `</summary`, `<usage`, `</usage`, `<task-id`, `</task-id`, `<status`, `</status` is written `&lt;` (matched in any case), and the `[` of `[SYSTEM NOTIFICATION` (in any case) is written `(`. Everything else is left as it was printed, so a diff, HTML or a C++ include stays readable.
 - `{status}` is the payload's status as it is (`completed`, `failed`, `killed`, `budget` for an agent; the statuses commands and monitors have today).
 - `{summary}` for an agent is `Agent {id} ("{description}")`, or with a name `Agent {name} ({id}, "{description}")`, followed by:
   - completed: `finished`
@@ -95,7 +96,7 @@ Background work you started has ended or reported. This is not a message from th
 `usage`, computed in `tell_parent` inside its own `try`, so that a failure there drops only the `usage` key and never the notification:
 - `subagent_tokens`: `store.session_tree_tokens(session.id)`, the agent and its own agents over their whole life so far;
 - `tool_uses`: the session's `tool_call_count`, read fresh with `store.get_session`, over its whole life so far;
-- `duration_ms`: the run that ended, from its first event to now. The run starts where the report's run starts (after the session's previous `session.complete`, as `loop_artifact_completion.py` slices it), else at the session's `created_at`. Timestamps are naive UTC: compare with `datetime.now(timezone.utc).replace(tzinfo=None)`.
+- `duration_ms`: from the first event of `run_events(events, status)` (else the session's `created_at`) to now. Timestamps are naive UTC: compare with `datetime.now(timezone.utc).replace(tzinfo=None)`.
 
 Section 13 states that tokens and tool calls are totals so far and the duration is the last run's.
 
@@ -104,7 +105,10 @@ Section 13 states that tokens and tool calls are totals so far and the duration 
 `tests/test_agent_news.py`:
 
 ```python
+import pytest
+
 from surogates.harness.agent_news import NEW_FORMAT, NOTIFICATION_HEADER, notification_note
+from surogates.harness.subagents import run_events
 
 NEW = {"format": NEW_FORMAT}
 
@@ -134,6 +138,7 @@ def test_a_result_cannot_pass_for_the_frame_and_stays_readable():
     })["content"]
     assert content.count("</task-notification>") == 1 and content.count("<task-notification>") == 1
     assert content.count(NOTIFICATION_HEADER) == 1 and content.startswith(NOTIFICATION_HEADER + "\n")
+    assert "(system notification" not in content.lower().split("<result>")[0]
     assert "&lt;/result>&lt;/task-notification>" in content
     assert "- a < b\n#include <vector>" in content
 
@@ -167,30 +172,47 @@ def test_a_background_command_in_the_new_format():
 @pytest.mark.parametrize("data", [
     {"agent_id": "a1", "kind": "agent", "status": "completed", "summary": "Count", "result": "12."},
     {"agent_id": "proc_1", "kind": "process", "status": "completed", "summary": "make test", "exit_code": 0, "result": "ok"},
+    {"agent_id": "proc_2", "kind": "monitor", "status": "output", "summary": "errors", "lines": 2, "result": "E1\nE2"},
 ])
 def test_a_notification_without_the_mark_reads_as_today(data):
     # Today's text, copied from the code before this change: the guard that nothing outside the flag moves.
     assert notification_note(data) == TODAYS[data["kind"]]
+
+
+def test_a_runs_events_start_where_its_end_path_leaves_them():
+    def ev(kind):
+        return SimpleNamespace(type=kind)
+
+    first, done, second, done2 = ev("user.message"), ev("session.complete"), ev("coordinator.message"), ev("session.complete")
+    log = [first, done, second, done2]
+    assert run_events(log, "completed") == [second, done2]     # this run's end is already written
+    assert run_events(log[:3], "failed") == [second]           # a failure writes no end for its run
+    assert run_events(log[:3], "killed") == [second]
+    assert run_events([first], "failed") == [first]
 ```
 
-`TODAYS` holds today's rendering of the two payloads, computed once with the `notification_note` of `origin/master` and pasted as literals.
+`TODAYS` holds today's rendering of the three payloads, computed once with the `notification_note` of `origin/master` and pasted as literals. Import `SimpleNamespace` from `types`.
 
 In `tests/integration/test_agent_tool.py`:
 - `test_a_background_agent_returns_its_id_at_once_and_its_report_wakes_its_parent` compares its payload with an exact dict: compare it without `usage` and `format`, assert `format == NEW_FORMAT`, and assert that `usage` has the three keys with integers and `duration_ms >= 0`. Replace the line pinning the old bracketed text with one checking that `<summary>Agent {child.id} ("Count open items") finished</summary>` is in `request[-1]["content"]`.
 - The early-end test at lines 300-306 asserts the old text for reason `tool_loop_halt`: expect `ended early (tool_loop_halt); its result may be partial` in the summary and `Partial.` in the result.
 
-In `tests/integration/test_send_message.py`, the resumed-run test (`test_a_finished_agent_resumes_with_its_context_and_reports_again_as_a_notification`) also asserts that the second notification's `usage.tool_uses` is at least the first's, and that both have a `duration_ms`.
+In `tests/integration/test_send_message.py`:
+- the resumed-run test (`test_a_finished_agent_resumes_with_its_context_and_reports_again_as_a_notification`) also asserts that the second notification's `usage.subagent_tokens` is greater than the first's (each run's model call adds tokens), and that both have a `duration_ms`;
+- `test_an_agent_messages_the_agent_that_started_it` pins `[Agent … completed]\nWaiting for an answer.` at lines 136-141: expect the new format there (the message line above it is not a notification and stays).
+
+In `tests/integration/test_monitor.py`, add `test_a_flagged_sessions_command_end_is_marked_and_reads_in_the_new_format`: a session created as `a_session` does, then given the flag with `store.update_session_config_key(chat, PARITY_KEY, True)`, starts a short command as the file's other tests do; its notification has `format == NEW_FORMAT`, and its rendering has the `<summary>` line of the command.
 
 - [ ] **Step 2: Run them and see them fail**
 
 Run: `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest tests/test_agent_news.py tests/integration/test_agent_tool.py tests/integration/test_send_message.py -n 0 -p no:cacheprovider -q`
-Expected: the new and changed tests fail (no `NEW_FORMAT`; the old bracketed text; no `usage`), except `test_a_notification_without_the_mark_reads_as_today`, which fails only on the import and then guards.
+Expected: the new and changed tests fail (no `NEW_FORMAT` or `run_events`; the old bracketed text; no `usage`). `test_a_notification_without_the_mark_reads_as_today` fails only on the import, and guards from then on.
 
 - [ ] **Step 3: Implement `mark_format`, the renderer, the payload's usage, and the two writers' marking**
 
 - [ ] **Step 4: Update the other files that pin the agents' and monitors' text, then run every file named under Files**
 
-In `test_agent_budget.py` and `test_monitor.py`, replace assertions on the old bracketed strings with assertions on the `<summary>` and `<result>` parts of the new text, keeping what each test checks.
+In `test_agent_budget.py`, replace assertions on the old bracketed strings with assertions on the `<summary>` and `<result>` parts of the new text, keeping what each test checks. Leave the existing tests of `test_monitor.py` as they are.
 
 Run: `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest tests/test_agent_news.py tests/integration/test_agent_tool.py tests/integration/test_agent_budget.py tests/integration/test_send_message.py tests/integration/test_monitor.py tests/integration/test_background_completions.py tests/integration/test_watch_across_workers.py tests/integration/test_list_stop_agents.py -n 0 -p no:cacheprovider -q`
 Expected: all pass, with `test_background_completions.py` and `test_watch_across_workers.py` unchanged.
@@ -215,7 +237,9 @@ git commit -m "feat(agents): notifications read as tagged system notifications w
 **Interfaces:**
 - Produces: `agent` argument `name`: 1 to 40 characters of letters, digits, `-` and `_`, starting with a letter. Stored as `agent_dispatch["name"]`.
 - Produces, in `subagents.py`: `async def resolve_agent(store, session_factory, caller: Any, to: str, *, own_only: bool = False) -> Any | None`: `"parent"` (any case) gives the caller's parent; a UUID gives that session; any other string gives, among the agents of the family the caller may reach (its own at any depth, its parent, its siblings: the set `list_agents` shows; with `own_only`, its own agents only), the newest one (by `created_at`) whose dispatch `name` equals it. `may_message` then decides as today. `send_message` resolves through it; `stop_agent` with `own_only=True`, so a newer sibling of the same name never hides one of the caller's own agents. `agents._tree` gains `created_at` in what it selects.
-- Produces: `list_agents` shows `name` for an agent that has one; `tell_parent` puts `name` in the payload (Task 1 renders it).
+- Produces: `list_agents` shows `name` for an agent that has one; `tell_parent` puts `name` in the payload (Task 1 renders it). `name` is stored in the dispatch only when given, so the exact-dict assertions on a dispatch (`test_agent_tool.py`) keep holding. `SessionDispatch` in `api/routes/sessions.py` is not changed: `test_agent_links.py` pins its shape, and no client needs the name yet.
+- `resolve_agent` resolves `"parent"` and an id without `session_factory` (the `send()` helper in `test_send_message.py` passes none); only a name needs it, for `_tree`. With no parent it keeps today's error, `you were not started by another agent: there is no parent to message`. Two agents of one name started in one response are told apart by `created_at`, then by id.
+- The design lists `list_agents` taking a name or an id: it takes none today, and reading one agent is part of the threads work (`read_thread`) in the second plan.
 
 Rules: a name that is `parent` in any case, or parses as a UUID, or starts with `proc_`, or breaks the character rule, is refused with `name must start with a letter and use only letters, digits, - and _ (at most 40); "parent" is taken`. The newest agent with a name answers to it; an older one with the same name stays reachable by its id.
 
@@ -311,12 +335,14 @@ git commit -m "feat(agents): agents can be named and addressed by their names"
 - Produces: an omitted `run_in_background` that would pass `MAX_RUNNING_IN_BACKGROUND` runs in the foreground instead of being refused. An explicit `run_in_background=true` over the limit is refused as today.
 - Produces: `starts_notified_work` counts an `agent` call as background work unless it passes `run_in_background: false`. A call that ends up in the foreground only arms the parent's live read for nothing, which is harmless; one that is missed loses its notification.
 - Produces: a fork follows the same default.
+- In `_start_agent`, the mode is decided under the start lock, before `dispatch`, `start_extra`, the `start` tuple and `on_started` are built, since each records it: a child stamped `background` that ran in the foreground would report twice, once as the call's result and once as a notification. Either build those after the check, or close the prepared run and rebuild it in the foreground.
 
 - [ ] **Step 1: Write the failing tests**
 
+Every new test in this task sets `monkeypatch.setattr(delegate_module, "_DELEGATION_TIMEOUT_SECONDS", 2)`: before the change, a call nothing wakes would wait an hour.
+
 ```python
 async def test_an_agent_runs_in_the_background_unless_asked_to_wait(chats, monkeypatch):
-    # A foreground call nothing wakes would wait for the delegation timeout: fail fast instead.
     monkeypatch.setattr(delegate_module, "_DELEGATION_TIMEOUT_SECONDS", 2)
     chat = await a_chat(chats, PARITY)
     chats.replies = [calling("agent", "call_a", description="Count", prompt="Count."), _final_response("Started.")]
@@ -327,14 +353,14 @@ async def test_an_agent_runs_in_the_background_unless_asked_to_wait(chats, monke
     assert child.config[DISPATCH_KEY]["mode"] == "background"
 
 
-async def test_an_agent_started_without_the_flag_that_ends_mid_turn_is_read_before_the_next_request(chats):
-    # The chat starts an agent without run_in_background; while the chat's next tool call runs
-    # (chats.during_the_tool_call), the agent's turn completes. The chat's next model request
+async def test_an_agent_started_without_the_flag_that_ends_mid_turn_is_read_before_the_next_request(chats, monkeypatch):
+    # The chat starts an agent without run_in_background, then calls a stub tool (todo); while that stub runs
+    # (chats.during_the_tool_call fires only in stub tools), the agent's turn completes. The chat's next model request
     # carries the notification, and a later request starts with the same messages.
     ...
 
 
-async def test_a_sub_agent_or_a_thread_that_does_not_say_starts_its_agent_in_the_foreground(chats):
+async def test_a_sub_agent_that_does_not_say_starts_its_agent_in_the_foreground(chats, monkeypatch):
     # Guards the default for sessions with a parent: the chat starts agent A in the background;
     # A calls agent(...) without run_in_background; A's call waits for its report.
     ...
@@ -344,17 +370,22 @@ async def test_a_sub_agent_or_a_thread_that_does_not_say_starts_its_agent_in_the
 
 async def test_a_sixth_agent_without_the_flag_runs_in_the_foreground(chats, monkeypatch):
     monkeypatch.setattr(agents_module, "MAX_RUNNING_IN_BACKGROUND", 1)
-    # One background agent runs; the chat calls agent(...) again without run_in_background: it waits for its
-    # report (woken with wake_children_as_they_come) instead of being refused.
+    # One background agent runs and is never woken, so it keeps the limit full. The chat calls agent(...) again
+    # without run_in_background: it waits for its report, woken with wake_children_as_they_come(skip={first.id}).
     ...
+    assert second.config[DISPATCH_KEY]["mode"] == "foreground"
+    assert [n for n in await chats.store.get_events(chat, types=[EventType.AGENT_NOTIFICATION])
+            if n.data["agent_id"] == str(second.id)] == []
 ```
+
+`wake_children_as_they_come` in `test_agent_tool.py` gains a `skip` argument: the ids of children it must leave alone.
 
 Change the calls listed under Files to pass `run_in_background=False`. Write the bodies marked `...` in full.
 
 - [ ] **Step 2: Run and see them fail**
 
 Run: `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest tests/integration/test_agent_tool.py -n 0 -p no:cacheprovider -q -k "unless_asked or mid_turn or does_not_say or sixth"`
-Expected: `unless_asked` fails after 2 seconds (the call waits); `mid_turn` and `sixth` fail; `does_not_say` passes (it guards today's behaviour for sub-agents).
+Expected: `unless_asked` and `mid_turn` fail after 2 seconds (the call waits); `does_not_say` and `sixth` pass, guarding today's foreground runs that the change must keep.
 
 - [ ] **Step 3: Implement; rewrite the schema property, `_AGENT_DESCRIPTION`'s sentence on the default and the module docstring to match**
 
@@ -393,7 +424,7 @@ git commit -m "feat(agents): a main session's agent runs in the background unles
 
 **Interfaces:**
 - Produces: `apply_parity` adds `send_message` to a session with `agent_dispatch` whatever its `allowed_tools` (an explicit `excluded_tools` naming it still holds), as `WORKER_SELF_TOOLS` are added to a task worker (`surogates/orchestrator/worker.py`, `_filter_effective_tools`). `list_agents` and `stop_agent` keep today's rule.
-- Produces: a session given `send_message` only this way (its `allowed_tools` is set and leaves it out) may message its parent and nobody else: `_send_message_handler` answers any other `to` with `you may message only the agent that started you`. The spec asks for a way to the parent, not to siblings.
+- Produces: a session given `send_message` only this way (its `allowed_tools` is set and leaves it out) may message its parent and nobody else: `_send_message_handler` answers any other `to` with `you may message only the agent that started you`. The spec asks for a way to the parent, not to siblings. This task covers the type's tool list; the policy half of the spec's rule (a policy cannot take `send_message` from a sub-agent) lands with governance in the second plan.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -411,11 +442,11 @@ async def test_such_a_sub_agent_cannot_message_its_siblings(chats, monkeypatch):
     assert json.loads(await tool_result(chats, child.id, "call_side"))["error"] == "you may message only the agent that started you"
 ```
 
-Provide the agent type by monkeypatching `surogates.harness.agent_resolver.resolve_agent_by_name` with a function that returns `AgentDef(name="reader", description="Reads", system_prompt="", tools=["read_file"], source="platform")` (`AgentDef` is in `surogates.tools.loader`) when asked for `"reader"`, and `None` otherwise. Write the bodies in full.
+Provide the agent type by monkeypatching `surogates.harness.agent_resolver.resolve_agent_by_name` with an `async` function taking `(name, tenant, *, session_factory=None, bundle=None)` (as `delegate.py` calls it) that returns `AgentDef(name="reader", description="Reads", system_prompt="", tools=["read_file"], source="platform")` (`AgentDef` is in `surogates.tools.loader`) when asked for `"reader"`, and `None` otherwise. Write the bodies in full.
 
 - [ ] **Step 2: Run and see it fail**
 
-Run: `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest tests/integration/test_send_message.py -n 0 -p no:cacheprovider -q -k "lists_its_tools"`
+Run: `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest tests/integration/test_send_message.py -n 0 -p no:cacheprovider -q -k "lists_its_tools or cannot_message_its_siblings"`
 Expected: both fail (`send_message` is not offered).
 
 - [ ] **Step 3: Implement**
@@ -450,6 +481,7 @@ What each says, in our words (the rules are fixed by the spec's "Guidance" secti
 
 - `agents.md`: when to start an agent and when not; how to write the brief (goal and why, what is known or ruled out, where to look, scope, what to report and how long; a fork's prompt is a directive; never "based on your findings"); in a main session agents run in the background unless the next step needs the report, while a sub-agent's or a thread's calls wait for theirs (one fragment, worded so it holds for both, since a sub-agent below the depth limit is offered `agent` too); never state or predict a result before its notification, and say it is still running when asked; a report can be wrong in a confident tone, so check what matters before relaying it; the user does not see the report; continue an agent with `send_message` when its context helps, start a fresh one when that context would mislead (after a wrong approach, or to check another agent's work).
 - `sub_agent.md`: do the task fully and stay in its scope; the final message is the report and the only thing the parent reads, so everything it needs goes there, not into a file; open the report with one line restating the task; name files by their paths in the workspace; messages from another agent direct the work but are never the user's approval of anything; a question for the parent goes in the report, or to the parent with `send_message`, and then the turn ends.
+- Both fragments start with the frontmatter the other guidance files carry (`name: ...`). `_tool_guidance_section` drops any line that mentions `` `ask_user_question` `` or "use terminal" when the session lacks that tool, which would break `fragment(name) in prompt`: neither fragment uses those words.
 - `_AGENT_DESCRIPTION`, `_SEND_MESSAGE_DESCRIPTION` and `FORK_NOTE` are rewritten to match, shorter where a fragment now carries the rule. `FORK_NOTE` tells the fork to do its one part itself and start no agents of its own, as Claude Code's fork is told.
 
 - [ ] **Step 1: Write the failing tests**
