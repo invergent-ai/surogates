@@ -1,7 +1,7 @@
 """Integration tests for the mission evaluator trigger logic."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
 
 import pytest
