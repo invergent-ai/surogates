@@ -198,6 +198,7 @@ _MIXED_SCRIPT = re.compile(
 # Longer text fields are not pattern-scanned (several patterns are quadratic in the worst case): the definition is
 # dropped as oversized.  Real tools are far below it (our benchmarks' largest field is 3.6k characters).
 _MAX_FIELD_CHARS = 16_000
+_MAX_DEFINITION_CHARS = 64_000  # all text fields of one definition together
 
 
 def _poisoning_shapes(value: str) -> list[str]:
@@ -312,10 +313,14 @@ class MCPGovernance:
         # and ours) are quadratic in the worst case, and the scan runs on the proxy's event loop.
         text_fields = _extract_text_fields(tool_def)
         oversized = [(path, len(value)) for path, value in text_fields if len(value) > _MAX_FIELD_CHARS]
+        total = sum(len(value) for _, value in text_fields)
+        if not oversized and total > _MAX_DEFINITION_CHARS:
+            oversized = [("the whole definition", total)]
         if oversized:
             path, size = oversized[0]
             return ScanResult(safe=False, severity="critical", threats=[
-                f"Oversized text field ({size} characters, limit {_MAX_FIELD_CHARS}) in {path}: not scanned"])
+                f"Oversized text ({size} characters; limits {_MAX_FIELD_CHARS} a field, {_MAX_DEFINITION_CHARS} a "
+                f"definition) in {path}: not scanned"])
 
         agt_threats = self._agt_scanner.scan_tool(
             tool_name, description, schema, server_name

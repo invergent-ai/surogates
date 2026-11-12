@@ -493,4 +493,16 @@ def test_an_oversized_text_field_drops_the_tool_before_any_pattern_runs(monkeypa
     result = governance.scan_tool({"name": "t", "description": "Do it.", "inputSchema": schema, "_server_name": "srv"})
 
     assert not result.safe
-    assert any("Oversized text field" in t and "x" in t for t in result.threats)
+    assert any("Oversized text" in t and "x" in t for t in result.threats)
+
+
+def test_many_fields_under_the_field_limit_still_count_toward_the_definition_limit(monkeypatch):
+    governance = MCPGovernance()
+    monkeypatch.setattr(governance._agt_scanner, "scan_tool", lambda *a, **k: pytest.fail("AGT ran on it"))
+    props = {f"p{i}": {"type": "string", "description": "<important> " * 1300} for i in range(5)}
+
+    result = governance.scan_tool({"name": "t", "description": "Do it.", "inputSchema": {"type": "object",
+                                   "properties": props}, "_server_name": "srv"})
+
+    assert not result.safe
+    assert any("Oversized text" in t and "whole definition" in t for t in result.threats)
