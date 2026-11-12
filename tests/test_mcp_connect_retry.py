@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import gc
 import logging
 import math
 import time
@@ -266,11 +267,62 @@ async def test_a_background_retry_whose_scan_fails_leaves_nothing_connected(upst
 
     monkeypatch.setattr(pool, "_clean_schemas", scan_fails)
     _later(monkeypatch, _UNAVAILABLE_RETRY_COOLDOWN + 1)
-    with pytest.raises(RuntimeError):
-        await _retried(pool, tenant)
+    await _retried(pool, tenant)
     assert upstream.connects["crm"] == 4
     assert _prefixed_name(*tenant, "crm") not in mcp_client._servers
     assert pool.unavailable_servers(*tenant) == {"crm": "timeout"}
+
+
+async def test_a_retry_whose_scan_fails_counts_as_failed_and_waits_for_its_cooldown(upstream, monkeypatch, caplog):
+    """An audit-store outage made every scan fail: the failure time was never noted, so each later tool list
+    started one more retry (and one more connect) at once."""
+    upstream.fails["crm"] = 3
+    pool, tenant = ConnectionPool(), _tenant()
+    await _list(pool, tenant)
+
+    async def scan_fails(*_args, **_kwargs):
+        raise RuntimeError("audit store down")
+
+    monkeypatch.setattr(pool, "_clean_schemas", scan_fails)
+    _later(monkeypatch, _UNAVAILABLE_RETRY_COOLDOWN + 1)
+    await _retried(pool, tenant)
+    assert pool._entries[tenant].failures["crm"] == 2
+    assert "scanning the reconnected servers' tools failed" in caplog.text
+    # The lists that follow start no retry until the doubled cooldown is over.
+    for _ in range(3):
+        pool.retry_unavailable_servers(*tenant)
+        assert tenant not in pool._retry_tasks
+    assert upstream.connects["crm"] == 4
+    _later(monkeypatch, _UNAVAILABLE_RETRY_COOLDOWN + 1 + _retry_cooldown(2) + 1)
+    await _retried(pool, tenant)
+    assert upstream.connects["crm"] == 5
+
+
+async def test_a_background_retry_that_raises_is_logged_not_left_unretrieved(upstream, monkeypatch, caplog):
+    upstream.fails["crm"] = 3
+    pool, tenant = ConnectionPool(), _tenant()
+    await _list(pool, tenant)
+
+    async def fails(*_args, **_kwargs):
+        raise RuntimeError("unexpected")
+
+    monkeypatch.setattr(pool, "_retry_servers", fails)
+    loop = asyncio.get_running_loop()
+    unretrieved: list[dict] = []
+    loop.set_exception_handler(lambda _loop, context: unretrieved.append(context))
+    try:
+        _later(monkeypatch, _UNAVAILABLE_RETRY_COOLDOWN + 1)
+        pool.retry_unavailable_servers(*tenant)
+        task = pool._retry_tasks[tenant]
+        await asyncio.wait([task])  # waits without reading the exception, as nothing in the proxy does
+        await asyncio.sleep(0)
+        del task
+        gc.collect()
+    finally:
+        loop.set_exception_handler(None)
+    assert unretrieved == []
+    assert "MCP background retry for agent agent failed" in caplog.text
+    assert tenant not in pool._retry_tasks
 
 
 async def test_each_failed_retry_doubles_the_cooldown(upstream, monkeypatch):
