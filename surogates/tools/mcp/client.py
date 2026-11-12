@@ -890,7 +890,15 @@ class MCPServerTask:
                                 "MCP server '%s': received tools/list_changed notification",
                                 self.name,
                             )
-                            await self._refresh_tools()
+                            # Started, not awaited: the session's receive loop
+                            # runs this handler, and the refresh's own
+                            # tools/list answer arrives through that loop.
+                            # Awaited here, the session would wait forever.
+                            task = asyncio.get_running_loop().create_task(
+                                self._refresh_tools_logged(), name="mcp-tools-refresh",
+                            )
+                            _refresh_tasks.add(task)
+                            task.add_done_callback(_refresh_tasks.discard)
                         case PromptListChangedNotification():
                             logger.debug("MCP server '%s': prompts/list_changed (ignored)", self.name)
                         case ResourceListChangedNotification():
@@ -900,6 +908,13 @@ class MCPServerTask:
             except Exception:
                 logger.exception("Error in MCP message handler for '%s'", self.name)
         return _handler
+
+    async def _refresh_tools_logged(self) -> None:
+        """:meth:`_refresh_tools` as a task of its own: what it raises is logged."""
+        try:
+            await self._refresh_tools()
+        except Exception:
+            logger.exception("MCP server '%s': refreshing its tools failed", self.name)
 
     async def _refresh_tools(self):
         """Re-fetch tools from the server and update the registry.
@@ -1216,6 +1231,10 @@ class MCPServerTask:
 # ---------------------------------------------------------------------------
 
 _servers: Dict[str, MCPServerTask] = {}
+
+# The tool refreshes a tools/list_changed notification started, held so they
+# are not collected mid-flight; each removes itself when done.
+_refresh_tasks: set[asyncio.Task] = set()
 
 # Why each server that discovery could not connect failed, by server name:
 # ``timeout``, ``refused`` or ``error`` (``_connect_failure_kind``).  Dropped
