@@ -35,7 +35,6 @@ from surogates.runtime.entitlements import (
 from surogates.runtime.governance import (
     BOARD_SELF_TOOLS,
     KEEL_DESIGNER_TOOLS,
-    RESEARCH_SPINE_TOOLS,
     WORKER_SELF_TOOLS,
     build_governance_gate,
 )
@@ -357,22 +356,6 @@ def _filter_effective_tools(
         result |= WHITEBOARD_TOOL_NAMES
     else:
         result -= WHITEBOARD_TOOL_NAMES
-
-    # idea_tree / dispatch_experiments / merge_experiment are the research
-    # coordinator's deterministic spine. They are present only while a
-    # research run is active AND only on the coordinator session (never a
-    # task worker): executors stay tree-blind so they cannot invent a
-    # second shared-state protocol (mle_kaggle.yaml "no second shared-state
-    # protocol between executors"). Unlike the self-tools above they are
-    # never force-added — they ride the registry's full set on the
-    # coordinator and are stripped everywhere else.
-    research_config = getattr(session, "config", None) or {}
-    is_research_coordinator = (
-        bool(research_config.get("active_research_run_id"))
-        and getattr(session, "task_id", None) is None
-    )
-    if not is_research_coordinator:
-        result -= RESEARCH_SPINE_TOOLS
 
     # The office tools edit a document that opens beside the chat: the same rule the schemas keep.
     if not has_file_pane(session):
@@ -1742,7 +1725,7 @@ async def run_worker(settings: Settings) -> None:
         # is the agent itself (it acts as itself, not the human); otherwise the
         # acting principal. ``acting`` is kept separately and passed to the
         # harness so inbox routing, attribution, and automation ownership
-        # (/loop, /mission, /auto-research) still track the human sender.
+        # (/loop, /mission) still track the human sender.
         agent_principal = await agent_principal_resolver(
             session_org_id,
             session.agent_id,
@@ -2422,7 +2405,7 @@ async def run_worker(settings: Settings) -> None:
                 str(agent_principal.id) if agent_principal is not None else None
             ),
             # The sending human/service account — owns automation they create
-            # (/loop, /mission, /auto-research), distinct from the agent
+            # (/loop, /mission), distinct from the agent
             # credential principal the tenant carries on managed channels.
             acting_principal=acting,
             # Settlement of monetized website turns

@@ -636,7 +636,6 @@ SESSION_STARTING_TOOLS: frozenset[str] = DELEGATION_TOOLS | frozenset({
     "send_message",
     "spawn_task",
     "unblock_task",
-    "dispatch_experiments",
     "cron_create",
     "start_thread",
     "message_thread",
@@ -670,9 +669,7 @@ def refused_in_a_thread(session_starting: frozenset[str]) -> frozenset[str]:
 
 
 # Today: a thread schedules no routine, since a run would start from old
-# files and its work would land only when someone next speaks to the thread;
-# and it dispatches no research run's experiments, which work on a bundle of
-# a git repository, and a thread's copy holds none to bundle.
+# files and its work would land only when someone next speaks to the thread.
 THREAD_REFUSED_TOOLS: frozenset[str] = refused_in_a_thread(SESSION_STARTING_TOOLS)
 
 # Tools the streaming executor holds until the response is saved.  A question

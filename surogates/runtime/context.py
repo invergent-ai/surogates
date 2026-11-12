@@ -60,14 +60,13 @@ class LLMEndpoint:
 
 
 # Canonical slash-command ids the harness can gate.  Hyphenated to match
-# the user-facing command names (``/auto-research``, ``/deep-research``).
+# the user-facing command names (``/deep-research``).
 SLASH_COMMAND_IDS: frozenset[str] = frozenset(
     {
         "clear",
         "compress",
         "code",
         "deep-research",
-        "auto-research",
         "loop",
         "mission",
         "goal",

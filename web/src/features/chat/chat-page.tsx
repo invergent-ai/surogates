@@ -457,10 +457,6 @@ export function ChatPage() {
                 slashCommands,
                 "deep-research",
               )}
-              researchEnabled={slashCommandEnabled(
-                slashCommands,
-                "auto-research",
-              )}
             />
           </div>
         )}

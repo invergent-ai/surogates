@@ -48,7 +48,6 @@ _SLASH_WIRE_TO_ID: dict[str, str] = {
     "compress": "compress",
     "code": "code",
     "deep_research": "deep-research",
-    "auto_research": "auto-research",
     "loop": "loop",
     "mission": "mission",
     "goal": "goal",

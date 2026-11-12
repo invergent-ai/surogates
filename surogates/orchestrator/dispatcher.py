@@ -300,7 +300,7 @@ class Orchestrator:
         self._session_factory = session_factory
         self._tenant_for_task = tenant_for_task
         # Per-agent Hub bundle cache so the tick's task-spawn path can
-        # resolve bundle-delivered sub-agents (e.g. arbor-executor).
+        # resolve bundle-delivered sub-agents.
         self._file_bundle_cache = file_bundle_cache
         # per-tenant TurnConcurrencyGate.  ``None`` in tests →
         # dequeue skips the gate.

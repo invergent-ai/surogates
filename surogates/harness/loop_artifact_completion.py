@@ -89,7 +89,6 @@ def summary_ruled_out(session: Any) -> bool:
     config = getattr(session, "config", None) or {}
     return bool(
         config.get("active_mission_id")
-        or config.get("active_research_run_id")
         or is_project_master(config)
         or getattr(session, "channel", None) in REALTIME_CHANNELS
     )
@@ -98,10 +97,9 @@ def summary_ruled_out(session: Any) -> bool:
 def wants_turn_summary(session: Any, *, turn_id: str | None, reason: str) -> bool:
     """Whether a finished turn gets its deliverables scan, and the summary listing them.
 
-    Orchestrated sessions skip it: a mission / auto-research coordinator ends its turn repeatedly
+    Orchestrated sessions skip it: a mission coordinator ends its turn repeatedly
     across the orchestration loop, and a list of files after each one reads as the chat
-    stopping while the run goes on (``active_mission_id``, or ``active_research_run_id`` which an
-    Arbor coordinator keeps after a terminal verdict). A project's master skips it the same way: it
+    stopping while the run goes on (``active_mission_id``). A project's master skips it the same way: it
     ends a turn at every exchange while its threads work on. A phone call skips it too: the caller heard
     the answer, nothing renders a download card on a call, and the drain (up to 10 s of caption calls)
     holds the session while the caller's next words wait for it.
@@ -1303,14 +1301,10 @@ class ArtifactCompletionMixin:
         # Emit TURN_SUMMARY (if applicable) BEFORE SESSION_COMPLETE so
         # late-arriving SSE subscribers see them in event-id order.
         #
-        # Orchestrated sessions skip it: a mission / auto-research
-        # coordinator ends its turn repeatedly across the orchestration loop
-        # (dispatch, wait, harvest, decide), and a list of files after
-        # each one reads as the chat stopping when the run is still
-        # going. ``active_mission_id`` marks a live mission; an Arbor
-        # research coordinator also carries ``active_research_run_id`` (and
-        # keeps running report turns even after the mission id is cleared at
-        # a terminal verdict), so suppress on either key.
+        # Orchestrated sessions skip it: a mission coordinator ends its
+        # turn repeatedly across the orchestration loop, and a list of
+        # files after each one reads as the chat stopping when the run is
+        # still going. ``active_mission_id`` marks a live mission.
         # Not gated on the summarizer: deciding what was delivered is
         # bookkeeping, so the download card needs no model.
         # The turn's files, for a report: None when no summary was written.

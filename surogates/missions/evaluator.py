@@ -123,9 +123,7 @@ async def should_evaluate(
         return EvaluationDecision(should=False, trigger="rate_limited")
 
     # Budget is checked here, after the cheap rate-limit path and before
-    # any work — never a reason to RUN, only a reason to stop. Mirrors how
-    # Arbor enforces its cycle ceiling at the evaluator boundary rather
-    # than mid-turn.
+    # any work — never a reason to RUN, only a reason to stop.
     if await mission_store.pause_if_budget_exhausted(mission_id):
         return EvaluationDecision(should=False, trigger="budget_exhausted")
 

@@ -370,8 +370,8 @@ async def _spawn_task_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
             parent_session_id,
         )
 
-    # ----- Phases 1-2 + spawn + enqueue are shared with dispatch_experiments
-    # (research missions) via surogates.tasks.service.create_task_and_spawn.
+    # ----- Phases 1-2 + spawn + enqueue live in
+    # surogates.tasks.service.create_task_and_spawn.
     from surogates.tasks.service import TaskSpawnError, create_task_and_spawn
 
     try:

@@ -1790,10 +1790,9 @@ async def test_a_release_that_is_no_confirmed_hand_back_gives_no_turn_and_leaves
     assert HANDED_BACK not in sent
 
 
-# Every command the harness answers itself in a chat on a folder: by its own handler, or, for one
-# such a chat refuses, at the gate.
+# Every command the harness answers itself in a chat on a folder, by its own handler.
 COMMANDS = [
-    "/compress", "/clear", "/goal status", "/mission status", "/auto-research status", "/code status",
+    "/compress", "/clear", "/goal status", "/mission status", "/code status",
     "/loop", "/loop 5m check the build",
 ]
 # One its agent has switched off, which the gate answers too.
@@ -1843,7 +1842,7 @@ def watching(harness, monkeypatch) -> dict[str, AsyncMock]:
     """Everything a wake runs a command of its user's with, each watched in place of being run: every
     command's handler, the gate's answer, and what expands a skill or consults an expert."""
     handlers = [name for name in dir(type(harness)) if name.startswith("_handle_") and name.endswith("_command")]
-    assert len(handlers) >= 7
+    assert len(handlers) >= 6
     watched = {name: AsyncMock() for name in [*handlers, "_emit_loop_response"]}
     for name, watch in watched.items():
         setattr(harness, name, watch)

@@ -1479,3 +1479,7 @@ ALTER TABLE IF EXISTS simulation_people ADD COLUMN IF NOT EXISTS next_after time
 -- A website simulation message is its session event, logged once whoever reads it first.
 CREATE UNIQUE INDEX IF NOT EXISTS uq_simulation_messages_web_wamid
     ON simulation_messages (run_id, wamid) WHERE wamid LIKE 'web:%';
+
+-- Research missions (Arbor) are gone: drop their sidecar tables.
+DROP TABLE IF EXISTS idea_nodes;
+DROP TABLE IF EXISTS research_runs;

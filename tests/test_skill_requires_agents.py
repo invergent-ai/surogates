@@ -10,13 +10,13 @@ from surogates.session.models import Session
 from surogates.tenant.context import TenantContext
 from surogates.tools.loader import AgentDef, SkillDef, _parse_skill_frontmatter
 
-ARBOR_SKILL_MD = """---
-name: arbor-ideate
-description: Hard-gated ideation for an Arbor research run.
+GATED_SKILL_MD = """---
+name: triage-review
+description: Review what the triage worker found.
 requires_agents:
-  - arbor-executor
+  - triage-worker
 ---
-Write the first-principles probe before any hypothesis.
+Read the worker's findings before deciding.
 """
 
 
@@ -35,30 +35,30 @@ def _builder(agents: list[AgentDef], preloaded: list[str] | None = None) -> Prom
         permissions=frozenset(), asset_root="/tmp/test",
     )
     skills = [
-        _skill(name="arbor-ideate", description="Ideation for a research run", requires_agents=["arbor-executor"]),
+        _skill(name="triage-review", description="Review a triage", requires_agents=["triage-worker"]),
         _skill(name="pdf", description="Work with PDF files"),
     ]
     return PromptBuilder(tenant, skills=skills, session=session, available_agents=agents)
 
 
 def _executor(enabled: bool = True) -> AgentDef:
-    return AgentDef(name="arbor-executor", description="Runs one experiment", system_prompt="", source="platform", enabled=enabled)
+    return AgentDef(name="triage-worker", description="Triages one case", system_prompt="", source="platform", enabled=enabled)
 
 
 def test_frontmatter_requires_agents_is_parsed():
-    assert _parse_skill_frontmatter(ARBOR_SKILL_MD, "x")["requires_agents"] == ["arbor-executor"]
+    assert _parse_skill_frontmatter(GATED_SKILL_MD, "x")["requires_agents"] == ["triage-worker"]
 
 
 def test_skill_is_indexed_only_while_its_sub_agent_is_available():
-    assert "arbor-ideate" in _builder([_executor()])._skills_section()
+    assert "triage-review" in _builder([_executor()])._skills_section()
 
     without = _builder([])._skills_section()
-    assert "arbor-ideate" not in without
+    assert "triage-review" not in without
     assert "pdf" in without
 
-    assert "arbor-ideate" not in _builder([_executor(enabled=False)])._skills_section()
+    assert "triage-review" not in _builder([_executor(enabled=False)])._skills_section()
 
 
 def test_a_preloaded_skill_is_inlined_whatever_its_gate():
-    # /auto-research preloads arbor-coordinator; the gate only governs the index.
-    assert "## arbor-ideate" in _builder([], preloaded=["arbor-ideate"])._preloaded_skills_section()
+    # The gate only governs the index.
+    assert "## triage-review" in _builder([], preloaded=["triage-review"])._preloaded_skills_section()

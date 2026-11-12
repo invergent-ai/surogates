@@ -92,8 +92,7 @@ def _build_task_worker_config(agent_def: Any | None, task: Any) -> dict[str, Any
     # task contract; it's the manual for their role.
     preloaded = list(cfg.get("preloaded_skills") or [])
     # An AgentDef may preload role-specific skills onto every worker it
-    # backs (e.g. the arbor-executor agent preloads the arbor-executor
-    # skill so the executor sees its workflow inlined, not discovered).
+    # backs, so the worker sees its workflow inlined, not discovered.
     if agent_def is not None and agent_def.preloaded_skills:
         for skill_name in agent_def.preloaded_skills:
             if skill_name not in preloaded:
@@ -143,9 +142,8 @@ async def _create_session_for_task(
 
     agent_def = None
     if task.agent_def_name:
-        # AgentDefs delivered through the per-agent Hub bundle (e.g. the
-        # arbor-executor research sub-agent) are invisible to a
-        # bundle-less catalog load. Prefer the caller-supplied bundle
+        # AgentDefs delivered through the per-agent Hub bundle are
+        # invisible to a bundle-less catalog load. Prefer the caller-supplied bundle
         # (the coordinator's own wake bundle, eager-spawn path); else
         # resolve it for the task's agent from the worker's file-bundle
         # cache (the dispatcher-tick / retry path).

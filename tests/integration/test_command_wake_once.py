@@ -64,7 +64,7 @@ pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 HANDLERS = (
     "_handle_compress_command", "_handle_clear_command", "_handle_goal_command", "_handle_mission_command",
-    "_handle_auto_research_command", "_handle_code_command", "_handle_loop_command",
+    "_handle_code_command", "_handle_loop_command",
 )
 # What a chat has said before its user types a command: enough for /compress to compress.
 TALK = (("Open the report.", "It is open."), ("Read it.", "It says Q3 was flat."), ("And Q2?", "Q2 grew."), ("Thanks.", "Any time."))
@@ -403,7 +403,6 @@ ANSWERED = {
     "/goal clear": "_handle_goal_command",
     "/mission status": "_handle_mission_command",
     "/mission pause": "_handle_mission_command",
-    "/auto-research status": "_handle_auto_research_command",
     "/code status": "_handle_code_command",
     "/code help": "_handle_code_command",
     "/loop list": "_handle_loop_command",
@@ -487,7 +486,7 @@ async def test_a_command_switched_off_for_the_agent_is_refused_once(workers, lat
 
 
 @pytest.mark.parametrize("command", [
-    "/compress", "/clear", "/goal status", "/mission status", "/auto-research status", "/code status", "/loop list",
+    "/compress", "/clear", "/goal status", "/mission status", "/code status", "/loop list",
 ])
 async def test_a_command_whose_worker_died_before_answering_is_run_once_by_the_wake_that_recovers_it(workers, command):
     chat = await workers.chat()

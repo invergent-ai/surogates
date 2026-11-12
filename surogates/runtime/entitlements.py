@@ -26,7 +26,7 @@ ENTITLEMENTS_CONFIG_KEY = "entitlements"
 #: underscores — :func:`capability_allowed` normalizes. Compress and
 #: multi-session are always included and never restricted here.
 _SLASH_CAPABILITIES = frozenset({
-    "code", "deep_research", "auto_research",
+    "code", "deep_research",
     "loop", "mission", "goal",
 })
 

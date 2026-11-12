@@ -176,7 +176,7 @@ async def test_enabled_command_reaches_handler(monkeypatch):
     assert _llm_responses(store) == ["/loop was cut off before it could answer. Check `/loop list` before typing it again."]
 
 
-@pytest.mark.parametrize("command", ["loop", "auto-research", "deep-research", "code"])
+@pytest.mark.parametrize("command", ["loop", "deep-research", "code"])
 def test_a_project_thread_refuses_a_command_that_starts_helpers(command):
     harness = _harness(AsyncMock(), _permissive())
     thread = _session()
@@ -198,8 +198,6 @@ def test_a_project_thread_runs_a_command_whose_helpers_work_on_copies_of_their_o
 @pytest.mark.parametrize("command, answer", [
     ("loop", "A thread can't start /loop yet: do this step in the thread itself."),
     ("code", "A thread can't start /code yet: do this step in the thread itself."),
-    # As a thread in the cloud answers them: the thread's rule comes before the local folder's.
-    ("auto-research", thread_refusal("/auto-research")),
     ("deep-research", thread_refusal("/deep-research")),
     ("mission", None),
 ])
@@ -211,7 +209,7 @@ def test_a_project_thread_on_the_users_computer_runs_the_commands_its_folder_can
     assert harness._slash_command_block_reason(f"/{command} Go.", thread) == answer
 
 
-@pytest.mark.parametrize("command", ["loop", "auto-research", "deep-research", "code"])
+@pytest.mark.parametrize("command", ["loop", "deep-research", "code"])
 @pytest.mark.parametrize("where", ["in the cloud", "on the user's computer"])
 def test_a_session_under_a_project_thread_is_refused_the_commands_its_thread_is(command, where):
     harness = _harness(AsyncMock(), _permissive())
@@ -237,15 +235,3 @@ async def test_a_project_threads_loop_never_schedules_a_run(monkeypatch):
     # No routine, so no run works on a copy its thread never lands.
     assert _llm_responses(store) == ["A thread can't start /loop yet: do this step in the thread itself."]
     harness._handle_loop_command.assert_not_awaited()
-
-
-def test_a_local_folder_chat_refuses_auto_research():
-    harness = _harness(AsyncMock(), _permissive())
-    local = _session()
-    local.config["execution"] = {"kind": "device", "device_id": str(uuid4())}
-    assert harness._slash_command_block_reason("/auto-research Go.", local) == (
-        "/auto-research is not available for sessions on a local folder"
-    )
-    # Its other commands run as before, and so does /auto-research elsewhere.
-    assert harness._slash_command_block_reason("/mission Go.", local) is None
-    assert harness._slash_command_block_reason("/auto-research Go.", _session()) is None
