@@ -203,11 +203,49 @@ async def test_a_fifo_or_a_folder_under_a_files_name_is_not_waited_on(places):
     ws, _ = places
     os.mkfifo(ws / "a" / "b" / "pipe.pdf")
     wio = LocalWorkspaceIO(str(ws))
+    key = await wio.resolve("a/b/pipe.pdf")
+    # In a thread, so a blocking open would fail the test by its timeout instead of hanging it.
     with pytest.raises(OSError, match="Not a regular file"):
-        await asyncio.wait_for(wio.read(await wio.resolve("a/b/pipe.pdf")), 5)
+        await asyncio.wait_for(asyncio.to_thread(lambda: asyncio.run(wio.read(key))), 5)
     with pytest.raises(OSError):
         async with wio.local_file(await wio.resolve("a/b/pipe.pdf")):
             pass
     with pytest.raises(IsADirectoryError):
         async with wio.local_file(await wio.resolve("a/b")):
             pass
+
+
+async def test_every_first_search_waits_for_the_one_bubblewrap_answer(monkeypatch):
+    """Searches that start while bubblewrap is being asked are confined too: none runs unconfined meanwhile."""
+    import threading
+    import time
+
+    calls = []
+
+    class _Done:
+        returncode = 0
+
+    def run(*_args, **_kwargs):
+        calls.append(1)
+        time.sleep(0.2)
+        return _Done()
+
+    monkeypatch.setattr(local_module, "_BWRAP", "/usr/bin/bwrap")
+    monkeypatch.setattr(local_module, "_bwrap_works", None)
+    monkeypatch.setattr(local_module.subprocess, "run", run)
+    answers = await asyncio.gather(*(local_module._bwrap_can_confine("/usr/bin/rg") for _ in range(4)))
+    assert answers == [True] * 4 and calls == [1]
+    assert threading.active_count() >= 1
+
+
+async def test_a_bubblewrap_that_does_not_answer_is_asked_again(monkeypatch):
+    import subprocess
+
+    def slow(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired("bwrap", 10)
+
+    monkeypatch.setattr(local_module, "_BWRAP", "/usr/bin/bwrap")
+    monkeypatch.setattr(local_module, "_bwrap_works", None)
+    monkeypatch.setattr(local_module.subprocess, "run", slow)
+    assert not await local_module._bwrap_can_confine("/usr/bin/rg")
+    assert local_module._bwrap_works is None

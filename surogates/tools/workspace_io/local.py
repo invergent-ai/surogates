@@ -17,7 +17,9 @@ import os
 import re
 import shutil
 import stat as stat_module
+import subprocess
 import tempfile
+import threading
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any, BinaryIO
@@ -809,28 +811,44 @@ _SEARCHED = "/surogates-search"
 _RG_IN_BWRAP = "/run/surogates-rg"
 
 
-async def _bwrap_can_confine(rg: str) -> bool:
-    """Whether bubblewrap can run ripgrep confined here (asked once per
-    process): a container without user namespaces cannot."""
+_bwrap_lock = threading.Lock()
+
+
+def _probe_bwrap(rg: str) -> bool:
+    """Whether bubblewrap can run ripgrep confined here, asked once per
+    process; every caller waits for the one answer.  A probe that did not
+    answer in time is asked again at the next search, never taken as no."""
     global _bwrap_works
-    if _bwrap_works is None:
-        _bwrap_works = False
-        if _BWRAP is not None:
+    with _bwrap_lock:
+        if _bwrap_works is not None:
+            return _bwrap_works
+        if _BWRAP is None:
+            _bwrap_works = False
+        else:
             try:
-                proc = await asyncio.create_subprocess_exec(
-                    _BWRAP, "--die-with-parent", "--unshare-all", *_BWRAP_SYSTEM,
-                    "--ro-bind", rg, _RG_IN_BWRAP, _RG_IN_BWRAP, "--version",
-                    stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
-                )
-                _bwrap_works = await asyncio.wait_for(proc.wait(), 10) == 0
-            except (OSError, asyncio.TimeoutError):
+                _bwrap_works = subprocess.run(
+                    [_BWRAP, "--die-with-parent", "--unshare-all", *_BWRAP_SYSTEM,
+                     "--ro-bind", rg, _RG_IN_BWRAP, _RG_IN_BWRAP, "--version"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10,
+                ).returncode == 0
+            except subprocess.TimeoutExpired:
+                logger.warning("bubblewrap did not answer in time: this search is not confined, the next one asks again")
+                return False
+            except OSError:
                 _bwrap_works = False
         if not _bwrap_works:
             logger.warning(
                 "bubblewrap cannot confine ripgrep on this host: a search starts in the folder the walk reached, "
                 "but its walk below it goes by path",
             )
-    return _bwrap_works
+        return _bwrap_works
+
+
+async def _bwrap_can_confine(rg: str) -> bool:
+    """:func:`_probe_bwrap`, off the event loop."""
+    if _bwrap_works is not None:
+        return _bwrap_works
+    return await asyncio.to_thread(_probe_bwrap, rg)
 
 
 class LocalWorkspaceIO:
@@ -1069,6 +1087,10 @@ class LocalWorkspaceIO:
         if given:
             stdout = _paths_back(stdout.decode("utf-8", errors="replace"), given, printed_as, mode).encode("utf-8")
         rc = proc.returncode or 0
+        if program == _BWRAP and rc == 1 and stderr.strip():
+            # bubblewrap's own failure is exit 1 too, as ripgrep's "no match"
+            # is; only the failure says something.
+            raise RipgrepError(f"confined search failed: {stderr.decode('utf-8', errors='replace')[:200]}")
         if rc not in (0, 1):
             message = f"rg exited {rc}: {stderr.decode('utf-8', errors='replace')[:200]}"
             # rg exits 2 on any file it could not read (one deleted mid-walk,
