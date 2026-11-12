@@ -106,6 +106,19 @@ class MediaGenConfig:
     image_cents: int = 4
 
 
+def unwired_media_tools(cfg: Any) -> set[str]:
+    """The media tools *cfg* has no model behind: ``generate_image`` without
+    an image client and model, ``generate_video`` without a video model and
+    endpoint.  The same checks the handlers make before answering "not
+    available"; such a tool is offered to no session."""
+    unwired: set[str] = set()
+    if getattr(cfg, "image_client", None) is None or not getattr(cfg, "image_model", ""):
+        unwired.add("generate_image")
+    if not (getattr(cfg, "video_model", "") and getattr(cfg, "video_base_url", "")):
+        unwired.add("generate_video")
+    return unwired
+
+
 class MediaBudgetExhaustedError(RuntimeError):
     """The sender's media-credit balance can't cover a generation."""
 

@@ -136,6 +136,8 @@ def drop_unusable_tools(
     is_voice: bool = False,
     has_forms: bool = False,
     has_file_pane: bool = True,
+    has_image_model: bool = True,
+    has_video_model: bool = True,
 ) -> list[dict[str, Any]]:
     """Drop tools whose backing resource this agent does not have.
 
@@ -157,8 +159,13 @@ def drop_unusable_tools(
 
     The office tools go only where ``has_file_pane``.
 
-    Never returns an empty list: a request with no tools at all is worse
-    than an oversized one.
+    ``generate_image`` goes only where an image model is wired
+    (*has_image_model*), ``generate_video`` only where a video model is
+    (*has_video_model*): whatever the session's tool list names, a media
+    tool with no model behind it could only answer "not available".
+
+    Never returns an empty list (a request with no tools at all is worse
+    than an oversized one), except where only unwired media tools were left.
     """
     drop: set[str] = set()
     if not has_kbs:
@@ -179,11 +186,23 @@ def drop_unusable_tools(
         drop.add("send_form")
     if not has_file_pane:
         drop |= _OFFICE_TOOLS
+    if not has_image_model:
+        drop.add("generate_image")
+    if not has_video_model:
+        drop.add("generate_video")
     if not drop:
         return schemas
 
     kept = [s for s in schemas if s["function"]["name"] not in drop]
-    return kept or schemas
+    if kept:
+        return kept
+    # Never empty, but never by sending a media tool with no model behind it:
+    # it could only answer "not available" (an empty list sends no tools).
+    unwired = {
+        name for name, wired in (("generate_image", has_image_model), ("generate_video", has_video_model))
+        if not wired
+    }
+    return [s for s in schemas if s["function"]["name"] not in unwired]
 
 
 # What only a session on a folder of the user's computer can use: a cloud session is not offered it.

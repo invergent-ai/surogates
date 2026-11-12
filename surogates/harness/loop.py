@@ -131,6 +131,7 @@ from surogates.session.execution_context import is_scheduled_run, is_unattended
 from surogates.tools.builtin.case_item import item_awaiting_report
 from surogates.tools.builtin.case_step import step_awaiting_report, step_given_back
 from surogates.tools.builtin.send_form import SENT as FORM_SENT
+from surogates.tools.builtin.media_gen import unwired_media_tools
 from surogates.keel.items import ITEM_NUDGE, is_case_item, item_contract_of
 from surogates.tools.builtin.ask_user_question import DISMISSED, TIMED_OUT
 from surogates.keel.steps import (
@@ -3219,6 +3220,8 @@ class AgentHarness(
         # Schemas ship on every request, so an unusable one is paid for
         # on every turn of every session.
         whatsapp_forms = getattr(self, "_whatsapp_forms", ())
+        _media = getattr(self, "_media_gen", None)
+        _unwired_media = unwired_media_tools(_media) if _media is not None else set()
         tool_schemas = drop_unusable_tools(
             tool_schemas,
             # Default to "has it" when the attribute is absent: an
@@ -3255,6 +3258,10 @@ class AgentHarness(
             is_whiteboard=getattr(self._prompt, "has_whiteboard", False),
             has_forms=capabilities_for(session.channel).forms and bool(whatsapp_forms),
             has_file_pane=has_file_pane(session),
+            # The worker's media wiring for this wake (``None``: a harness
+            # built without it keeps the tools, as before).
+            has_image_model="generate_image" not in _unwired_media,
+            has_video_model="generate_video" not in _unwired_media,
         )
         tool_schemas = describe_for_device(tool_schemas, session.config)
         tool_schemas = describe_for_conversation(

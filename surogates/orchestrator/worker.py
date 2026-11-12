@@ -838,21 +838,13 @@ def _media_tool_exclusions(media_gen_config: Any) -> set[str]:
     pick, platform preset, or deployment fallback). Dropping the
     schema keeps the LLM from burning a turn on a tool that can only
     answer "not available" — 10 of 48 prod generate_image calls did
-    exactly that. Predicates mirror the handlers' own availability
-    checks in tools/builtin/media_gen.py.
+    exactly that. This keeps the prompt surface; the schemas the model
+    is sent are gated with the same check in the harness
+    (``drop_unusable_tools``).
     """
-    excluded: set[str] = set()
-    if (
-        getattr(media_gen_config, "image_client", None) is None
-        or not getattr(media_gen_config, "image_model", "")
-    ):
-        excluded.add("generate_image")
-    if not (
-        getattr(media_gen_config, "video_model", "")
-        and getattr(media_gen_config, "video_base_url", "")
-    ):
-        excluded.add("generate_video")
-    return excluded
+    from surogates.tools.builtin.media_gen import unwired_media_tools
+
+    return unwired_media_tools(media_gen_config)
 
 
 async def _load_attached_kbs(
