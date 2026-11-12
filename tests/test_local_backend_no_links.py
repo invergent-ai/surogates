@@ -118,12 +118,15 @@ async def test_the_bucket_still_works_as_before(tmp_path):
 
 
 async def test_a_listing_of_a_very_deep_tree_needs_no_recursion(tmp_path):
-    """A session can make a folder a thousand levels deep: listing it must not fail (the orphan sweep lists buckets)."""
+    """A session can make a folder thousands of levels deep: listing it must neither fail (the orphan sweep lists
+    buckets) nor take long (a listing runs on the event loop): it walks no deeper than S3's longest key."""
+    import time
+
     backend = LocalBackend(str(tmp_path))
     await backend.create_bucket("b")
     (tmp_path / "b" / "s").mkdir(parents=True)
     fd = os.open(tmp_path / "b" / "s", os.O_RDONLY)
-    for _ in range(1100):  # made one level at a time, as a loop of mkdir d; cd d does
+    for _ in range(5000):  # made one level at a time, as a loop of mkdir d; cd d does
         os.mkdir("d", dir_fd=fd)
         child = os.open("d", os.O_RDONLY, dir_fd=fd)
         os.close(fd)
@@ -132,8 +135,11 @@ async def test_a_listing_of_a_very_deep_tree_needs_no_recursion(tmp_path):
     os.write(bottom, b"x")
     os.close(bottom)
     os.close(fd)
-    keys = await backend.list_keys("b")
-    assert keys == ["s/" + "d/" * 1100 + "bottom.txt"]
+    started = time.monotonic()
+    assert await backend.list_keys("b") == []  # the bottom file is past any key a bucket holds
+    assert time.monotonic() - started < 5
+    shallow = await backend.list_entries("b", "", limit=10_000)
+    assert max(len(e["key"].encode()) for e in shallow) <= 1024 + 2
 
 
 async def test_a_bounded_listing_keeps_the_shallowest_entries(tmp_path):

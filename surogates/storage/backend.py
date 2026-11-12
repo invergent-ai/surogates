@@ -554,7 +554,8 @@ class LocalBackend:
         followed: a link is no entry, and a folder link is not walked into.
         Breadth first (all of a folder's entries before any deeper folder's),
         one folder open at a time, so a deep tree costs neither recursion nor
-        descriptors; with *limit*, the shallowest entries are the ones kept."""
+        descriptors, and no deeper than S3's longest key; with *limit*, the
+        shallowest entries are the ones kept."""
         parts = _key_parts(prefix)
         root = str(self._bucket_path(bucket))
         entries: list[dict[str, Any]] = []
@@ -590,7 +591,10 @@ class LocalBackend:
                 if limit is not None and len(entries) >= limit:
                     break
                 is_dir = stat.S_ISDIR(st.st_mode)
-                if is_dir:
+                # A folder whose keys would pass S3's 1,024-byte limit is not
+                # walked into: no bucket holds such a key, and each folder is
+                # reached from the root, so depth bounds what one costs.
+                if is_dir and len(f"{rel}/{name}/x".lstrip("/").encode()) <= _MAX_KEY_BYTES:
                     queue.append([*folder_parts, name])
                 if not stat.S_ISREG(st.st_mode) and not (is_dir and limit is not None):
                     continue  # a link, or a folder where no limit asks for folders
@@ -929,6 +933,10 @@ def _walk() -> Any:
     from surogates.tools.workspace_io import local
 
     return local
+
+
+#: S3's longest key, in bytes: a listing walks no folder deeper.
+_MAX_KEY_BYTES = 1024
 
 
 def _key_parts(key: str) -> list[str]:
