@@ -111,15 +111,31 @@ _URL_PATTERN = r"https?://"
 _SEND_PATTERNS = frozenset({r"\bsend\s+email\b", r"\bsend\s+to\b", r"\bpost\s+to\b"})
 _SENSITIVE_DATA = re.compile(
     r"\b(api[\s_-]?keys?|(access|auth|authentication|authorization|bearer|refresh|session|oauth)[\s_-]?tokens?"
-    r"|passwords?|passphrases?|credentials?|secrets?|private[\s_-]?keys?|session[\s_-]?cookies?"
-    r"|env(ironment)?[\s_-]?var(iable)?s?|system[\s_-]?prompts?"
+    r"|passwords?|passwd|passphrases?|credentials?|secrets?|private[\s_-]?keys?|(ssh|gpg|pgp)[\s_-]?keys?"
+    r"|session[\s_-]?cookies?|env(ironment)?[\s_-]?var(iable)?s?|system[\s_-]?prompts?"
     r"|(whole|full|entire|complete)\s+(conversation|chat|transcript|message\s+history)s?"
-    r"|(chat|message|conversation)\s+histor(y|ies)|card\s+numbers?|credit\s+cards?|cvv|social\s+security)\b",
+    r"|(chat|message|conversation)\s+histor(y|ies)|(all|every|any)\s+(the\s+)?(tokens|keys)"
+    r"|(card|account|routing)\s+numbers?|credit\s+cards?|cvv|iban|ssn|social\s+security)\b",
     re.IGNORECASE,
 )
-_SECRET_NAME = re.compile(r"\b[A-Z][A-Z0-9_]*_(KEY|TOKEN|SECRET|PASSWORD)\b")
+# Variable names: upper case any *_KEY / *_TOKEN / ...; lower case only the unmistakable ones (``page_token``,
+# ``sort_key``, ``idempotency_key`` are ordinary parameters).
+_SECRET_NAME = re.compile(
+    r"\b[A-Z][A-Z0-9_]*_(KEY|TOKEN|SECRET|PASSWORD)\b"
+    r"|\b\w*(api_?key|secret_key|client_secret|password|passwd|access_token|auth_token|refresh_token)\w*\b",
+)
+# "the conversation" / "the messages" next to a hand-over verb.
+_CONVERSATION_HANDED_OVER = re.compile(
+    r"\b(pass|include|put|send|attach|upload|copy|append|forward|insert|paste|share)\b[^.\n]{0,40}"
+    r"\b(the|this|our|whole|full|entire)\s+(conversation|chat|messages|transcript)\b",
+    re.IGNORECASE,
+)
 _CONTACT = re.compile(r"[\w.+-]+@[\w-]+(\.[\w-]+)+|\+\d[\d ().-]{6,}\d")
-_COPY_CUE = re.compile(r"\b(bcc|cc|copy|copies|also|as\s+well|every|each|forward)\b", re.IGNORECASE)
+_COPY_CUE = re.compile(
+    r"\b(bcc|cc|copy|copies|also|as\s+well|every|each|forward)\b"
+    r"|\b(change|replace|redirect|reroute|route|set)\s+(the\s+)?(recipient|number|address|destination|to)\b",
+    re.IGNORECASE,
+)
 _BASE64_RUN = re.compile(r"[A-Za-z0-9+/]{40,}={0,2}")
 _HEX_ESCAPES = re.compile(r"(?:\\x[0-9a-fA-F]{2}){4,}")
 # AGT's own list of words that make a decoded run suspicious.
@@ -133,30 +149,41 @@ _SUSPICIOUS_DECODED = ("ignore", "override", "system", "password", "secret", "ad
 # every text field after NFKC normalisation (fullwidth ``＜IMPORTANT＞`` reads
 # as ``<IMPORTANT>``).
 # ---------------------------------------------------------------------------
+_TAG_NAMES = r"(important|system|instructions?|hidden|secret)"
 _TAG_BLOCK = re.compile(
-    r"<\s*(important|system|instructions?|hidden|secret)\b[^<>]{0,80}>[\s\S]*?<\s*/\s*\1\s*>", re.IGNORECASE)
+    r"<\s*" + _TAG_NAMES + r"\b[\w-]*[^<>]{0,80}>[\s\S]*?<\s*/\s*\1[\w-]*\s*>"   # a paired block
+    r"|^\s*<\s*" + _TAG_NAMES + r"\b[\w-]*[^<>]{0,80}>\s*$",                     # an opening tag on a line of its own
+    re.IGNORECASE | re.MULTILINE,
+)
 _KEEP_FROM_USER = re.compile(
     r"\b(do\s+not|don['’]?t|never)\s+(tell|mention|inform|notify|reveal|alert|disclose)\s+(this|that|it|them)\b"
     r"[^.\n]{0,40}\b(users?|humans?)\b"
     r"|\b(do\s+not|don['’]?t|never)\s+(tell|inform|notify|alert)\s+(the\s+)?(users?|humans?)\s+(about\s+)?"
     r"(this|that|it|them)\b"
-    r"|\bwithout\s+(telling|informing)\s+(the\s+)?(users?|humans?)\b",
+    r"|\bwithout\s+(telling|informing)\s+(the\s+)?(users?|humans?)\b"
+    r"|\b(do\s+not|don['’]?t|never)\s+(tell|inform|notify|alert)\s+the\s+(users?|humans?)\s*[.!;]",
     re.IGNORECASE,
 )
 _SECRET_FILE = re.compile(
     r"(\.ssh/(?!authorized_keys|known_hosts)|\bid_(rsa|dsa|ecdsa|ed25519)\b(?!\.pub)|\.aws/credentials"
     r"|\.netrc\b|\.git-credentials\b|\.npmrc\b|\.pypirc\b|\.kube/config|\.docker/config\.json|/proc/self/environ"
-    r"|/etc/(passwd|shadow)\b|\bmcp\.json\b|\.cursor/|\.gnupg/|(?:^|[\s`'\"(/~])\.env\b)",
+    r"|/etc/(passwd|shadow)\b|\bmcp\.json\b|\.cursor/|\.gnupg/|(?:^|[\s`'\"(/~])\.env\b(?!\.(example|sample|template|dist)))",
     re.IGNORECASE,
 )
 _HAND_OVER = re.compile(
     r"\b(pass|include|put|send|attach|upload|copy|append|forward|insert|paste|share|add)\b[^.\n]{0,60}"
-    r"\b(content|contents|it|them|its|value|values|text)\b|\b(its|their|the|file['’]?s)\s+contents?\b",
+    r"\b(content|contents|text)\b|\b(its|their|the|file['’]?s)\s+contents?\b",
     re.IGNORECASE,
 )
-_MARKDOWN_IMAGE_URL = re.compile(r"!\[[^\]]*\]\(\s*https?://", re.IGNORECASE)
-_URL_TEMPLATE_QUERY = re.compile(r"https?://\S*[?&][\w.-]+=\{", re.IGNORECASE)
-_MIXED_SCRIPT = re.compile(r"\b(?=\w*[A-Za-z])(?=\w*[Ѐ-ӿ])\w+\b")
+_IMAGE_URL = re.compile(
+    r"!\[[^\]]*\]\(\s*https?://"                                    # markdown image
+    r"|!\[[^\]]*\]\[[^\]]+\][\s\S]*?^\s*\[[^\]]+\]:\s*https?://"     # reference-style image + its definition
+    r"|<\s*img\b[^>]*\bsrc\s*=\s*['\"]?\s*https?://",                    # HTML image
+    re.IGNORECASE | re.MULTILINE,
+)
+_URL_TEMPLATE_QUERY = re.compile(r"https?://\S*[?&][\w.-]+=(\{|<|\[|\$\{?[A-Za-z_])", re.IGNORECASE)
+# A word mixing Latin with Cyrillic, or with Greek capitals (look-alikes of A, B, E, H, I, K, M, N, O, P, T, X ...).
+_MIXED_SCRIPT = re.compile(r"\b(?=\w*[A-Za-z])(?=\w*[\u0400-\u04ff\u0391-\u03a9])\w+\b")
 
 
 def _poisoning_shapes(value: str) -> list[str]:
@@ -165,7 +192,7 @@ def _poisoning_shapes(value: str) -> list[str]:
     found: list[str] = []
     m = _TAG_BLOCK.search(text)
     if m:
-        found.append(f"Instruction block addressed to the model ({m.group(1)!r})")
+        found.append(f"Instruction block addressed to the model ({(m.group(1) or m.group(2))!r})")
     m = _KEEP_FROM_USER.search(text)
     if m:
         found.append(f"Instruction to keep something from the user ({m.group()!r})")
@@ -174,15 +201,15 @@ def _poisoning_shapes(value: str) -> list[str]:
         if _HAND_OVER.search(window):
             found.append(f"Secret file handed over by a tool definition ({m.group().strip()!r})")
             break
-    m = _MARKDOWN_IMAGE_URL.search(text)
+    m = _IMAGE_URL.search(text)
     if m:
-        found.append("Markdown image pointing at a URL (renders as a request carrying data)")
+        found.append("Image pointing at a URL (renders as a request carrying data)")
     m = _URL_TEMPLATE_QUERY.search(text)
     if m:
         found.append(f"URL whose query the model fills in ({m.group()!r})")
     m = _MIXED_SCRIPT.search(text)
     if m:
-        found.append(f"Word mixing Latin and Cyrillic letters (look-alike characters: {m.group()!r})")
+        found.append(f"Word mixing Latin with Cyrillic or Greek letters (look-alike characters: {m.group()!r})")
     return found
 
 
@@ -266,7 +293,9 @@ class MCPGovernance:
             tool_name, description, schema, server_name
         )
         advisory = (
-            _wording_advisories(agt_threats, description) if self._wording_advisory
+            _wording_advisories(
+                agt_threats, description, "\n".join(value for _, value in _extract_text_fields(tool_def)),
+            ) if self._wording_advisory
             else [False] * len(agt_threats)
         )
         advisories: list[str] = []
@@ -444,7 +473,7 @@ _SEVERITY_ORDER: dict[str, int] = {
 }
 
 
-def _wording_advisories(agt_threats: list, description: str) -> list[bool]:
+def _wording_advisories(agt_threats: list, description: str, all_text: str) -> list[bool]:
     """Per AGT hit (same order): True when it is only a wording heuristic and the
     tool keeps it as an advisory (see the constants above).  Anything this does
     not recognise stays a threat, so a renamed AGT message fails closed."""
@@ -453,7 +482,8 @@ def _wording_advisories(agt_threats: list, description: str) -> list[bool]:
     exfil = [_message(t).startswith(_EXFILTRATION_MESSAGE) for t in agt_threats]
     url = [e and _pattern(t) == _URL_PATTERN for e, t in zip(exfil, agt_threats)]
     send = [e and _pattern(t) in _SEND_PATTERNS for e, t in zip(exfil, agt_threats)]
-    kinds = sum((any(role), any(url), any(send), _names_sensitive_data(description), _copies_to_contact(description)))
+    # Credentials or a copy-to address count wherever the definition names them (a parameter's description too).
+    kinds = sum((any(role), any(url), any(send), _names_sensitive_data(all_text), _copies_to_contact(all_text)))
     lone_kind = kinds == 1
     hides = _hides_text(description)
     return [
@@ -471,8 +501,8 @@ def _pattern(threat) -> str | None:
     return getattr(threat, "matched_pattern", None)
 
 
-def _names_sensitive_data(description: str) -> bool:
-    return bool(_SENSITIVE_DATA.search(description) or _SECRET_NAME.search(description))
+def _names_sensitive_data(text: str) -> bool:
+    return bool(_SENSITIVE_DATA.search(text) or _SECRET_NAME.search(text) or _CONVERSATION_HANDED_OVER.search(text))
 
 
 def _copies_to_contact(description: str) -> bool:
