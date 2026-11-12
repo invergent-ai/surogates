@@ -1,13 +1,9 @@
-"""Programmatic task creation — shared by the ``spawn_task`` LLM tool and
-``dispatch_experiments`` (research missions).
+"""Programmatic task creation for the ``spawn_task`` LLM tool.
 
-The body here is lifted verbatim from ``_spawn_task_handler`` (the
-insert + atomic-claim + eager-spawn + enqueue core); the LLM tool keeps
-its argument parsing and the calling-session mission read, and passes
-already-validated values in. ``dispatch_experiments`` supplies the same
-values directly. Keeping one implementation means both paths share the
-exact race-safe claim semantics (UPDATE ... RETURNING, not FOR UPDATE)
-and the same rollback-on-spawn-failure behaviour.
+The insert + atomic-claim + eager-spawn + enqueue core; the LLM tool
+keeps its argument parsing and the calling-session mission read, and
+passes already-validated values in. The claim is race-safe
+(UPDATE ... RETURNING, not FOR UPDATE) and a failed spawn rolls back.
 """
 from __future__ import annotations
 

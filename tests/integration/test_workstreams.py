@@ -484,7 +484,7 @@ def woken_on(monkeypatch, session, message: str):
     store = _stub_store(session, [_user_event(10, message)])
     harness = _harness(store, _permissive())
     for handler in (
-        "_handle_goal_command", "_handle_mission_command", "_handle_auto_research_command",
+        "_handle_goal_command", "_handle_mission_command",
         "_handle_code_command", "_handle_loop_command", "_run_loop",
     ):
         setattr(harness, handler, AsyncMock())
@@ -494,10 +494,9 @@ def woken_on(monkeypatch, session, message: str):
 @pytest.mark.parametrize("message, handler", [
     ("/goal Ship the Q3 report", "_handle_goal_command"),
     ("/mission Audit the Q3 figures", "_handle_mission_command"),
-    ("/auto-research Find the best forecast", "_handle_auto_research_command"),
     ("/code Fix the totals script", "_handle_code_command"),
     ("/deep-research The Q3 market", "_run_loop"),
-], ids=["goal", "mission", "auto-research", "code", "deep-research"])
+], ids=["goal", "mission", "code", "deep-research"])
 async def test_a_master_refuses_the_commands_that_work_in_place(api, monkeypatch, message, handler):
     master = await master_of(api, await create(api))
     harness, store = woken_on(monkeypatch, master, message)

@@ -42,9 +42,9 @@ def under_a_thread(config: dict[str, Any] | None) -> bool:
 
 
 #: What a thread has no other way to do: its words must not send the model to do it "in the thread itself".
-_NO_OTHER_WAY = frozenset({"/deep-research", "/auto-research", "dispatch_experiments"})
-#: The sub-agents that are a deep research's or a research run's own: a thread starts none of them by type.
-THREAD_REFUSED_AGENT_TYPES = frozenset({"deep-research", "research-writer", "arbor-executor"})
+_NO_OTHER_WAY = frozenset({"/deep-research"})
+#: The sub-agents that are a deep research's own: a thread starts none of them by type.
+THREAD_REFUSED_AGENT_TYPES = frozenset({"deep-research", "research-writer"})
 
 
 def sub_agent(kind: str) -> str:

@@ -173,8 +173,8 @@ async def test_an_unknown_mission_is_not_exhausted(session_factory):
 async def test_an_exhausted_mission_stops_being_evaluated(
     session_factory, org_id, user_id, chat_session,
 ):
-    """Budget is checked at the evaluator boundary, mirroring how Arbor
-    enforces its cycle ceiling — and only after the cheap negative paths."""
+    """Budget is checked at the evaluator boundary — and only after the
+    cheap negative paths."""
     from surogates.missions.evaluator import should_evaluate
 
     store = MissionStore(session_factory)

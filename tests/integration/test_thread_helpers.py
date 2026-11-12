@@ -243,11 +243,7 @@ def an_agent(*tools: str) -> SimpleNamespace:
     # the planner its outline to a writer on another, started from the thread's hand-off as it was: the
     # writer's copy had none of the evidence the planner kept in .research/, which is all it writes from.
     ("/deep-research Heat pumps in cold climates", "the writer finds no evidence"),
-    # Run end to end with its repository's bundle supplied, a research run handed each experiment the
-    # copy with its bundle.  But a copy leaves out every folder that holds a git repository: the one the
-    # command names was in no copy, the thread's or an experiment's, so there is none to bundle or merge.
-    ("/auto-research repo=/workspace/app Raise the score.\n\nRubric:\n- the dev score is higher", "a copy holds no repository"),
-], ids=["deep-research", "auto-research"])
+], ids=["deep-research"])
 async def test_a_threads_research_command_is_refused_and_starts_nothing(api, monkeypatch, pods, command, why):
     master = await master_of(api, await create(api))
     thread = await a_thread(api, "Draft A", master)
@@ -264,10 +260,10 @@ async def test_a_threads_research_command_is_refused_and_starts_nothing(api, mon
     *_, answer = [e.data["message"]["content"] for e in await store.get_events(thread.id, types=[EventType.LLM_RESPONSE])]
     name = command.split()[0]
     assert answer == f"A thread can't start {name} {NO_OTHER_WAY}", why
-    # No turn ran for it, no helper or task was started, no research run made, no pod, no history.
+    # No turn ran for it, no helper or task was started, no pod, no history.
     thread = await store.get_session(thread.id)
     assert (ran, await helpers_of(api, thread), pods.pods) == ([], [], {})
-    assert not {"active_research_run_id", "active_mission_id", "coordinator"} & set(thread.config)
+    assert not {"active_mission_id", "coordinator"} & set(thread.config)
     assert not (pods.project / "_history").exists()
 
 
@@ -511,19 +507,6 @@ async def test_a_step_that_hands_the_copy_on_waits_out_the_fence_its_harness_run
     assert fences == [903.0]
 
 
-async def test_a_thread_dispatches_no_research_experiment_and_hands_nothing_on_for_one(api, monkeypatch, pods):
-    thread = await a_coordinating_thread(api)
-    locks = await project_locks_taken(monkeypatch)
-    await asyncio.wait_for(a_turn(api, monkeypatch, thread, [
-        calling(("dispatch_experiments", {"node_keys": ["1"]})), _final_response("Done."),
-    ], pool=SandboxPool(pods)), 60)
-    # A thread has no research run, its command being refused, so the model is not sent the tool, and a
-    # call of it all the same never runs.  (Reached past that, it answers with the thread's refusal: a run
-    # could bundle no repository from a copy that holds none.)
-    assert await api.app.state.session_store.get_events(thread.id, types=[EventType.TOOL_CALL]) == []
-    assert (await helpers_of(api, thread), pods.pods, locks) == ([], {}, [])
-
-
 async def test_a_task_queued_behind_another_takes_the_copy_as_it_is_when_queued_and_one_the_tool_refuses_takes_none(
     api, monkeypatch, pods,
 ):
@@ -682,13 +665,12 @@ async def test_a_mission_in_a_thread_loses_no_finished_tasks_work_when_a_turn_th
 COMMANDS_A_THREAD_REFUSES = {
     "loop": "/loop 5m Add a line to notes.txt.",
     "code": "/code claude Add a line to notes.txt.",
-    "auto-research": "/auto-research repo=/workspace/app Raise the score.\n\nRubric:\n- the dev score is higher",
     "deep-research": "/deep-research Heat pumps in cold climates",
 }
 
 
 async def woken_with_nothing_started(api, monkeypatch, pool, helper) -> list[str]:
-    """*helper* woken for real; what it answered, having run no turn, no coding agent, no schedule and no research run."""
+    """*helper* woken for real; what it answered, having run no turn, no coding agent and no schedule."""
     ran: list = []
 
     async def a_turn_of_it(*args, **kwargs):
@@ -702,7 +684,7 @@ async def woken_with_nothing_started(api, monkeypatch, pool, helper) -> list[str
         schedules = (await db.execute(
             text("SELECT count(*) FROM scheduled_sessions WHERE created_from_session_id = :id"), {"id": helper.id},
         )).scalar()
-    made = set((await store.get_session(helper.id)).config) & {"active_research_run_id", "active_mission_id", "coordinator"}
+    made = set((await store.get_session(helper.id)).config) & {"active_mission_id", "coordinator"}
     assert (ran, schedules, made, await helpers_of(api, helper)) == ([], 0, set(), [])
     return [e.data["message"]["content"] for e in await store.get_events(helper.id, types=[EventType.LLM_RESPONSE])]
 
@@ -732,8 +714,8 @@ async def test_a_helper_of_a_threads_helper_is_refused_the_commands_too(api, mon
     assert await woken_with_nothing_started(api, monkeypatch, SandboxPool(pods), its_own) == [thread_refusal(f"/{command}")]
 
 
-@pytest.mark.parametrize("tool", ["cron_create", "dispatch_experiments"])
-async def test_a_threads_helper_and_its_own_are_refused_the_tools_their_thread_is(api, tool):
+async def test_a_threads_helper_and_its_own_are_refused_the_tools_their_thread_is(api):
+    tool = "cron_create"
     thread = await a_thread(api)
     store = api.app.state.session_store
     helper = await create_child_session(store=store, parent=thread, channel="delegation")
@@ -750,8 +732,7 @@ NO_OTHER_WAY = "yet, and has no other way to do it: tell the user it cannot be d
     ("delegate_task", {"goals": [{"goal": "Part one."}, {"goal": "Heat pumps", "agent_type": "deep-research"}]}, "deep-research"),
     ("delegate_task", {"goal": "Write the report.", "agent_type": "research-writer"}, "research-writer"),
     ("spawn_worker", {"goal": "Heat pumps in cold climates", "agent_type": "deep-research"}, "deep-research"),
-    ("spawn_task", {"goal": "Run the experiment.", "agent_type": "arbor-executor"}, "arbor-executor"),
-], ids=["delegate_task", "one goal of several", "the writer alone", "spawn_worker", "an experiment's executor"])
+], ids=["delegate_task", "one goal of several", "the writer alone", "spawn_worker"])
 async def test_a_thread_and_its_helpers_start_no_research_sub_agent_by_its_type(api, monkeypatch, pods, tool, arguments, kind):
     thread = await a_coordinating_thread(api)
     # The agent has the sub-agents: nothing but the thread's rule stands between the call and them.
@@ -777,7 +758,7 @@ async def test_a_thread_and_its_helpers_start_no_research_sub_agent_by_its_type(
 
 async def test_what_a_thread_has_no_other_way_to_do_is_refused_in_words_that_send_it_nowhere_else():
     # "Do this step in the thread itself" would, for research, be the very delegation that is refused.
-    for name in ("/deep-research", "/auto-research", "dispatch_experiments", 'the "deep-research" sub-agent'):
+    for name in ("/deep-research", 'the "deep-research" sub-agent'):
         assert thread_refusal(name) == f"A thread can't start {name} {NO_OTHER_WAY}"
     for name in ("/loop", "/code", "cron_create"):
         assert thread_refusal(name) == f"A thread can't start {name} yet: do this step in the thread itself."

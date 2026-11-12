@@ -44,10 +44,8 @@ from surogates.db.models import (
     BoardNote,
     DeliveryOutbox,
     Event as EventRow,
-    IdeaNode,
     InboxItem,
     Mission as MissionRow,
-    ResearchRun,
     ScheduledSession as ScheduledSessionRow,
     Session as SessionRow,
     SessionCursor,
@@ -2536,8 +2534,7 @@ class SessionStore:
         """The newest rubric proposal recorded for *mission_id*, or ``None``.
 
         This is what ``/mission accept`` applies. The command takes no rubric
-        argument on purpose, so the text it commits can only come from here --
-        the same shape as ``merge_experiment`` accepting no score.
+        argument on purpose, so the text it commits can only come from here.
 
         Events are keyed by session, not by mission, and a session outlives
         its missions, so the payload's ``mission_id`` is matched in SQL to
@@ -3647,27 +3644,7 @@ def _build_counter_update_clause(event_type: EventType, data: dict) -> str:
 
 
 async def delete_missions(db: AsyncSession, mission_ids: Sequence[UUID]) -> None:
-    """Delete missions with their research runs, idea nodes, tasks and task edges."""
-    # Research-run sidecar (Arbor): idea_nodes -> research_runs
-    # -> missions, and idea_nodes -> tasks.  None of those FKs
-    # carry ON DELETE CASCADE, so delete the tree rows before
-    # the mission's tasks and the mission itself or they reject.
-    run_ids = (await db.execute(
-        select(ResearchRun.id).where(
-            ResearchRun.mission_id.in_(mission_ids),
-        )
-    )).scalars().all()
-    if run_ids:
-        await db.execute(
-            delete(IdeaNode).where(
-                IdeaNode.run_id.in_(run_ids),
-            )
-        )
-        await db.execute(
-            delete(ResearchRun).where(
-                ResearchRun.id.in_(run_ids),
-            )
-        )
+    """Delete missions with their tasks and task edges."""
     task_ids = (await db.execute(
         select(TaskRow.id).where(
             TaskRow.mission_id.in_(mission_ids),

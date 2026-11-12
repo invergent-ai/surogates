@@ -202,7 +202,7 @@ Three parties hold one power each, so a *pivot* stays distinguishable from
 
 `/mission accept` commits the rubric recorded in the `mission.refinement_proposed`
 event. It takes no rubric argument, so nothing the coordinator writes can change
-what is committed — the same guarantee as `merge_experiment` accepting no score.
+what is committed.
 
 The mission's `description` is never amended — it is the standing intent — and
 `iteration` is not reset, so a pivot does not refill the allowance

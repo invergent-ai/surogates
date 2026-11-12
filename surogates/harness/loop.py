@@ -49,7 +49,7 @@ from surogates.devices.history import (
     thread_copy,
 )
 from surogates.devices.operations import DeviceOperations
-from surogates.devices.sandbox import NOT_AVAILABLE, enter_device_session, leave_device_session
+from surogates.devices.sandbox import enter_device_session, leave_device_session
 from surogates.devices.workspace import DeviceOperationError
 from surogates.harness.agent_resolver import (
     apply_agent_def_to_session,
@@ -318,7 +318,6 @@ from surogates.harness.loop_vision import (
 
 
 from surogates.harness.loop_artifact_completion import ArtifactCompletionMixin, announce_result
-from surogates.harness.loop_arbor import ArborHarvestMixin
 from surogates.harness.loop_board import BoardMixin
 from surogates.harness.loop_code_commands import CodeCommandMixin
 from surogates.harness.loop_context_replay import (
@@ -506,8 +505,6 @@ def _slash_command_name(content: str | None) -> str | None:
         return "goal"
     if content == "/mission" or content.startswith("/mission "):
         return "mission"
-    if content == "/auto-research" or content.startswith("/auto-research "):
-        return "auto-research"
     if content == "/code" or content.startswith("/code "):
         return "code"
     if content.startswith("/loop"):
@@ -522,7 +519,6 @@ def _slash_command_name(content: str | None) -> str | None:
 _SAYS_HOW_IT_STANDS = {
     "goal": "`/goal status`",
     "mission": "`/mission status`",
-    "auto-research": "`/auto-research status`",
     "loop": "`/loop list`",
     "code": "`/code status`",
 }
@@ -561,12 +557,12 @@ def command_never_answered(events: list) -> str | None:
 _COMMAND_FOR_THE_MODEL = "deep-research"
 
 #: Commands that do their work in the conversation itself.  A project's
-#: master works through threads: a goal, a mission or an auto-research run
-#: there could neither delegate nor do the work, ``/deep-research`` hands its
+#: master works through threads: a goal or a mission there could neither
+#: delegate nor do the work, ``/deep-research`` hands its
 #: topic to ``delegate_task``, and ``/code`` clones into the project's shared
 #: workspace.  ``/loop`` (a routine), ``/compress`` and ``/clear`` still run.
 _PROJECT_MASTER_REFUSED_COMMANDS = frozenset({
-    "goal", "mission", "auto-research", "code", "deep-research",
+    "goal", "mission", "code", "deep-research",
 })
 
 #: How long a stop waits to take back what its turn handed on: the pod, the project's lock and the
@@ -591,14 +587,9 @@ async def _keep_to_write(redis: Any, session_id: Any, turn: int, said: dict[str,
 # thread.  A coding agent's turn ends outside the thread's landing, so its
 # edits would stay in a copy never landed.  A deep research's writer works on
 # a copy of its own, where it finds none of the evidence its planner kept.
-# An auto-research run works on a git repository, and a copy holds none.
 # A mission's tasks each work on a copy of their own, handed back to the
 # thread: that one runs.
-_PROJECT_THREAD_REFUSED_COMMANDS = frozenset({"loop", "auto-research", "deep-research", "code"})
-
-# The commands a chat on a local folder refuses: a research run's
-# experiments need the cloud's coding sandbox and a /workspace repository.
-_LOCAL_FOLDER_REFUSED_COMMANDS = frozenset({"auto-research"})
+_PROJECT_THREAD_REFUSED_COMMANDS = frozenset({"loop", "deep-research", "code"})
 
 
 #: A first-person intention to act, sitting at the very end of the message:
@@ -710,7 +701,6 @@ _SLACK_FETCH_STAMP_RE = re.compile(r"^[^-]+-")
 
 class AgentHarness(
     BoardMixin,
-    ArborHarvestMixin,
     ContextReplayMixin,
     IterationSummaryMixin,
     OutcomeCommandMixin,
@@ -826,7 +816,7 @@ class AgentHarness(
         self._llm = llm_client
         self._tenant = tenant
         # Who actually SENT this turn — the owner of any automation they create
-        # (/loop, /mission, /auto-research) and the principal for user-scoped
+        # (/loop, /mission) and the principal for user-scoped
         # coding-agent credentials. Distinct from ``tenant``, which is the
         # credential principal the agent *acts as* (its own service account on
         # managed channels). Falls back to the tenant principal for
@@ -2012,12 +2002,6 @@ class AgentHarness(
             and under_a_thread(session.config)
         ):
             return thread_refusal(f"/{name}")
-        if (
-            name in _LOCAL_FOLDER_REFUSED_COMMANDS
-            and session is not None
-            and device_of(session.config) is not None
-        ):
-            return f"/{name} is {NOT_AVAILABLE}"
         if self._slash_command_enabled(name, session):
             return None
         return f"/{name} is disabled for this agent."
@@ -3348,12 +3332,6 @@ class AgentHarness(
             board_cursor = await self.maybe_emit_board_update(
                 session, messages, board_cursor,
             )
-
-            # --- Research missions: deterministic pre-LLM harvest ---
-            # Folds finished experiments into the Idea Tree before the
-            # coordinator LLM runs, so a dead executor or compacted context
-            # can never strand a running node or stale the leaderboard.
-            await self.maybe_harvest_research(session, messages)
 
             # --- Skill nudge tracking ---
             # Counter resets whenever skill_manage is actually used (in
@@ -5952,8 +5930,7 @@ class AgentHarness(
         gate, while the schema kept advertising them, and every handler
         behind them fails closed on the same condition
         (``board/tools.py`` returns "(no context_group_id on this
-        session)", ``arbor.py``'s ``_require_run`` raises, the
-        ``worker_*`` tools need ``Session.task_id``).  So the model was
+        session)", the ``worker_*`` tools need ``Session.task_id``).  So the model was
         paying context for tools it was never told about and could not
         have used.
 
@@ -5970,7 +5947,6 @@ class AgentHarness(
         from surogates.runtime.governance import (
             BOARD_SELF_TOOLS,
             PROJECT_THREAD_TOOLS,
-            RESEARCH_SPINE_TOOLS,
             WORKER_SELF_TOOLS,
         )
 
@@ -5990,13 +5966,6 @@ class AgentHarness(
             result |= BOARD_SELF_TOOLS
         else:
             result -= BOARD_SELF_TOOLS
-
-        # The research spine is never force-added: it rides the registry's
-        # full set on the coordinator and is stripped everywhere else, so
-        # executors stay tree-blind and cannot invent a second
-        # shared-state protocol between themselves.
-        if not (config.get("active_research_run_id") and not is_task_worker):
-            result -= RESEARCH_SPINE_TOOLS
 
         # Only a project's master starts and follows up its threads.
         if not is_project_master(config):
@@ -6460,8 +6429,6 @@ class AgentHarness(
             await self._handle_goal_command(session, text, lease)
         elif command == "mission":
             await self._handle_mission_command(session, text, lease, typed_on=getattr(typed, "created_at", None))
-        elif command == "auto-research":
-            await self._handle_auto_research_command(session, text, lease, typed_on=getattr(typed, "created_at", None))
         elif command == "code":
             await self._handle_code_command(session, text, lease, all_events)
         elif command == "loop":

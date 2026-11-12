@@ -55,7 +55,7 @@ Skills can declare conditions that control whether they appear in a session. The
 | Field | Rule |
 |---|---|
 | `requires_tools` | Skill is **included** only when **all** listed tools are available. |
-| `requires_agents` | Skill is **included** only when **all** listed sub-agents are in the session's sub-agent catalog. A feature pack whose sub-agent ships in the agent's bundle only while the feature is on uses this to gate the skills that drive it — the research-mission (Arbor) skills require `arbor-executor`, which the bundle carries only when research missions are enabled. |
+| `requires_agents` | Skill is **included** only when **all** listed sub-agents are in the session's sub-agent catalog. A feature pack whose sub-agent ships in the agent's bundle only while the feature is on uses this to gate the skills that drive it. |
 | `fallback_for_tools` | Skill is **hidden** when **all** listed tools are available: the prompt's skill index leaves it out, `skills_list` does not list it and `skill_view` refuses it, saying why. It only appears as a fallback when at least one is missing. The prompt hides by the session's toolset; `skills_list` and `skill_view` read skills through the API, which knows a session's tools only from its row, so they hide by the office tools (`office_read`, `office_edit`): a chat with them has no `docx`, `xlsx`, `pptx` or `pdf-forms` skill. The web UI's slash menu names no session and lists every skill. |
 
 Example -- a skill that provides manual web search instructions when the `web_search` tool is not connected:

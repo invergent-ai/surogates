@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 NOT_AVAILABLE = "not available for sessions on a local folder"
 
 # Switched off for sessions on the user's computer in the first release.
-UNAVAILABLE_TOOLS = frozenset({"run_coding_agent", "idea_tree", "dispatch_experiments", "merge_experiment"})
+UNAVAILABLE_TOOLS = frozenset({"run_coding_agent"})
 
 DEVICE_SANDBOX_ID = "device"
 

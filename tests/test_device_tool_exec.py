@@ -150,12 +150,11 @@ async def test_a_child_works_under_its_roots_task_id():
     assert (runner._root_session_id, runner._calling_session_id) == (UUID(root), session.id)
 
 
-@pytest.mark.parametrize("name", ["run_coding_agent", "idea_tree", "dispatch_experiments", "merge_experiment"])
-async def test_a_feature_switched_off_on_a_local_folder_is_refused(name):
-    registry = registry_with(name)
-    result = await run(registry, device_session(), name, {})
+async def test_a_feature_switched_off_on_a_local_folder_is_refused():
+    registry = registry_with("run_coding_agent")
+    result = await run(registry, device_session(), "run_coding_agent", {})
     assert NOT_AVAILABLE in json.loads(result["content"])["error"]
-    registry.get(name).handler.assert_not_called()
+    registry.get("run_coding_agent").handler.assert_not_called()
 
 
 async def test_containment_is_left_to_the_computer():

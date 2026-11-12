@@ -818,8 +818,8 @@ class PromptBuilder:
         ):
             return False
         # A feature pack ships its sub-agent in the agent's bundle only
-        # while the feature is on (the research-missions arbor-executor),
-        # so the sub-agent's presence gates the skills that drive it.
+        # while the feature is on, so the sub-agent's presence gates the
+        # skills that drive it.
         if requires_agents and not set(requires_agents) <= {
             agent.name for agent in self._available_agents
         }:

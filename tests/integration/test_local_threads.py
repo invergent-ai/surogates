@@ -542,27 +542,6 @@ async def test_a_thread_on_the_users_computer_starts_a_helper_in_its_copy_and_ha
     assert not landing_module.handed_on(thread)
 
 
-async def test_a_thread_on_the_users_computer_is_not_offered_a_research_runs_tool_and_starts_nothing_by_it(api, laptop, monkeypatch, tmp_path):
-    _, _, thread = await begun_local(api, laptop)
-    store = api.app.state.session_store
-    await store.update_session_config_key(thread.id, "coordinator", True)
-    thread = await store.get_session(thread.id)
-    asked: list = []
-    for name in ("keep_copy", "take_up", "project_lock"):
-        monkeypatch.setattr(landing_module, name, lambda *args, name=name, **more: asked.append(name))
-    pods = ThreadPods(tmp_path / "pods")
-    harness = await asyncio.wait_for(a_turn(api, monkeypatch, thread, [
-        calling(("dispatch_experiments", {"node_keys": ["1"]})), _final_response("Started."),
-        _final_response("Nothing to dispatch."),  # asked once more for the file its goal names
-    ], pool=SandboxPool(pods)), 60)
-    # A research run needs the cloud's sandbox: on a local folder its command is refused and its tools are
-    # not offered, a thread's as any chat's.  A call of one all the same never runs, and starts nothing.
-    offered = harness._tool_filter_for_session(thread)
-    assert offered is not None and "dispatch_experiments" not in offered and "delegate_task" in offered
-    assert await events_of(api, thread.id, EventType.TOOL_CALL) == []
-    assert (await children_of(api, thread), pods.pods, asked) == ([], {}, [])
-
-
 async def test_a_routine_run_of_a_project_whose_thread_works_on_a_folder_runs_on_the_projects_own_files_and_asks_the_computer_nothing(
     api, laptop, monkeypatch, pods,
 ):

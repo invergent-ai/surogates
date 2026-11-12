@@ -82,7 +82,7 @@ async def test_a_closed_office_document_is_office_edits_to_change(session_factor
 
 @pytest.mark.parametrize(("channel", "config"), [
     ("api", {}),
-    ("web", {"coordinator": True, "strict_coordinator": True, "active_research_run_id": "run"}),
+    ("web", {"coordinator": True, "strict_coordinator": True}),
 ])
 async def test_where_the_office_tools_are_not_offered_a_closed_document_is_left_alone(session_factory, channel, config):
     # Without a file pane, or as a strict coordinator, the session has no office tools to be sent to. A document open
