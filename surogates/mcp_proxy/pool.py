@@ -18,7 +18,7 @@ import logging
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from surogates.audit import (
@@ -189,6 +189,11 @@ class ConnectionPool:
         Optional :class:`AuditStore` that receives
         ``policy.mcp_scan`` and ``policy.rug_pull`` entries per scanned
         tool.  Has no effect when *governance_enabled* is False.
+    scan_wording:
+        ``"advisory"`` (default): a tool whose description trips only one
+        of AGT's wording heuristics is kept, with the hit audited and
+        logged (``governance.mcp_scanner``).  ``"drop"``: every hit drops
+        the tool (proxy setting ``mcp_scan_wording``).
     """
 
     def __init__(
@@ -198,7 +203,9 @@ class ConnectionPool:
         *,
         governance_enabled: bool = False,
         audit_store: AuditStore | None = None,
+        scan_wording: Literal["advisory", "drop"] = "advisory",
     ) -> None:
+        self._scan_wording = scan_wording
         self._idle_timeout = idle_timeout
         self._max_per_org = max_per_org
         self._entries: dict[tuple[UUID, UUID, str], PoolEntry] = {}
@@ -412,7 +419,7 @@ class ConnectionPool:
             approval_room: _ApprovalRoom | None = None
             if self._governance_enabled:
                 approvals = self._tenant_approvals(key)
-                tenant_governance = MCPGovernance(fingerprints=approvals)
+                tenant_governance = MCPGovernance(fingerprints=approvals, wording=self._scan_wording)
                 approval_room = _ApprovalRoom(approvals)
 
             for schema in schemas:
@@ -662,14 +669,17 @@ class ConnectionPool:
 
         if not result.safe:
             logger.warning(
-                "Unsafe MCP tool %s from server %s [%s]: %s",
+                "Unsafe MCP tool %s from server %s [%s]: %s%s",
                 tool_name, server_name, result.severity,
                 "; ".join(result.threats),
+                f" (advisories: {'; '.join(result.advisories)})" if result.advisories else "",
             )
             return False
 
         if result.advisories:
-            logger.warning(
+            # Once per approval, not at every reconnect of an approved tool.
+            logger.log(
+                logging.DEBUG if governance.has_fingerprint(qualified_name) else logging.WARNING,
                 "MCP tool %s from server %s kept with scan advisories (wording heuristics, not dropped): %s",
                 tool_name, server_name, "; ".join(result.advisories),
             )

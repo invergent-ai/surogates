@@ -73,7 +73,8 @@ scanner + local pattern checks).
 | `tool` | string | MCP tool name, as advertised by the server. |
 | `safe` | bool | `false` means the tool was filtered out before advertising. |
 | `threats` | string[] | Human-readable threat descriptions; empty when safe. |
-| `severity` | string | `info`, `warning`, or `critical`. |
+| `severity` | string | `info`, `warning`, or `critical`. `warning` on a kept tool means it has advisories. |
+| `advisories` | string[] | Wording heuristics the definition tripped that did not drop it (one kind alone: a URL, a send / post verb, a second-person rule such as "you must", an id that looks like base64). The proxy also logs a WARNING naming server, tool and rule at the tool's first approval. Empty when there were none. With the proxy setting `mcp_scan_wording: drop` every such hit is a threat instead. |
 | `timestamp` | number | |
 
 `policy.rug_pull` — emitted when a previously-registered MCP tool's

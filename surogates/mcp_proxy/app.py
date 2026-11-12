@@ -59,6 +59,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         max_per_org=settings.max_connections_per_org,
         governance_enabled=True,
         audit_store=app.state.audit_store,
+        scan_wording=settings.mcp_scan_wording,
     )
     app.state.pool = pool
     pool.start_eviction_loop()
