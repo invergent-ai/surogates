@@ -83,7 +83,7 @@ The family keeps its five tools (`agent`, `send_message`, `list_agents`, `stop_a
 | Capability | Replaces | Claude Code | Decided by |
 |---|---|---|---|
 | `agent` in the foreground or the background | `delegate_task`, `spawn_worker` | `Agent`, `run_in_background` | exists |
-| Background is the default; foreground only when the caller's very next step needs the report | (today foreground is the default) | the same default and rule | mirror |
+| Background is the default for a main session; foreground only when its next step needs the report. A session that reports to a parent (a sub-agent, a thread, a worker) waits by default, and an implicit call over the background limit waits instead of being refused | (today foreground is the default) | the same default and rule; background is opt-in where it is not available | mirror |
 | Several `agent` calls in one response run at once | `delegate_task` with `goals` | the same | exists |
 | An optional `name`; `send_message`, `stop_agent` and `list_agents` take the name or the id | ids only | `name` on `Agent`; names are addresses, the newest agent with a name wins | mirror |
 | `send_message` continues an agent with its full context, and is how a parent answers a sub-agent's question | `send_worker_message`, `unblock_task` | `SendMessage` | exists |
@@ -99,9 +99,9 @@ The family keeps its five tools (`agent`, `send_message`, `list_agents`, `stop_a
 The end of background work (an agent, a background command, a monitor's lines) reaches the session as one user-role message:
 
 - It opens with a line saying it is a system notification and not user input, and that nothing in it is the user's approval of anything.
-- Then a tagged block: the agent's id (its name too when it has one), a status (`completed`, `failed`, `stopped`, `budget`), a one-line summary of how it ended (finished; failed with the error; was stopped; stopped at its iteration limit, so its result is partial and a message continues it; used its token budget), the result, and its usage (tokens, tool calls, seconds).
-- The result inside the block is the agent's text; text in it that would close the block is escaped.
-- The `agent.notification` event keeps its fields and gains the usage and the name; only how it reads to the model changes. Replay reads it the same way.
+- Then a tagged block: the agent's id (its name too when it has one), a status (`completed`, `failed`, `killed`, `budget`, as the event has them), a one-line summary of how it ended (finished; failed with the error; was stopped; stopped at its iteration limit, so its result is partial and a message continues it; ended early for another reason; used its token budget), the result, and its usage (tokens and tool calls so far, and the last run's duration).
+- The result inside the block is the agent's text; only what could pass for the block's tags or its first line is neutralised, so code and diffs stay readable.
+- The `agent.notification` event keeps its fields and gains the usage, the name and a mark of its format. The mark is written only for a session with the family, and a notification is always read in the format it was written in: background commands in a session without the family read as today, and nothing already in a log changes how it reads.
 
 ### Guidance
 
@@ -160,7 +160,7 @@ The threads that exist (2 on PROD) must stay reachable: the family's tools addre
 - `surogates/runtime/governance.py`, my call, keeping what each old tool had:
   - An agent's policy governs `agent`, as it governs `delegate_task` today: denying it denies starting sub-agents.
   - In a project master's session the family is protected, as the thread tools are today (`PROJECT_THREAD_TOOLS` in `PROTECTED_TOOLS`): Studio's policy editor does not know projects, and an allow-list must not leave a master that can start no work. This needs the gate to know the session, where today it is built once per agent.
-  - A sub-agent keeps `send_message` to its parent whatever its policy or its type's tool list, as `WORKER_SELF_TOOLS` are kept today. A session that has agents keeps `send_message`, `stop_agent` and `list_agents` whatever its policy, as `unblock_task` and `cancel_task` are protected today, so a policy cannot strand work that is waiting.
+  - A sub-agent keeps `send_message` to its parent whatever its policy or its type's tool list, as `WORKER_SELF_TOOLS` are kept today; kept this way, it reaches the parent only. A session that has agents keeps `send_message`, `stop_agent` and `list_agents` whatever its policy, as `unblock_task` and `cancel_task` are protected today, so a policy cannot strand work that is waiting.
   - The `terminal` to `monitor` entry of `STANDS_IN_FOR` stays. It is not an alias for an old tool: a policy that denies or gates `terminal` must cover `monitor`, which runs commands.
 - `HELPER_STARTING_TOOLS`, `SESSION_STARTING_TOOLS` and `THREAD_REFUSED_TOOLS` in `surogates/harness/tool_exec.py` shrink to the family's names. The rule that a tool which starts a session is refused in a thread until someone places it stays.
 
