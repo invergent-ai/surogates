@@ -131,9 +131,6 @@ TOOL_LOCATIONS: dict[str, ToolLocation] = {
     "kb_read_page": ToolLocation.HARNESS,
     "kb_search_pages": ToolLocation.HARNESS,
     # Coordinator tools (session management, no isolation needed)
-    "spawn_worker": ToolLocation.HARNESS,
-    "send_worker_message": ToolLocation.HARNESS,
-    "stop_worker": ToolLocation.HARNESS,
     # A project's thread tools: sessions, rows and the queue.
     "start_thread": ToolLocation.HARNESS,
     "message_thread": ToolLocation.HARNESS,

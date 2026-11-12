@@ -847,7 +847,7 @@ async def test_every_holder_of_the_lock_in_a_threads_work_settles_with_its_worke
     # A step hands the copy on to a helper, and a stop drops that hand-off.
     await asyncio.wait_for(a_turn(api, monkeypatch, thread, [
         calling(("terminal", {"command": "echo outline > outline.md"})),
-        calling(("spawn_worker", {"goal": "Draft the sources."})),
+        calling(("agent", {"description": "Helper", "prompt": "Draft the sources.", "run_in_background": True})),
         calling(("memory", {"action": "add", "content": "x"})),
         _final_response("Done."),
     ], pool=mine, during=stopped_while_the_helper_works), 120)

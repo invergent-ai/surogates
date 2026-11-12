@@ -63,7 +63,6 @@ class ToolRuntime:
             voice_call,
             agents,
             coding_agent,
-            coordinator,
             cron,
             delegate,
             expert,
@@ -117,7 +116,6 @@ class ToolRuntime:
             tool_groups,  # load_tools (held-back tool groups of a prompt profile)
             ask_user_question,
             cron,
-            coordinator,
             threads,  # a project's master: start, message, stop, list, read, resolve and propose threads
             artifact,
             coding_agent,  # run_coding_agent (Claude Code / Codex)

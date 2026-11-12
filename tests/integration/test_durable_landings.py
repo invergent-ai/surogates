@@ -2496,7 +2496,7 @@ async def test_a_stop_taken_before_a_threads_turn_has_a_name_writes_nothing_and_
     thread = await a_thread(api)
     store = api.app.state.session_store
     # An earlier turn started a helper, and ended.
-    await store.emit_event(thread.id, EventType.TOOL_CALL, {"tool_call_id": "c1", "name": "spawn_worker", "arguments": {}})
+    await store.emit_event(thread.id, EventType.TOOL_CALL, {"tool_call_id": "c1", "name": "agent", "arguments": {}})
     await store.emit_event(thread.id, EventType.SESSION_COMPLETE, {"reason": "completed"})
     harness = harness_of(api)
     harness._sandbox_pool = SandboxPool(pods)

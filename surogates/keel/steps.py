@@ -179,7 +179,7 @@ CASE_ALLOWED_TOOLS: frozenset[str] = frozenset({
     # ``skill_step`` is bookkeeping for a procedure skill, as the other two are
     # for the skills themselves.
     "skills_list", "skill_view", "skill_step", "todo", "vision_analyze",
-    "spawn_worker", "send_worker_message", "stop_worker", "agent",
+    "agent", "send_message", "list_agents", "stop_agent",
 })
 #: What a person's case agent is never offered of the tools a case allows: it
 #: reads the case only through Keel (:data:`KEEL_CASE_TOOLS`) and drafts only
@@ -188,7 +188,7 @@ CASE_ALLOWED_TOOLS: frozenset[str] = frozenset({
 #: the case's own workspace.
 CASE_AGENT_REFUSED: frozenset[str] = frozenset({
     "skills_list", "skill_view", "skill_step", "terminal", "process", "write_file", "patch",
-    "office_read", "office_edit", "spawn_worker", "send_worker_message", "stop_worker", "agent",
+    "office_read", "office_edit", "agent", "send_message", "list_agents", "stop_agent",
 })
 #: What a rerun and its helpers are never offered of the tools a case allows: a
 #: rerun runs on a copy of the case's past, so it may not run a command or

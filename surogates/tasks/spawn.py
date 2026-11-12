@@ -26,10 +26,11 @@ from typing import Any
 from surogates.harness.agent_resolver import resolve_agent_by_name
 from surogates.session.events import EventType
 from surogates.session.provisioning import create_child_session
-from surogates.tools.builtin.coordinator import (
-    WORKER_EXCLUDED_TOOLS,
-    _WORKER_MAX_ITERATIONS,
-)
+
+# Cap on iterations a task's worker session may consume.
+_WORKER_MAX_ITERATIONS: int = 30
+# What a task's worker may not use: it starts no tasks of its own.
+WORKER_EXCLUDED_TOOLS: frozenset[str] = frozenset({"spawn_task", "unblock_task", "cancel_task"})
 
 logger = logging.getLogger(__name__)
 

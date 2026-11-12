@@ -25,7 +25,6 @@ import json
 import logging
 import time
 from typing import Any
-from uuid import UUID
 
 from surogates.channels.constants import session_queue_priority
 from surogates.config import enqueue_session
@@ -73,9 +72,6 @@ _TRACE_SUMMARY_LIMIT: int = 10
 # pool.
 _DELEGATION_ALWAYS_BLOCKED_TOOLS: frozenset[str] = frozenset({
     "ask_user_question",
-    "spawn_worker",
-    "send_worker_message",
-    "stop_worker",
 })
 
 # Built-in file-mutating tools whose ``path`` argument we collect into

@@ -92,16 +92,15 @@ def test_restricting_renders_the_agents_section_again():
     """A build before the narrowing (the compaction measure) must not leave the wider spawn tools behind."""
     from surogates.tools.loader import AgentDef
 
-    session = _chat({"coordinator": True, "excluded_tools": ["spawn_task", "spawn_worker"]})
+    session = _chat({"coordinator": True, "excluded_tools": ["agent"]})
     builder = PromptBuilder(
-        _tenant(session), session=session, available_tools={"spawn_task", "spawn_worker", "agent"},
+        _tenant(session), session=session, available_tools={"spawn_task", "agent"},
         available_agents=[AgentDef(name="analyst", description="Reads the numbers", system_prompt="",
                                    source="platform")],
     )
-    assert "spawn_task" in builder._available_agents_section()
-    builder.restrict_tools({"agent"})
-    section = builder._available_agents_section()
-    assert "``agent``" in section and "spawn_task" not in section
+    assert "analyst" in builder._available_agents_section()
+    builder.restrict_tools({"spawn_task"})
+    assert builder._available_agents_section() == ""
 
 
 async def test_the_compaction_measure_is_narrowed_too():

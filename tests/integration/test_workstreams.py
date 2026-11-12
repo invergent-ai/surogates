@@ -464,8 +464,7 @@ async def test_a_master_does_a_simple_thing_itself_and_gives_out_the_rest(api, m
     # Research, a site's study and every other piece of work are a thread's.
     assert not sent & {
         "web_search", "web_extract", "browser_navigate", "create_artifact", "vision_analyze",
-        "spawn_worker", "send_worker_message", "stop_worker", "agent",
-        "spawn_task", "unblock_task", "cancel_task", "run_coding_agent",
+        "agent", "spawn_task", "unblock_task", "cancel_task", "run_coding_agent",
     }
 
 
@@ -474,7 +473,7 @@ async def test_a_mission_coordinator_keeps_its_own_tools(api):
     session = await api.app.state.session_store.get_session(UUID(chat.json()["id"]))
     session.config.update(coordinator=True, strict_coordinator=True)
     tools = harness_with_every_tool()._tool_filter_for_session(session)
-    assert {"spawn_worker", "agent", "spawn_task", "run_coding_agent"} <= tools
+    assert {"agent", "spawn_task", "run_coding_agent"} <= tools
     assert not tools & {"read_file", "kb_read_page"}
 
 

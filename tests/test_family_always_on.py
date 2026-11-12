@@ -37,6 +37,12 @@ def test_delegate_task_is_no_tool():
     assert "delegate_task" not in TOOL_LOCATIONS
 
 
+def test_the_coordinator_worker_tools_are_no_tools():
+    old = {"spawn_worker", "send_worker_message", "stop_worker"}
+    assert not old & _builtins()
+    assert not old & set(TOOL_LOCATIONS)
+
+
 class _Store:
     """What ``tell_parent`` reads and writes, in memory."""
 

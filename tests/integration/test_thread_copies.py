@@ -753,13 +753,13 @@ async def test_every_tool_that_starts_a_session_is_named_as_handing_a_threads_co
     )
 
     # The tools whose step puts a thread's copy on its hand-off first, for the helper they start.
-    assert HELPER_STARTING_TOOLS == {"spawn_worker", "spawn_task", "agent"}
+    assert HELPER_STARTING_TOOLS == {"spawn_task", "agent"}
     # A thread schedules no routine: its runs would work on old files, and land only at the thread's next turn.
     assert THREAD_REFUSED_TOOLS == {"cron_create"}
     # Every other tool that starts a session is named, with why the thread's rule leaves it: it reaches a
     # session that exists already, or it answers a thread itself.
     assert SESSION_STARTING_TOOLS - HELPER_STARTING_TOOLS - THREAD_REFUSED_TOOLS == {
-        "send_worker_message", "unblock_task", "message_thread", "start_thread", "propose_threads", "send_message",
+        "unblock_task", "message_thread", "start_thread", "propose_threads", "send_message",
     }
     assert HELPER_STARTING_TOOLS <= SESSION_STARTING_TOOLS and THREAD_REFUSED_TOOLS <= SESSION_STARTING_TOOLS
     # A new tool that starts a session is refused in a thread by the code itself, until it is placed: it never

@@ -515,7 +515,7 @@ async def test_a_helper_of_a_thread_on_the_users_computer_works_in_the_threads_c
         await journal(api).bind(session_id=helper.id, device_id=UUID(laptop.device_id), folder=FOLDER, nonce=NONCE)
 
 
-@pytest.mark.parametrize("tool", ["agent", "spawn_worker", "spawn_task"])
+@pytest.mark.parametrize("tool", ["agent", "background agent", "spawn_task"])
 async def test_a_thread_on_the_users_computer_starts_a_helper_in_its_copy_and_hands_no_copy_on(api, laptop, monkeypatch, tmp_path, tool):
     _, _, thread = await begun_local(api, laptop)
     store = api.app.state.session_store
@@ -529,7 +529,11 @@ async def test_a_thread_on_the_users_computer_starts_a_helper_in_its_copy_and_ha
     pods = ThreadPods(tmp_path / "pods")
     pool = SandboxPool(pods)
     await asyncio.wait_for(a_turn(api, monkeypatch, thread, [
-        calling((tool, {"description": "Check", "prompt": "Check the totals."} if tool == "agent" else {"goal": "Check the totals."})), _final_response("Started."),
+        calling((
+            "agent" if tool == "background agent" else tool,
+            {"description": "Check", "prompt": "Check the totals.", "run_in_background": tool == "background agent"}
+            if tool.endswith("agent") else {"goal": "Check the totals."},
+        )), _final_response("Started."),
         _final_response("The helper has it."),  # asked once more for the file its goal names
     ], pool=pool), 60)
     [helper] = await children_of(api, thread)

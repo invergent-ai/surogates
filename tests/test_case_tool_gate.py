@@ -61,7 +61,7 @@ DESIGNER_TOOLS = {
     "draft_process_read", "draft_process_save", "draft_process_edit", "draft_process_check",
     "draft_process_reference",
 }
-HELPER_TOOLS = {"agent", "spawn_worker", "send_worker_message", "stop_worker"}
+HELPER_TOOLS = {"agent", "send_message", "list_agents", "stop_agent"}
 # What a person's case agent never gets: skills, the terminal, file writing,
 # office, and the helpers, any of which would work in the case's workspace.
 NEVER_FOR_A_CASE_AGENT = HELPER_TOOLS | {
@@ -310,7 +310,7 @@ async def test_a_step_without_narrowed_tools_keeps_its_agents_work_tools(scoped)
     registry = _registry()
     step = await _step(_SessionStore(), scoped=scoped)
 
-    assert {"agent", "spawn_worker", "terminal"} <= _prompt_tools(step, registry)
+    assert {"agent", "terminal"} <= _prompt_tools(step, registry)
     # A session that coordinates no one is sent no worker tools, a case's or not.
     assert {"agent", "terminal"} <= _schema_tools(step, registry)
 

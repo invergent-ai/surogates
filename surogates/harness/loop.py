@@ -276,7 +276,6 @@ from surogates.harness.loop_pending import (
     answered_helpers,
     read_as_result,
     _actionable_pending_events,
-    _awaited_report_unread,
     _aware,
     _command_answered,
     _cut_off_at,
@@ -294,7 +293,6 @@ from surogates.harness.loop_pending import (
     _redo_unread,
     _turn_for_a_hand_back,
     _turn_for_a_redo,
-    _waits_on_its_workers,
 )
 from surogates.harness.agent_news import agent_news_unread, started_notified_work, starts_notified_work
 from surogates.harness.subagents import (
@@ -1303,25 +1301,6 @@ class AgentHarness(
         )
         return agent_news_unread(events)
 
-    async def _has_awaited_report(self, session: Session) -> bool:
-        """Return True if a report the session was told to wait for is newer than its last model
-        request (``_awaited_report_unread``).
-
-        Every skipped wake of a finished chat asks this, and reads little of
-        its log: none for a session that does not wait on its workers
-        (``_waits_on_its_workers``), and a single row for one that never
-        started a worker, as most have not.
-        """
-        if not _waits_on_its_workers(session) or not await self._store.has_event(
-            session.id, EventType.WORKER_SPAWNED,
-        ):
-            return False
-        events = await self._store.get_events(
-            session.id,
-            types=[EventType.LLM_REQUEST, EventType.WORKER_SPAWNED, EventType.WORKER_COMPLETE, EventType.WORKER_FAILED],
-        )
-        return _awaited_report_unread(session, events)
-
     async def _collect_reports(
         self,
         session: Session,
@@ -2210,12 +2189,6 @@ class AgentHarness(
             # A project's master is also resumed by a thread's report that
             # no turn has read: the master's turn has usually ended long
             # before a thread finishes, and the report is what it waits for.
-            # So is a session that waits on its workers by the report of a
-            # worker it started with spawn_worker or spawn_task, which told
-            # it the report comes in its next turn: a chat no other started,
-            # neither a case's step, a routine's run nor a mission's
-            # coordinator, and a report within a day of its worker's start
-            # (``_awaited_report_unread``).  Only one whose turn completed.
             # A project's thread is resumed by a redo no turn has read: its
             # landing left a file out, and the thread redoes it.  Only one
             # whose turn completed, as the redo is written at such an end.
@@ -2234,8 +2207,6 @@ class AgentHarness(
                     ):
                         revived_by = "stranded_user_message"
                     elif is_project_master(session.config) and await self._has_unread_report(session_id):
-                        revived_by = "worker_report"
-                    elif session.status == "completed" and await self._has_awaited_report(session):
                         revived_by = "worker_report"
                     elif session.status == "completed" and await self._has_unread_agent_news(session_id):
                         # Background work it started ended after its turn did:
@@ -2684,7 +2655,6 @@ class AgentHarness(
                 at_rest = await self._end_command_turn(session, lease, typed_at, written, ends_here=is_new)
                 if is_new and self._redis is not None and (
                     not at_rest or is_project_master(session.config) and unread_reports(written)
-                    or _awaited_report_unread(session, written)
                     or is_project_thread(session.config) and _redo_unread(written)
                     or device_of(session.config) is not None and _hand_back_unread(written)
                 ):
@@ -6055,11 +6025,7 @@ class AgentHarness(
         elif explicit_allowed:
             tool_filter = set(config["allowed_tools"])
         else:
-            from surogates.tools.builtin.coordinator import WORKER_EXCLUDED_TOOLS
-
-            excluded = set(config.get("excluded_tools") or [])
-            excluded.update(WORKER_EXCLUDED_TOOLS)
-            tool_filter = set(self._tools.tool_names) - excluded
+            tool_filter = set(self._tools.tool_names) - set(config.get("excluded_tools") or [])
 
         tool_filter = self._apply_execution_context_gates(session, tool_filter)
 

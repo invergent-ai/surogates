@@ -696,7 +696,7 @@ async def test_blocklist_filters_ask_user_question_from_preset_allowlist(
     captured = _install_stub_child_session(monkeypatch, store)
     _install_stub_agent_resolver(
         monkeypatch,
-        agent_def=_StubAgentDef(tools=["read_file", "ask_user_question", "spawn_worker"]),
+        agent_def=_StubAgentDef(tools=["read_file", "ask_user_question"]),
     )
 
     await _run_agent(
@@ -711,7 +711,6 @@ async def test_blocklist_filters_ask_user_question_from_preset_allowlist(
     allowed = captured["config"]["allowed_tools"]
     assert "read_file" in allowed
     assert "ask_user_question" not in allowed
-    assert "spawn_worker" not in allowed
 
 
 # ─── file-change awareness ───────────────────────────────────────────
@@ -889,9 +888,6 @@ async def test_blocklist_appears_in_excluded_tools_when_no_allowlist(
 
     excluded = captured["config"].get("excluded_tools", [])
     assert "ask_user_question" in excluded
-    assert "spawn_worker" in excluded
-    assert "send_worker_message" in excluded
-    assert "stop_worker" in excluded
 
 
 # ─── progress ────────────────────────────────────────────────────────

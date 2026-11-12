@@ -259,7 +259,6 @@ def deduplicate_tool_calls(tool_calls: list[dict]) -> list[dict]:
 _MAX_DELEGATE_CALLS: int = 5
 
 _DELEGATION_TOOL_NAMES: frozenset[str] = frozenset({
-    "spawn_worker",
     "agent",
 })
 
@@ -270,7 +269,7 @@ def cap_delegate_calls(
 ) -> list[dict]:
     """Cap the number of delegation calls in a single turn.
 
-    Limits both ``agent`` and ``spawn_worker`` calls to prevent
+    Limits ``agent`` calls to prevent
     unbounded fan-out.  Preserves all non-delegation calls.
     """
     delegates: list[dict] = []

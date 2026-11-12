@@ -93,11 +93,6 @@ _B64_SUSPICIOUS_KEYWORDS: frozenset[str] = frozenset({
 })
 
 
-def _or_list(items: list[str]) -> str:
-    """``a``, ``a or b``, ``a, b or c``."""
-    return " or ".join(filter(None, (", ".join(items[:-1]), items[-1])))
-
-
 class PromptBuilder:
     """Builds system prompts from tenant config, skills, memory, and platform settings."""
 
@@ -503,18 +498,18 @@ class PromptBuilder:
         return "\n\n".join(parts)
 
     def _available_agents_section(self) -> str:
-        """Render an "# Available Sub-Agents" block for coordinator sessions.
+        """Render an "# Available Sub-Agents" block for a session offered ``agent``.
 
         Memoized after the first call because the agent catalog is
         immutable per builder and rendering runs regex injection scans
         on every description.  Returns the empty string when the
-        session is not a coordinator or when no agents are configured.
-        A project's master has neither ``spawn_worker`` nor
-        ``delegate_task``, so it gets none.
+        session is not offered ``agent`` or when no agents are configured.
+        A project's master starts threads, not sub-agent types, so it gets
+        none.
         """
         if self._session is None:
             return ""
-        if not self._session.config.get("coordinator"):
+        if "agent" not in self._available_tools:
             return ""
         if is_project_master(self._session.config):
             return ""
@@ -542,17 +537,13 @@ class PromptBuilder:
             self._available_agents_section_cache = ""
             return ""
 
-        spawn_tools = [
-            f"``{name}``" for name in ("spawn_task", "spawn_worker", "agent")
-            if name in self._available_tools
-        ] or ["``spawn_task``", "``spawn_worker``", "``agent``"]
         rendered = (
             "# Available Sub-Agents\n"
-            f"Pass ``agent_type=<name>`` to {_or_list(spawn_tools)} to use one of "
+            "Pass ``agent_type=<name>`` to ``agent`` to use one of "
             "these pre-configured sub-agent types. "
             "Each sub-agent runs with its own system prompt, tool filter, and model. "
             "These are not skills, so ``skill_view`` does not open them. You see "
-            "what is listed here and not their instructions, so say in each goal "
+            "what is listed here and not their instructions, so say in each brief "
             "what to read and where to write.\n"
             + "\n".join(lines)
         )

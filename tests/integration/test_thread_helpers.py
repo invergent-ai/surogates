@@ -117,8 +117,15 @@ def the_helper_is_on_a_copy_of_its_own(pods, thread, helper) -> None:
 
 
 def _goal(tool: str, goal: str) -> dict:
-    """The arguments that start a helper on *goal* with *tool*."""
+    """The arguments that start a helper on *goal* with *tool* ("background agent": ``agent`` in the background)."""
+    if tool == "background agent":
+        return {"description": "Helper", "prompt": goal, "run_in_background": True}
     return {"description": "Helper", "prompt": goal} if tool == "agent" else {"goal": goal}
+
+
+def _name(tool: str) -> str:
+    """The tool a parametrized *tool* calls."""
+    return "agent" if tool == "background agent" else tool
 
 async def test_a_helper_started_by_agent_works_on_a_copy_of_its_own_and_its_work_lands_with_the_thread(api, monkeypatch, pods):
     master = await master_of(api, await create(api))
@@ -157,7 +164,7 @@ async def test_a_helper_started_by_agent_works_on_a_copy_of_its_own_and_its_work
     assert refs(pods, "handoff") == []
 
 
-@pytest.mark.parametrize("tool", ["spawn_worker", "spawn_task"])
+@pytest.mark.parametrize("tool", ["background agent", "spawn_task"])
 @pytest.mark.parametrize("ends_its_turn", ["while the thread's turn runs", "after the thread's turn"])
 async def test_a_helper_the_thread_does_not_wait_for_works_on_a_copy_of_its_own_and_its_work_lands_with_the_thread(
     api, monkeypatch, tmp_path, tool, ends_its_turn,
@@ -175,11 +182,11 @@ async def test_a_helper_the_thread_does_not_wait_for_works_on_a_copy_of_its_own_
     meanwhile = ends_its_turn == "while the thread's turn runs"
     await asyncio.wait_for(a_turn(api, monkeypatch, thread, [
         calling(("terminal", {"command": "echo outline > outline.md"})),
-        calling((tool, {"goal": "Draft the sources."})),
+        calling((_name(tool), _goal(tool, "Draft the sources."))),
         *([calling(("memory", {"action": "add", "content": "x"}))] if meanwhile else []),
         _final_response("Done."),
     ], pool=mine, during=the_helper_works), 120)
-    [started] = [json.loads(result) for result in await results_of(api, thread, tool)]
+    [started] = [json.loads(result) for result in await results_of(api, thread, _name(tool))]
     assert "error" not in started, started
     [helper] = await helpers_of(api, thread)
     assert handed_on == [["Report.docx", "notes.txt", "outline.md"]]
@@ -320,7 +327,7 @@ async def test_a_stop_while_a_helper_runs_takes_the_turns_work_back_and_the_help
 
     await asyncio.wait_for(a_turn(api, monkeypatch, thread, [
         calling(("terminal", {"command": "echo outline > outline.md"})),
-        calling(("spawn_worker", {"goal": "Draft the sources."})),
+        calling(("agent", {"description": "Helper", "prompt": "Draft the sources.", "run_in_background": True})),
         calling(("memory", {"action": "add", "content": "x"})),
         _final_response("Done."),
     ], pool=mine, during=stopped_while_the_helper_works), 120)
@@ -416,17 +423,18 @@ async def test_a_step_that_starts_another_helper_takes_the_firsts_work_up_and_sa
 
     await asyncio.wait_for(a_turn(api, monkeypatch, thread, [
         calling(("terminal", {"command": "echo outline > outline.md"})),
-        calling(("spawn_worker", {"goal": "Draft the sources."})),
+        calling(("agent", {"description": "Helper", "prompt": "Draft the sources.", "run_in_background": True})),
         calling(("terminal", {"command": "echo by the thread > notes.txt"})),
         calling(("memory", {"action": "add", "content": "x"})),
-        calling(("spawn_worker", {"goal": "Check them."})),
+        calling(("agent", {"description": "Helper", "prompt": "Check them.", "run_in_background": True})),
         _final_response("Done."),
     ], pool=mine, during=the_first_helper_ends), 120)
-    first, second = [json.loads(result) for result in await results_of(api, thread, "spawn_worker")]
+    first, second = [json.loads(result) for result in await results_of(api, thread, "agent")]
     # The second step took the first helper's work up before it handed the copy on: its sources, not its notes,
     # which the thread changed too.  The result stays the JSON its tool returns, the note a key of its own.
-    assert "note" not in first and "error" not in second
-    assert second["note"] == f"{NOT_TAKEN_UP}: notes.txt"
+    # A background agent's result carries its own note; the step's note joins it.
+    assert NOT_TAKEN_UP not in first["note"] and "error" not in second
+    assert second["note"].endswith(f"{NOT_TAKEN_UP}: notes.txt")
     assert handed_on == [["Report.docx", "notes.txt", "outline.md"], ["Report.docx", "notes.txt", "outline.md", "sources.md"]]
     assert pods.real_names() == ["Report.docx", "notes.txt", "outline.md", "sources.md"]
     assert (pods.project / "notes.txt").read_text() == "by the thread\n"
@@ -507,7 +515,7 @@ async def test_a_step_that_hands_the_copy_on_waits_out_the_fence_its_harness_run
     # for dead only after that, never after the default five minutes.
     slow = SimpleNamespace(default_step_timeout=900, default_max_retries=1, retry_delay=2)
     await asyncio.wait_for(a_turn(api, monkeypatch, thread, [
-        calling(("spawn_worker", {"goal": "Draft the sources."})), _final_response("Done."),
+        calling(("agent", {"description": "Helper", "prompt": "Draft the sources.", "run_in_background": True})), _final_response("Done."),
     ], pool=SandboxPool(pods), saga_settings=slow), 120)
     assert fences == [903.0]
 
@@ -573,7 +581,7 @@ async def a_thread_whose_helper_finished_after_its_turn(api, monkeypatch, tmp_pa
     mine = SandboxPool(pods)
     await asyncio.wait_for(a_turn(api, monkeypatch, thread, [
         calling(("terminal", {"command": "echo outline > outline.md"})),
-        calling(("spawn_worker", {"goal": "Draft the sources."})),
+        calling(("agent", {"description": "Helper", "prompt": "Draft the sources.", "run_in_background": True})),
         _final_response("Started."),
     ], pool=mine), 120)
     [first] = await helpers_of(api, thread)
@@ -594,7 +602,7 @@ async def test_a_stop_of_a_turn_that_took_a_helpers_finished_work_up_and_handed_
     # The next turn's copy takes the helper's work up, the turn starts a second helper, and is stopped.
     await asyncio.wait_for(a_turn(api, monkeypatch, thread, [
         calling(("terminal", {"command": "ls > seen.txt"})),
-        calling(("spawn_worker", {"goal": "Check the sources."})),
+        calling(("agent", {"description": "Helper", "prompt": "Check the sources.", "run_in_background": True})),
         calling(("memory", {"action": "add", "content": "x"})),
         _final_response("Done."),
     ], pool=mine, during=stop), 120)
@@ -617,7 +625,7 @@ async def test_a_thread_whose_pod_goes_after_its_turn_took_a_helpers_work_up_and
 
     await asyncio.wait_for(a_turn(api, monkeypatch, thread, [
         calling(("terminal", {"command": "ls > seen.txt"})),
-        calling(("spawn_worker", {"goal": "Check the sources."})),
+        calling(("agent", {"description": "Helper", "prompt": "Check the sources.", "run_in_background": True})),
         calling(("memory", {"action": "add", "content": "x"})),
         calling(("terminal", {"command": "ls > seen-after.txt"})),
         _final_response("Done."),
@@ -695,14 +703,14 @@ async def woken_with_nothing_started(api, monkeypatch, pool, helper) -> list[str
 
 
 @pytest.mark.parametrize("command", sorted(COMMANDS_A_THREAD_REFUSES))
-@pytest.mark.parametrize("tool", ["agent", "spawn_worker"])
+@pytest.mark.parametrize("tool", ["agent", "background agent"])
 async def test_a_threads_helper_whose_goal_is_a_command_its_thread_may_not_run_is_refused_it_too(api, monkeypatch, pods, command, tool):
     thread = await a_coordinating_thread(api)
     mine, theirs = SandboxPool(pods), SandboxPool(pods)
     # A helper that is waited for: its outcome, without its turn.  It is woken below, as a worker wakes it.
     monkeypatch.setattr(delegate_module, "_poll_child_completion", AsyncMock(return_value={"status": "failed", "reason": "not run here"}))
     await asyncio.wait_for(a_turn(api, monkeypatch, thread, [
-        calling((tool, _goal(tool, COMMANDS_A_THREAD_REFUSES[command]))), _final_response("Done."),
+        calling((_name(tool), _goal(tool, COMMANDS_A_THREAD_REFUSES[command]))), _final_response("Done."),
     ], pool=mine), 120)
     # Its goal is its first message, word for word: read as a command, it gets the answer its thread gets.
     [helper] = await helpers_of(api, thread)
@@ -735,8 +743,9 @@ NO_OTHER_WAY = "yet, and has no other way to do it: tell the user it cannot be d
 @pytest.mark.parametrize("tool, arguments, kind", [
     ("agent", {"description": "Research", "prompt": "Heat pumps in cold climates", "agent_type": "deep-research"}, "deep-research"),
     ("agent", {"description": "Write", "prompt": "Write the report.", "agent_type": "research-writer"}, "research-writer"),
-    ("spawn_worker", {"goal": "Heat pumps in cold climates", "agent_type": "deep-research"}, "deep-research"),
-], ids=["agent", "the writer alone", "spawn_worker"])
+    ("agent", {"description": "Research", "prompt": "Heat pumps in cold climates", "agent_type": "deep-research",
+               "run_in_background": True}, "deep-research"),
+], ids=["agent", "the writer alone", "background agent"])
 async def test_a_thread_and_its_helpers_start_no_research_sub_agent_by_its_type(api, monkeypatch, pods, tool, arguments, kind):
     thread = await a_coordinating_thread(api)
     # The agent has the sub-agents: nothing but the thread's rule stands between the call and them.
@@ -768,7 +777,7 @@ async def test_what_a_thread_has_no_other_way_to_do_is_refused_in_words_that_sen
         assert thread_refusal(name) == f"A thread can't start {name} yet: do this step in the thread itself."
 
 
-@pytest.mark.parametrize("tool", ["agent", "spawn_worker", "spawn_task"])
+@pytest.mark.parametrize("tool", ["agent", "background agent", "spawn_task"])
 async def test_a_step_whose_hand_off_fails_starts_no_helper_on_old_files_and_says_so(api, monkeypatch, pods, tool):
     thread = await a_coordinating_thread(api)
     monkeypatch.setattr(delegate_module, "_poll_child_completion", AsyncMock(return_value={"status": "failed", "reason": "not run here"}))
@@ -779,11 +788,11 @@ async def test_a_step_whose_hand_off_fails_starts_no_helper_on_old_files_and_say
     monkeypatch.setattr(History, "hand_off", fails)
     await asyncio.wait_for(a_turn(api, monkeypatch, thread, [
         calling(("terminal", {"command": "echo outline > outline.md"})),
-        calling((tool, _goal(tool, "Draft the sources from outline.md."))),
+        calling((_name(tool), _goal(tool, "Draft the sources from outline.md."))),
         _final_response("Done."),
     ], pool=SandboxPool(pods)), 120)
     # A helper started now would work without this turn's outline, and nobody would know: none is started.
-    [result] = await results_of(api, thread, tool)
+    [result] = await results_of(api, thread, _name(tool))
     assert "error" in json.loads(result) and "could not be handed to a helper, so none was started" in result, result
     assert await helpers_of(api, thread) == []
     async with api.app.state.session_factory() as db:
@@ -830,7 +839,7 @@ async def a_thread_whose_worker_outlives_its_turn(api, monkeypatch, tmp_path):
 
     await asyncio.wait_for(a_turn(api, monkeypatch, thread, [
         calling(("terminal", {"command": "echo outline > outline.md"})),
-        calling(("spawn_worker", {"goal": "Draft the sources."})),
+        calling(("agent", {"description": "Helper", "prompt": "Draft the sources.", "run_in_background": True})),
         calling(("memory", {"action": "add", "content": "x"})),
         _final_response("Started."),
     ], pool=mine, during=the_worker_starts_work), 120)
@@ -850,7 +859,7 @@ async def test_a_stop_of_a_turn_during_which_an_earlier_turns_worker_handed_back
     with caplog.at_level(logging.WARNING):
         await asyncio.wait_for(a_turn(api, monkeypatch, thread, [
             calling(("terminal", {"command": "echo the stopped turn > stopped.md"})),
-            calling(("spawn_worker", {"goal": "Check something."})),
+            calling(("agent", {"description": "Helper", "prompt": "Check something.", "run_in_background": True})),
             calling(("memory", {"action": "add", "content": "x"})),
             _final_response("Done."),
         ], pool=mine, during=the_worker_ends_then_the_turn_is_stopped), 180)
@@ -925,11 +934,11 @@ async def a_stop_that_falls_short(api, monkeypatch, tmp_path, caplog, way: str):
     with caplog.at_level(logging.WARNING):
         await asyncio.wait_for(a_turn(api, monkeypatch, thread, [
             calling(("terminal", {"command": "echo the stopped turn > stopped.md"})),
-            calling(("spawn_worker", {"goal": "Check the sources."})),
+            calling(("agent", {"description": "Helper", "prompt": "Check the sources.", "run_in_background": True})),
             calling(("memory", {"action": "add", "content": "x"})),
             *([
                 # In the pod made again, whose copy took up what the turn had handed on, its draft with it.
-                calling(("spawn_worker", {"goal": "Check them again."})),
+                calling(("agent", {"description": "Helper", "prompt": "Check them again.", "run_in_background": True})),
                 calling(("memory", {"action": "add", "content": "x"})),
             ] if again else []),
             _final_response("Done."),
@@ -984,7 +993,7 @@ async def test_a_thread_whose_copy_was_made_again_after_it_handed_on_is_told_wha
 
     await asyncio.wait_for(a_turn(api, monkeypatch, thread, [
         calling(("terminal", {"command": "echo draft > draft.md"})),
-        calling(("spawn_worker", {"goal": "Check the draft."})),
+        calling(("agent", {"description": "Helper", "prompt": "Check the draft.", "run_in_background": True})),
         calling(("memory", {"action": "add", "content": "x"})),
         calling(("terminal", {"command": "ls"})),
         _final_response("Done."),
@@ -1098,7 +1107,7 @@ async def a_worker_gone_under_a_turn_that_handed_on(api, monkeypatch, tmp_path, 
     with pytest.raises(BaseException):
         await asyncio.wait_for(a_turn(api, monkeypatch, thread, [
             calling(("terminal", {"command": "echo the stopped turn > stopped.md"})),
-            calling(("spawn_worker", {"goal": "Check the sources."})),
+            calling(("agent", {"description": "Helper", "prompt": "Check the sources.", "run_in_background": True})),
             calling(("memory", {"action": "add", "content": "x"})),
             _final_response("Done."),
         ], pool=mine, during=the_worker_dies), 120)
@@ -1191,7 +1200,7 @@ async def test_a_stop_this_worker_could_not_write_down_is_written_before_the_thr
     with caplog.at_level(logging.WARNING):
         await asyncio.wait_for(a_turn(api, monkeypatch, thread, [
             calling(("terminal", {"command": "echo the stopped turn > stopped.md"})),
-            calling(("spawn_worker", {"goal": "Check the sources."})),
+            calling(("agent", {"description": "Helper", "prompt": "Check the sources.", "run_in_background": True})),
             calling(("memory", {"action": "add", "content": "x"})),
             _final_response("Done."),
         ], pool=mine, during=stopped_by_no_route), 120)
@@ -1223,7 +1232,7 @@ async def test_a_stop_its_worker_could_not_write_down_is_written_before_the_thre
 
     await asyncio.wait_for(a_turn(api, monkeypatch, thread, [
         calling(("terminal", {"command": "echo the stopped turn > stopped.md"})),
-        calling(("spawn_worker", {"goal": "Check the sources."})),
+        calling(("agent", {"description": "Helper", "prompt": "Check the sources.", "run_in_background": True})),
         calling(("memory", {"action": "add", "content": "x"})),
         _final_response("Done."),
     ], pool=mine, during=stopped_by_no_route), 120)
