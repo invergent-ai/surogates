@@ -1335,7 +1335,15 @@ async def _handle_document(
                 markdown = await _parse_document_to_text(local)
         elif wio.identity is None:
             async with wio.local_file(key) as local:
-                markdown = await default_cache().get_or_parse(local, _parse_document_to_text)
+                # The key it always had (path, mtime, size, suffix), taken from
+                # the resolved key and the file the walk opened, never from a
+                # path read back from the parser's link: a folder swapped
+                # meanwhile could name another session's file.
+                opened = local.stat()
+                markdown = await default_cache().get_or_load(
+                    f"{key}|{opened.st_mtime_ns}|{opened.st_size}|{Path(key).suffix.lower()}",
+                    lambda: _parse_document_to_text(local),
+                )
         else:
             async def download_and_parse() -> str:
                 async with wio.local_file(key) as local:
