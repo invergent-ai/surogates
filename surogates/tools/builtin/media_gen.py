@@ -20,10 +20,9 @@ import asyncio
 import json
 import logging
 import math
-import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 from typing import Any
 from uuid import uuid4
 
@@ -38,6 +37,7 @@ from surogates.tools.builtin.vision import _image_ref_to_data_url
 from surogates.tools.registry import ToolRegistry, ToolSchema
 from surogates.tools.utils.tool_result_storage import HARNESS_FOLDER_REFUSAL, in_harness_folder
 from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError, validate_path
+from surogates.tools.workspace_io.local import write_in_workspace
 
 logger = logging.getLogger(__name__)
 
@@ -870,11 +870,9 @@ async def _save_media_bytes(
     saved = False
     if workspace_path:
         try:
-            target = Path(validate_path(workspace_path, relative_path))
-            target.parent.mkdir(parents=True, exist_ok=True)
-            tmp_path = Path(f"{target}.tmp")
-            tmp_path.write_bytes(data)
-            os.replace(tmp_path, target)
+            # Never by path: a link planted at the file or at its .tmp, or a
+            # folder swapped for one, would carry the bytes outside (#651).
+            write_in_workspace(workspace_path, validate_path(workspace_path, relative_path), data)
             saved = True
         except (OSError, WorkspaceSandboxError) as exc:
             logger.warning(

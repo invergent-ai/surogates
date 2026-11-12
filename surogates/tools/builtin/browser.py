@@ -1252,16 +1252,17 @@ def _save_screenshot_to_workspace(
     if not workspace_path:
         return None
 
-    workspace = Path(workspace_path).resolve()
-    target = workspace / relative_path
-    target_dir = target.parent
+    from surogates.tools.utils.workspace_sandbox import validate_path
+    from surogates.tools.workspace_io.local import write_in_workspace
+
     try:
-        target_dir.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(png_bytes)
-    except OSError as exc:
+        # Never by path: a link planted at the screenshot's name, or a folder
+        # swapped for one, would carry the page's pixels outside (#651).
+        write_in_workspace(workspace_path, validate_path(workspace_path, relative_path), png_bytes)
+    except (OSError, WorkspaceSandboxError) as exc:
         logger.warning(
             "Could not save browser screenshot to workspace path %s: %s",
-            target,
+            relative_path,
             exc,
         )
         return None
