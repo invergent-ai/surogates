@@ -23,7 +23,6 @@
     "test:browser-pane": "node --test ../scripts/web-browser-pane.test.mjs",
     "test:oauth-consent": "node --experimental-strip-types --test ../scripts/oauth-consent.test.mjs",
     "test:projects": "node --experimental-strip-types --test ../scripts/web-projects.test.mjs",
-    "test:local-thread": "node --experimental-strip-types --test ../scripts/web-local-thread.test.mjs",
     "test:push-offer": "node --experimental-strip-types --test ../scripts/web-push-offer.test.mjs",
     "test:copy": "node --test ../scripts/no-em-dash.test.mjs",
     "test:usage-units": "node --experimental-strip-types --test ../scripts/web-usage-units.test.mjs",
