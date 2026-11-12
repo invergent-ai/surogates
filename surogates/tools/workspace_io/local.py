@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import codecs
 import contextlib
+import errno
 import io
 import json
 import logging
@@ -582,6 +583,109 @@ def _page(fh: BinaryIO, encoding: str, offset: int, limit: int, max_bytes: int) 
     return LinePage(fh.read(fits[shown - 1] - begin if shown else max_bytes), total)
 
 
+_O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+# O_PATH where there is one: a folder on the way needs no read permission
+# (as with a path), only search.  A link opened so is ENOTDIR with O_DIRECTORY.
+_FOLDER_FLAGS = getattr(os, "O_PATH", os.O_RDONLY) | getattr(os, "O_DIRECTORY", 0) | _O_NOFOLLOW | _O_CLOEXEC
+#: Whether this system opens, makes, removes, renames and stats by folder
+#: descriptor (POSIX does; os.replace shares os.rename's).  Without it a
+#: write goes by path, as before.
+_BY_FOLDER = (
+    bool(_O_NOFOLLOW)
+    and {os.open, os.mkdir, os.unlink, os.rename, os.stat} <= os.supports_dir_fd
+    and os.stat in os.supports_follow_symlinks
+)
+_SWAPPED = "a folder on the file's path was replaced after the path was checked; nothing outside the workspace was touched"
+
+
+def _contained_parts(real_root: str, key: str) -> tuple[list[str], str]:
+    """*key*'s folders below *real_root* (a resolved path) and its own name.
+    Raises PermissionError for a key that is not inside it (resolve() gives
+    none)."""
+    rel = os.path.relpath(os.path.abspath(key), real_root)
+    parts = rel.split(os.sep)
+    if rel in (".", "") or os.path.isabs(rel) or any(p in ("", ".", "..") for p in parts):
+        raise PermissionError(errno.EACCES, "Refused: the file is not inside the workspace.")
+    return parts[:-1], parts[-1]
+
+
+def _open_folder(real_root: str, folders: list[str], *, create: bool) -> int:
+    """A descriptor of the folder *folders* under *real_root*, opened one
+    folder at a time from the workspace's own, with no link followed; with
+    *create*, a missing folder is made.  A folder on the way that is a link
+    (swapped in after resolve() checked the path) raises PermissionError; one
+    that is a file raises FileExistsError with *create* (as making the folder
+    by path did) and NotADirectoryError without, naming only that folder.
+    All are OSErrors with their errno, as the file tools and a computer's
+    folder (``devices.workspace``) expect."""
+    fd = os.open(real_root, _FOLDER_FLAGS & ~_O_NOFOLLOW)
+    try:
+        for part in folders:
+            try:
+                try:
+                    child = os.open(part, _FOLDER_FLAGS, dir_fd=fd)
+                except FileNotFoundError:
+                    if not create:
+                        raise
+                    with contextlib.suppress(FileExistsError):
+                        os.mkdir(part, 0o777, dir_fd=fd)
+                    child = os.open(part, _FOLDER_FLAGS, dir_fd=fd)
+            except OSError as exc:
+                if exc.errno not in (errno.ELOOP, errno.ENOTDIR):
+                    raise
+                try:
+                    is_link = stat_module.S_ISLNK(os.stat(part, dir_fd=fd, follow_symlinks=False).st_mode)
+                except OSError:
+                    is_link = True  # gone again: it was being swapped
+                if is_link:
+                    raise PermissionError(errno.EACCES, f"Refused: {_SWAPPED}.") from None
+                # As a path gave it: a write that would make the folder finds a
+                # file there (EEXIST), any other call a path through a file.
+                said = f"'{part}' on the file's path is not a folder."
+                if create:
+                    raise FileExistsError(errno.EEXIST, said) from None
+                raise NotADirectoryError(errno.ENOTDIR, said) from None
+            fd, parent = child, fd
+            os.close(parent)
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _replace_file(dir_fd: int | None, name: str, data: bytes) -> None:
+    """Replace the file *name* (in the folder *dir_fd*, or a path when None)
+    with *data*: written to a new temporary file beside it, then renamed over
+    it.  An existing file keeps its permission bits."""
+    tmp = name + ".tmp"
+    # The temporary file is made new, never opened through what is
+    # already at its name: a symlink planted there (by a command, a
+    # cloned repository, an archive) would carry the write outside the
+    # workspace.  A leftover or a planted link is removed, not followed.
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW | _O_CLOEXEC
+    try:
+        try:
+            fd = os.open(tmp, flags, 0o666, dir_fd=dir_fd)
+        except FileExistsError:
+            os.unlink(tmp, dir_fd=dir_fd)
+            fd = os.open(tmp, flags, 0o666, dir_fd=dir_fd)
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+            # Through the open file, not its name: the name could be
+            # swapped for a link before a chmod by name reached it.  Only a
+            # file's own mode is kept: a link at the name is not followed.
+            with contextlib.suppress(OSError):
+                st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+                if stat_module.S_ISREG(st.st_mode):
+                    os.fchmod(fh.fileno(), stat_module.S_IMODE(st.st_mode))
+        os.replace(tmp, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+    except Exception:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp, dir_fd=dir_fd)
+        raise
+
+
 class LocalWorkspaceIO:
     """WorkspaceIO over this host, contained to *workspace_path* when one is set."""
 
@@ -644,34 +748,36 @@ class LocalWorkspaceIO:
     async def write(self, key: str, data: bytes, *, expected_revision: str | None = None) -> None:
         refuse_nul(key)
         # expected_revision is not checked: cloud behaviour does not change.
-        os.makedirs(os.path.dirname(key) or ".", exist_ok=True)
-        tmp = key + ".tmp"
-        # The temporary file is made new, never opened through what is
-        # already at its name: a symlink planted there (by a command, a
-        # cloned repository, an archive) would carry the write outside the
-        # workspace.  A leftover or a planted link is removed, not followed.
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        if not (self.root and _BY_FOLDER):
+            os.makedirs(os.path.dirname(key) or ".", exist_ok=True)
+            _replace_file(None, key, data)
+            return
+        # Contained: the file's folder is reached from the workspace one
+        # folder at a time, following no link, and the file is written and
+        # renamed in that folder.  resolve() checked the path, but a folder
+        # on it swapped for a link meanwhile (by a command still running in
+        # the workspace) would otherwise carry the write outside it.
+        real_root = os.path.realpath(self.root)
+        folder, name = _contained_parts(real_root, key)
+        dir_fd = _open_folder(real_root, folder, create=True)
         try:
-            try:
-                fd = os.open(tmp, flags, 0o666)
-            except FileExistsError:
-                os.unlink(tmp)
-                fd = os.open(tmp, flags, 0o666)
-            with os.fdopen(fd, "wb") as fh:
-                fh.write(data)
-                # Through the open file, not its name: the name could be
-                # swapped for a link before a chmod by name reached it.
-                with contextlib.suppress(OSError):
-                    os.fchmod(fh.fileno(), stat_module.S_IMODE(os.stat(key).st_mode))
-            os.replace(tmp, key)
-        except Exception:
-            with contextlib.suppress(OSError):
-                os.unlink(tmp)
-            raise
+            _replace_file(dir_fd, name, data)
+        finally:
+            os.close(dir_fd)
 
     async def delete(self, key: str) -> None:
         refuse_nul(key)
-        os.unlink(key)
+        if not (self.root and _BY_FOLDER):
+            os.unlink(key)
+            return
+        # As write(): only a file in the workspace's own folder is removed.
+        real_root = os.path.realpath(self.root)
+        folder, name = _contained_parts(real_root, key)
+        dir_fd = _open_folder(real_root, folder, create=False)
+        try:
+            os.unlink(name, dir_fd=dir_fd)
+        finally:
+            os.close(dir_fd)
 
     async def list_dir(self, key: str) -> list[str]:
         refuse_nul(key)
