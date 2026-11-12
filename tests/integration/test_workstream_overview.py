@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 import surogates.api.routes.workstreams as workstreams_routes
 from surogates.config import DatabaseSettings
 from surogates.db.models import InboxItem
+from surogates.harness.agent_news import NEW_FORMAT
 from surogates.jobs.inbox_expire import expire_inbox_items
 from surogates.session.events import EventType
 from surogates.session.interactive_input import expire_input_request
@@ -33,6 +34,7 @@ from . import test_workstream_threads as threads_tests
 from .conftest import issue_service_account_token, leave_mid_stream
 from .test_devices import add_user, api, next_control  # noqa: F401  (api is a fixture)
 from .test_workstream_threads import (
+    blocks,
     PROPOSED,
     proposing,
     TODO_CALL,
@@ -799,7 +801,7 @@ async def test_the_user_starts_a_proposed_thread_from_its_card(api):
     [spawned] = await events_of(api, master.id, EventType.WORKER_SPAWNED)
     assert spawned.data == {
         "worker_id": row["id"], "title": "Draft A", "goal": "Draft the A memo as A.docx.",
-        "started_by": "user", "proposal_id": proposal_id, "key": "1",
+        "started_by": "user", "proposal_id": proposal_id, "key": "1", "format": NEW_FORMAT,
     }
     assert await queued(api, thread)
 
@@ -958,7 +960,10 @@ async def test_a_turns_summary_takes_the_users_request_not_a_report(api, monkeyp
     parent, worker = await coordinator_with_a_report(api)
     made = harnesses(monkeypatch)
     [request] = await live_turn(api, monkeypatch, parent, [_final_response("The figures add up.")])
-    assert request[-1]["content"] == f"[Worker {worker.id} completed]\nChecked the figures."
+    assert blocks(request[-1]["content"]) == {
+        "task-id": str(worker.id), "status": "completed", "summary": f"Agent {worker.id} finished",
+        "result": "Checked the figures.",
+    }
     assert made[0]._complete_session.await_args.kwargs["user_message"] == "Check the Q3 figures."
 
 

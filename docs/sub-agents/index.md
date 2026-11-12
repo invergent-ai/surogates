@@ -600,6 +600,21 @@ Background work you started has ended or reported. This is not a message from th
 
 A notification without the mark (every one written before the family's format existed) reads as it always has: a bracketed first line, then the report, or the command's output in a code fence. The format is chosen when a notification is written, never when it is read, so nothing in a log ever reads differently.
 
+#### A project's thread reports
+
+A project master hears of its threads by `worker.spawned`, `worker.complete` and `worker.failed` events on its own session (the project's board and the thread cards read the same events). Every one written now carries the same `format` mark, and a thread's turn report and failure carry `usage`. The master reads a marked one in the frame above, with one more block, `<files>`: the files of the turn, then what its landing left out, set aside or could not finish, in the lines the unmarked report appends after the thread's words.
+
+| Event | `<status>` | `<summary>` | `<result>` | `<files>` |
+|---|---|---|---|---|
+| `worker.complete`, a thread's turn | `completed` | `Thread "{title}" reported` | the thread's words | `Files: …`, then the landing, left-out and set-aside lines |
+| `worker.complete` with `stopped` | `killed` | `Thread "{title}" was stopped` | what the stop did not take back, if anything | none |
+| `worker.complete` with `recovered` | `completed` | `Thread "{title}": a landing its worker left unfinished was settled` | none | the landing lines, and that nothing could be put back when the history is gone |
+| `worker.failed`, a thread | `failed` | `Thread "{title}" failed: {error}` | none | the not-taken-up and set-aside lines |
+| `worker.spawned` with `started_by: "user"` | `started` | `Thread "{title}" was started by the user from its card` | none | none |
+| `worker.complete` / `worker.failed` of a helper (no title) | `completed` / `failed` | `Agent {id} finished` / `Agent {id} failed: {error}` | its words | that its work could not be handed back, when so |
+
+`<task-id>` is the thread's id. `<result>` and `<files>` are neutralised as a notification's result is (a file's name is the user's or the thread's text), and so is the title in `<summary>`. `list_agents` with a thread's `agent_id` gives the master its last report as it read it. An unmarked `worker.*` event, written before the mark, reads as it always has: `[Thread "{title}" ({id}) reported]`, then the thread's words between `<<thread report>>` and `<<end of thread report>>`, then `Files: …`.
+
 ### Budget
 
 `agents.agent_token_budget` (env `SUROGATES_AGENTS_AGENT_TOKEN_BUDGET`) gives each agent the `agent` tool starts a budget of input and output tokens, its own sub-agents' included; 0, the default, sets none. A sub-agent with a budget hands each agent it starts at most half of what it has left, less what its agents still running were handed, so parallel calls never share more than it has. Past its budget, the agent makes one last call with no tools, asked for its report, and its turn ends (`session.complete` with reason `token_budget_exhausted`): that call is over the budget by its own size. Its parent is told, with that report as the result (or none, if the call failed; never a line from the middle of a step): `status: budget` for a background agent, the report and a note in the call's result for a foreground one. An agent that used its budget is not resumed by a message; news of its own (a background command's end) can still wake it, and each such wake costs that one last call again.

@@ -13,7 +13,8 @@ replay must produce the same bytes.
 
 Every notification written now carries a mark (``format``: ``NEW_FORMAT``)
 and reads as a tagged system notification, in the shape Claude Code's
-sub-agents use.  One written before the mark existed reads as it always has,
+sub-agents use (``frame``).  A project's thread reports to its master in the
+same frame (``loop_context_replay.worker_note``).  One written before the mark existed reads as it always has,
 so a notification never reads differently from how it was first read.
 """
 
@@ -49,7 +50,7 @@ _GAP = r"[\s\u200b\u200c\u200d\u2060\ufeff]*"
 #: What printed text could close or open the block's tags with, spaced or not, in any case; never a longer
 #: name such as ``<results>``.
 _FRAME_TAG = re.compile(
-    rf"<({_GAP}/?{_GAP}(?:task-notification|task-id|status|summary|result|usage))(?![\w-])", re.IGNORECASE,
+    rf"<({_GAP}/?{_GAP}(?:task-notification|task-id|status|summary|result|files|usage))(?![\w-])", re.IGNORECASE,
 )
 #: What printed text could pass for the first line with, however it is spaced or joined, in any case.
 _FRAME_HEADER = re.compile(rf"\[({_GAP}system[\s_\-\u200b\u200c\u200d\u2060\ufeff]*notification)", re.IGNORECASE)
@@ -136,8 +137,38 @@ def _neutral(text: str) -> str:
     return _FRAME_HEADER.sub(r"(\1", _FRAME_TAG.sub(r"&lt;\1", text))
 
 
+def frame(
+    *, task_id: str, status: str, summary: str, result: str = "", usage: dict | None = None, files: str = "",
+) -> dict:
+    """The user-role message a marked notification reads as: the marker line, what the block is, then the tagged
+    block, each of ``<result>`` and ``<files>`` left out when empty.
+
+    Every block's text is neutralised (``_neutral``): an agent's description,
+    a thread's title, a file's name and a report are all text the harness did
+    not write.
+    """
+    parts = [
+        NOTIFICATION_HEADER, NOTIFICATION_NOTE, "<task-notification>",
+        f"<task-id>{_neutral(task_id)}</task-id>",
+        f"<status>{_neutral(status)}</status>",
+        f"<summary>{_neutral(summary)}</summary>",
+    ]
+    if result:
+        parts.append(f"<result>\n{_neutral(result)}\n</result>")
+    if files:
+        parts.append(f"<files>\n{_neutral(files)}\n</files>")
+    if isinstance(usage, dict):
+        parts.append(
+            f"<usage><subagent_tokens>{int(usage.get('subagent_tokens') or 0)}</subagent_tokens>"
+            f"<tool_uses>{int(usage.get('tool_uses') or 0)}</tool_uses>"
+            f"<duration_ms>{int(usage.get('duration_ms') or 0)}</duration_ms></usage>"
+        )
+    parts.append("</task-notification>")
+    return {"role": "user", "content": "\n".join(parts)}
+
+
 def _tagged_note(data: dict) -> dict:
-    """The family's format: a marker line, what the block is, then the tagged block."""
+    """The family's format for background work's end: how it ended, in the frame."""
     kind = data.get("kind")
     if kind == "process":
         summary = _process_head(data)
@@ -148,24 +179,10 @@ def _tagged_note(data: dict) -> dict:
     else:
         named = f"{data.get('agent_id') or '?'} ({data.get('summary')})" if data.get("summary") else str(data.get("agent_id") or "?")
         summary = f"{named} {data.get('status') or 'ended'}"
-    parts = [
-        NOTIFICATION_HEADER, NOTIFICATION_NOTE, "<task-notification>",
-        f"<task-id>{_neutral(str(data.get('agent_id') or '?'))}</task-id>",
-        f"<status>{_neutral(str(data.get('status') or ''))}</status>",
-        f"<summary>{_neutral(summary)}</summary>",
-    ]
-    result = str(data.get("result") or "")
-    if result:
-        parts.append(f"<result>\n{_neutral(result)}\n</result>")
-    usage = data.get("usage")
-    if isinstance(usage, dict):
-        parts.append(
-            f"<usage><subagent_tokens>{int(usage.get('subagent_tokens') or 0)}</subagent_tokens>"
-            f"<tool_uses>{int(usage.get('tool_uses') or 0)}</tool_uses>"
-            f"<duration_ms>{int(usage.get('duration_ms') or 0)}</duration_ms></usage>"
-        )
-    parts.append("</task-notification>")
-    return {"role": "user", "content": "\n".join(parts)}
+    return frame(
+        task_id=str(data.get("agent_id") or "?"), status=str(data.get("status") or ""), summary=summary,
+        result=str(data.get("result") or ""), usage=data.get("usage"),
+    )
 
 
 def _todays_note(data: dict) -> dict:

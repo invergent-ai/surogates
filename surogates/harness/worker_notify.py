@@ -12,11 +12,13 @@ from __future__ import annotations
 
 import json
 import logging
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from surogates.channels.constants import session_queue_priority
 from surogates.config import enqueue_session
+from surogates.harness.agent_news import NEW_FORMAT
 from surogates.session.events import EventType
 
 if TYPE_CHECKING:
@@ -123,6 +125,18 @@ async def emit_and_wake(
         )
 
 
+async def _usage_of(session_store: SessionStore, worker_session_id: UUID, status: str) -> dict[str, Any]:
+    """``{"usage": …}`` for the worker's report, as an agent's notification carries it; empty when it cannot be
+    read: the report goes without it."""
+    from surogates.harness.subagents import _usage
+
+    try:
+        return {"usage": await _usage(session_store, SimpleNamespace(id=worker_session_id), status)}
+    except Exception:
+        logger.debug("No usage for worker %s's report", worker_session_id, exc_info=True)
+        return {}
+
+
 async def notify_parent_on_completion(
     *,
     session_store: SessionStore,
@@ -164,6 +178,10 @@ async def notify_parent_on_completion(
     false, and ``left``, the files kept apart, which its thread's copy lacks.
 
     A helper's report is marked *delegated* (``is_delegated``).
+
+    Every report carries the family's mark (``format``) and, when it can be
+    read, the worker's ``usage``: its parent reads it in the notification
+    frame (``loop_context_replay.worker_note``).
     """
     try:
         from surogates.harness.message_utils import extract_final_response
@@ -175,6 +193,8 @@ async def notify_parent_on_completion(
             "worker_id": str(worker_session_id),
             "result": final_response[:_MAX_RESULT_CHARS],
             **(unkept or {}),
+            "format": NEW_FORMAT,
+            **await _usage_of(session_store, worker_session_id, "completed"),
         }
         if delegated:
             payload["delegated"] = True
@@ -260,6 +280,8 @@ async def notify_parent_on_failure(
         payload: dict[str, Any] = {
             "worker_id": str(worker_session_id),
             "error": error[:2000],
+            "format": NEW_FORMAT,
+            **await _usage_of(session_store, worker_session_id, "failed"),
         }
         if delegated:
             payload["delegated"] = True

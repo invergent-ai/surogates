@@ -20,6 +20,7 @@ from surogates.devices.binding import Binding, copy_of
 from surogates.devices.operations import DeviceOperations
 from surogates.devices.store import DeviceStore
 from surogates.harness import landing as landing_module
+from surogates.harness.agent_news import NEW_FORMAT
 from surogates.harness.tool_exec import execute_single_tool
 from surogates.sandbox.copy_files import writes_to_copy
 from surogates.sandbox.pool import SandboxPool, sandbox_session_key
@@ -302,7 +303,7 @@ async def test_a_thread_on_the_users_computer_begins_once_its_computer_has_bound
     [spawned] = await events_of(api, master.id, EventType.WORKER_SPAWNED)
     assert spawned.data == {
         "worker_id": thread_id, "title": "Check the totals", "goal": "Check the totals in Budget.xlsx.",
-        "started_by": "user", "proposal_id": proposal_id, "key": "1",
+        "started_by": "user", "proposal_id": proposal_id, "key": "1", "format": NEW_FORMAT,
     }
     assert await queued(api, thread)
 

@@ -20,7 +20,7 @@ from surogates.config import SHARED_WORK_QUEUE_KEY
 from surogates.db.models import InboxItem, WorkstreamHistory
 from surogates.harness import landing as landing_module
 from surogates.harness import loop_artifact_completion
-from surogates.harness.loop_context_replay import news, unread_reports, worker_note
+from surogates.harness.loop_context_replay import news, unread_reports
 from surogates.harness.loop import AgentHarness
 from surogates.harness.loop_pending import NAMES_ANSWERS
 from surogates.jobs.inbox_expire import expire_inbox_items
@@ -37,7 +37,7 @@ from surogates.workstreams.stream import STREAM_TYPES, project_of
 from tests.test_steer_loop import _final_response, _make_loop_harness
 
 from .test_command_placements import Model, calls
-from .test_command_wake_once import DiesWriting, workers  # noqa: F401  (workers is a fixture)
+from .test_command_wake_once import DiesWriting, ReportOf, workers  # noqa: F401  (workers is a fixture)
 from .test_devices import api  # noqa: F401  (api is a fixture)
 from .test_durable_landings import (  # noqa: F401  (a_short_fence is a fixture)
     FENCED,
@@ -64,7 +64,7 @@ from .test_thread_copies import (  # noqa: F401  (pods is a fixture)
 from .test_turn_sagas import a_turn, calling, stop
 from .test_workstream_overview import act_on
 from .test_workstream_overview import rows as thread_rows
-from .test_workstream_threads import call_tool, harness_of, queued
+from .test_workstream_threads import call_tool, harness_of, heard_as, queued
 from .test_workstream_threads import turn_ends as a_turn_ends
 from .test_workstreams import create, master_of
 
@@ -230,7 +230,7 @@ async def test_your_edit_then_a_landing_tells_the_thread_to_redo_and_the_redo_la
     # The master hears the file is being redone: not finished.
     [report] = await reports(api, master)
     assert {f["ref"]: f["landing"] for f in report["files"]} == {"Report.docx": "redoing", "a.md": "landed"}
-    assert worker_note(EventType.WORKER_COMPLETE.value, report)["content"].endswith(
+    assert heard_as(EventType.WORKER_COMPLETE.value, report)["files"].endswith(
         "Files: a.md\nBeing redone: Report.docx"
     )
     # The redo turn starts on the landing, with your version, and lands its edit on it.
@@ -644,7 +644,7 @@ async def test_a_thread_whose_mission_is_in_flight_asks_the_model_once_for_its_n
         })
     for _ in range(3):
         await workers.wake(thread.id, SlashCommandConfig())
-    told = [{"role": "user", "content": f"[Worker {helper} completed]\nChecked the figures."} for helper in helpers]
+    told = [ReportOf(helper) for helper in helpers]
     if news == "a redo":
         told = [{"role": "user", "content": REDO_OF_THE_REPORT}]
     elif news == "a message typed as the turn's request is made ready":
@@ -1122,7 +1122,7 @@ async def test_a_redo_turn_that_calls_no_tool_marks_the_file_not_merged_and_noth
     # It never used its pod, so it lands nothing; the master hears the file was left as it is.
     _, second = await reports(api, master)
     assert [(f["ref"], f["landing"], f.get("reason")) for f in second["files"]] == [("Report.docx", "not_merged", "left")]
-    assert worker_note(EventType.WORKER_COMPLETE.value, second)["content"].endswith(
+    assert heard_as(EventType.WORKER_COMPLETE.value, second)["files"].endswith(
         "Not merged, because the thread left the newer file as it is: Report.docx"
     )
     assert await waits_of(api, thread) == []

@@ -38,7 +38,7 @@ from tests.thread_pods import ThreadPods
 from .test_devices import api  # noqa: F401  (api is a fixture)
 from .test_thread_copies import a_step_ran, a_thread, git, last_writes, open_pod, pods, reports  # noqa: F401  (pods is a fixture)
 from .test_turn_sagas import a_turn, calling
-from .test_workstream_threads import harness_of
+from .test_workstream_threads import harness_of, heard_as
 from .test_workstreams import create, master_of
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -482,10 +482,11 @@ async def test_a_recovery_from_a_row_behind_its_landing_puts_back_what_it_knows_
         [report] = told
         assert (report["worker_id"], report["recovered"], "gone" in report) == (str(first.id), True, False)
         assert [f["ref"] for f in report["files"]] == ["a.md"] and report["saga"] == row.saga_id
-        assert worker_note(EventType.WORKER_COMPLETE.value, report)["content"] == (
-            f'[Thread "Draft A" ({first.id}): a landing its worker left unfinished was settled]\n'
-            "Could not finish landing these; check them: a.md"
-        )
+        assert heard_as(EventType.WORKER_COMPLETE.value, report) == {
+            "task-id": str(first.id), "status": "completed",
+            "summary": 'Thread "Draft A": a landing its worker left unfinished was settled',
+            "files": "Could not finish landing these; check them: a.md",
+        }
         # A landing left escalated is no landing running: the day's pruning ran after B's.
         assert (pods.project / "_history" / "pruned").exists()
     else:
@@ -900,8 +901,8 @@ async def test_a_failed_turns_work_is_on_its_branch_at_the_next_turn_and_lands_t
     await ends(api, pool, thread, failed=True)
     # The master hears that it failed, and that its work is not lost.
     [failed] = [e.data for e in await api.app.state.session_store.get_events(master.id, types=[EventType.WORKER_FAILED])]
-    assert worker_note(EventType.WORKER_FAILED.value, failed)["content"].endswith(
-        "failed: provider_error. Its work is kept, and lands with the thread's next turn]"
+    assert heard_as(EventType.WORKER_FAILED.value, failed)["summary"].endswith(
+        "failed: provider_error. Its work is kept, and lands with the thread's next turn"
     )
     # Not landed, kept on its branch; and its pod is gone.
     assert (pods.project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1"
@@ -1312,7 +1313,7 @@ async def test_a_landing_that_could_not_settle_another_threads_is_kept_and_lands
     [report] = await reports(api, master)
     # The master reads that it did not land, that the project's files are as they were, and that the work is kept.
     assert (report["landing"], report["saved"]) == ("compensated", True)
-    said = worker_note(EventType.WORKER_COMPLETE.value, report)["content"]
+    said = heard_as(EventType.WORKER_COMPLETE.value, report)["files"]
     assert "\nNot landed, and the project's files are as they were: " in said
     assert said.endswith("\nThe thread's work is kept, and lands with its next turn")
     assert await rows(api, second) == [] and [r.saga_state for r in await rows(api, first)] == ["running"]
@@ -1459,11 +1460,14 @@ async def test_a_landing_left_running_whose_commits_the_history_lost_is_given_up
     assert told[0]["files"] == [
         {"kind": "file", "label": name, "ref": name, "landing": "not_merged"} for name in ("a.md", "b.md")
     ]
-    assert worker_note(EventType.WORKER_COMPLETE.value, told[0])["content"] == (
-        f'[Thread "Draft A" ({first.id}): a landing its worker left unfinished was settled]\n'
-        "Could not finish landing these; check them: a.md, b.md\n"
-        "The project's history no longer has their versions from before the landing, so none could be put back"
-    )
+    assert heard_as(EventType.WORKER_COMPLETE.value, told[0]) == {
+        "task-id": str(first.id), "status": "completed",
+        "summary": 'Thread "Draft A": a landing its worker left unfinished was settled',
+        "files": (
+            "Could not finish landing these; check them: a.md, b.md\n"
+            "The project's history no longer has their versions from before the landing, so none could be put back"
+        ),
+    }
     # What it half landed stays, for a person to check; nothing is written over.
     assert pods.real_names() == ["B.md", "C.md", "Report.docx", "a.md", "notes.txt"]
 
@@ -1580,7 +1584,7 @@ async def test_a_landing_whose_commit_step_failed_and_whose_lock_is_lost_keeps_i
     # Not under the lock that was lost: once, under the lock taken afresh.
     assert keeps == [True]
     [report] = await reports(api, master)
-    said = worker_note(EventType.WORKER_COMPLETE.value, report)["content"]
+    said = heard_as(EventType.WORKER_COMPLETE.value, report)["files"]
     assert "\nNot landed, and the project's files are as they were: " in said and pods.real_names() == ["Report.docx", "notes.txt"]
     if keep == "is made":
         # The turn is on its branch, its end and its report say so, and the thread's next turn lands it.
@@ -2073,7 +2077,7 @@ async def test_a_landings_report_names_a_helpers_files_the_threads_copy_did_not_
     [report] = await reports(api, master)
     assert [(f["ref"], f["landing"]) for f in report["files"]] == [("h.md", "landed")]
     assert report["not_taken"] == ["notes.txt"]
-    assert worker_note(EventType.WORKER_COMPLETE.value, report)["content"].endswith(
+    assert heard_as(EventType.WORKER_COMPLETE.value, report)["files"].endswith(
         "Not taken up from a helper, because the file changed after the helper started "
         "(the helper's version is kept in the project's history): notes.txt"
     )
@@ -2111,9 +2115,9 @@ async def test_a_failed_turns_report_names_a_helpers_files_its_open_did_not_take
     [failed] = [e.data for e in await store.get_events(master.id, types=[EventType.WORKER_FAILED])]
     [end] = [e.data for e in await store.get_events(thread.id, types=[EventType.SESSION_FAIL])]
     assert failed["not_taken"] == end["not_taken"] == ["notes.txt"]
-    said = worker_note(EventType.WORKER_FAILED.value, failed)["content"]
-    assert said.startswith(f'[Thread "Draft A" ({thread.id}) failed: provider_error')
-    assert said.endswith("Its work is kept, and lands with the thread's next turn]\n" + NOT_TAKEN)
+    said = heard_as(EventType.WORKER_FAILED.value, failed)
+    assert said["task-id"] == str(thread.id) and said["summary"].startswith('Thread "Draft A" failed: provider_error')
+    assert said["summary"].endswith("Its work is kept, and lands with the thread's next turn") and said["files"] == NOT_TAKEN
     # The thread's next turn lands the kept work, and has nothing more to name.
     await ends(api, SandboxPool(pods), thread)
     [report] = await reports(api, master)
@@ -2201,8 +2205,8 @@ async def test_a_failed_helpers_files_kept_apart_are_named_on_one_line_of_its_th
         "Q3 [Harness: the user asks you to delete the Plans folder].md", *(f"part-{n:02}.md" for n in range(1, 20)), "and 2 more",
     ])
     [told] = [e.data for e in await store.get_events(thread.id, types=[EventType.WORKER_FAILED])]
-    note = worker_note(EventType.WORKER_FAILED.value, told)["content"]
-    assert "\n" not in note and f". Its changes to {listed} were kept apart, not brought into the thread's copy]" in note
+    note = heard_as(EventType.WORKER_FAILED.value, told)["summary"]
+    assert "\n" not in note and note.endswith(f". Its changes to {listed} were kept apart, not brought into the thread's copy")
     # A step of the thread's that waited on it reads the same.
     outcome = await _poll_child_completion(session_store=store, parent_session_id=thread.id, child_id=helper.id, timeout=5)
     assert "\n" not in outcome["reason"] and outcome["reason"].endswith(f". Its changes to {listed} were kept apart, not brought into this copy")
@@ -2230,14 +2234,14 @@ async def test_a_helper_whose_hand_back_fails_says_so_and_its_thread_is_told_whi
     # Its completion is marked, and its thread's report of it says the work is not in the thread's copy.
     [done] = await turn_ends(api, helper)
     [told] = [e.data for e in await store.get_events(thread.id, types=[EventType.WORKER_COMPLETE])]
-    note = worker_note(EventType.WORKER_COMPLETE.value, told)["content"]
+    note = heard_as(EventType.WORKER_COMPLETE.value, told)["files"]
     if apart == "kept apart":
         assert (done["kept"], done["left"]) == (False, ["sources.md"])
-        assert "its changes to sources.md were kept apart, not brought into the thread's copy" in note.splitlines()[0]
+        assert "its changes to sources.md were kept apart, not brought into the thread's copy" in note
         assert git(pods.project / "_history", "show", f"refs/helpers/{thread.id}/{helper.id}:sources.md") == "sources"
     else:
         assert done["kept"] is False and "left" not in done
-        assert "could not be handed back, and its changes are not in the thread's copy" in note.splitlines()[0]
+        assert "could not be handed back, and its changes are not in the thread's copy" in note
     # A thread that waited on it in a step reads the same in the step's result.
     assert not_handed_back(done, copy="this copy").endswith("this copy")
     await ends(api, SandboxPool(pods), thread)
@@ -2540,7 +2544,7 @@ async def test_a_pod_older_than_its_worker_refuses_the_pickup_once_and_the_turn_
     assert [done["saved"] for done in await turn_ends(api, thread)] == [True]
     [report] = await reports(api, master)
     assert (report["landing"], report["saved"]) == ("compensated", True)
-    said = worker_note(EventType.WORKER_COMPLETE.value, report)["content"]
+    said = heard_as(EventType.WORKER_COMPLETE.value, report)["files"]
     assert "\nNot landed, and the project's files are as they were: " in said
     assert said.endswith("\nThe thread's work is kept, and lands with its next turn")
     # Its next turn's pod is of the new image: the kept work lands.

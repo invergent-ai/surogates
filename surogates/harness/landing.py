@@ -53,6 +53,7 @@ from surogates.governance.saga.orchestrator import (
     SAGA_DEFAULT_STEP_TIMEOUT_SECONDS,
     StepRefused,
 )
+from surogates.harness.agent_news import NEW_FORMAT
 from surogates.sandbox.history import (
     _PRUNE_EVERY,
     UNKNOWN_STEP,
@@ -1126,7 +1127,7 @@ async def _tell_escalated(
     await store.emit_event(thread.parent_id, EventType.WORKER_COMPLETE, {
         "worker_id": str(thread_id), "title": named.title if named is not None else thread.title, "result": "",
         "files": [{"kind": "file", "label": path, "ref": path, "landing": "not_merged"} for path in at_issue],
-        "landing": "escalated", "recovered": True, "saga": saga.saga_id,
+        "landing": "escalated", "recovered": True, "saga": saga.saga_id, "format": NEW_FORMAT,
         **({"gone": True} if any(s.error == _GONE for s in saga.steps) else {}),
     })
 

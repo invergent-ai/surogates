@@ -24,6 +24,7 @@ from surogates.config import INTERRUPT_CHANNEL_PREFIX, SHARED_WORK_QUEUE_KEY, en
 from surogates.db.models import Mission as MissionRow
 from surogates.db.models import Session as SessionRow
 from surogates.devices.browser import BROWSER_HAND_BACK
+from surogates.harness.agent_news import NOTIFICATION_HEADER
 from surogates.harness.budget import IterationBudget
 from surogates.harness.cost_tracker import SessionCostTracker
 from surogates.harness.landing import last_turn_end, name_turn
@@ -1795,6 +1796,28 @@ async def test_a_command_in_a_paused_missions_chat_gets_its_wake_though_its_work
     assert (await workers.said(chat))[-1] == answer
 
 
+class ReportOf:
+    """The user-role message that is *worker*'s marked report of *words*, whatever its usage: that differs every run."""
+
+    def __init__(self, worker, words: str = "Checked the figures.", status: str = "completed") -> None:
+        self.worker, self.words, self.status = str(worker), words, status
+
+    def __eq__(self, other) -> bool:
+        content = other.get("content") if isinstance(other, dict) else None
+        return isinstance(content, str) and other.get("role") == "user" and content.startswith(NOTIFICATION_HEADER) and all(
+            block in content for block in (
+                f"<task-id>{self.worker}</task-id>", f"<status>{self.status}</status>", f"<result>\n{self.words}\n</result>",
+            )
+        )
+
+    def __repr__(self) -> str:
+        return f"ReportOf({self.worker!r}, {self.words!r}, {self.status!r})"
+
+
+def summary_of(content: str) -> str:
+    """What a marked notification's ``<summary>`` says."""
+    return content.split("<summary>", 1)[1].split("</summary>", 1)[0] if "<summary>" in content else content
+
 async def test_a_coordinator_takes_its_turn_on_a_report_after_a_command(workers):
     chat = await a_coordinator(workers)
     answer = await workers.types(chat, "/mission status")
@@ -1809,8 +1832,7 @@ async def test_a_coordinator_takes_its_turn_on_a_report_after_a_command(workers)
     assert (await workers.said(chat)).count(answer) == 1
     [conversation] = workers.requests
     assert conversation[-3:] == [
-        {"role": "user", "content": "/mission status"}, {"role": "assistant", "content": answer},
-        {"role": "user", "content": f"[Worker {helper} completed]\nChecked the figures."},
+        {"role": "user", "content": "/mission status"}, {"role": "assistant", "content": answer}, ReportOf(helper),
     ]
 
 
@@ -1842,7 +1864,7 @@ async def test_a_coordinators_command_is_answered_once_and_a_wake_with_nothing_n
     await workers.wake(chat)
     assert workers.ran == [handler]
     [conversation] = workers.requests
-    assert conversation[-1] == {"role": "user", "content": f"[Worker {helper} completed]\nChecked the figures."}
+    assert conversation[-1] == ReportOf(helper)
 
 
 async def pause(workers: Workers, chat: UUID, how: str) -> None:
@@ -1924,9 +1946,7 @@ async def test_a_resumed_missions_coordinator_reads_the_reports_that_waited_once
     await workers.wake(chat)
 
     [conversation] = workers.requests
-    assert [message["content"] for message in conversation[-3:]] == [
-        f"[Worker {helper} completed]\nChecked the figures." for helper in helpers
-    ]
+    assert conversation[-3:] == [ReportOf(helper) for helper in helpers]
     assert workers.ran == ["_handle_mission_command"]
 
 
@@ -2033,7 +2053,7 @@ async def test_a_report_written_right_after_a_commands_answer_still_wakes_its_co
 
     await workers.wake(chat)
     [conversation] = workers.requests
-    assert conversation[-1] == {"role": "user", "content": f"[Worker {reported[0]} completed]\nChecked the figures."}
+    assert conversation[-1] == ReportOf(reported[0])
 
 
 async def test_a_coordinators_chat_is_not_brought_to_rest_when_its_mission_cannot_be_read(workers, monkeypatch):
@@ -2066,7 +2086,7 @@ async def test_a_report_no_turn_has_read_is_not_passed_over_by_a_commands_end(wo
     await workers.wake(chat)
 
     [conversation] = workers.requests
-    assert {"role": "user", "content": f"[Worker {helper} completed]\nChecked the figures."} in conversation
+    assert ReportOf(helper) in conversation
     assert workers.ran == ["_handle_mission_command"]
 
 
@@ -2149,9 +2169,7 @@ async def test_a_master_reads_a_threads_report_after_a_command(api, workers, com
     assert workers.ran == [ANSWERED[command]]
     assert (await workers.said(master.id)).count(answer) == 1
     # The report revives the master, as after any turn of its own, and its turn reads it.
-    assert [conversation[-1]["content"].split("]")[0] for conversation in workers.requests] == [
-        f'[Thread "Draft A" ({thread.id}) reported',
-    ]
+    assert [summary_of(conversation[-1]["content"]) for conversation in workers.requests] == ['Thread "Draft A" reported']
     assert at_rest == "completed"
     assert len(await workers.routines()) == (1 if command.startswith("/loop") else 0)
 
@@ -2194,9 +2212,7 @@ async def test_a_report_that_reached_a_master_before_its_command_was_answered_is
 
     await workers.wake(master.id)
     assert workers.ran == ["_handle_compress_command"]
-    assert [conversation[-1]["content"].split("]")[0] for conversation in workers.requests] == [
-        f'[Thread "Draft A" ({thread.id}) reported',
-    ]
+    assert [summary_of(conversation[-1]["content"]) for conversation in workers.requests] == ['Thread "Draft A" reported']
 
 
 # -- The sweeper --
@@ -2903,4 +2919,4 @@ async def test_a_skills_expansion_is_never_written_over_a_note_its_cut_off_turn_
     # The wake that goes on with the turn expands the skill in the user's own message: the note stays the newest.
     assert recovered == cut_off
     assert recovered[-2] == {"role": "user", "content": "Follow the report-writer skill: tidy the notes."}
-    assert recovered[-1]["content"].startswith("[Worker ") if note == "a helper's report" else recovered[-1]["content"] == BROWSER_HANDED_BACK
+    assert summary_of(recovered[-1]["content"]).startswith("Agent ") if note == "a helper's report" else recovered[-1]["content"] == BROWSER_HANDED_BACK

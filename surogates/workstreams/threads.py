@@ -11,6 +11,7 @@ from surogates.board.groups import ensure_group_and_inherit
 from surogates.channels.constants import session_queue_priority
 from surogates.config import INTERRUPT_CHANNEL_PREFIX, enqueue_session
 from surogates.devices.store import DeviceRecord
+from surogates.harness.agent_news import NEW_FORMAT
 from surogates.session.events import EventType
 from surogates.session.models import Session
 from surogates.session.provisioning import create_thread_session
@@ -114,7 +115,9 @@ async def begin_thread(
         await session_store.emit_event(thread.id, EventType.USER_MESSAGE, {"content": content})
         spawned = {"worker_id": str(thread.id), "title": title, "goal": goal[:500]}
         if proposal is not None:
-            spawned.update(started_by="user", proposal_id=proposal["proposal_id"], key=proposal["key"])
+            spawned.update(
+                started_by="user", proposal_id=proposal["proposal_id"], key=proposal["key"], format=NEW_FORMAT,
+            )
         await session_store.emit_event(master.id, EventType.WORKER_SPAWNED, spawned)
     except BaseException:
         # A thread without its row, its goal or its card is never queued:

@@ -294,7 +294,7 @@ from surogates.harness.loop_pending import (
     _turn_for_a_hand_back,
     _turn_for_a_redo,
 )
-from surogates.harness.agent_news import agent_news_unread, started_notified_work, starts_notified_work
+from surogates.harness.agent_news import NEW_FORMAT, agent_news_unread, started_notified_work, starts_notified_work
 from surogates.harness.subagents import (
     BUDGET_REASON,
     TOKEN_BUDGET_REPORT_REQUEST,
@@ -1618,7 +1618,7 @@ class AgentHarness(
                 result = STOP_TAKEN_BACK
             await self._store.emit_event(session.parent_id, EventType.WORKER_COMPLETE, {
                 "worker_id": str(session.id), "title": named.title, "stopped": True,
-                "result": result, "not_taken_back": left,
+                "result": result, "not_taken_back": left, "format": NEW_FORMAT,
             })
         except Exception:
             logger.warning(
