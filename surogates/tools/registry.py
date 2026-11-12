@@ -13,7 +13,7 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from surogates.tools.schema_sanitizer import sanitize_tool_schemas
+from surogates.tools.schema_sanitizer import restore_json_nulls, sanitize_tool_schemas
 
 logger = logging.getLogger(__name__)
 
@@ -190,6 +190,9 @@ class ToolRegistry:
                 return json.dumps({"error": f"Invalid JSON arguments: {exc}"})
         else:
             parsed = arguments
+        # The model's literal null arrives as the string "null" for a
+        # parameter the sanitized schema shows as a nullable string.
+        parsed = restore_json_nulls(parsed, entry.schema.parameters)
 
         try:
             if entry.is_async:

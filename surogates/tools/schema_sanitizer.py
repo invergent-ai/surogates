@@ -186,3 +186,75 @@ def _strip_top_level_combinators(
             )
             out.pop(key, None)
     return out
+
+
+def restore_json_nulls(arguments: Any, schema: Any) -> Any:
+    """Turn the string ``"null"`` back into JSON null where the schema admits null.
+
+    The schemas the model sees have nullable unions collapsed to their non-null
+    branch plus ``nullable: true`` (``strip_nullable_unions`` above), so a
+    ``string | null`` parameter reads as a plain string.  A tool-call parser that
+    types each value from the schema then hands the model's literal ``null`` to
+    the tool as the four-character string ``"null"``; AutomationBench's
+    ``api_fetch(body=None)`` got ``"null"`` thousands of times and its Drive
+    listing failed on every one.  Only the exact string ``"null"``, only for a
+    value whose own schema admits null (``nullable: true``, a ``null`` type, or a
+    ``null`` branch of ``anyOf`` / ``oneOf``), nested objects and arrays
+    included.  Everything else, ``"NULL"`` or ``"None"`` and a ``"null"`` for a
+    plain string among them, is passed on as written.  Returns *arguments*
+    itself when nothing changes.
+    """
+    if isinstance(arguments, dict):
+        props = _branch_with(schema, "properties")
+        if props is None:
+            return arguments
+        changed: dict[str, Any] | None = None
+        for key, value in arguments.items():
+            sub = props.get(key)
+            if not isinstance(sub, dict):
+                continue
+            new = None if value == "null" and _admits_null(sub) else restore_json_nulls(value, sub)
+            if new is not value:
+                if changed is None:
+                    changed = dict(arguments)
+                changed[key] = new
+        return arguments if changed is None else changed
+    if isinstance(arguments, list):
+        items = _branch_with(schema, "items")
+        if not isinstance(items, dict):
+            return arguments
+        restored = [
+            None if value == "null" and _admits_null(items) else restore_json_nulls(value, items)
+            for value in arguments
+        ]
+        return arguments if all(a is b for a, b in zip(restored, arguments)) else restored
+    return arguments
+
+
+def _admits_null(schema: Any) -> bool:
+    if not isinstance(schema, dict):
+        return False
+    if schema.get("nullable") is True:
+        return True
+    kind = schema.get("type")
+    if kind == "null" or (isinstance(kind, list) and "null" in kind):
+        return True
+    if isinstance(schema.get("enum"), list) and None in schema["enum"]:
+        return True
+    return any(
+        isinstance(variants, list) and any(_admits_null(item) for item in variants)
+        for variants in (schema.get("anyOf"), schema.get("oneOf"))
+    )
+
+
+def _branch_with(schema: Any, key: str) -> Any:
+    """``schema[key]``, or that of the first ``anyOf`` / ``oneOf`` branch that has it."""
+    if not isinstance(schema, dict):
+        return None
+    if isinstance(schema.get(key), dict):
+        return schema[key]
+    for combinator in ("anyOf", "oneOf"):
+        for item in schema.get(combinator) or []:
+            if isinstance(item, dict) and isinstance(item.get(key), dict):
+                return item[key]
+    return None
