@@ -122,14 +122,14 @@ async def _maybe_run_mission_evaluator(
         )
         return
 
-    # The judge does not mint the terminal verdict on its own word. Task
-    # status is machine-written by the dispatcher and the completion
-    # classifier, so it is evidence the coordinator cannot author.
+    # The judge does not mint the terminal verdict on its own word. An
+    # agent's status is machine-written by the harness, so it is evidence
+    # the coordinator cannot author.
     from surogates.missions.verdict_policy import adjust_mission_verdict
 
-    done, total = await _mission_task_counts(session_factory, active.id)
+    done, total = await mission_store.agent_counts(active.id)
     verdict = adjust_mission_verdict(
-        verdict, completed_tasks=done, total_tasks=total,
+        verdict, completed_agents=done, total_agents=total,
     )
 
     await apply_verdict(
@@ -263,19 +263,3 @@ def _build_mission_judge(
             raise MissionJudgeParseError(str(exc)) from exc
 
     return judge
-
-
-async def _mission_task_counts(session_factory, mission_id) -> tuple[int, int]:
-    """(completed, total) tasks for *mission_id*."""
-    from sqlalchemy import func, select
-
-    from surogates.db.models import Task
-
-    async with session_factory() as db:
-        row = (await db.execute(
-            select(
-                func.count(),
-                func.count().filter(Task.status == "done"),
-            ).where(Task.mission_id == mission_id)
-        )).one()
-    return int(row[1] or 0), int(row[0] or 0)

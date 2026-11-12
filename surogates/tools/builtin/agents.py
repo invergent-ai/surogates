@@ -446,11 +446,6 @@ _STOP_SIGNAL = "stopped by agent"
 async def _stop_agent_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
     """Stop an agent below the caller, with the agents of the family below it, or a background command the
     caller started."""
-    from surogates.config import INTERRUPT_CHANNEL_PREFIX
-    from surogates.devices.operations import DeviceOperations
-    from surogates.harness.message_utils import extract_final_response
-    from surogates.harness.subagents import runs_in_background, tell_parent
-
     session_store = kwargs.get("session_store")
     me_id = kwargs.get("session_id")
     redis = kwargs.get("redis")
@@ -475,23 +470,50 @@ async def _stop_agent_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
     if agent["status"] not in ("active", "processing"):
         return json.dumps({"status": _STATUS.get(agent["status"], agent["status"]), "agent_id": str(agent["id"]),
                            "note": "It is not running: there is nothing to stop."})
+    stopped = await stop_tree(
+        session_store=session_store, redis=redis, session_factory=session_factory, top_id=agent["id"], by=me.id,
+        reason=reason, rows=list(mine.values()),
+    )
+    if not stopped:
+        return json.dumps({"status": "completed", "agent_id": str(agent["id"]), "note": "It ended before the stop: there was nothing to stop."})
+    return json.dumps({"status": "stopped", "agent_id": str(agent["id"]), "stopped": [str(sid) for sid in stopped],
+                       "note": "A stopped agent keeps its context: send_message resumes it."
+                       if agent["parent_id"] == me.id else "A stopped agent keeps its context."})
+
+
+async def stop_tree(
+    *, session_store: Any, redis: Any, session_factory: Any, top_id: UUID, by: UUID, reason: str,
+    rows: list[dict] | None = None,
+) -> list[UUID]:
+    """Stop running agent *top_id* and the agents of the family below it, for *by*: the ids it stopped.
+
+    *rows*, the session tree they are found in (``_tree``), is read from *top_id* down when not given.
+    """
+    from surogates.config import INTERRUPT_CHANNEL_PREFIX
+    from surogates.devices.operations import DeviceOperations
+    from surogates.harness.message_utils import extract_final_response
+    from surogates.harness.subagents import runs_in_background, tell_parent
+
+    kwargs = {"session_factory": session_factory}
+    rows = rows if rows is not None else await _tree(kwargs, top_id)
+    top = next((row for row in rows if row["id"] == top_id), None)
     stopped: list[UUID] = []
-    for row in [agent, *_family_below(list(mine.values()), agent["id"])]:
+    for row in [top, *_family_below(rows, top_id)] if top is not None else []:
         # Paused only from running, the status and its event in one write: a turn that ended meanwhile stays
         # ended, and is told of once.
         if await session_store.pause_if_active(row["id"], {
-            "reason": "stopped", "message": reason, "stopped_by": str(me.id),
+            "reason": "stopped", "message": reason, "stopped_by": str(by),
         }):
             stopped.append(row["id"])
     if not stopped:
-        return json.dumps({"status": "completed", "agent_id": str(agent["id"]), "note": "It ended before the stop: there was nothing to stop."})
+        return stopped
     try:
         # As the pause route does: what the stopped agents, and the helpers under them, left waiting on the
         # user's computer is cancelled.
-        below = [row["id"] for row in await _tree(kwargs, agent["id"])]
+        below = [row["id"] for row in await _tree(kwargs, top_id)]
         await DeviceOperations(session_factory, redis).cancel(below, sparing=below)
     except Exception:
-        logger.warning("Could not cancel the device operations of the agents %s stopped", me.id, exc_info=True)
+        logger.warning("Could not cancel the device operations of the agents %s stopped", by, exc_info=True)
     for sid in stopped:
         if redis is not None:
             await redis.publish(f"{INTERRUPT_CHANNEL_PREFIX}:{sid}", json.dumps({"reason": _STOP_SIGNAL}))
@@ -502,9 +524,7 @@ async def _stop_agent_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
                 store=session_store, redis=redis, session=session, status="killed",
                 result=extract_final_response(await session_store.get_events(sid), fallback=""),
             )
-    return json.dumps({"status": "stopped", "agent_id": str(agent["id"]), "stopped": [str(sid) for sid in stopped],
-                       "note": "A stopped agent keeps its context: send_message resumes it."
-                       if agent["parent_id"] == me.id else "A stopped agent keeps its context."})
+    return stopped
 
 
 async def _stop_process(proc_id: str, **kwargs: Any) -> str:
@@ -870,6 +890,9 @@ async def _start_agent(
         "tool_call_id": tool_call_id,
         "parent": str(parent.id),
         **({"name": name} if name else {}),
+        # An agent a mission's coordinator starts is the mission's: its judge, budget and cascade read it.
+        **({"mission_id": str(parent.config["active_mission_id"])}
+           if (parent.config or {}).get("active_mission_id") else {}),
     }
     started: list[UUID] = []
 

@@ -30,9 +30,6 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from surogates.db.models import (
     Event,
     Mission as MissionRow,
-    Session as ORMSession,
-    Task as TaskRow,
-    TaskLink,
 )
 from surogates.missions.models import Mission
 from surogates.tenant.auth.middleware import get_current_tenant
@@ -154,153 +151,42 @@ async def get_mission(
     return Mission.model_validate(row).model_dump(mode="json")
 
 
-@router.get("/{mission_id}/tasks")
-async def get_mission_tasks(
-    mission_id: UUID,
-    session_factory: async_sessionmaker = Depends(_session_factory_dep),
-    tenant: TenantContext = Depends(get_current_tenant),
-) -> dict[str, Any]:
-    await _load_mission_authorized(
-        mission_id, session_factory=session_factory, tenant=tenant,
-    )
-    async with session_factory() as db:
-        tasks = (await db.execute(
-            select(TaskRow).where(TaskRow.mission_id == mission_id)
-            .order_by(TaskRow.created_at.asc())
-        )).scalars().all()
-        # Resolve parent edges for the task DAG view. Querying with an
-        # empty IN-list would generate a no-op SELECT, so short-circuit.
-        links: list[TaskLink] = []
-        if tasks:
-            links = (await db.execute(
-                select(TaskLink).where(
-                    TaskLink.child_id.in_([t.id for t in tasks]),
-                )
-            )).scalars().all()
-    parent_ids_by_child: dict[str, list[str]] = {}
-    for link in links:
-        parent_ids_by_child.setdefault(str(link.child_id), []).append(
-            str(link.parent_id),
-        )
-
-    payload = []
-    for t in tasks:
-        payload.append({
-            "id": str(t.id),
-            "goal": t.goal,
-            "status": t.status,
-            "attempt_count": t.attempt_count,
-            "max_attempts": t.max_attempts,
-            "agent_def_name": t.agent_def_name,
-            "result": t.result,
-            "result_metadata": t.result_metadata,
-            "parent_ids": parent_ids_by_child.get(str(t.id), []),
-            "current_session_id": (
-                str(t.current_session_id) if t.current_session_id else None
-            ),
-            "created_at": t.created_at.isoformat() if t.created_at else None,
-            "started_at": t.started_at.isoformat() if t.started_at else None,
-            "completed_at": (
-                t.completed_at.isoformat() if t.completed_at else None
-            ),
-        })
-    return {"tasks": payload}
-
-
 @router.get("/{mission_id}/workers")
 async def get_mission_workers(
     mission_id: UUID,
     session_factory: async_sessionmaker = Depends(_session_factory_dep),
     tenant: TenantContext = Depends(get_current_tenant),
 ) -> dict[str, Any]:
-    """Return worker activity rows for the mission.
-
-    Returns three categories of children, distinguished by ``kind``:
-
-    * ``"task"`` — task-backed workers (the coordinator called ``spawn_task``).
-      Carry a ``task_id`` and a ``task_status``; mature, durable, retried by
-      the dispatcher.
-    * ``"worker"`` — async one-shot children spawned via ``spawn_worker``.
-      No Task row, but the session is durable. ``task_id``/``task_status``
-      are ``None``.
-    * ``"delegation"`` — sync fork-join children spawned via
-      ``delegate_task``. The coordinator's wake blocks until they finish;
-      sessions are usually short-lived. Same null-task shape as workers.
-
-    Direct ``spawn_worker``/``delegate_task`` children were previously
-    invisible — they have no Task row, so the old task-driven query
-    returned an empty list even though the coordinator was actively
-    delegating. Merging them in surfaces real activity without changing
-    agent behaviour.
+    """The mission's agents: the sessions its coordinator started with ``agent``
+    while the mission was active, oldest first, each with its latest event.
 
     The client derives a human-friendly activity label from the
     ``latest_event_*`` fields; the server's job is just to expose them.
     """
-    mission_row = await _load_mission_authorized(
+    from surogates.missions.store import MissionStore
+
+    await _load_mission_authorized(
         mission_id, session_factory=session_factory, tenant=tenant,
     )
-    workers: list[dict[str, Any]] = []
+    agents = await MissionStore(session_factory).agents(mission_id)
     async with session_factory() as db:
-        # 1. Task-backed workers (the spawn_task path).
-        tasks = (await db.execute(
-            select(TaskRow).where(
-                TaskRow.mission_id == mission_id,
-                TaskRow.current_session_id.isnot(None),
-            )
-        )).scalars().all()
-        for t in tasks:
-            sess = await db.get(ORMSession, t.current_session_id)
-            if sess is None:
-                continue
-            workers.append(await _worker_row(
-                db, kind="task", task=t, session=sess,
-            ))
-
-        # 2. Direct children of the coordinator's session (spawn_worker +
-        # delegate_task). These don't have Task rows.  Channel discriminates:
-        #   * ``worker`` — spawn_worker
-        #   * ``delegation`` — delegate_task
-        # Filtering to those two channels keeps unrelated child shapes
-        # (``scheduled``, ``api``, etc.) out — only the coordinator-driven
-        # primitives surface here.
-        direct_children = (await db.execute(
-            select(ORMSession).where(
-                ORMSession.parent_id == mission_row.session_id,
-                ORMSession.channel.in_(("worker", "delegation")),
-            ).order_by(ORMSession.created_at.asc())
-        )).scalars().all()
-        for sess in direct_children:
-            kind = "worker" if sess.channel == "worker" else "delegation"
-            workers.append(await _worker_row(
-                db, kind=kind, task=None, session=sess,
-            ))
+        workers = [await _worker_row(db, agent) for agent in agents]
     return {"workers": workers}
 
 
-async def _worker_row(
-    db,
-    *,
-    kind: str,
-    task: TaskRow | None,
-    session: ORMSession,
-) -> dict[str, Any]:
-    """Build one worker entry, joining the session's latest event."""
+async def _worker_row(db, agent: Any) -> dict[str, Any]:
+    """One agent's row, with the session's latest event."""
     latest = (await db.execute(
         select(Event)
-        .where(Event.session_id == session.id)
+        .where(Event.session_id == agent.session_id)
         .order_by(Event.id.desc())
         .limit(1)
     )).scalar_one_or_none()
     return {
-        "kind": kind,
-        "task_id": str(task.id) if task is not None else None,
-        "worker_session_id": str(session.id),
-        "agent_def_name": (
-            task.agent_def_name if task is not None
-            else (session.config or {}).get("agent_def_name")
-        ),
-        "task_status": task.status if task is not None else None,
-        "session_status": session.status,
+        "worker_session_id": str(agent.session_id),
+        "agent_def_name": agent.agent_type,
+        "description": agent.description,
+        "session_status": agent.status,
         "latest_event_id": latest.id if latest else None,
         "latest_event_kind": latest.type if latest else None,
         "latest_event_at": (
@@ -311,7 +197,7 @@ async def _worker_row(
             json.dumps(latest.data)[:200]
             if latest and latest.data else None
         ),
-        "transcript_url": f"/chat/{session.id}",
+        "transcript_url": f"/chat/{agent.session_id}",
     }
 
 
@@ -330,69 +216,26 @@ async def get_mission_events(
 ) -> dict[str, Any]:
     """Mission-wide event timeline, ascending by event id.
 
-    Merges events from every session attached to the mission:
-
-    * the coordinator session (``mission.session_id``),
-    * every task-attempt session (``sessions.task_id`` points at a
-      mission task — includes past retry attempts, not just
-      ``current_session_id``),
-    * direct ``spawn_worker`` / ``delegate_task`` children of the
-      coordinator (same channel filter as the workers route).
-
-    Cursorable by ``after_id`` (bigserial event PK). The ``sessions``
-    map labels every contributing session so clients can attribute
-    rows to tasks/agents without N+1 lookups — required because the
-    client only knows each task's *current* attempt session.
+    Merges the events of the coordinator session (``mission.session_id``)
+    and of the mission's agents.  Cursorable by ``after_id`` (bigserial
+    event PK). The ``sessions`` map labels every contributing session
+    (``coordinator`` or ``agent``) so clients can attribute rows without
+    N+1 lookups.
     """
+    from surogates.missions.store import MissionStore
+
     mission_row = await _load_mission_authorized(
         mission_id, session_factory=session_factory, tenant=tenant,
     )
+    agents = await MissionStore(session_factory).agents(mission_id)
+    session_meta: dict[str, dict[str, Any]] = {
+        str(mission_row.session_id): {"agent_def_name": None, "kind": "coordinator"},
+    }
+    session_ids: list[UUID] = [mission_row.session_id]
+    for agent in agents:
+        session_meta[str(agent.session_id)] = {"agent_def_name": agent.agent_type, "kind": "agent"}
+        session_ids.append(agent.session_id)
     async with session_factory() as db:
-        task_rows = (await db.execute(
-            select(TaskRow.id, TaskRow.agent_def_name).where(
-                TaskRow.mission_id == mission_id,
-            )
-        )).all()
-        agent_by_task = {t.id: t.agent_def_name for t in task_rows}
-
-        session_meta: dict[str, dict[str, Any]] = {
-            str(mission_row.session_id): {
-                "task_id": None, "agent_def_name": None,
-                "kind": "coordinator",
-            },
-        }
-        session_ids: list[UUID] = [mission_row.session_id]
-
-        if agent_by_task:
-            task_sessions = (await db.execute(
-                select(ORMSession.id, ORMSession.task_id).where(
-                    ORMSession.task_id.in_(list(agent_by_task)),
-                )
-            )).all()
-            for sid, sid_task in task_sessions:
-                session_meta[str(sid)] = {
-                    "task_id": str(sid_task),
-                    "agent_def_name": agent_by_task.get(sid_task),
-                    "kind": "task",
-                }
-                session_ids.append(sid)
-
-        direct_children = (await db.execute(
-            select(ORMSession).where(
-                ORMSession.parent_id == mission_row.session_id,
-                ORMSession.channel.in_(("worker", "delegation")),
-            )
-        )).scalars().all()
-        for sess in direct_children:
-            if str(sess.id) in session_meta:
-                continue
-            session_meta[str(sess.id)] = {
-                "task_id": None,
-                "agent_def_name": (sess.config or {}).get("agent_def_name"),
-                "kind": "worker" if sess.channel == "worker" else "delegation",
-            }
-            session_ids.append(sess.id)
-
         filters = [
             Event.session_id.in_(session_ids),
             Event.type.notin_(_HIDDEN_EVENT_TYPES),

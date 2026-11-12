@@ -138,26 +138,28 @@ def _real_harness(session, registry, skills, tools):
 
 
 async def test_the_skill_index_follows_the_schemas_in_every_session():
-    """The built-in registry and the in-tree skills: the orchestrator skill needs spawn_task, which only a
-    coordinator's schemas offer."""
-    from surogates.tools.loader import ResourceLoader
+    """A skill that needs a tool is listed only where the session's schemas offer that tool."""
+    from surogates.tools.loader import ResourceLoader, SkillDef
     from surogates.tools.runtime import ToolRuntime
 
     registry = ToolRegistry()
     ToolRuntime(registry).register_builtins()
-    skills = ResourceLoader()._load_skills_from_dir("skills", "platform")
-    assert any(getattr(s, "name", "") == "subagent-task-orchestrator" for s in skills)
+    skills = [
+        *ResourceLoader()._load_skills_from_dir("skills", "platform"),
+        SkillDef(name="needs-agents", description="Fans work out to agents", content="x", source="platform",
+                 requires_tools=["agent"]),
+    ]
     tools = set(registry.tool_names)
+
+    without = _chat({"excluded_tools": ["agent"]})
+    harness = _real_harness(without, registry, skills, tools)
+    assert "agent" not in harness._tool_filter_for_session(without)
+    assert "needs-agents" not in await harness._build_system_prompt(without)
 
     ordinary = _chat({})
     harness = _real_harness(ordinary, registry, skills, tools)
-    assert "spawn_task" not in harness._tool_filter_for_session(ordinary)
-    assert "subagent-task-orchestrator" not in await harness._build_system_prompt(ordinary)
-
-    coordinator = _chat({"coordinator": True})
-    harness = _real_harness(coordinator, registry, skills, tools)
-    assert "spawn_task" in harness._tool_filter_for_session(coordinator)
-    assert "subagent-task-orchestrator" in await harness._build_system_prompt(coordinator)
+    assert "agent" in harness._tool_filter_for_session(ordinary)
+    assert "needs-agents" in await harness._build_system_prompt(ordinary)
 
 
 async def test_a_strict_coordinator_is_not_told_about_its_implementation_tools():
@@ -173,9 +175,9 @@ async def test_a_strict_coordinator_is_not_told_about_its_implementation_tools()
     assert WEB not in await harness._build_system_prompt(strict)
 
 
-async def test_an_ordinary_session_loses_only_the_orchestrator_skill():
-    """The golden delta for every ordinary session: the prompt as the worker's tools would have it, less the
-    skill index lines of the one in-tree skill whose tool (spawn_task) only a coordinator is offered."""
+async def test_an_ordinary_sessions_prompt_is_the_one_its_worker_tools_give():
+    """The golden delta for every ordinary session: the prompt as the worker's tools would have it, and no
+    difference, since every in-tree skill's tools are an ordinary session's too."""
     import difflib
 
     from surogates.tools.loader import ResourceLoader
@@ -195,7 +197,7 @@ async def test_an_ordinary_session_loses_only_the_orchestrator_skill():
     gone = [line[1:] for line in difflib.ndiff(before.splitlines(), after.splitlines()) if line.startswith("- ")]
     joined = [line for line in difflib.ndiff(before.splitlines(), after.splitlines()) if line.startswith("+ ")]
     assert joined == []
-    assert [line.strip().split(":")[0] for line in gone] == ["kanban", "- subagent-task-orchestrator"]
+    assert gone == []
 
 
 async def test_a_project_master_loses_the_web_and_artifact_guidance():

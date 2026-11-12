@@ -6,18 +6,17 @@ pattern used elsewhere in Surogates (see ``surogates.session.store``).
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import case, func, select, update
+from sqlalchemy import case, func, select, text, update
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from surogates.db.models import (
     Mission as MissionRow,
     Session as ORMSession,
-    Task,
-    TaskLink,
 )
 from surogates.missions.models import Mission, MissionStatus
 
@@ -31,32 +30,21 @@ _ACTIVE_OR_PAUSED: tuple[str, ...] = ("active", "paused")
 STAGNANT_EVALUATION_LIMIT = 3
 
 
-def any_task_in_flight(
-    statuses: dict[UUID, str], parents: dict[UUID, set[UUID]],
-) -> bool:
-    """True while one of these tasks will still finish with no one acting.
+@dataclass(frozen=True)
+class MissionAgent:
+    """An agent the mission's coordinator started while the mission was active (``agent_dispatch.mission_id``)."""
 
-    ``ready`` and ``running`` are moving. A ``todo`` task moves once every
-    parent is ``done``, so it only counts while each parent is done or moving
-    itself: a failed or cancelled parent never releases its children, and a
-    ``blocked`` one waits on a person. Those children could otherwise hold the
-    judge back for good, on work nothing is going to start.
-    """
-    moving = {
-        task for task, status in statuses.items()
-        if status in ("todo", "ready", "running")
-    }
-    while True:
-        stuck = {
-            task for task in moving
-            if statuses[task] == "todo" and any(
-                parent not in moving and statuses.get(parent) != "done"
-                for parent in parents.get(task, ())
-            )
-        }
-        if not stuck:
-            return bool(moving)
-        moving -= stuck
+    session_id: UUID
+    status: str
+    description: str
+    agent_type: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+#: An agent's session statuses while it works, and once its run has ended.
+_RUNNING: tuple[str, ...] = ("active", "processing")
+_ENDED: tuple[str, ...] = ("completed", "failed", "paused")
 
 
 class MissionStoreError(Exception):
@@ -344,48 +332,63 @@ class MissionStore:
             )).scalar_one_or_none()
         return bool(count is not None and count >= STAGNANT_EVALUATION_LIMIT)
 
-    async def has_tasks_in_flight(self, mission_id: UUID) -> bool:
-        """True while this mission has work that will finish by itself.
-
-        Statuses and links are read in one snapshot. A task finishing just
-        after it can only make this answer stale towards "wait", and that task
-        re-enqueues the coordinator, whose next turn asks again.
-        """
+    async def agents(self, mission_id: UUID) -> list[MissionAgent]:
+        """The mission's agents, oldest first: its coordinator's children that carry its id."""
         async with self._sf() as db:
-            statuses: dict[UUID, str] = {
-                task: status for task, status in (await db.execute(
-                    select(Task.id, Task.status)
-                    .where(Task.mission_id == mission_id)
-                )).all()
-            }
-            waiting = [t for t, status in statuses.items() if status == "todo"]
-            parents: dict[UUID, set[UUID]] = {}
-            if waiting:
-                links = (await db.execute(
-                    select(TaskLink.child_id, TaskLink.parent_id, Task.status)
-                    .join(Task, Task.id == TaskLink.parent_id)
-                    .where(TaskLink.child_id.in_(waiting))
-                )).all()
-                for child, parent, status in links:
-                    parents.setdefault(child, set()).add(parent)
-                    statuses.setdefault(parent, status)
-        return any_task_in_flight(statuses, parents)
+            coordinator = (await db.execute(
+                select(MissionRow.session_id).where(MissionRow.id == mission_id)
+            )).scalar_one_or_none()
+            if coordinator is None:
+                return []
+            rows = (await db.execute(
+                select(
+                    ORMSession.id, ORMSession.status, ORMSession.config,
+                    ORMSession.created_at, ORMSession.updated_at,
+                )
+                .where(ORMSession.parent_id == coordinator)
+                .order_by(ORMSession.created_at.asc(), ORMSession.id.asc())
+            )).all()
+        agents: list[MissionAgent] = []
+        for sid, status, config, created_at, updated_at in rows:
+            dispatch = (config or {}).get("agent_dispatch")
+            if not isinstance(dispatch, dict) or dispatch.get("mission_id") != str(mission_id):
+                continue
+            agents.append(MissionAgent(
+                session_id=sid, status=status, description=str(dispatch.get("description") or ""),
+                agent_type=(config or {}).get("agent_type"), created_at=created_at, updated_at=updated_at,
+            ))
+        return agents
+
+    async def has_agents_in_flight(self, mission_id: UUID) -> bool:
+        """True while one of the mission's agents is still working: its report is still to come."""
+        return any(agent.status in _RUNNING for agent in await self.agents(mission_id))
+
+    async def agent_ended_since(self, mission_id: UUID, since: datetime) -> bool:
+        """True when one of the mission's agents ended (finished, failed or stopped) strictly after *since*."""
+        if since.tzinfo is not None:
+            since = since.astimezone(timezone.utc).replace(tzinfo=None)
+        return any(
+            agent.status in _ENDED and agent.updated_at > since
+            for agent in await self.agents(mission_id)
+        )
+
+    async def agent_counts(self, mission_id: UUID) -> tuple[int, int]:
+        """(completed, all) of the mission's agents."""
+        agents = await self.agents(mission_id)
+        return sum(agent.status == "completed" for agent in agents), len(agents)
 
     async def tokens_spent(self, mission_id: UUID) -> int:
         """Total tokens billed to *mission_id*.
 
         DERIVED, never a counter: a SUM over the mission's own coordinator
-        session plus every session attached to one of its tasks.  A counter
-        incremented alongside the work can drift from what was actually
-        billed; this cannot.
-
-        The join goes ``sessions.task_id -> tasks.mission_id`` rather than
-        reading ``Task.current_session_id``, which only points at the
-        in-flight attempt and would miss every earlier one.
+        session plus every session under one of the mission's agents, the
+        agents included.  A counter incremented alongside the work can drift
+        from what was actually billed; this cannot.
         """
         spend = func.coalesce(ORMSession.input_tokens, 0) + func.coalesce(
             ORMSession.output_tokens, 0
         )
+        agents = [agent.session_id for agent in await self.agents(mission_id)]
         async with self._sf() as db:
             own = (await db.execute(
                 select(func.coalesce(func.sum(spend), 0))
@@ -393,13 +396,20 @@ class MissionStore:
                 .join(MissionRow, MissionRow.session_id == ORMSession.id)
                 .where(MissionRow.id == mission_id)
             )).scalar_one()
-            workers = (await db.execute(
-                select(func.coalesce(func.sum(spend), 0))
-                .select_from(ORMSession)
-                .join(Task, Task.id == ORMSession.task_id)
-                .where(Task.mission_id == mission_id)
-            )).scalar_one()
-        return int(own or 0) + int(workers or 0)
+            below = 0
+            if agents:
+                below = (await db.execute(text(
+                    """
+                    WITH RECURSIVE tree(id) AS (
+                        SELECT id FROM sessions WHERE id = ANY(:agents)
+                        UNION
+                        SELECT s.id FROM sessions s JOIN tree t ON s.parent_id = t.id
+                    )
+                    SELECT COALESCE(SUM(COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)), 0)
+                    FROM sessions WHERE id IN (SELECT id FROM tree)
+                    """
+                ), {"agents": agents})).scalar_one()
+        return int(own or 0) + int(below or 0)
 
     async def budget_exhausted(self, mission_id: UUID) -> bool:
         """True when the mission has a token allowance and has spent it."""

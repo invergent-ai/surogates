@@ -20,8 +20,8 @@ async def test_create_inserts_mission_emits_event_and_returns_kickoff(
     * writes a Mission row,
     * emits ``mission.defined``,
     * updates ``session.config`` with ``active_mission_id`` +
-      ``coordinator=True`` + ``strict_coordinator=True`` + the
-      preloaded orchestrator skill,
+      ``coordinator=True`` + ``strict_coordinator=True``, and no
+      preloaded skill (coordinator mode is in the coordinator's guidance),
     * returns the kickoff content via ``MissionHandlerResult.kickoff_content``
       so the slash handler can emit it AFTER ``advance_harness_cursor``
       runs (otherwise the cursor would race past the kickoff event id
@@ -87,8 +87,7 @@ async def test_create_inserts_mission_emits_event_and_returns_kickoff(
         assert sess.config["active_mission_id"] == str(mid)
         assert sess.config["coordinator"] is True
         assert sess.config["strict_coordinator"] is True
-        preloaded = sess.config.get("preloaded_skills") or []
-        assert "subagent-task-orchestrator" in preloaded
+        assert "subagent-task-orchestrator" not in (sess.config.get("preloaded_skills") or [])
 
 
 @pytest.mark.asyncio(loop_scope="session")
@@ -301,17 +300,18 @@ async def test_cancel_without_cascade_marks_cancelled(
 
 
 @pytest.mark.asyncio(loop_scope="session")
-async def test_cancel_with_cascade_publishes_interrupt_per_running_worker(
+async def test_cancel_with_cascade_interrupts_each_running_agent(
     session_factory, session_store, org_id, user_id, chat_session,
 ):
-    """cascade_to_workers=True publishes an interrupt for each running task
-    and marks every non-terminal mission task as cancelled."""
+    """cascade_to_workers=True stops each running mission agent and interrupts its turn; a finished one is left
+    as it is."""
     from surogates.config import INTERRUPT_CHANNEL_PREFIX
-    from surogates.db.models import Task
     from surogates.missions.commands import (
         handle_mission_create, handle_mission_cancel,
     )
     from surogates.missions.store import MissionStore
+
+    from tests.integration.missions.conftest import a_mission_agent
 
     store = MissionStore(session_factory)
     redis = AsyncMock(zadd=AsyncMock(), publish=AsyncMock())
@@ -322,32 +322,8 @@ async def test_cancel_with_cascade_publishes_interrupt_per_running_worker(
         session_store=session_store, session_factory=session_factory,
         mission_store=store,
     )
-
-    worker_session_id = uuid.uuid4()
-    async with session_factory() as db:
-        db.add(ORMSession(
-            id=worker_session_id, org_id=org_id, user_id=user_id,
-            agent_id="orchestrator", channel="task", status="active",
-        ))
-        await db.flush()
-        running = Task(
-            org_id=org_id, parent_session_id=chat_session.id,
-            goal="train", status="running", mission_id=created.mission_id,
-            current_session_id=worker_session_id, attempt_count=1,
-        )
-        ready = Task(
-            org_id=org_id, parent_session_id=chat_session.id,
-            goal="eval", status="ready", mission_id=created.mission_id,
-        )
-        done = Task(
-            org_id=org_id, parent_session_id=chat_session.id,
-            goal="research", status="done", mission_id=created.mission_id,
-        )
-        db.add_all([running, ready, done])
-        await db.commit()
-        running_id = running.id
-        ready_id = ready.id
-        done_id = done.id
+    running = await a_mission_agent(session_factory, chat_session, created.mission_id, status="active")
+    done = await a_mission_agent(session_factory, chat_session, created.mission_id, status="completed")
 
     res = await handle_mission_cancel(
         session_id=chat_session.id,
@@ -359,67 +335,9 @@ async def test_cancel_with_cascade_publishes_interrupt_per_running_worker(
     assert res.ok is True
 
     channels_published = [c.args[0] for c in redis.publish.call_args_list]
-    assert f"{INTERRUPT_CHANNEL_PREFIX}:{worker_session_id}" in channels_published
-
-    async with session_factory() as db:
-        for tid, expected in (
-            (running_id, "cancelled"),
-            (ready_id, "cancelled"),
-            (done_id, "done"),
-        ):
-            t = await db.get(Task, tid)
-            assert t.status == expected
-
-
-@pytest.mark.asyncio(loop_scope="session")
-async def test_cancel_with_cascade_interrupts_a_cancelled_tasks_session_only_while_a_turn_runs_for_it(
-    session_factory, session_store, org_id, user_id, chat_session,
-):
-    """A task already cancelled is interrupted again only where a worker still
-    holds its session: a cascade cut off after marking it may never have told
-    it.  One cancelled long ago, its session at rest, is not told again."""
-    from surogates.config import INTERRUPT_CHANNEL_PREFIX
-    from surogates.db.models import Task
-    from surogates.missions.commands import (
-        handle_mission_create, handle_mission_cancel,
-    )
-    from surogates.missions.store import MissionStore
-
-    store = MissionStore(session_factory)
-    redis = AsyncMock(zadd=AsyncMock(), publish=AsyncMock())
-    created = await handle_mission_create(
-        description="d", rubric="r",
-        session_id=chat_session.id, user_id=user_id, org_id=org_id,
-        agent_id="orchestrator",
-        session_store=session_store, session_factory=session_factory,
-        mission_store=store,
-    )
-    at_work, at_rest = uuid.uuid4(), uuid.uuid4()
-    async with session_factory() as db:
-        for sid in (at_work, at_rest):
-            db.add(ORMSession(
-                id=sid, org_id=org_id, user_id=user_id,
-                agent_id="orchestrator", channel="task", status="active",
-            ))
-        await db.flush()
-        db.add_all([
-            Task(
-                org_id=org_id, parent_session_id=chat_session.id, goal=goal,
-                status="cancelled", mission_id=created.mission_id,
-                current_session_id=sid, attempt_count=1,
-            )
-            for goal, sid in (("train", at_work), ("eval", at_rest))
-        ])
-        await db.commit()
-    assert await session_store.try_acquire_lease(at_work, "a worker", ttl_seconds=60) is not None
-
-    res = await handle_mission_cancel(
-        session_id=chat_session.id, reason="abort", cascade_to_workers=True,
-        session_store=session_store, session_factory=session_factory,
-        mission_store=store, redis=redis,
-    )
-    assert res.ok is True
-    assert [c.args[0] for c in redis.publish.call_args_list] == [f"{INTERRUPT_CHANNEL_PREFIX}:{at_work}"]
+    assert channels_published == [f"{INTERRUPT_CHANNEL_PREFIX}:{running.id}"]
+    assert (await session_store.get_session(running.id)).status == "paused"
+    assert (await session_store.get_session(done.id)).status == "completed"
 
 
 # ---------------------------------------------------------------------------
@@ -468,9 +386,8 @@ async def test_create_with_service_account_principal(
         assert sess.config["coordinator"] is True
         # ``strict_coordinator`` is what makes ``_tool_filter_for_session``
         # strip implementation tools (terminal, read_file, browser_*, web_*,
-        # etc.) — the structural enforcement the subagent-task-orchestrator
-        # skill assumes is in place.  Without it the LLM just does the work
-        # itself instead of spawning subagent tasks.
+        # etc.): without it the LLM just does the work itself instead of
+        # starting agents.
         assert sess.config["strict_coordinator"] is True
 
     # handle_mission_create no longer enqueues — the slash handler does

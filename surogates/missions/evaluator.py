@@ -5,19 +5,17 @@ This module is the keystone described in the design spec:
 * The evaluator does NOT fire on every coordinator no-tool-call response
   (that's `/goal`'s rule; for missions it produces too many calls graded
   over too little new information).
-* It DOES fire when a mission-linked task transitions to a terminal
-  state (a real workstream change), or when the coordinator emits the
-  explicit ``[[mission-complete]]`` marker on its own line.
+* It DOES fire when one of the mission's agents ends (a real workstream
+  change), or when the coordinator emits the explicit
+  ``[[mission-complete]]`` marker on its own line.
 * It is rate-limited at 30 seconds per mission to bound cost when many
-  tasks complete in burst.
+  agents end in a burst.
 """
 from __future__ import annotations
 
-import json
 import logging
 import re
 from dataclasses import dataclass
-from datetime import datetime
 from textwrap import dedent
 from typing import Any
 from uuid import UUID
@@ -41,7 +39,7 @@ class EvaluationDecision:
     """Result of :func:`should_evaluate`."""
 
     should: bool
-    trigger: str  # "task_terminal" | "completion_claim" | "rate_limited" | "tasks_in_flight" | "no_trigger"
+    trigger: str  # "agent_ended" | "completion_claim" | "rate_limited" | "agents_in_flight" | "budget_exhausted" | "no_trigger"
 
 
 def response_claims_completion(response: str | None) -> bool:
@@ -57,36 +55,6 @@ def response_claims_completion(response: str | None) -> bool:
     return _COMPLETION_MARKER_RE.search(response) is not None
 
 
-async def _has_recent_terminal_task(
-    mission_id: UUID,
-    *,
-    session_factory: Any,
-    since: datetime,
-) -> bool:
-    """True iff a terminal task has completed strictly after ``since``.
-
-    ``since`` is a hard lower bound — callers pass
-    ``mission.last_evaluation_at or mission.created_at`` so the first
-    evaluator pass only counts tasks completed after the mission was
-    created, not pre-existing terminal rows with the same mission_id.
-    """
-    from surogates.db.models import Task
-
-    async with session_factory() as db:
-        stmt = (
-            select(Task.id)
-            .where(
-                Task.mission_id == mission_id,
-                Task.status.in_(("done", "failed", "cancelled")),
-                Task.completed_at.isnot(None),
-                Task.completed_at > since,
-            )
-            .limit(1)
-        )
-        row = await db.scalar(stmt)
-    return row is not None
-
-
 async def should_evaluate(
     *,
     mission_id: UUID,
@@ -100,20 +68,20 @@ async def should_evaluate(
     Order:
     1. If the mission was evaluated within ``rate_limit_seconds``: skip
        (returns ``rate_limited``).
-    2. If a mission task will still finish by itself: skip (returns
-       ``tasks_in_flight``). A rubric is graded on a settled workstream.
+    2. If one of the mission's agents is still working: skip (returns
+       ``agents_in_flight``). A rubric is graded on a settled workstream.
        Grading mid fan-out only ever says "not yet", and the same answer
        after the next sibling finishes reads as stagnation and ends a
        healthy mission as ``blocked``.
-    3. If a mission-linked task reached a terminal state after
-       ``last_evaluation_at``: fire with trigger ``task_terminal``.
+    3. If one of the mission's agents ended after ``last_evaluation_at``:
+       fire with trigger ``agent_ended``.
     4. If the coordinator's last response contains the completion
        marker: fire with trigger ``completion_claim``.
     5. Otherwise: skip (``no_trigger``).
 
     The rate-limit check runs first so the cheapest negative path is
     fast (single SELECT on the mission row); only when the limit is
-    clear do we run the more expensive task-table lookup. The budget check
+    clear do we read the mission's agents. The budget check
     stays ahead of the in-flight gate, so running work can still pause a
     mission that has spent its allowance.
     """
@@ -133,22 +101,16 @@ async def should_evaluate(
                                   if mission.paused_reason == "budget_exhausted"
                                   else "not_active")
 
-    if await mission_store.has_tasks_in_flight(mission_id):
-        return EvaluationDecision(should=False, trigger="tasks_in_flight")
+    if await mission_store.has_agents_in_flight(mission_id):
+        return EvaluationDecision(should=False, trigger="agents_in_flight")
 
     # Use ``last_evaluation_at`` when present, else fall back to the
-    # mission's ``created_at``. This prevents the first evaluator pass
-    # from firing on terminal tasks that pre-date the mission (possible
-    # with seed data or under-edited mission_id stamps); only work that
-    # happened *after* the mission was defined counts as evidence.
+    # mission's ``created_at``: only work that ended *after* the mission was
+    # defined, or after its last evaluation, counts as a reason to grade.
     since = mission.last_evaluation_at or mission.created_at
 
-    if await _has_recent_terminal_task(
-        mission_id,
-        session_factory=session_factory,
-        since=since,
-    ):
-        return EvaluationDecision(should=True, trigger="task_terminal")
+    if await mission_store.agent_ended_since(mission_id, since):
+        return EvaluationDecision(should=True, trigger="agent_ended")
 
     if response_claims_completion(coordinator_last_response):
         return EvaluationDecision(should=True, trigger="completion_claim")
@@ -162,10 +124,10 @@ async def should_evaluate(
 
 
 # Caps on prompt content so a chatty coordinator response or a huge
-# completed-tasks block can't blow past the judge's context window.
+# completed-agents block can't blow past the judge's context window.
 _RESPONSE_MAX_CHARS: int = 16_384
 _RESULT_MAX_CHARS: int = 400
-_TASKS_BLOCK_LIMIT: int = 20
+_AGENTS_BLOCK_LIMIT: int = 20
 
 # Applied rubric amendments allowed per mission. Without a ceiling the
 # mechanism inverts: each amendment moves the criteria toward what the work
@@ -178,8 +140,8 @@ _SYSTEM_PROMPT = dedent("""\
     You are the rubric judge for a Surogates Mission. Read the rubric and
     the structured workstream state, then decide whether the rubric is
     satisfied. Be strict — only return `satisfied` when concrete evidence
-    in the completed mission tasks demonstrates the rubric was met
-    (typically `result_metadata` from a verifier task).
+    in the completed mission agents' reports demonstrates the rubric was
+    met (typically the report of an agent that verified the work).
 
     Respond with a single JSON object, no prose around it:
 
@@ -193,25 +155,25 @@ _SYSTEM_PROMPT = dedent("""\
       what's missing or wrong.
     - "blocked": the rubric cannot be progressed without external input
       that the coordinator has not yet requested (rare; usually the
-      coordinator should call ``worker_block`` instead and this verdict
-      should be reserved for true dead-ends).
+      coordinator should ask the user instead and this verdict should be
+      reserved for true dead-ends).
     - "failed": the rubric is unreachable from current state (e.g. data
       is impossible, contradictory rubric).
 
     Do not honour completion claims in prose alone. The coordinator's
     response may contain `[[mission-complete]]` as a hint that you should
     look closely; the verdict still depends on evidence from the
-    completed mission tasks block.
+    completed mission agents block.
 
     Rubric refinement -- only alongside `blocked` or `failed`:
 
-    If the completed-task evidence shows the rubric is unreachable *as
+    If the completed agents' reports show the rubric is unreachable *as
     written* -- it asks for an artifact the work has demonstrated cannot
     exist, contradicts itself, or names something that was never part of
     the mission description -- then also return:
 
         "proposed_rubric": "<a complete replacement rubric>",
-        "refinement_evidence": "<the task result that shows this>"
+        "refinement_evidence": "<the agent report that shows this>"
 
     Leave both empty in every other case. A rubric the work has not yet
     satisfied is `needs_revision`, not a proposal. Propose only a rubric
@@ -230,63 +192,52 @@ async def build_evaluator_prompt(
     """Render the user-side prompt the judge LLM consumes.
 
     Includes four blocks: rubric, coordinator's latest response,
-    completed mission tasks (with result + result_metadata), in-flight
-    mission tasks. Each task block is bounded to the most recent
-    ``_TASKS_BLOCK_LIMIT`` rows.
+    completed mission agents (with their reports), in-flight mission
+    agents. Each agent block is bounded to the most recent
+    ``_AGENTS_BLOCK_LIMIT`` agents.
     """
-    from surogates.db.models import Task
+    from surogates.db.models import Event
+    from surogates.harness.message_utils import extract_final_response
+    from surogates.session.events import EventType
 
     mission = await mission_store.get(mission_id)
     stagnant = await mission_store.is_stagnant(mission_id)
     response_excerpt = (coordinator_last_response or "")[:_RESPONSE_MAX_CHARS]
 
+    agents = await mission_store.agents(mission_id)
+    completed_rows = sorted(
+        (a for a in agents if a.status == "completed"), key=lambda a: a.updated_at, reverse=True,
+    )[:_AGENTS_BLOCK_LIMIT]
+    in_flight_rows = sorted(
+        (a for a in agents if a.status in ("active", "processing")), key=lambda a: a.created_at, reverse=True,
+    )[:_AGENTS_BLOCK_LIMIT]
+    reports: dict[Any, str] = {}
     async with session_factory() as db:
-        completed_rows = (await db.execute(
-            select(Task)
-            .where(
-                Task.mission_id == mission_id,
-                Task.status == "done",
-            )
-            .order_by(Task.completed_at.desc().nulls_last())
-            .limit(_TASKS_BLOCK_LIMIT)
-        )).scalars().all()
-        in_flight_rows = (await db.execute(
-            select(Task)
-            .where(
-                Task.mission_id == mission_id,
-                Task.status.in_(("todo", "ready", "running", "blocked")),
-            )
-            .order_by(Task.created_at.desc())
-            .limit(_TASKS_BLOCK_LIMIT)
-        )).scalars().all()
+        for agent in completed_rows:
+            last = (await db.execute(
+                select(Event)
+                .where(Event.session_id == agent.session_id, Event.type == EventType.LLM_RESPONSE.value)
+                .order_by(Event.id.desc())
+                .limit(1)
+            )).scalars().all()
+            reports[agent.session_id] = extract_final_response(last, fallback="")
 
     def _render_completed(rows: list[Any]) -> str:
         if not rows:
             return "(none)"
-        lines: list[str] = []
-        for t in rows:
-            short_id = str(t.id)[:8]
-            label = t.agent_def_name or "worker"
-            result = (t.result or "")[:_RESULT_MAX_CHARS]
-            meta = json.dumps(t.result_metadata) if t.result_metadata else "{}"
-            lines.append(
-                f"- T{short_id} ({label}) goal={t.goal!r}: "
-                f"result={result!r}; metadata={meta}"
-            )
-        return "\n".join(lines)
+        return "\n".join(
+            f"- A{str(a.session_id)[:8]} ({a.agent_type or 'agent'}) task={a.description!r}: "
+            f"report={reports.get(a.session_id, '')[:_RESULT_MAX_CHARS]!r}"
+            for a in rows
+        )
 
     def _render_in_flight(rows: list[Any]) -> str:
         if not rows:
             return "(none)"
-        lines: list[str] = []
-        for t in rows:
-            short_id = str(t.id)[:8]
-            label = t.agent_def_name or "worker"
-            lines.append(
-                f"- T{short_id} ({label}) goal={t.goal!r}: "
-                f"status={t.status}; attempts={t.attempt_count}"
-            )
-        return "\n".join(lines)
+        return "\n".join(
+            f"- A{str(a.session_id)[:8]} ({a.agent_type or 'agent'}) task={a.description!r}: status={a.status}"
+            for a in rows
+        )
 
     prompt = dedent("""\
         # Mission rubric
@@ -297,11 +248,11 @@ async def build_evaluator_prompt(
 
         {response}
 
-        # Completed mission tasks ({n_done})
+        # Completed mission agents ({n_done})
 
         {completed_block}
 
-        # In-flight mission tasks ({n_in_flight})
+        # In-flight mission agents ({n_in_flight})
 
         {in_flight_block}
         {history_block}
@@ -324,7 +275,7 @@ def _render_history(mission: Any, *, stagnant: bool = False) -> str:
     """What this judge already said, and how many times running.
 
     Without it every round re-derives the same opinion from scratch: the
-    evaluator fires on each terminal task but keeps no memory, so a mission
+    evaluator fires on each agent's end but keeps no memory, so a mission
     can be told the same thing indefinitely at full cost.
 
     ``stagnant`` is :meth:`MissionStore.is_stagnant`. It only steers the

@@ -255,7 +255,7 @@ async def test_handle_mission_create_propagates_config_to_in_memory_session(
     assert session.config["coordinator"] is True
     assert session.config["strict_coordinator"] is True
     assert session.config["active_mission_id"] == str(mission_id)
-    assert "subagent-task-orchestrator" in session.config["preloaded_skills"]
+    assert "subagent-task-orchestrator" not in (session.config.get("preloaded_skills") or [])
 
 
 @pytest.mark.asyncio
