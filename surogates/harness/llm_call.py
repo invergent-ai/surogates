@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import math
 import os
 import time
 from typing import TYPE_CHECKING, Any, Callable
@@ -100,6 +101,21 @@ _FALLBACK_CONTEXT_WINDOW: int = 128_000
 
 # Retry constants
 MAX_LLM_RETRIES: int = 3
+
+#: Extra attempts for an engine whose queue is full (``is_engine_full``):
+#: they do not use up the call's ``MAX_LLM_RETRIES``.  An engine with no
+#: room for the request makes it wait for admission, then expires it ("expired
+#: while waiting for admission": an error event in the stream it opened with
+#: HTTP 200, or an HTTP 503 for a request that does not stream); a few seconds
+#: later it has room again more often than not.  Waits: the engine's
+#: Retry-After, else ``ENGINE_FULL_BACKOFF_BASE`` doubling up to
+#: ``ENGINE_FULL_BACKOFF_MAX`` (5 + 10 + 20 + 40 + 60 + 60 s, plus up to half
+#: again of jitter).
+MAX_ENGINE_FULL_RETRIES: int = 6
+ENGINE_FULL_BACKOFF_BASE: float = 5.0
+ENGINE_FULL_BACKOFF_MAX: float = 60.0
+#: The error codes an engine gives a request that expired in its queue.
+_ENGINE_FULL_CODES = frozenset({"request_queue_timeout"})
 
 #: Longest provider cooldown worth waiting out in-session rather than
 #: failing. Every cooldown seen on the workspace-bench prod run was under
@@ -474,9 +490,13 @@ def extract_retry_after(exc: Exception) -> float | None:
         ra = headers.get("retry-after") or headers.get("Retry-After")
         if ra:
             try:
-                return min(float(ra), 120.0)  # Cap at 2 minutes
+                seconds = float(ra)
             except (TypeError, ValueError):
-                pass
+                seconds = None
+            # A wait that is no number of seconds (negative, NaN, infinite)
+            # is no Retry-After: the caller's backoff applies.
+            if seconds is not None and math.isfinite(seconds) and seconds > 0:
+                return min(seconds, 120.0)  # Cap at 2 minutes
     # From error body
     body = getattr(exc, "body", None)
     if isinstance(body, dict):
@@ -485,10 +505,33 @@ def extract_retry_after(exc: Exception) -> float | None:
             ra = error.get("retry_after")
             if ra is not None:
                 try:
-                    return min(float(ra), 120.0)
+                    seconds = float(ra)
                 except (TypeError, ValueError):
-                    pass
+                    seconds = None
+                if seconds is not None and math.isfinite(seconds) and seconds > 0:
+                    return min(seconds, 120.0)
     return None
+
+
+def _error_body(exc: Exception) -> dict[str, Any]:
+    """The provider's error object: the ``body`` the SDK keeps, unwrapped
+    from ``{"error": {...}}`` when it is not already."""
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict) and isinstance(body.get("error"), dict):
+        body = body["error"]
+    return body if isinstance(body, dict) else {}
+
+
+def is_engine_full(exc: Exception) -> bool:
+    """Whether *exc* says the engine had no room for the request now: its
+    queue timed the request out ("expired while waiting for admission",
+    as an HTTP 503 or as an error event in the stream it opened), or it
+    answered 503 / 529 with a Retry-After."""
+    body = _error_body(exc)
+    message = str(body.get("message") or exc).lower()
+    if str(body.get("code") or "") in _ENGINE_FULL_CODES or "waiting for admission" in message:
+        return True
+    return extract_status_code(exc) in (503, 529) and extract_retry_after(exc) is not None
 
 
 def _rate_limit_cooldown_seconds(
@@ -605,6 +648,8 @@ async def call_llm_with_retry(
     Production-hardening features:
 
     - Jittered exponential backoff on transient errors (429, 500, 502, 503, 529)
+    - An engine with no room (``is_engine_full``) waited out as a stream, in
+      up to ``MAX_ENGINE_FULL_RETRIES`` attempts of its own
     - Fallback provider chain on 402 and repeated 429 via *activate_fallback*
     - Context-length error detection (400/413 with context-related phrases) --
       triggers context compression via *compress_context* callback
@@ -655,7 +700,10 @@ async def call_llm_with_retry(
         iteration=iteration, turn_id=turn_id, iteration_index=iteration_index,
     )
 
-    for attempt in range(1, MAX_LLM_RETRIES + 1):
+    attempt = 0
+    engine_full_retries = 0
+    while attempt < MAX_LLM_RETRIES:
+        attempt += 1
         # A stopped turn never starts another full call (a retry after a backoff used to).
         if callable(interrupt_check) and interrupt_check():
             return _interrupted_result(create_kwargs.get("model", ""))
@@ -1097,6 +1145,25 @@ async def call_llm_with_retry(
                     continue
                 raise  # Non-retryable
 
+            # An engine with no room now: waited out within its own budget,
+            # before the call's attempts and any fallback provider.
+            if is_engine_full(exc) and engine_full_retries < MAX_ENGINE_FULL_RETRIES:
+                engine_full_retries += 1
+                attempt -= 1  # this attempt is not one of the call's MAX_LLM_RETRIES
+                wait = extract_retry_after(exc) or jittered_backoff(
+                    engine_full_retries,
+                    base_delay=ENGINE_FULL_BACKOFF_BASE,
+                    max_delay=ENGINE_FULL_BACKOFF_MAX,
+                )
+                logger.warning(
+                    "LLM engine full for session %s (iteration %d, retry %d/%d, "
+                    "status=%s): %s. Retrying in %.1fs",
+                    session.id, iteration, engine_full_retries, MAX_ENGINE_FULL_RETRIES,
+                    status_code, summarize_api_error(exc), wait,
+                )
+                await interruptible_sleep(wait, interrupt_check)
+                continue
+
             # Transient server errors (500, 502, 503, 529)
             is_retryable = (
                 classified.retryable
@@ -1191,8 +1258,10 @@ async def call_llm_streaming(
     except Exception as exc:
         # A stuck or failing gateway is retried as a stream: the non-streaming
         # fallback waits on the same upstream, longer, with nothing to show.
+        # So is an engine that had no room: its stream says so in an error
+        # event, with no HTTP status.
         status = extract_status_code(exc)
-        if status is not None and status >= 500:
+        if (status is not None and status >= 500) or is_engine_full(exc):
             raise
         logger.warning(
             "Streaming failed for session %s (iteration %d), "
