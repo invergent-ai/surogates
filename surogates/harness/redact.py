@@ -37,18 +37,25 @@ _SECRET_ENV_NAMES = (
 # ``PGPASSWORD``, ``OPENAI_API_KEY``, ``AUTH_SECRET``, ``API_KEYS``), never
 # runs into a longer word: code such as ``AUTHORITY_RANK = {...}`` or
 # ``TOKENIZER=...`` is not a secret, nor a count such as ``MAX_TOKENS = 4096``
-# (a ``...TOKENS`` name with a number).  Bounded
+# (``MAX_`` / ``MIN_`` / ``NUM_`` / ``TOTAL_`` / ``DEFAULT_ ... TOKENS`` with a
+# number of at most 7 digits).  Bounded
 # repetitions (no catastrophic backtracking); the spacing around ``=`` is
 # kept as written.
 _ENV_ASSIGN_RE = re.compile(
-    rf"((?<![A-Z0-9_])[A-Z0-9_]{{0,50}}{_SECRET_ENV_NAMES}(?:_[A-Z0-9]{{1,50}}){{0,8}})(?![A-Za-z0-9_])"
+    rf"((?<![A-Z0-9_])[A-Z0-9_]{{0,200}}{_SECRET_ENV_NAMES}(?:_[A-Z0-9]{{1,50}}){{0,20}})(?![A-Za-z0-9_])"
     r"(\s*=\s*)(['\"]?)(\S+)\3"
 )
 # A value that is a lookup in code, not a literal: ``os.getenv("TOKEN")``,
-# ``os.getenv("TOKEN",``, ``settings['api_key']``, ``get_token()``.  Matched
-# whole; anything else after the name (a password with a bracket in it) is
-# still a value.
-_CODE_VALUE_RE = re.compile(r"[A-Za-z_][\w.]*(?:\(\)|[(\[](['\"])[A-Za-z_][\w.-]*\1(?:[)\]]|,)?)")
+# ``os.getenv("TOKEN",``, ``settings['api_key']``, ``get_token()`` (a bare
+# call only with a "_" or "." in its name): a lower-case name without digits.
+# Matched whole; anything else (a password with a bracket in it,
+# ``hunter2()``, ``Zx9Yw8['ab']``) is still a value.
+_CODE_VALUE_RE = re.compile(
+    r"[a-z_][A-Za-z_]*[_.][A-Za-z_.]*\(\)"
+    r"|[a-z_][A-Za-z_.]*[(\[](['\"])[A-Za-z_][\w.-]*\1(?:[)\]]|,)?"
+)
+# A count, not a secret: ``MAX_TOKENS = 4096``, ``MAX_NEW_TOKENS=512``.
+_TOKEN_COUNT_NAME_RE = re.compile(r"(?:MAX|MIN|NUM|TOTAL|DEFAULT)_(?:[A-Z0-9]+_)*TOKENS")
 _JSON_KEY_NAMES = (
     r"(?:api_?[Kk]ey|token|secret|password|access_token|refresh_token|"
     r"auth_token|bearer|secret_value|raw_secret|secret_input|key_material)"
@@ -206,7 +213,7 @@ def _mask_token(token: str) -> str:
 
 def _mask_env_assignment(m: re.Match[str]) -> str:
     name, eq, quote, value = m.group(1), m.group(2), m.group(3), m.group(4)
-    if _CODE_VALUE_RE.fullmatch(value) or (name.endswith("TOKENS") and value.isdigit()):
+    if _CODE_VALUE_RE.fullmatch(value) or (_TOKEN_COUNT_NAME_RE.fullmatch(name) and value.isdigit() and len(value) <= 7):
         return m.group(0)
     return f"{name}{eq}{quote}{_mask_token(value)}{quote}"
 

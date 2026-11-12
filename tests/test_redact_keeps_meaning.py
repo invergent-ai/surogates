@@ -74,6 +74,12 @@ def test_real_secrets_are_still_masked_in_events() -> None:
         "https://api.example.test/cb?code=oauth-code&access_token=opaque-token": "opaque-token",
         # glued or plural names, and passwords with brackets: masked as before
         "PGPASSWORD=Xq7rT2mLp9sKd4": "Xq7rT2mLp9sKd4",
+        "SPRING_SECURITY_OAUTH2_CLIENT_REGISTRATION_GITHUB_CLIENT_SECRET=a1b2c3d4e5f6g7h8i9j0": "a1b2c3d4e5f6g7h8i9j0",
+        "TOKEN_A_B_C_D_E_F_G_H_I_J=a1b2c3d4e5f6g7h8i9j0": "a1b2c3d4e5f6g7h8i9j0",
+        "PASSWORD=Tr0ub4dor3()": "Tr0ub4dor3",
+        "API_TOKENS=12345678901234567890": "12345678901234567890",
+        "OTP_TOKENS=482913": "482913",
+        "SECRET=Zx9Yw8['ab']": "Zx9Yw8",
         "NGROK_AUTHTOKEN=2aBcD3eFgH4iJkL5mNoP6qRs": "2aBcD3eFgH4iJkL5mNoP6qRs",
         "SECRETKEY=Zx9Yw8Vu7Ts6Rq5Po4": "Zx9Yw8Vu7Ts6Rq5Po4",
         "AUTHENTICATION_KEY=a1b2c3d4e5f6g7h8i9j0": "a1b2c3d4e5f6g7h8i9j0",
@@ -103,9 +109,11 @@ def test_numbers_and_code_are_not_read_as_phones_or_secrets_in_events() -> None:
         "Billed_Revenue_Cents: 18500000+18750000+19000000",
         "AUTHORITY_RANK = {'Head office': 30, 'Service lead': 20}",
         "MAX_TOKENS = 4096",
+        "MAX_NEW_TOKENS=512",
         "TOKENIZER=cl100k_base",
         'API_KEY = os.getenv("API_KEY")',
-        "token = settings['api_token']",
+        "TOKEN = settings['api_token']",
+        "GITHUB_TOKEN = get_token()",
     ):
         assert redact_sensitive_data(text, phones=False) == text, text
 
