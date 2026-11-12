@@ -49,6 +49,11 @@ SERVER_OWNED_KEYS: tuple[str, ...] = (
 STANDS_IN_FOR: dict[str, tuple[str, ...]] = {
     "delegate_task": ("agent", "send_message", "list_agents", "stop_agent"),
     "terminal": ("monitor",),
+    # The coordinator's worker tools: ``agent`` starts in the background what
+    # ``spawn_worker`` starts, so a policy on them binds the agent family too.
+    "spawn_worker": ("agent", "send_message", "list_agents", "stop_agent"),
+    "send_worker_message": ("send_message",),
+    "stop_worker": ("stop_agent",),
 }
 
 #: The tools that go with ``agent``: offered to a session that may start agents, and to every agent it started.
