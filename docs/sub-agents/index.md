@@ -538,6 +538,10 @@ With it on, `agent` takes `delegate_task`'s place wherever the session may deleg
 | `stop_agent(agent_id)` | Stops an agent the caller started (with its own agents), or a background command it started. A stopped agent keeps its context: `send_message` from the agent that stopped it resumes it. A user's stop of it, later, is the user's to lift. |
 | `monitor(command, description, timeout_seconds?, max_notifications_per_minute?)` | Runs a command in the sandbox; each line it prints reaches the session as a notification, at most the given number a minute, until it exits, times out (killed), is stopped, or its session is stopped (killed). At most 4 run per session, counted in the sandbox. A worker sends a session at most 30 monitor notifications a minute; monitors started on different workers each count on their own worker. Offered to a root session where `terminal` is: never on a user's computer, to a session with a parent (a sub-agent, a helper, a worker, a routine run), or in a project's thread. |
 
+### Reaching the parent
+
+A sub-agent of the family is always offered `send_message`, even when its agent type's tool list leaves it out (an explicit `excluded_tools` still holds): it can always ask the agent that started it. Kept only this way, it reaches its parent and nobody else.
+
 ### Names
 
 An agent started with `name` (a letter, then letters, digits, `-` and `_`, 40 at most; never `parent`, an id or a `proc_` id) can be addressed by it wherever an `agent_id` is taken: `send_message` looks among the agents the caller can reach (its own, its parent, its siblings), `stop_agent` among its own only. When two agents share a name, the newest answers to it; the older stays reachable by its id. `list_agents` shows each agent's name, and its notifications carry it.

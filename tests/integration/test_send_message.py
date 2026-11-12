@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -296,3 +296,62 @@ async def test_starts_and_resumes_of_one_parent_share_one_lock_while_any_waits()
 async def _takes(lock):
     async with lock:
         await asyncio.sleep(0)
+
+
+def a_reader_type(monkeypatch) -> None:
+    """The agent type ``reader``, whose tool list names only ``read_file``."""
+    from surogates.harness import agent_resolver
+    from surogates.tools.loader import AgentDef
+
+    async def resolve(name, tenant, *, session_factory=None, bundle=None):
+        if name == "reader":
+            return AgentDef(name="reader", description="Reads", system_prompt="", tools=["read_file"], source="platform")
+        return None
+
+    monkeypatch.setattr(agent_resolver, "resolve_agent_by_name", resolve)
+
+
+async def a_reader(chats, chat):  # noqa: F811
+    chats.replies = [
+        calling("agent", "call_reader", description="Read the tracker", prompt="Read it.", agent_type="reader",
+                run_in_background=True),
+        _final_response("Started."),
+    ]
+    await chats.says(chat, "Read the tracker.")
+    await chats.wake(chat)
+    started = json.loads(await tool_result(chats, chat, "call_reader"))
+    return await chats.session(UUID(started["agent_id"]))
+
+
+async def test_a_sub_agent_whose_type_lists_its_tools_can_still_message_its_parent(chats, monkeypatch):  # noqa: F811
+    a_reader_type(monkeypatch)
+    chat = await a_chat(chats, PARITY)
+    child = await a_reader(chats, chat)
+    assert child.config["allowed_tools"] == ["read_file"]
+    chats.replies = [
+        calling("send_message", "call_up", to="parent", message="Which list do you mean?", summary="Which list"),
+        _final_response("Asked."),
+    ]
+    await chats.wake(child.id)
+    assert "send_message" in chats.offered[-1] and "list_agents" not in chats.offered[-1]
+    assert json.loads(await tool_result(chats, child.id, "call_up"))["status"] in ("delivered", "resumed", "queued")
+
+
+async def test_such_a_sub_agent_cannot_message_its_siblings(chats, monkeypatch):  # noqa: F811
+    a_reader_type(monkeypatch)
+    chat = await a_chat(chats, PARITY)
+    child = await a_reader(chats, chat)
+    chats.replies = [
+        calling("agent", "call_count", description="Count open items", prompt="Count them.", run_in_background=True),
+        _final_response("Started."),
+    ]
+    await chats.says(chat, "Count them too.")
+    await chats.wake(chat)
+    sibling = await chats.session(UUID(json.loads(await tool_result(chats, chat, "call_count"))["agent_id"]))
+    chats.replies = [
+        calling("send_message", "call_side", to=str(sibling.id), message="Send me the open items.", summary="Open items"),
+        _final_response("Asked."),
+    ]
+    await chats.wake(child.id)
+    assert json.loads(await tool_result(chats, child.id, "call_side"))["error"] == "you may message only the agent that started you"
+    assert await chats.store.get_events(sibling.id, types=[EventType.COORDINATOR_MESSAGE]) == []

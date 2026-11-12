@@ -108,7 +108,19 @@ def apply_parity(tools: set[str], config: dict | None, *, root: bool = True) -> 
         if "terminal" in result and device_of(config) is None and root and monitor_allowed(config):
             companions.add(MONITOR_TOOL)
         result |= {name for name in companions if name not in excluded and (not allowed or name in allowed)}
+        if isinstance(config.get(DISPATCH_KEY), dict) and "send_message" not in excluded:
+            # A sub-agent can always reach the agent that started it, whatever its type's tool list, as a task
+            # worker keeps its self-tools; kept only this way, it reaches its parent and nobody else.
+            result.add("send_message")
     return result
+
+
+def parent_only(config: dict | None) -> bool:
+    """Whether a sub-agent with *config* has ``send_message`` only to reach its parent: its tool list leaves it
+    out, and ``apply_parity`` put it back for that alone."""
+    config = config or {}
+    allowed = config.get("allowed_tools")
+    return isinstance(config.get(DISPATCH_KEY), dict) and bool(allowed) and "send_message" not in allowed
 
 
 def monitor_allowed(config: dict | None) -> bool:
