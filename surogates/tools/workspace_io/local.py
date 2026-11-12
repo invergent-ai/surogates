@@ -606,7 +606,7 @@ def _contained_parts(real_root: str, key: str) -> tuple[list[str], str]:
     rel = os.path.relpath(os.path.abspath(key), real_root)
     parts = rel.split(os.sep)
     if rel in (".", "") or os.path.isabs(rel) or any(p in ("", ".", "..") for p in parts):
-        raise PermissionError("Refused: the file is not inside the workspace.")
+        raise PermissionError(errno.EACCES, "Refused: the file is not inside the workspace.")
     return parts[:-1], parts[-1]
 
 
@@ -615,8 +615,10 @@ def _open_folder(real_root: str, folders: list[str], *, create: bool) -> int:
     folder at a time from the workspace's own, with no link followed; with
     *create*, a missing folder is made.  A folder on the way that is a link
     (swapped in after resolve() checked the path) raises PermissionError; one
-    that is a file raises NotADirectoryError, naming only that folder.  Both
-    are OSErrors, as the file tools expect."""
+    that is a file raises FileExistsError with *create* (as making the folder
+    by path did) and NotADirectoryError without, naming only that folder.
+    All are OSErrors with their errno, as the file tools and a computer's
+    folder (``devices.workspace``) expect."""
     fd = os.open(real_root, _FOLDER_FLAGS & ~_O_NOFOLLOW)
     try:
         for part in folders:
@@ -637,8 +639,13 @@ def _open_folder(real_root: str, folders: list[str], *, create: bool) -> int:
                 except OSError:
                     is_link = True  # gone again: it was being swapped
                 if is_link:
-                    raise PermissionError(f"Refused: {_SWAPPED}.") from None
-                raise NotADirectoryError(f"'{part}' on the file's path is not a folder.") from None
+                    raise PermissionError(errno.EACCES, f"Refused: {_SWAPPED}.") from None
+                # As a path gave it: a write that would make the folder finds a
+                # file there (EEXIST), any other call a path through a file.
+                said = f"'{part}' on the file's path is not a folder."
+                if create:
+                    raise FileExistsError(errno.EEXIST, said) from None
+                raise NotADirectoryError(errno.ENOTDIR, said) from None
             fd, parent = child, fd
             os.close(parent)
         return fd

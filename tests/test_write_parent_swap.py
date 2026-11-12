@@ -84,7 +84,8 @@ async def test_a_file_where_a_folder_should_be_is_named_as_such(places):
     (ws / "notes.txt").write_text("a file")
     wio = LocalWorkspaceIO(str(ws))
     key = await wio.resolve("notes.txt/inside.md")
-    with pytest.raises(NotADirectoryError, match="'notes.txt' on the file's path is not a folder") as refused:
+    # As a path gave it: the write finds a file where it would make the folder, the delete a path through a file.
+    with pytest.raises(FileExistsError, match="'notes.txt' on the file's path is not a folder") as refused:
         await wio.write(key, b"x")
     assert str(ws) not in str(refused.value)
     with pytest.raises(NotADirectoryError):
