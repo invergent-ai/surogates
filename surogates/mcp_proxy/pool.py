@@ -81,6 +81,15 @@ class AgentChangedDuringConnect(Exception):
     that connect found is dropped, and its configs must be read anew."""
 
 
+def _note_failed_attempt(entry: "PoolEntry", failed: dict[str, str]) -> None:
+    """Record that a connect attempt of each of *failed* (name -> why) failed now."""
+    now = time.monotonic()
+    for name, why in failed.items():
+        entry.unavailable[name] = why
+        entry.failed_at[name] = now
+        entry.failures[name] = entry.failures.get(name, 1) + 1
+
+
 def _retry_cooldown(failures: int) -> float:
     """Seconds to wait before trying a server again after *failures* failed attempts in a row."""
     return min(_UNAVAILABLE_RETRY_COOLDOWN * 2 ** max(failures - 1, 0), _MAX_UNAVAILABLE_RETRY_COOLDOWN)
@@ -731,6 +740,13 @@ class ConnectionPool:
         def _done(done: asyncio.Task) -> None:
             if self._retry_tasks.get(key) is done:
                 del self._retry_tasks[key]
+            # Nothing awaits the task: what it raised is logged here, not
+            # left to "Task exception was never retrieved".
+            if not done.cancelled() and (error := done.exception()) is not None:
+                logger.error(
+                    "MCP background retry task for org=%s user=%s agent=%s raised",
+                    key[0], key[1], key[2], exc_info=error,
+                )
 
         task.add_done_callback(_done)
 
@@ -778,16 +794,31 @@ class ConnectionPool:
                     is_service_account=entry.is_service_account,
                     taken={s.get("name", "") for s in entry.tool_schemas},
                 )
+            except Exception:
+                # The scan raised (a scanner or audit-emitter error, which a
+                # tool definition can trigger every time): the entry still
+                # names them unavailable, so the attempt counts as failed and
+                # the next one waits for its cooldown, not for the next tool
+                # list; and what this retry connected must not stay open
+                # outside the entry.
+                logger.error(
+                    "MCP background retry for org=%s user=%s agent=%s: scanning the reconnected servers' tools raised",
+                    key[0], key[1], key[2], exc_info=True,
+                )
+                if self._entries.get(key) is entry:
+                    _note_failed_attempt(entry, {
+                        **{names_by_key[p]: entry.unavailable.get(names_by_key[p], _LOST) for p in owners},
+                        **reasons,
+                    })
+                await self._shutdown_servers(owners)
+                return
             except BaseException:
-                # The entry still names them unavailable: what this retry
-                # connected must not stay open outside it.
                 await self._shutdown_servers(owners)
                 raise
         if self._entries.get(key) is not entry:
             await self._shutdown_servers(owners)
             return
 
-        now = time.monotonic()
         entry.tool_schemas = [*entry.tool_schemas, *clean_schemas]
         entry.tool_index = {**entry.tool_index, **tool_index}
         entry.utility_index = {**entry.utility_index, **utility_index}
@@ -796,10 +827,7 @@ class ConnectionPool:
             entry.unavailable.pop(name, None)
             entry.failed_at.pop(name, None)
             entry.failures.pop(name, None)
-        for name, why in reasons.items():
-            entry.unavailable[name] = why
-            entry.failed_at[name] = now
-            entry.failures[name] = entry.failures.get(name, 1) + 1
+        _note_failed_attempt(entry, reasons)
         logger.info(
             "MCP background retry for org=%s user=%s agent=%s: connected %s; still unavailable %s",
             key[0], key[1], key[2],
