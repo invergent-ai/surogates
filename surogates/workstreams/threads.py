@@ -98,7 +98,8 @@ async def begin_thread(
     bound: bool = False,
 ) -> Session | None:
     """Give *thread* its row and its goal, tell the master, and queue it;
-    None, the thread archived, when its project was archived meanwhile.
+    None, the thread archived, when its project was archived meanwhile.  A
+    thread begun already, by a begin at the same moment, is left as it is.
 
     A thread *bound* on the user's computer, after the master's turn that
     started it, is news to the master, which reads it at its next model
@@ -107,7 +108,10 @@ async def begin_thread(
     """
     content = f"{goal}\n\n## Context\n{context}" if context else goal
     try:
-        if not await WorkstreamStore(session_factory).add_thread(thread.id, UUID(master.config["workstream_id"]), title):
+        added = await WorkstreamStore(session_factory).add_thread(thread.id, UUID(master.config["workstream_id"]), title)
+        if added == "exists":
+            return thread
+        if added == "archived":
             # Archived since it was read: the thread goes with the project.
             await session_store.update_session_status(thread.id, "archived")
             return None
@@ -162,6 +166,27 @@ async def thread_bound(session_factory: Any, redis: Any, thread_id: UUID, bindin
             "there is out of date, ask the user to update Surogate Desktop, then start the thread again."
         ),
     )
+
+
+async def fail_threads_of_revoked(session_factory: Any, redis: Any, device_id: UUID) -> None:
+    """Fail to their masters the threads that waited for the computer *device_id* to set up their copies, now that
+    its revocation closed their binds: none of them can begin there."""
+    from sqlalchemy import select
+
+    from surogates.db.models import DeviceOperation
+    from surogates.devices.binding import BIND, binding_from
+    from surogates.devices.store import REVOKED_OUTCOME
+
+    async with session_factory() as db:
+        binds = (await db.execute(
+            select(DeviceOperation.root_session_id, DeviceOperation.args, DeviceOperation.outcome).where(
+                DeviceOperation.device_id == device_id, DeviceOperation.kind == BIND,
+                DeviceOperation.invocation_id == BIND, DeviceOperation.ordinal == 0,
+            )
+        )).all()
+    for bind in binds:
+        if "master" in bind.args and bind.outcome == REVOKED_OUTCOME:
+            await thread_bound(session_factory, redis, bind.root_session_id, binding_from(bind.args, bind.outcome))
 
 
 async def reopen_if_thread(session: Session, *, app_state: Any) -> None:

@@ -768,15 +768,6 @@ async def test_only_the_projects_live_threads_are_resolved_or_reopened(api, sess
         assert (await act_on(api, project, mine, action, their_token)).status_code == 404
 
 
-async def test_no_route_starts_a_thread(api):
-    # The master starts every thread: no card's route is left.
-    project = await create(api)
-    thread = await start(api, await master_of(api, project))
-    for path, body in (("threads", {"proposal_id": str(uuid4()), "key": "1"}), (f"threads/{thread.id}/start", None)):
-        response = await api.client.post(f"/v1/workstreams/{project['id']}/{path}", json=body, headers=api.auth())
-        assert response.status_code in (404, 405), (path, response.status_code, response.text)
-
-
 @pytest.mark.parametrize("method, path", [
     ("get", "threads"),
     ("get", "stream"),

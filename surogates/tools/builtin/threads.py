@@ -141,6 +141,46 @@ async def _own_thread(thread_id: str, **kwargs: Any) -> Any:
     return await kwargs["session_store"].get_session(session_id)
 
 
+async def _waiting_threads(**kwargs: Any) -> list[Any]:
+    """The calling master's threads that wait for the project's computer to set up their copies: made, not begun (no
+    row), and not stopped (archived)."""
+    from sqlalchemy import select
+
+    from surogates.db.models import Session as SessionRow
+    from surogates.db.models import WorkstreamThread
+
+    if not is_project_master(kwargs.get("session_config")):
+        return []
+    async with kwargs["session_factory"]() as db:
+        made = (await db.execute(
+            select(SessionRow.id, SessionRow.config).where(
+                SessionRow.parent_id == UUID(str(kwargs["session_id"])), SessionRow.status != "archived",
+                ~select(WorkstreamThread.session_id).where(WorkstreamThread.session_id == SessionRow.id).exists(),
+            ).order_by(SessionRow.created_at)
+        )).all()
+    return [thread for thread in made if "workstream_start" in (thread.config or {})]
+
+
+async def _waiting_thread(thread_id: str, **kwargs: Any) -> Any:
+    """The thread *thread_id* of the calling master's that waits for its computer, or None."""
+    return next((thread for thread in await _waiting_threads(**kwargs) if str(thread.id) == thread_id), None)
+
+
+def _waiting_row(thread: Any) -> dict[str, Any]:
+    """A waiting thread as the master's list shows a thread: in Waiting, on its computer."""
+    computer = (thread.config.get("execution") or {}).get("device_name") or "its computer"
+    return {
+        "thread_id": str(thread.id), "title": thread.config["workstream_start"]["title"], "group": "waiting",
+        "reason": "computer", "status_line": f"Starts once {computer} sets up its copy of the project's folder",
+    }
+
+
+async def _stop_waiting(thread: Any, status: str, **kwargs: Any) -> str:
+    """Stop a thread that waits for its computer: it never begins, whatever its computer answers later."""
+    await kwargs["session_store"].update_session_status(thread.id, "archived")
+    return json.dumps({"status": status, "thread_id": str(thread.id)})
+
+
 async def _message_thread_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
     from surogates.workstreams.store import WorkstreamStore
 
@@ -148,6 +188,11 @@ async def _message_thread_handler(arguments: dict[str, Any], **kwargs: Any) -> s
     if not message:
         return _error("message is required")
     thread = await _own_thread(thread_id, **kwargs)
+    if thread is None and await _waiting_thread(thread_id, **kwargs) is not None:
+        return _error(
+            f"Thread {thread_id} has not started: it starts once its computer sets up its copy of the project's "
+            "folder. To change its work, stop it and start another."
+        )
     if thread is None:
         return _error(f"No thread {thread_id} in this project.")
     if thread.status not in _ACCEPTS_MESSAGES:
@@ -182,6 +227,8 @@ async def _stop(thread: Any, reason: str, **kwargs: Any) -> bool:
 async def _stop_thread_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
     thread_id = _text(arguments, "thread_id")
     thread = await _own_thread(thread_id, **kwargs)
+    if thread is None and (waiting := await _waiting_thread(thread_id, **kwargs)) is not None:
+        return await _stop_waiting(waiting, "stopped", **kwargs)
     if thread is None:
         return _error(f"No thread {thread_id} in this project.")
     stopped = await _stop(thread, _text(arguments, "reason") or _STOP_REASON, **kwargs)
@@ -204,10 +251,11 @@ async def _list_threads_handler(arguments: dict[str, Any], **kwargs: Any) -> str
             UUID(master_config["workstream_id"]), with_files=False,
         )
     ]
-    return json.dumps({"threads": [
+    listed = [
         {"thread_id": row["id"], **{key: row[key] for key in ("title", "group", "reason", "status_line")}}
-        for row in rows if group is None or row["group"] == group
-    ]}, ensure_ascii=False)
+        for row in rows
+    ] + [_waiting_row(thread) for thread in await _waiting_threads(**kwargs)]
+    return json.dumps({"threads": [row for row in listed if group is None or row["group"] == group]}, ensure_ascii=False)
 
 
 async def _read_thread_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
@@ -216,6 +264,8 @@ async def _read_thread_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
 
     thread_id = _text(arguments, "thread_id")
     thread = await _own_thread(thread_id, **kwargs)
+    if thread is None and (waiting := await _waiting_thread(thread_id, **kwargs)) is not None:
+        return json.dumps({**_waiting_row(waiting), "progress": None, "report": None, "question": None}, ensure_ascii=False)
     if thread is None:
         return _error(f"No thread {thread_id} in this project.")
     projects = WorkstreamStore(kwargs["session_factory"])
@@ -241,6 +291,8 @@ async def _resolve_thread_handler(arguments: dict[str, Any], **kwargs: Any) -> s
 
     thread_id = _text(arguments, "thread_id")
     thread = await _own_thread(thread_id, **kwargs)
+    if thread is None and (waiting := await _waiting_thread(thread_id, **kwargs)) is not None:
+        return await _stop_waiting(waiting, "resolved", **kwargs)
     if thread is None:
         return _error(f"No thread {thread_id} in this project.")
     if thread.status not in _ACCEPTS_MESSAGES:

@@ -5,11 +5,12 @@ from __future__ import annotations
 import posixpath
 from collections import defaultdict
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from sqlalchemy import and_, any_, bindparam, delete, func, not_, or_, select, text, update
 from sqlalchemy.dialects.postgresql import ARRAY
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -211,9 +212,12 @@ class WorkstreamStore:
             if device_id not in live or master_id not in bound or (bound[master_id] is not None and "ok" not in bound[master_id])
         }
 
-    async def add_thread(self, session_id: UUID, workstream_id: UUID, title: str) -> bool:
-        """Record *session_id* as a thread of the project, and title its chat;
-        False, writing nothing, when the project has been archived.
+    async def add_thread(
+        self, session_id: UUID, workstream_id: UUID, title: str,
+    ) -> Literal["added", "archived", "exists"]:
+        """Record *session_id* as a thread of the project, and title its chat.
+        "archived", writing nothing, when the project has been archived;
+        "exists" when the thread was added already: one begin wins.
 
         The project's row is held while the thread is added, and an archive
         takes it before it reads the tree it archives, so a thread is either
@@ -226,11 +230,19 @@ class WorkstreamStore:
                 .with_for_update(read=True)
             )
             if live is None:
-                return False
-            db.add(WorkstreamThread(session_id=session_id, workstream_id=workstream_id, title=title))
+                return "archived"
+            added = await db.scalar(
+                pg_insert(WorkstreamThread)
+                .values(session_id=session_id, workstream_id=workstream_id, title=title)
+                .on_conflict_do_nothing(index_elements=[WorkstreamThread.session_id])
+                .returning(WorkstreamThread.session_id)
+            )
+            if added is None:
+                await db.rollback()
+                return "exists"
             await db.execute(update(SessionRow).where(SessionRow.id == session_id).values(title=title))
             await db.commit()
-            return True
+            return "added"
 
     async def get_thread(self, session_id: UUID) -> WorkstreamThread | None:
         async with self._sf() as db:

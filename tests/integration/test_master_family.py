@@ -92,6 +92,15 @@ async def test_a_masters_thread_takes_no_fork_type_or_name(api):
     assert await children_of(api, master) == []
 
 
+async def test_a_master_is_told_to_ask_the_user_rather_than_propose(api):
+    # A master whose log or memory still proposes: its call starts nothing, and it is told to ask first.
+    master = await master_of(api, await create(api))
+    for extra in ({"propose": True}, {"propose": True, "where": "device"}, {"where": "cloud"}):
+        refused = await call_tool(api, master, "agent", description="Draft A", prompt="Draft A.", **extra)
+        assert "ask the user in this conversation" in refused["error"], (extra, refused)
+    assert await children_of(api, master) == []
+
+
 async def test_resolve_is_refused_outside_a_project(api):
     chat_id = UUID((await api.client.post("/v1/sessions", json={}, headers=api.auth())).json()["id"])
     chat = await api.app.state.session_store.get_session(chat_id)

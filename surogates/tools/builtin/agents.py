@@ -864,6 +864,12 @@ async def _master_agent(arguments: dict[str, Any], **kwargs: Any) -> str:
 
     if arguments.get("fork") is True or arguments.get("agent_type") or arguments.get("name"):
         return _error("a thread starts from its brief alone: give its description and its prompt")
+    # A call written as threads were once proposed starts nothing: the user may have asked to approve each one.
+    if "propose" in arguments or "where" in arguments:
+        return _error(
+            "agent starts the thread at once and has no propose or where: to have the user approve it first, ask the "
+            "user in this conversation, then call agent without them"
+        )
     # As given: the thread handlers refuse what is not text.
     title, goal = arguments.get("description"), arguments.get("prompt")
     answer = _thread_answer(await threads._start_thread_handler({"title": title, "goal": goal}, **kwargs))

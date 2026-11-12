@@ -36,6 +36,7 @@ from surogates.db.models import Session as SessionRow
 from surogates.devices.binding import (
     BIND,
     RETIRE,
+    Binding,
     THREAD_ACTIONS,
     THREAD_KINDS,
     binding_from,
@@ -292,7 +293,10 @@ def _completing(device_id: UUID, generation: int, operation_id: UUID, digest: st
             ),
         )
         .values(outcome=outcome, completed_at=func.now())
-        .returning(DeviceOperation.id, DeviceOperation.kind, DeviceOperation.args, DeviceOperation.root_session_id)
+        .returning(
+            DeviceOperation.id, DeviceOperation.kind, DeviceOperation.args, DeviceOperation.outcome,
+            DeviceOperation.root_session_id,
+        )
     )
 
 
@@ -1298,8 +1302,10 @@ class DeviceOperations:
 
         The credential check is part of the write, not a step before it, so a
         reauthorization or revocation cannot land between the two.  A thread's
-        bind its master asked for begins the thread, or fails it, once: as it
-        is recorded, never for a duplicate.
+        bind its master asked for begins the thread, or fails it, as it is
+        recorded; and again for a duplicate, which the app sends until it is
+        acknowledged: the retry of a begin cut short.  A thread begun or
+        failed already is left as it is.
         """
         async with self._sf() as db:
             if not await self._current(db, device_id, generation):
@@ -1315,25 +1321,38 @@ class DeviceOperations:
                 if not await self._current(db, device_id, generation):
                     return "stale"
                 row = (await db.execute(
-                    select(DeviceOperation.device_id, DeviceOperation.digest)
-                    .where(DeviceOperation.id == operation_id)
+                    select(
+                        DeviceOperation.device_id, DeviceOperation.digest, DeviceOperation.kind, DeviceOperation.args,
+                        DeviceOperation.outcome, DeviceOperation.root_session_id,
+                    ).where(DeviceOperation.id == operation_id)
                 )).one_or_none()
         if completed is None and row is None:
             return "gone"
         if completed is None and (row.device_id != device_id or row.digest != digest):
             return "rejected"
-        if completed is not None and completed.kind == BIND and "master" in completed.args:
-            from surogates.workstreams.threads import thread_bound
-
-            # ponytail: a crash between the record and this leaves the thread made and never begun; a sweep of
-            # threads with a recorded bind and no row would begin them.
-            try:
-                await thread_bound(self._sf, self._redis, completed.root_session_id, binding_from(completed.args, outcome))
-            except Exception:
-                logger.exception("Could not begin or fail thread %s after its bind", completed.root_session_id)
+        recorded = completed if completed is not None else row
+        if recorded.kind == BIND and "master" in recorded.args:
+            await self._thread_bound(recorded.root_session_id, binding_from(recorded.args, recorded.outcome))
         # Announced for a duplicate too: its worker may have missed the first.
         await self._announce(operation_channel(operation_id), "completed")
         return "completed" if completed is not None else "duplicate"
+
+    async def _thread_bound(self, thread_id: UUID, binding: Binding) -> None:
+        """Begin or fail the thread *thread_id* its master started on this computer, as its bind's answer reads.
+
+        Shielded, so the link's deadline for recording the answer cuts no
+        begin short; and logged, so the answer stays recorded whatever the
+        begin meets.
+        """
+        from surogates.workstreams.threads import thread_bound
+
+        async def bound() -> None:
+            try:
+                await thread_bound(self._sf, self._redis, thread_id, binding)
+            except Exception:
+                logger.exception("Could not begin or fail thread %s after its bind", thread_id)
+
+        await asyncio.shield(bound())
 
     async def start_transfer(
         self,

@@ -11,7 +11,7 @@ The agent family moved a project's master onto `agent`. Proposals came with it a
 
 ## What changes
 
-- **The master starts every thread.** `agent` in a project's master starts a thread, in the cloud or on the user's computer. `propose` and `where` are gone from `agent`; `resolve` on `stop_agent` stays.
+- **The master starts every thread.** `agent` in a project's master starts a thread, in the cloud or on the user's computer. `propose` and `where` are gone from `agent`; `resolve` on `stop_agent` stays. A thread works where its project does: a project in the cloud has no threads on the user's computer, and its master points the user to a project made in Surogate Desktop for that.
 - **A thread on the user's computer starts from the server.** The master's `agent` call makes the thread (not begun) and queues a `bind` for the project's computer that names the master instead of a page's confirmation token. Surogate Desktop accepts such a bind for a thread's copy when the master's chat is bound there to a project folder that is still the one its user chose, a copy can be made, and the folder the server names is that folder: the checks `prepareThreadFolder` makes today. It records the thread's binding to its own copy, with the project folder's mode. This grants nothing new: the master already works in the folder itself, and a thread's changes reach it only through the same landing.
 - **The thread begins when its computer answers.** The server begins it (its row, its goal, the master's `worker.spawned`, its queue) as it records the computer's answer to that bind, once. A computer that is offline answers when it comes back; until then the thread has no row and the master was told it waits for the computer. A refusal (an older Surogate Desktop, the folder chosen again or gone) is told to the master as the thread's failure, with the computer's words.
 - **No cards.** The `thread.proposed` event, the proposal card (and its "Start all"), the routes that start a thread from a card (`POST /v1/workstreams/{id}/threads`, `POST …/threads/{thread_id}/start`), a thread's `workstream_card`, the user-started `worker.spawned` news, and the desktop bridge's `prepareThreadFolder` and the web app's card flow are deleted. Old `thread.proposed` events in existing logs read as nothing.
@@ -24,7 +24,7 @@ The agent family moved a project's master onto `agent`. Proposals came with it a
 
 ## Release
 
-Surogate Desktop must ship the new bind before the runtime: an older app answers the server's bind with a refusal, and the thread fails with "update Surogate Desktop".
+The runtime ships first. An older Surogate Desktop answers the server's master-named bind with a refusal, and the thread fails to its master with "update Surogate Desktop", which is the right advice. The other order breaks the older web client the old runtime serves: the new app has no `prepareThreadFolder`, so a computer project's card says to update an app that is current, and a cloud project's card for the user's computer waits for a bind the new app no longer accepts.
 
 ## Not done
 

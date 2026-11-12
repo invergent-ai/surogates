@@ -27,9 +27,10 @@ from .test_devices import (  # noqa: F401  (api is a fixture)
     add_user,
     api,
     binding,
+    eventually,
     register,
 )
-from .test_local_threads import confirmed, held, journal
+from .test_local_threads import confirmed, has_begun, held, journal
 from .test_workstream_threads import children_of, events_of, queued
 from .test_workstreams import create, master_of, system_prompt, turn_calling
 
@@ -200,6 +201,99 @@ async def test_two_threads_started_while_the_computer_is_away_each_begin_once_it
     assert sorted(e.data["worker_id"] for e in spawned) == sorted([str(one.id), str(two.id)])
     assert all(e.data["bound"] for e in spawned)
     assert await queued(api, one) and await queued(api, two)
+
+
+async def test_a_thread_whose_begin_was_cut_short_begins_when_its_computer_answers_again(api, monkeypatch):
+    import surogates.workstreams.threads as threads_module
+
+    _, device, master, thread = await a_waiting_thread(api)
+    real, calls = threads_module.thread_bound, []
+
+    async def broken_once(*args, **kwargs):
+        calls.append(args)
+        if len(calls) == 1:
+            raise RuntimeError("the database went away")
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(threads_module, "thread_bound", broken_once)
+    ops = journal(api)
+    [bind] = await ops.pending(UUID(device["id"]), 1)
+    bound = {"ok": {"history": {"thread": str(thread.id)}}}
+    assert await ops.complete(UUID(device["id"]), 1, bind.id, bind.digest, bound) == "completed"
+    assert await events_of(api, thread.id) == []
+    # The app sends its answer again as it reconnects: that is the begin's retry.
+    assert await ops.complete(UUID(device["id"]), 1, bind.id, bind.digest, bound) == "duplicate"
+    [goal] = await events_of(api, thread.id, EventType.USER_MESSAGE)
+    assert goal.data == {"content": "Draft the A memo as A.docx."}
+    assert len(await events_of(api, master.id, EventType.WORKER_SPAWNED)) == 1
+
+
+async def test_a_bind_answer_whose_link_gives_up_still_begins_the_thread(api, monkeypatch):
+    import asyncio
+
+    import surogates.workstreams.threads as threads_module
+
+    _, device, master, thread = await a_waiting_thread(api)
+    real = threads_module.begin_thread
+
+    async def slow(**kwargs):
+        await asyncio.sleep(0.3)
+        return await real(**kwargs)
+
+    monkeypatch.setattr(threads_module, "begin_thread", slow)
+    ops = journal(api)
+    [bind] = await ops.pending(UUID(device["id"]), 1)
+    bound = {"ok": {"history": {"thread": str(thread.id)}}}
+    # The link's own deadline runs out while the thread begins: the begin goes on.
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(ops.complete(UUID(device["id"]), 1, bind.id, bind.digest, bound), 0.05)
+    async def spawned() -> bool:
+        return len(await events_of(api, master.id, EventType.WORKER_SPAWNED)) == 1
+
+    await eventually(spawned)
+    assert await has_begun(api, str(thread.id))
+    assert (await api.app.state.session_store.get_session(thread.id)).status != "archived"
+
+
+async def test_a_thread_begun_twice_at_once_begins_once(api):
+    import asyncio
+
+    from surogates.devices.binding import Binding
+    from surogates.workstreams.threads import thread_bound
+
+    _, _, master, thread = await a_waiting_thread(api)
+    state = api.app.state
+    await asyncio.gather(*(thread_bound(state.session_factory, state.redis, thread.id, Binding("bound")) for _ in range(2)))
+    assert len(await events_of(api, thread.id, EventType.USER_MESSAGE)) == 1
+    assert len(await events_of(api, master.id, EventType.WORKER_SPAWNED)) == 1
+    assert (await state.session_store.get_session(thread.id)).status != "archived"
+
+
+async def test_a_thread_waiting_for_a_computer_that_is_removed_fails_to_its_master(api):
+    _, device, master, thread = await a_waiting_thread(api)
+    await revoke(api, device)
+    [failed] = await events_of(api, master.id, EventType.WORKER_FAILED)
+    assert failed.data["worker_id"] == str(thread.id) and "Local access to this computer was revoked" in failed.data["error"]
+    assert (await api.app.state.session_store.get_session(thread.id)).status == "archived"
+
+
+async def test_a_waiting_thread_is_listed_and_stopped_and_says_it_has_not_started(api):
+    _, device, master, thread = await a_waiting_thread(api)
+    listed = await held(api, master, "list_agents")
+    [row] = [a for a in listed["agents"] if a["agent_id"] == str(thread.id)]
+    assert (row["description"], row["group"], row["reason"]) == ("Draft A", "waiting", "computer"), row
+    assert COMPUTER in row["status_line"]
+    read = await held(api, master, "list_agents", agent_id=str(thread.id))
+    assert (read["agent_id"], read["group"]) == (str(thread.id), "waiting"), read
+    sent = await held(api, master, "send_message", to=str(thread.id), message="Use euros.", summary="Currency")
+    assert "has not started" in sent["error"], sent
+    stopped = await held(api, master, "stop_agent", agent_id=str(thread.id))
+    assert stopped["status"] == "stopped", stopped
+    assert (await api.app.state.session_store.get_session(thread.id)).status == "archived"
+    # Its computer comes back and sets up its copy: a stopped thread never begins.
+    await answer_bind(api, device, {"ok": {"history": {"thread": str(thread.id)}}})
+    assert await events_of(api, thread.id) == []
+    assert await events_of(api, master.id, EventType.WORKER_SPAWNED) == []
 
 
 async def test_a_refused_bind_tells_the_master_the_thread_failed(api):
