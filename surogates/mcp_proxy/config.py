@@ -7,7 +7,6 @@ pool tuning.
 
 from __future__ import annotations
 
-import os
 from typing import Any, Literal
 
 from pydantic import Field
@@ -17,6 +16,8 @@ from surogates.config import (
     APISettings,
     DatabaseSettings,
     RedisSettings,
+    _apply_config_environ,
+    _config_lock,
     _load_yaml_config,
     _flatten_yaml,
 )
@@ -60,11 +61,10 @@ class McpProxySettings(BaseSettings):
 
 def load_proxy_settings() -> McpProxySettings:
     """Load proxy settings from config file + environment variables."""
-    yaml_config = _load_yaml_config()
-    if yaml_config:
-        flat = _flatten_yaml(yaml_config)
-        for key, value in flat.items():
-            if key not in os.environ:
-                os.environ[key] = value
+    # As load_settings: read and applied under its lock.
+    with _config_lock:
+        yaml_config = _load_yaml_config()
+        if yaml_config:
+            _apply_config_environ(_flatten_yaml(yaml_config))
 
     return McpProxySettings()
