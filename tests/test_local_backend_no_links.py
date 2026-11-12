@@ -109,6 +109,9 @@ async def test_the_bucket_still_works_as_before(tmp_path):
     assert not (tmp_path / "b" / "x" / "y").exists()  # empty parents removed, up to the bucket
     assert await backend.delete_prefix("b", "x") == 1
     assert not (tmp_path / "b" / "x").exists()
-    for bad in ("../escape", "/etc/passwd", "a/../../b"):
+    for bad in ("../escape", "/etc/passwd"):
         with pytest.raises(ValueError):
             await backend.read("b", bad)
+    # New: a key through .. is refused even where it would stay in the bucket (it was resolved before).
+    with pytest.raises(ValueError):
+        await backend.read("b", "a/../x/w.txt")
