@@ -19,10 +19,9 @@ from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
-
-import surogates.harness.loop as loop_module
 from agent_os.egress_policy import EgressPolicy
 
+import surogates.harness.loop as loop_module
 from surogates.governance.policy import GovernanceGate
 from surogates.harness.budget import IterationBudget
 from surogates.harness.loop import AgentHarness
