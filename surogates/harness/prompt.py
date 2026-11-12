@@ -56,6 +56,13 @@ CHANNELS_WITHOUT_ARTIFACT_PANEL: frozenset[str] = frozenset({
     "slack", "discord", "teams", "telegram", "whatsapp", "signal", "email",
 })
 
+# Tools that work in the session's workspace (`$HOME`): the Workspace block
+# in the Context section is shown only when the session has one of them.
+WORKSPACE_TOOLS: frozenset[str] = frozenset({
+    "read_file", "write_file", "patch", "search_files", "list_files",
+    "terminal", "process", "office_read", "office_edit", "run_coding_agent",
+})
+
 # Maximum bytes to read from any single memory/skill file.
 _MAX_FILE_BYTES: int = 32_768
 
@@ -123,6 +130,9 @@ class PromptBuilder:
         self._speaker: tuple[str, str] | None = speaker
         self.skills: list = skills or []
         self._available_tools: set[str] = available_tools or set()
+        # Whether the caller said which tools the session has (an empty set
+        # is an answer: none).  Without it, tool-keyed blocks keep rendering.
+        self._tools_known: bool = available_tools is not None
         self._memory_manager: MemoryManager | None = memory_manager
         self._session: Session | None = session
         # pre-loaded bundle content.  When set,
@@ -915,8 +925,12 @@ class PromptBuilder:
         # stay within the workspace.  The leading newline keeps a blank
         # line between the preceding bullet and the Workspace Rules
         # heading after the final ``"\n".join(parts)``.
+        # Only for a session that can reach it: the rules are about the file
+        # tools and the terminal.  Without them (an agent whose policy denies
+        # them) the block sent the model to look for the task's data in
+        # `$HOME` and call `terminal`, a tool it does not have.
         workspace = self._get_workspace_path()
-        if workspace:
+        if workspace and self._offers_workspace_tools():
             parts.append("- **Workspace**: `$HOME` (your working directory)")
             parts.append("\n" + self._prompts.get("identity/workspace_rules"))
 
@@ -1202,6 +1216,11 @@ class PromptBuilder:
         if self._session is not None:
             return getattr(self._session, "channel", None)
         return None
+
+    def _offers_workspace_tools(self) -> bool:
+        """Whether the session has a tool that works in the workspace (or
+        the caller did not say which tools it has)."""
+        return not self._tools_known or bool(self._available_tools & WORKSPACE_TOOLS)
 
     def _get_workspace_path(self) -> str | None:
         """Extract workspace path from session config or return None."""
