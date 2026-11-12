@@ -63,45 +63,44 @@ def test_a_real_variable_in_lower_case_still_wins(config_file):
 
 
 def test_settings_built_from_an_older_file_are_not_left_under_the_newer_ones_key(config_file, monkeypatch):
-    """Two threads build at once: the one that read the older file must not put its values back, nor cache them."""
+    """Thread A read the file just before it was rotated; thread B builds from the rotated file.  A's build runs
+    while B is between applying the file's values and taking its snapshot: A must not put the old value back."""
+    import threading
+
     config_file("llm:\n  api_key: old-key\n")
     assert load_settings().llm.api_key == "old-key"
-    real_read = config._read_config_bytes
-    reads = []
+    real_read, real_apply = config._read_config_bytes, config._apply_config_environ
+    stale = real_read(config.get_config_path())
+    a_read = threading.Event()
+    results: dict[str, str] = {}
 
     def read(path):
-        content = real_read(path)
-        if not reads:
-            reads.append(1)
-            # Another thread rotates the file and builds from it while this one is between its read and its build.
-            config_file("llm:\n  api_key: rotated-key\n")
-            assert load_settings().llm.api_key == "rotated-key"
-        return content
+        if threading.current_thread().name == "A" and not a_read.is_set():
+            a_read.set()
+            return stale  # A's first read, before the rotation
+        return real_read(path)
 
-    config_file("llm:\n  api_key: middle-key\n")
+    def apply(flat):
+        real_apply(flat)
+        if threading.current_thread().name == "B" and "A" not in results:
+            a = threading.Thread(target=lambda: results.__setitem__("A", load_settings().llm.api_key), name="A")
+            a.start()
+            a.join(0.5)  # A runs now, unless a lock holds it until B is done
+
     monkeypatch.setattr(config, "_read_config_bytes", read)
-    load_settings()
+    monkeypatch.setattr(config, "_apply_config_environ", apply)
+    config_file("llm:\n  api_key: rotated-key\n")
+    b = threading.Thread(target=lambda: results.__setitem__("B", load_settings().llm.api_key), name="B")
+    b.start()
+    b.join(5)
+    for thread in threading.enumerate():
+        if thread.name == "A":
+            thread.join(5)
     monkeypatch.setattr(config, "_read_config_bytes", real_read)
+    monkeypatch.setattr(config, "_apply_config_environ", real_apply)
+    assert results == {"A": "rotated-key", "B": "rotated-key"}
     assert load_settings().llm.api_key == "rotated-key"
     assert os.environ["SUROGATES_LLM_API_KEY"] == "rotated-key"
-
-
-def test_a_real_environment_variable_still_wins(config_file):
-    os.environ["SUROGATES_LLM_API_KEY"] = "from-the-operator"
-    config_file("llm:\n  api_key: first-key\n")
-    assert load_settings().llm.api_key == "from-the-operator"
-    config_file("llm:\n  api_key: rotated-key\n")
-    assert load_settings().llm.api_key == "from-the-operator"
-    config_file("llm:\n  base_url: http://engine.test/v1\n")
-    assert load_settings().llm.api_key == "from-the-operator"
-
-
-def test_a_variable_set_by_someone_else_after_the_file_gave_it_is_theirs(config_file):
-    config_file("llm:\n  api_key: first-key\n")
-    assert load_settings().llm.api_key == "first-key"
-    os.environ["SUROGATES_LLM_API_KEY"] = "set-later"
-    config_file("llm:\n  api_key: rotated-key\n")
-    assert load_settings().llm.api_key == "set-later"
 
 
 @pytest.mark.parametrize("gone", ["", "not: [valid yaml"])

@@ -17,6 +17,7 @@ from surogates.config import (
     DatabaseSettings,
     RedisSettings,
     _apply_config_environ,
+    _config_lock,
     _load_yaml_config,
     _flatten_yaml,
 )
@@ -60,8 +61,10 @@ class McpProxySettings(BaseSettings):
 
 def load_proxy_settings() -> McpProxySettings:
     """Load proxy settings from config file + environment variables."""
-    yaml_config = _load_yaml_config()
-    if yaml_config:
-        _apply_config_environ(_flatten_yaml(yaml_config))
+    # As load_settings: read and applied under its lock.
+    with _config_lock:
+        yaml_config = _load_yaml_config()
+        if yaml_config:
+            _apply_config_environ(_flatten_yaml(yaml_config))
 
     return McpProxySettings()
