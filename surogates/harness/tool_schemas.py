@@ -136,6 +136,8 @@ def drop_unusable_tools(
     is_voice: bool = False,
     has_forms: bool = False,
     has_file_pane: bool = True,
+    has_image_model: bool = True,
+    has_video_model: bool = True,
 ) -> list[dict[str, Any]]:
     """Drop tools whose backing resource this agent does not have.
 
@@ -156,6 +158,11 @@ def drop_unusable_tools(
     could only ever be refused.
 
     The office tools go only where ``has_file_pane``.
+
+    ``generate_image`` goes only where an image model is wired
+    (*has_image_model*), ``generate_video`` only where a video model is
+    (*has_video_model*): whatever the session's tool list names, a media
+    tool with no model behind it could only answer "not available".
 
     Never returns an empty list: a request with no tools at all is worse
     than an oversized one.
@@ -179,6 +186,10 @@ def drop_unusable_tools(
         drop.add("send_form")
     if not has_file_pane:
         drop |= _OFFICE_TOOLS
+    if not has_image_model:
+        drop.add("generate_image")
+    if not has_video_model:
+        drop.add("generate_video")
     if not drop:
         return schemas
 
