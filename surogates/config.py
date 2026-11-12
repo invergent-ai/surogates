@@ -15,6 +15,7 @@ individually configurable — there is no single "home directory".
 from __future__ import annotations
 
 import os
+import threading
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
@@ -1094,10 +1095,7 @@ def load_settings() -> Settings:
     # The file is read once: the key holds the bytes the settings come from.
     yaml_config = _parse_yaml_config(content)
     if yaml_config:
-        flat = _flatten_yaml(yaml_config)
-        for key, value in flat.items():
-            if key not in os.environ:
-                os.environ[key] = value
+        _apply_config_environ(_flatten_yaml(yaml_config))
 
     # Keyed by the environment after the file's values went into it, taken
     # before the settings read it: a variable another thread sets meanwhile
@@ -1110,6 +1108,36 @@ def load_settings() -> Settings:
 
 #: The last settings built, keyed by what they were built from.
 _settings_cache: tuple[tuple, Any] | None = None
+
+#: The ``SUROGATES_*`` variables the config file put into the environment,
+#: with the values it put there.
+_config_environ: dict[str, str] = {}
+_config_environ_lock = threading.Lock()
+
+
+def _apply_config_environ(flat: dict[str, str]) -> None:
+    """Put the config file's values (*flat*, as ``_flatten_yaml`` gives
+    them) into the environment, where pydantic-settings reads them.
+
+    A real environment variable wins, as before.  A value the file put there
+    earlier follows the file: changed with it, removed when the file no longer
+    has it (a rotated key or password in the file reaches the next
+    ``load_settings()``; before, the first value read stayed for the life of
+    the process).  A variable someone else set or changed since is theirs and
+    stays.  Not called for a file that is missing, empty or unreadable: what
+    it gave last is kept, as before.
+    """
+    with _config_environ_lock:
+        for key, put in list(_config_environ.items()):
+            if os.environ.get(key) != put:
+                del _config_environ[key]  # set or removed by someone else since
+            elif key not in flat:
+                del os.environ[key]
+                del _config_environ[key]
+        for key, value in flat.items():
+            if key in _config_environ or key not in os.environ:
+                os.environ[key] = value
+                _config_environ[key] = value
 
 
 def _surogates_environment() -> frozenset[tuple[str, str]]:
