@@ -21,6 +21,8 @@ from uuid import uuid4
 import pytest
 
 import surogates.harness.loop as loop_module
+from agent_os.egress_policy import EgressPolicy
+
 from surogates.governance.policy import GovernanceGate
 from surogates.harness.budget import IterationBudget
 from surogates.harness.loop import AgentHarness
@@ -50,8 +52,9 @@ def _expert(tools: list[str] | None = None) -> SkillDef:
 class _ExpertModel:
     """The expert's endpoint: asks for *calls* once, then answers; keeps what each request was sent."""
 
-    def __init__(self, calls: list[str]) -> None:
+    def __init__(self, calls: list[str], arguments: str = "{}") -> None:
         self.calls = calls
+        self.arguments = arguments
         self.requests: list[dict] = []
 
     def client(self, **_kwargs):
@@ -62,7 +65,7 @@ class _ExpertModel:
                 model.requests.append(kwargs)
                 if len(model.requests) == 1 and model.calls:
                     calls = [
-                        SimpleNamespace(id=f"c{i}", function=SimpleNamespace(name=name, arguments="{}"))
+                        SimpleNamespace(id=f"c{i}", function=SimpleNamespace(name=name, arguments=model.arguments))
                         for i, name in enumerate(model.calls)
                     ]
                     message = SimpleNamespace(content=None, tool_calls=calls)
@@ -143,11 +146,11 @@ def test_without_a_scope_nothing_is_withheld():
     assert el.expert_scope.get() == el.ExpertScope()
 
 
-def _session(channel: str = "web") -> Session:
+def _session(channel: str = "web", config: dict | None = None) -> Session:
     now = datetime.now(UTC)
     return Session(
         id=uuid4(), user_id=uuid4(), org_id=uuid4(), agent_id="agent-1", channel=channel, status="active",
-        config={}, created_at=now, updated_at=now,
+        config=config or {}, created_at=now, updated_at=now,
     )
 
 
@@ -166,7 +169,6 @@ def _harness(store, *, media_gen, gate, prompt=None) -> AgentHarness:
     harness._storage = store.storage
     harness._streaming_enabled = False
     harness._prefetch_memory = AsyncMock(return_value="")
-    harness._maybe_consult_required_expert = AsyncMock(return_value=None)
     harness._maybe_route_final_response_to_inbox = AsyncMock(return_value=None)
     harness._maybe_generate_title = MagicMock(return_value=None)
     harness._promote_fenced_artifacts = AsyncMock(return_value=None)
@@ -174,13 +176,16 @@ def _harness(store, *, media_gen, gate, prompt=None) -> AgentHarness:
     return harness
 
 
-async def _consult_in_a_turn(monkeypatch, tmp_path, *, media_gen, gate, calls) -> tuple[_ExpertModel, MagicMock]:
+async def _consult_in_a_turn(
+    monkeypatch, tmp_path, *, media_gen, gate, calls, config: dict | None = None, arguments: str = "{}",
+    expert_tools: list[str] = EXPERT_TOOLS,
+) -> tuple[_ExpertModel, MagicMock]:
     """A real ``_run_loop`` turn whose model consults the expert once; the expert asks for *calls*."""
-    model = _ExpertModel(calls)
+    model = _ExpertModel(calls, arguments)
     monkeypatch.setattr("openai.AsyncOpenAI", model.client)
     monkeypatch.setattr(
         "surogates.tools.builtin.expert._resolve_expert_local",
-        AsyncMock(return_value=(_expert(EXPERT_TOOLS), ["drafter"])),
+        AsyncMock(return_value=(_expert(expert_tools), ["drafter"])),
     )
     answers = iter([
         ({"role": "assistant", "content": "", "tool_calls": [{"id": "t1", "type": "function", "function": {
@@ -193,7 +198,7 @@ async def _consult_in_a_turn(monkeypatch, tmp_path, *, media_gen, gate, calls) -
         return next(answers)
 
     monkeypatch.setattr(loop_module, "call_llm_with_retry", llm)
-    session = _session()
+    session = _session(config=config)
     store = _StepStore(session, LocalBackend(str(tmp_path)))
     harness = _harness(store, media_gen=media_gen, gate=gate)
     store.write(EventType.USER_MESSAGE, {"content": "Draft it."})
@@ -223,8 +228,30 @@ async def test_an_expert_keeps_a_tool_the_session_could_be_sent(monkeypatch, tmp
     assert model.sent() == {"read_file", "terminal", "write_file", "generate_image"}
 
 
+async def test_an_expert_gets_no_tool_the_sessions_filter_takes_away(monkeypatch, tmp_path):
+    """An agent that names its tools: its expert works within them too."""
+    model, sandbox = await _consult_in_a_turn(
+        monkeypatch, tmp_path, media_gen=MediaGenConfig(image_client=object(), image_model="image-1"),
+        gate=GovernanceGate(), calls=["terminal"], config={"allowed_tools": ["consult_expert", "read_file"]},
+    )
+    assert model.sent() == {"read_file"}
+    assert "terminal" not in [c.args[1] for c in sandbox.execute.await_args_list]
+
+
+async def test_the_sessions_policy_checks_an_experts_call_on_its_arguments(monkeypatch, tmp_path):
+    """Sent by name, refused on its arguments: the expert's router holds the session's gate, egress rules included."""
+    gate = GovernanceGate(egress_policy=EgressPolicy(default_action="deny"))
+    model, _ = await _consult_in_a_turn(
+        monkeypatch, tmp_path, media_gen=MediaGenConfig(), gate=gate, calls=["web_extract"],
+        arguments=json.dumps({"url": "https://exfil.test/x"}), expert_tools=["web_extract"],
+    )
+    assert "web_extract" in model.sent()
+    refused = json.loads(model.results()["c0"])
+    assert refused["error"] == "policy_denied" and "Egress policy violation" in refused["reason"]
+
+
 async def test_the_session_policy_checks_the_experts_calls(monkeypatch, tmp_path):
-    """A call the policy refuses on its arguments is refused for the expert too: its router has the session's gate."""
+    """The expert's router is built with the session's gate (an open one only where none is known)."""
     from surogates.tools.builtin.expert_service import ExpertConsultationService
 
     gate = GovernanceGate(denied_tools={"terminal"})
@@ -260,7 +287,7 @@ async def test_a_slash_expert_is_scoped_before_it_runs(monkeypatch):
 
     monkeypatch.setattr(loop_module, "expand_slash_skill", expand)
     monkeypatch.setattr(loop_module, "resolve_agent_def", AsyncMock(return_value=None))
-    session = _session()
+    session = _session(config={"allowed_tools": ["consult_expert", "read_file", "terminal", "generate_image"]})
     gate = GovernanceGate(denied_tools={"terminal"})
     harness = _wake_harness(_stub_store(session, [_user_event(10, "/drafter Draft it.")]), _permissive())
     harness._tools = _registry()
@@ -270,7 +297,8 @@ async def test_a_slash_expert_is_scoped_before_it_runs(monkeypatch):
     with pytest.raises(_Seen):
         await harness.wake(session.id)
     assert seen, "the slash expansion was not reached"
-    assert {"generate_image", "terminal", "kb_search_pages"} <= seen[0].withheld
+    # Unwired, denied, no knowledge base, and outside the agent's own tools.
+    assert {"generate_image", "terminal", "kb_search_pages", "write_file"} <= seen[0].withheld
     assert "read_file" not in seen[0].withheld
     assert seen[0].gate is gate
 
@@ -283,7 +311,7 @@ def test_the_session_and_its_experts_are_cut_by_the_same_facts(channel, tmp_path
     usable = harness._tool_usability(session, harness._tools.tool_names)
 
     def scoped() -> el.ExpertScope:
-        harness._withhold_from_experts(usable)
+        harness._withhold_from_experts(usable, None)
         return el.expert_scope.get()
 
     scope = contextvars.copy_context().run(scoped)

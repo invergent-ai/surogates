@@ -1928,7 +1928,7 @@ class AgentHarness(
             **channel_tool_flags(getattr(session, "channel", None)),
             # A chat with an owner of its own makes and changes its agent's
             # schedules, and a scheduled run changes its own (the tools it
-            # may not call are taken off in _run_loop); anything someone owns,
+            # may not call are taken off by its tool filter); anything someone owns,
             # helpers included, can read them.  Whether a tool is allowed at
             # all is the policy's, by name; whether /loop is on, the
             # agent's.  No evaluation row: no one is behind it.
@@ -1962,16 +1962,32 @@ class AgentHarness(
             has_video_model="generate_video" not in _unwired_media,
         )
 
-    def _withhold_from_experts(self, usable: dict[str, bool]) -> None:
-        """Keep from any expert this wake consults what *usable* takes off the
-        session's request, and what its policy lets no one call unasked; the
-        expert's calls are checked against the session's policy
+    def _withhold_from_experts(self, usable: dict[str, bool], offered: Iterable[str] | None) -> None:
+        """Keep from any expert this wake consults every tool the session
+        could not be sent: one outside *offered* (the session's tool filter
+        after its gates; ``None``: every tool), one *usable* takes off its
+        request, and one its policy lets no one call unasked.  The expert's
+        calls are checked against the session's policy
         (``expert_loop.expert_scope``)."""
-        withheld = unusable_tool_names(**usable)
+        names = set(self._tools.tool_names)
+        withheld = set(unusable_tool_names(**usable))
+        if offered is not None:
+            withheld |= names - set(offered)
         gate = self._governance_gate
         if gate is not None:
-            withheld |= {name for name in self._tools.tool_names if not gate.runs_unasked(name)}
+            withheld |= {name for name in names if not gate.runs_unasked(name)}
         expert_scope.set(ExpertScope(withheld=frozenset(withheld), gate=gate))
+
+    def _scope_experts_before_the_turn(self, session: Session) -> None:
+        """``_withhold_from_experts`` for an expert run before the turn's tool
+        list exists (``/<expert>``), from the same filter and gate."""
+        offered = self._tool_filter_for_session(session)
+        if offered is None:
+            offered = set(self._tools.tool_names)
+        gate = self._governance_gate
+        if gate is not None:
+            offered = {name for name in offered if gate.offers(name)}
+        self._withhold_from_experts(self._tool_usability(session, offered), offered)
 
     # ------------------------------------------------------------------
     # Slash-command capability gate
@@ -2712,7 +2728,7 @@ class AgentHarness(
             elif last_user_content.startswith("/"):
                 # An expert consulted here gets only tools the session could
                 # be sent, as one its model consults does.
-                self._withhold_from_experts(self._tool_usability(session, self._tools.tool_names))
+                self._scope_experts_before_the_turn(session)
                 expansion = await expand_slash_skill(
                     text=last_user_content,
                     tools=self._tools,
@@ -3270,8 +3286,9 @@ class AgentHarness(
         whatsapp_forms = getattr(self, "_whatsapp_forms", ())
         usable = self._tool_usability(session, (s["function"]["name"] for s in tool_schemas))
         tool_schemas = drop_unusable_tools(tool_schemas, **usable)
-        # A consulted expert's model is not sent them either.
-        self._withhold_from_experts(usable)
+        # A consulted expert's model is not sent them, nor what the filter
+        # and the policy took away.
+        self._withhold_from_experts(usable, tool_filter)
         tool_schemas = describe_for_device(tool_schemas, session.config)
         tool_schemas = describe_for_conversation(
             tool_schemas, channel=session.channel, forms=whatsapp_forms,

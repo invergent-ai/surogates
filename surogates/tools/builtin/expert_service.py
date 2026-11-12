@@ -235,25 +235,27 @@ class ExpertConsultationService:
     def _resolve_tool_router(self) -> Any:
         if self._tool_router is not None:
             return self._tool_router
+        # The consulting session's policy holds for its expert's calls too.
+        gate = expert_scope.get().gate
         if self._sandbox_pool is None:
-            return _RegistryOnlyToolRouter(self._tool_registry)
+            return _RegistryOnlyToolRouter(self._tool_registry, gate)
 
         from surogates.governance.policy import GovernanceGate
         from surogates.tools.router import ToolRouter
 
-        # The consulting session's policy holds for its expert's calls too.
         return ToolRouter(
             self._tool_registry,
             self._sandbox_pool,
-            expert_scope.get().gate or GovernanceGate(),
+            gate if gate is not None else GovernanceGate(),
         )
 
 
 class _RegistryOnlyToolRouter:
     """Minimal fallback router for tests and harness-local expert tools."""
 
-    def __init__(self, registry: Any) -> None:
+    def __init__(self, registry: Any, governance: Any | None = None) -> None:
         self._registry = registry
+        self.governance = governance
 
     async def execute(
         self,
@@ -265,6 +267,16 @@ class _RegistryOnlyToolRouter:
         workspace_path: str | None = None,
         session_config: dict[str, Any] | None = None,
     ) -> str:
+        if self.governance is not None:
+            try:
+                parsed = json.loads(arguments) if isinstance(arguments, str) and arguments.strip() else arguments
+            except json.JSONDecodeError:
+                parsed = None
+            decision = self.governance.check(
+                name, parsed if isinstance(parsed, dict) else None, session_id=str(session_id),
+            )
+            if not decision.allowed:
+                return json.dumps({"error": "policy_denied", "tool": name, "reason": decision.reason})
         return await self._registry.dispatch(
             name,
             arguments,
