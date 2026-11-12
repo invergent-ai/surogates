@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import codecs
 import contextlib
+import errno
 import io
 import json
 import logging
@@ -16,6 +17,9 @@ import os
 import re
 import shutil
 import stat as stat_module
+import subprocess
+import tempfile
+import threading
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any, BinaryIO
@@ -582,6 +586,274 @@ def _page(fh: BinaryIO, encoding: str, offset: int, limit: int, max_bytes: int) 
     return LinePage(fh.read(fits[shown - 1] - begin if shown else max_bytes), total)
 
 
+_O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+# O_PATH where there is one: a folder on the way needs no read permission
+# (as with a path), only search.  A link opened so is ENOTDIR with O_DIRECTORY.
+_FOLDER_FLAGS = getattr(os, "O_PATH", os.O_RDONLY) | getattr(os, "O_DIRECTORY", 0) | _O_NOFOLLOW | _O_CLOEXEC
+#: Whether this system opens, makes, removes, renames and stats by folder
+#: descriptor (POSIX does; os.replace shares os.rename's).  Without it a
+#: write goes by path, as before.
+_BY_FOLDER = (
+    bool(_O_NOFOLLOW)
+    and {os.open, os.mkdir, os.unlink, os.rename, os.stat} <= os.supports_dir_fd
+    and os.stat in os.supports_follow_symlinks
+)
+_SWAPPED = "a folder on the file's path was replaced after the path was checked; nothing outside the workspace was touched"
+
+
+def _contained_parts(real_root: str, key: str) -> tuple[list[str], str]:
+    """*key*'s folders below *real_root* (a resolved path) and its own name.
+    Raises PermissionError for a key that is not inside it (resolve() gives
+    none)."""
+    rel = os.path.relpath(os.path.abspath(key), real_root)
+    parts = rel.split(os.sep)
+    if rel in (".", "") or os.path.isabs(rel) or any(p in ("", ".", "..") for p in parts):
+        raise PermissionError(errno.EACCES, "Refused: the file is not inside the workspace.")
+    return parts[:-1], parts[-1]
+
+
+def _open_folder(real_root: str, folders: list[str], *, create: bool) -> int:
+    """A descriptor of the folder *folders* under *real_root*, opened one
+    folder at a time from the workspace's own, with no link followed; with
+    *create*, a missing folder is made.  A folder on the way that is a link
+    (swapped in after resolve() checked the path) raises PermissionError; one
+    that is a file raises FileExistsError with *create* (as making the folder
+    by path did) and NotADirectoryError without, naming only that folder.
+    All are OSErrors with their errno, as the file tools and a computer's
+    folder (``devices.workspace``) expect."""
+    fd = os.open(real_root, _FOLDER_FLAGS & ~_O_NOFOLLOW)
+    try:
+        for part in folders:
+            try:
+                try:
+                    child = os.open(part, _FOLDER_FLAGS, dir_fd=fd)
+                except FileNotFoundError:
+                    if not create:
+                        raise
+                    with contextlib.suppress(FileExistsError):
+                        os.mkdir(part, 0o777, dir_fd=fd)
+                    child = os.open(part, _FOLDER_FLAGS, dir_fd=fd)
+            except OSError as exc:
+                if exc.errno not in (errno.ELOOP, errno.ENOTDIR):
+                    raise
+                try:
+                    mode = os.stat(part, dir_fd=fd, follow_symlinks=False).st_mode
+                    # A link, or a folder again (it was not one at the open):
+                    # it is being swapped.
+                    is_link = stat_module.S_ISLNK(mode) or stat_module.S_ISDIR(mode)
+                except OSError:
+                    is_link = True  # gone again: it was being swapped
+                if is_link:
+                    raise PermissionError(errno.EACCES, f"Refused: {_SWAPPED}.") from None
+                # As a path gave it: a write that would make the folder finds a
+                # file there (EEXIST), any other call a path through a file.
+                said = f"'{part}' on the file's path is not a folder."
+                if create:
+                    raise FileExistsError(errno.EEXIST, said) from None
+                raise NotADirectoryError(errno.ENOTDIR, said) from None
+            fd, parent = child, fd
+            os.close(parent)
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _replace_file(dir_fd: int | None, name: str, data: bytes) -> None:
+    """Replace the file *name* (in the folder *dir_fd*, or a path when None)
+    with *data*: written to a new temporary file beside it, then renamed over
+    it.  An existing file keeps its permission bits."""
+    tmp = name + ".tmp"
+    # The temporary file is made new, never opened through what is
+    # already at its name: a symlink planted there (by a command, a
+    # cloned repository, an archive) would carry the write outside the
+    # workspace.  A leftover or a planted link is removed, not followed.
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW | _O_CLOEXEC
+    try:
+        try:
+            fd = os.open(tmp, flags, 0o666, dir_fd=dir_fd)
+        except FileExistsError:
+            os.unlink(tmp, dir_fd=dir_fd)
+            fd = os.open(tmp, flags, 0o666, dir_fd=dir_fd)
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+            # Through the open file, not its name: the name could be
+            # swapped for a link before a chmod by name reached it.  Only a
+            # file's own mode is kept: a link at the name is not followed.
+            with contextlib.suppress(OSError):
+                st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+                if stat_module.S_ISREG(st.st_mode):
+                    os.fchmod(fh.fileno(), stat_module.S_IMODE(st.st_mode))
+        os.replace(tmp, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+    except Exception:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp, dir_fd=dir_fd)
+        raise
+
+
+#: Where a descriptor of this process can be opened again by path (Linux):
+#: what lets a parser or ripgrep, which take a path, read exactly the file or
+#: folder the walk reached.  Without it they get the path, as before.
+def _own_proc() -> bool:
+    try:
+        return os.readlink("/proc/self") == str(os.getpid())
+    except OSError:
+        return False
+
+
+_PROC_FDS = os.path.isdir("/proc/self/fd") and _own_proc()
+
+
+def _fd_path(fd: int) -> str:
+    """A path that opens the file or folder of this process's descriptor *fd*
+    (also from a child process: it names this process, not ``self``)."""
+    return f"/proc/{os.getpid()}/fd/{fd}"
+
+
+def _reach(real_root: str, key: str) -> tuple[list[str], str | None]:
+    """*key*'s folders below *real_root* and its own name; no name for the
+    workspace's root itself.  Raises PermissionError for a key not inside it."""
+    rel = os.path.relpath(os.path.abspath(key), real_root)
+    if rel == ".":
+        return [], None
+    parts = rel.split(os.sep)
+    if os.path.isabs(rel) or any(p in ("", ".", "..") for p in parts):
+        raise PermissionError(errno.EACCES, "Refused: the file is not inside the workspace.")
+    return parts[:-1], parts[-1]
+
+
+def _open_in(real_root: str, key: str, flags: int) -> int:
+    """*key* opened with *flags*, reached from the workspace one folder at a
+    time with no link followed (``_open_folder``), its own name included: a
+    link there (swapped in after resolve() checked the path) is refused with
+    PermissionError, as a folder on the way is."""
+    folders, name = _reach(real_root, key)
+    dir_fd = _open_folder(real_root, folders, create=False)
+    try:
+        try:
+            fd = os.open(name or ".", flags | _O_NOFOLLOW | _O_CLOEXEC, dir_fd=dir_fd)
+            try:
+                # O_PATH | O_NOFOLLOW opens a link itself rather than refusing it.
+                is_link = name is not None and stat_module.S_ISLNK(os.fstat(fd).st_mode)
+            except BaseException:
+                os.close(fd)
+                raise
+            if is_link:
+                os.close(fd)
+                raise PermissionError(errno.EACCES, f"Refused: {_SWAPPED}.")
+            return fd
+        except OSError as exc:
+            if name is not None and exc.errno == errno.ELOOP:
+                # O_NOFOLLOW met a link at the name itself.
+                raise PermissionError(errno.EACCES, f"Refused: {_SWAPPED}.") from None
+            if name is not None and exc.errno == errno.ENOTDIR:
+                try:
+                    mode = os.stat(name, dir_fd=dir_fd, follow_symlinks=False).st_mode
+                    # A link, or (for a folder that was not one at the open) a folder again: being swapped.
+                    is_link = stat_module.S_ISLNK(mode) or (
+                        exc.errno == errno.ENOTDIR and stat_module.S_ISDIR(mode)
+                    )
+                except OSError:
+                    is_link = True  # gone again: it was being swapped
+                if is_link:
+                    raise PermissionError(errno.EACCES, f"Refused: {_SWAPPED}.") from None
+            raise
+    finally:
+        os.close(dir_fd)
+
+
+def _open_to_read(real_root: str, key: str) -> BinaryIO:
+    """The file *key* open to read, reached as :func:`_open_in` does; a folder
+    raises IsADirectoryError, as opening it by path did."""
+    # Opened without waiting, so a FIFO planted under a file's name cannot
+    # hold the call until a writer comes; only a regular file is read.
+    fd = _open_in(real_root, key, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+    try:
+        mode = os.fstat(fd).st_mode
+        if stat_module.S_ISDIR(mode):
+            raise IsADirectoryError(errno.EISDIR, "Is a directory")
+        if not stat_module.S_ISREG(mode):
+            raise OSError(errno.EINVAL, "Not a regular file")
+        os.set_blocking(fd, True)
+        return os.fdopen(fd, "rb")
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _paths_back(out: str, given: str, key: str, mode: str) -> str:
+    """ripgrep's output with each path it printed from *given* (what it was
+    handed: ``./`` under a folder it ran in, or a descriptor's path) written
+    as the key it stands for, as a run on *key* by path printed it."""
+    if mode == "json":
+        quoted = json.dumps(given)[1:-1]
+        return out.replace(f'"path":{{"text":"{quoted}', f'"path":{{"text":"{json.dumps(key)[1:-1]}')
+    return "".join(
+        key + line[len(given):] if line.startswith(given) else line
+        for line in out.splitlines(keepends=True)
+    )
+
+
+#: bubblewrap, which confines ripgrep to the folder it searches (the worker
+#: image has it for srt); None where it is missing or cannot run here.
+_BWRAP: str | None = shutil.which("bwrap")
+_bwrap_works: bool | None = None
+#: What a confined ripgrep sees of the host: the system's programs and
+#: libraries, read-only, and nothing else but the folder it searches.
+_BWRAP_SYSTEM = (
+    "--ro-bind", "/usr", "/usr",
+    "--ro-bind-try", "/bin", "/bin", "--ro-bind-try", "/lib", "/lib",
+    "--ro-bind-try", "/lib64", "/lib64", "--ro-bind-try", "/lib32", "/lib32",
+    "--dev", "/dev",
+)
+_SEARCHED = "/surogates-search"
+_RG_IN_BWRAP = "/run/surogates-rg"
+
+
+_bwrap_lock = threading.Lock()
+
+
+def _probe_bwrap(rg: str) -> bool:
+    """Whether bubblewrap can run ripgrep confined here, asked once per
+    process; every caller waits for the one answer.  A probe that did not
+    answer in time is asked again at the next search, never taken as no."""
+    global _bwrap_works
+    with _bwrap_lock:
+        if _bwrap_works is not None:
+            return _bwrap_works
+        if _BWRAP is None:
+            _bwrap_works = False
+        else:
+            try:
+                _bwrap_works = subprocess.run(
+                    [_BWRAP, "--die-with-parent", "--unshare-all", *_BWRAP_SYSTEM,
+                     "--ro-bind", rg, _RG_IN_BWRAP, _RG_IN_BWRAP, "--version"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10,
+                ).returncode == 0
+            except subprocess.TimeoutExpired:
+                # A slow box, most likely: this search is confined anyway (a
+                # bubblewrap that cannot run makes it fail, never run
+                # unconfined), and the next search asks again.
+                logger.warning("bubblewrap did not answer the probe in time: confining this search anyway")
+                return True
+            except OSError:
+                _bwrap_works = False
+        if not _bwrap_works:
+            logger.warning(
+                "bubblewrap cannot confine ripgrep on this host: a search starts in the folder the walk reached, "
+                "but its walk below it goes by path",
+            )
+        return _bwrap_works
+
+
+async def _bwrap_can_confine(rg: str) -> bool:
+    """:func:`_probe_bwrap`, off the event loop."""
+    if _bwrap_works is not None:
+        return _bwrap_works
+    return await asyncio.to_thread(_probe_bwrap, rg)
+
+
 class LocalWorkspaceIO:
     """WorkspaceIO over this host, contained to *workspace_path* when one is set."""
 
@@ -591,6 +863,16 @@ class LocalWorkspaceIO:
 
     def __init__(self, workspace_path: str | None = None) -> None:
         self.root = workspace_path or None
+        self._resolved_root: tuple[str, str] | None = None
+
+    def _real_root(self) -> str:
+        """The workspace's resolved path, where every walk starts: resolved
+        once per root (the workspace itself is not swapped; what is in it can
+        be)."""
+        root = str(self.root)
+        if self._resolved_root is None or self._resolved_root[0] != root:
+            self._resolved_root = (root, os.path.realpath(root))
+        return self._resolved_root[1]
 
     # A NUL is refused first in every method that hands its text to the system,
     # in Surogate's own sentence: what Python says of one depends on the call
@@ -619,7 +901,20 @@ class LocalWorkspaceIO:
 
     async def stat(self, key: str) -> FileStat | None:
         try:
-            st = os.stat(key)
+            if self.root and _BY_FOLDER:
+                # Reached as write() reaches it: a link swapped in on the way
+                # is nothing there, never what it points at.
+                real_root = self._real_root()
+                folders, name = _reach(real_root, key)
+                dir_fd = _open_folder(real_root, folders, create=False)
+                try:
+                    st = os.fstat(dir_fd) if name is None else os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+                finally:
+                    os.close(dir_fd)
+                if stat_module.S_ISLNK(st.st_mode):
+                    return None
+            else:
+                st = os.stat(key)
         except (OSError, ValueError):
             # A key with a NUL too: nothing is there, as for any key that cannot be stat'ed.
             return None
@@ -629,57 +924,88 @@ class LocalWorkspaceIO:
             revision=f"{st.st_dev}:{st.st_ino}:{st.st_size}:{st.st_mtime_ns}:{st.st_ctime_ns}",
         )
 
+    def _open_to_read(self, key: str) -> BinaryIO:
+        """*key* open to read: with a workspace, reached from it one folder at
+        a time with no link followed, so a folder swapped for a link after
+        resolve() checked the path cannot make it read a file outside."""
+        if self.root and _BY_FOLDER:
+            return _open_to_read(self._real_root(), key)
+        return open(key, "rb")
+
     async def read(self, key: str, max_bytes: int | None = None) -> bytes:
         refuse_nul(key)
-        with open(key, "rb") as fh:
+        with self._open_to_read(key) as fh:
             return fh.read(-1 if max_bytes is None else max_bytes)
 
     async def read_lines(
         self, key: str, *, encoding: str, offset: int, limit: int, max_bytes: int,
     ) -> LinePage:
         refuse_nul(key)
-        with open(key, "rb") as fh:
+        with self._open_to_read(key) as fh:
             return _page(fh, encoding, offset, limit, max_bytes)
 
     async def write(self, key: str, data: bytes, *, expected_revision: str | None = None) -> None:
         refuse_nul(key)
         # expected_revision is not checked: cloud behaviour does not change.
-        os.makedirs(os.path.dirname(key) or ".", exist_ok=True)
-        tmp = key + ".tmp"
-        # The temporary file is made new, never opened through what is
-        # already at its name: a symlink planted there (by a command, a
-        # cloned repository, an archive) would carry the write outside the
-        # workspace.  A leftover or a planted link is removed, not followed.
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        if not (self.root and _BY_FOLDER):
+            os.makedirs(os.path.dirname(key) or ".", exist_ok=True)
+            _replace_file(None, key, data)
+            return
+        # Contained: the file's folder is reached from the workspace one
+        # folder at a time, following no link, and the file is written and
+        # renamed in that folder.  resolve() checked the path, but a folder
+        # on it swapped for a link meanwhile (by a command still running in
+        # the workspace) would otherwise carry the write outside it.
+        real_root = self._real_root()
+        folder, name = _contained_parts(real_root, key)
+        dir_fd = _open_folder(real_root, folder, create=True)
         try:
-            try:
-                fd = os.open(tmp, flags, 0o666)
-            except FileExistsError:
-                os.unlink(tmp)
-                fd = os.open(tmp, flags, 0o666)
-            with os.fdopen(fd, "wb") as fh:
-                fh.write(data)
-                # Through the open file, not its name: the name could be
-                # swapped for a link before a chmod by name reached it.
-                with contextlib.suppress(OSError):
-                    os.fchmod(fh.fileno(), stat_module.S_IMODE(os.stat(key).st_mode))
-            os.replace(tmp, key)
-        except Exception:
-            with contextlib.suppress(OSError):
-                os.unlink(tmp)
-            raise
+            _replace_file(dir_fd, name, data)
+        finally:
+            os.close(dir_fd)
 
     async def delete(self, key: str) -> None:
         refuse_nul(key)
-        os.unlink(key)
+        if not (self.root and _BY_FOLDER):
+            os.unlink(key)
+            return
+        # As write(): only a file in the workspace's own folder is removed.
+        real_root = self._real_root()
+        folder, name = _contained_parts(real_root, key)
+        dir_fd = _open_folder(real_root, folder, create=False)
+        try:
+            os.unlink(name, dir_fd=dir_fd)
+        finally:
+            os.close(dir_fd)
 
     async def list_dir(self, key: str) -> list[str]:
         refuse_nul(key)
-        return os.listdir(key)
+        if not (self.root and _BY_FOLDER):
+            return os.listdir(key)
+        fd = _open_in(self._real_root(), key, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            return os.listdir(fd)
+        finally:
+            os.close(fd)
 
     @contextlib.asynccontextmanager
     async def local_file(self, key: str) -> AsyncIterator[Path]:
-        yield Path(key)
+        if not (self.root and _BY_FOLDER and _PROC_FDS):
+            yield Path(key)
+            return
+        # The parser opens a path: it gets one that opens the very file the
+        # walk reached (through this process's descriptor), under the file's
+        # own name, so its suffix still tells the parser what it is.
+        real_root = self._real_root()
+        base = tempfile.gettempdir()
+        if os.path.realpath(base) == real_root or os.path.realpath(base).startswith(real_root + os.sep):
+            base = "/tmp"  # never a link a command in the workspace could swap
+        with _open_to_read(real_root, key) as fh, tempfile.TemporaryDirectory(
+            dir=base, ignore_cleanup_errors=True,
+        ) as folder:
+            local = Path(folder) / Path(key).name
+            os.symlink(_fd_path(fh.fileno()), local)
+            yield local
 
     async def which(self, name: str) -> bool:
         return shutil.which(name) is not None
@@ -714,15 +1040,60 @@ class LocalWorkspaceIO:
                 if context > 0:
                     args += ["-C", str(context)]
             args += ["-e", pattern]
-        args.append(key)
 
-        proc = await asyncio.create_subprocess_exec(
-            _RIPGREP_PATH, *args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await proc.communicate()
+        # With a workspace, ripgrep starts from what the walk reached: in the
+        # folder itself or on the file's descriptor, and its paths are written
+        # back as keys.  A folder swapped for a link after resolve() cannot
+        # point it outside.  Below a folder, ripgrep walks by path: there,
+        # bubblewrap confines it to that folder (a link swapped in during its
+        # walk leads nowhere); where bubblewrap cannot run, that walk is by
+        # path on the host, as before.
+        program, cwd, fd, given, printed_as = _RIPGREP_PATH, None, None, "", key
+        if self.root and _BY_FOLDER and _PROC_FDS:
+            fd = _open_in(self._real_root(), key, getattr(os, "O_PATH", os.O_RDONLY))
+            try:
+                is_dir = stat_module.S_ISDIR(os.fstat(fd).st_mode)
+                fd_in_child = f"/proc/self/fd/{fd}"  # the child's own: pass_fds keeps the number
+                if is_dir:
+                    given, target = "./", "."
+                    printed_as = key.rstrip(os.sep) + os.sep
+                    if await _bwrap_can_confine(_RIPGREP_PATH):
+                        program = _BWRAP
+                        args = [
+                            "--die-with-parent", "--unshare-all", *_BWRAP_SYSTEM,
+                            "--ro-bind", _RIPGREP_PATH, _RG_IN_BWRAP,
+                            "--ro-bind", fd_in_child, _SEARCHED, "--chdir", _SEARCHED,
+                            _RG_IN_BWRAP, *args,
+                        ]
+                    else:
+                        cwd = fd_in_child
+                else:
+                    given = target = fd_in_child
+            except BaseException:
+                os.close(fd)
+                raise
+        else:
+            target = key
+        args.append(target)
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                program, *args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=cwd,
+                pass_fds=() if fd is None else (fd,),
+            )
+            stdout, stderr = await proc.communicate()
+        finally:
+            if fd is not None:
+                os.close(fd)
+        if given:
+            stdout = _paths_back(stdout.decode("utf-8", errors="replace"), given, printed_as, mode).encode("utf-8")
         rc = proc.returncode or 0
+        if program == _BWRAP and rc == 1 and stderr.strip():
+            # bubblewrap's own failure is exit 1 too, as ripgrep's "no match"
+            # is; only the failure says something.
+            raise RipgrepError(f"confined search failed: {stderr.decode('utf-8', errors='replace')[:200]}")
         if rc not in (0, 1):
             message = f"rg exited {rc}: {stderr.decode('utf-8', errors='replace')[:200]}"
             # rg exits 2 on any file it could not read (one deleted mid-walk,

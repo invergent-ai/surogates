@@ -165,9 +165,12 @@ async def test_delete_and_list_dir(wio, root):
 
 
 async def test_local_file_is_the_file_itself(wio, root):
+    """Under the file's own name, it opens the very file (in a workspace through the descriptor the walk opened)."""
     (root / "doc.pdf").write_bytes(b"%PDF")
     async with wio.local_file(str(root / "doc.pdf")) as local:
-        assert local == root / "doc.pdf"
+        assert local.name == "doc.pdf"
+        assert local.read_bytes() == b"%PDF"
+        assert local.resolve() == (root / "doc.pdf").resolve()
 
 
 async def test_which(wio):

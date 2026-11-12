@@ -30,6 +30,7 @@ def _context_of(client: httpx.AsyncClient):
 def _fresh(monkeypatch):
     monkeypatch.setattr(tls, "_cached", None)
     monkeypatch.setattr(config, "_settings_cache", None)
+    monkeypatch.setattr(config, "_config_environ", {})
     monkeypatch.delenv("SSL_CERT_FILE", raising=False)
     monkeypatch.delenv("SSL_CERT_DIR", raising=False)
 
@@ -218,12 +219,11 @@ def test_a_changed_config_file_is_read_even_with_the_same_size_and_time(counted,
     stamp = os.stat(path).st_mtime_ns
     try:
         assert config.load_settings().tool_output.max_bytes == 11111
-        # The same size, the same mtime: only the bytes differ.  The first
-        # load put the file's value in the environment, as it always has,
-        # so a new key shows the change.
-        path.write_text("tool_output:\n  max_lines: 22222\n")
+        # The same size, the same mtime: only the bytes differ, and the
+        # value the file gave follows it.
+        path.write_text("tool_output:\n  max_bytes: 22222\n")
         os.utime(path, ns=(stamp, stamp))
-        assert config.load_settings().tool_output.max_lines == 22222
+        assert config.load_settings().tool_output.max_bytes == 22222
         assert len(counted) == 2
     finally:
         for name in ("SUROGATES_TOOL_OUTPUT_MAX_BYTES", "SUROGATES_TOOL_OUTPUT_MAX_LINES"):

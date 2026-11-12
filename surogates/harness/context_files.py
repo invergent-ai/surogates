@@ -13,8 +13,11 @@ SOUL.md is loaded independently (always, from asset root).
 from __future__ import annotations
 
 import codecs
+import errno
 import logging
+import os
 import re
+import stat
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -117,6 +120,92 @@ async def load_soul_md(bundle) -> str | None:
     return truncate_context(content, filename="SOUL.md", readable=False)
 
 
+#: The most of a context file read: far past what the prompt keeps
+#: (``truncate_context``), and a file made huge (a sparse one) is not read whole.
+MAX_CONTEXT_FILE_BYTES = 1 << 20
+
+
+def read_context_file(path: Path, workspace: str | None) -> str | None:
+    """The text of the context file *path* for the prompt, or None.
+
+    Never anything out of the workspace through a link: a link at the file's
+    name is followed only to a regular file inside *workspace*; a file whose
+    folder, or its name, leads out of the workspace is skipped, with one
+    warning naming the file, and its content is never read.  A file in the
+    workspace is read through the no-follow walk from the workspace's root
+    (``LocalWorkspaceIO``), so a folder swapped for a link meanwhile is
+    refused, as is a file with other names elsewhere (a hard link).  A file
+    above the workspace (the search up to the repository's root) is opened
+    without following its name.  Only a regular file is read, without waiting
+    (a FIFO by the name is no context file), and at most
+    ``MAX_CONTEXT_FILE_BYTES`` of it; strict UTF-8 (a character the cap cuts
+    in two is left out).
+    """
+    from surogates.tools.workspace_io.local import _BY_FOLDER, _open_to_read
+
+    root = os.path.realpath(workspace) if workspace else None
+
+    def inside(target: str) -> bool:
+        if root is None or target == root:
+            return False
+        try:
+            return os.path.commonpath([root, target]) == root
+        except ValueError:
+            return False
+
+    in_workspace = inside(os.path.abspath(path))
+
+    def shown() -> str:
+        return os.path.relpath(os.path.abspath(path), root) if root and in_workspace else path.name
+
+    def out_of_the_workspace() -> None:
+        logger.warning("Context file %s leads out of the workspace: skipped, not read", shown())
+
+    try:
+        if os.path.islink(path):
+            source = os.path.realpath(path)
+            if not inside(source):
+                out_of_the_workspace()
+                return None
+        else:
+            # Its folder as resolved, so a file in the workspace is read
+            # through the walk from the workspace's root.
+            source = os.path.join(os.path.realpath(path.parent), path.name)
+            if in_workspace and not inside(source):
+                out_of_the_workspace()  # a folder on its path is a link out
+                return None
+        if inside(source) and _BY_FOLDER:
+            with _open_to_read(root, source) as fh:
+                if os.fstat(fh.fileno()).st_nlink > 1:
+                    logger.warning("Context file %s has other names (a hard link): skipped, not read", shown())
+                    return None
+                data = fh.read(MAX_CONTEXT_FILE_BYTES)
+        else:
+            fd = os.open(source, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+            with os.fdopen(fd, "rb") as fh:
+                if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+                    return None
+                os.set_blocking(fh.fileno(), True)
+                data = fh.read(MAX_CONTEXT_FILE_BYTES)
+    except FileNotFoundError:
+        return None
+    except PermissionError:
+        # Refused by the walk (a folder on the way, or the name, swapped for a
+        # link after the check), or a file this worker may not read.
+        logger.warning("Context file %s could not be read: skipped", shown())
+        return None
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            out_of_the_workspace()
+        elif exc.errno not in (errno.ENOTDIR, errno.EISDIR, errno.EINVAL):
+            logger.warning("Failed to read context file %s", shown())
+        return None
+    try:
+        return codecs.getincrementaldecoder("utf-8")().decode(data, final=len(data) < MAX_CONTEXT_FILE_BYTES)
+    except UnicodeDecodeError:
+        return None
+
+
 def load_project_context(workspace_path: str | None) -> str | None:
     """Discover and load project context from workspace.
 
@@ -133,17 +222,11 @@ def load_project_context(workspace_path: str | None) -> str | None:
     current = start
     for _ in range(20):  # safety limit
         for filename in PROJECT_CONTEXT_FILENAMES:
-            candidate = current / filename
-            if candidate.is_file():
-                try:
-                    content = candidate.read_text(encoding="utf-8").strip()
-                    if not content:
-                        continue
-                    content = scan_context_content(content, filename)
-                    return truncate_context(content)
-                except OSError:
-                    logger.warning("Failed to read %s", candidate)
-                    continue
+            text = read_context_file(current / filename, workspace_path)
+            content = (text or "").strip()
+            if content:
+                content = scan_context_content(content, filename)
+                return truncate_context(content)
 
         if current == stop_at:
             break
