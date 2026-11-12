@@ -109,6 +109,9 @@ class ProcessBrowserBackend:
                 f"{live_view_port}:8080",
                 "--shm-size",
                 "2g",
+                # As the sandbox: a local server (a dev app the agent posts from) is host.docker.internal.
+                "--add-host",
+                "host.docker.internal:host-gateway",
                 "--label",
                 "app=surogates-browser",
                 "--label",

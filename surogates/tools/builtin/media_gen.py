@@ -491,7 +491,7 @@ def _image_delivery(channel: Any, path: str, *, artifact: bool) -> str:
         return (
             f"Nobody sees this run as it happens: the image stays at {path} in "
             "the workspace until you post or upload it (browser_upload_file "
-            "takes this path) or name the path in your final reply."
+            "takes a web link to it) or name the path in your final reply."
         )
     if artifact:
         return "Shown inline in the chat; mention it, do not embed the path."

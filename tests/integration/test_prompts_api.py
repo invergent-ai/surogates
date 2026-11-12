@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import os
 import uuid
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
@@ -306,6 +306,33 @@ async def test_submit_prompt_creates_api_channel_session(
     user_msgs = [e for e in events if e.type == "user.message"]
     assert len(user_msgs) == 1
     assert user_msgs[0].data["content"].startswith("generate a training")
+
+
+async def test_a_prompt_can_start_its_browser_logged_in(
+    client: AsyncClient, session_factory, session_store
+):
+    """A caller names a saved login (a publisher posting from one of several accounts); a bad id is refused."""
+    org_id = await create_org(session_factory)
+    token = await _issue_token(session_factory, org_id)
+    profile = uuid4()
+
+    resp = await client.post(
+        "/v1/api/prompts",
+        json={"prompt": "publish the post", "browser_profile_id": str(profile)},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 202, resp.text
+    session = await session_store.get_session(UUID(resp.json()["session_id"]))
+    assert session.config["browser"] == {"profile_id": str(profile)}
+
+    plain = await client.post("/v1/api/prompts", json={"prompt": "no login"}, headers={"Authorization": f"Bearer {token}"})
+    assert "browser" not in (await session_store.get_session(UUID(plain.json()["session_id"]))).config
+
+    bad = await client.post(
+        "/v1/api/prompts", json={"prompt": "x", "browser_profile_id": "not-a-uuid"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert bad.status_code == 422
 
 
 async def test_idempotency_key_returns_existing_session(

@@ -237,10 +237,6 @@ def unusable_tool_names(
     return frozenset(drop)
 
 
-# What only a session on a folder of the user's computer can use: a cloud session is not offered it.
-DEVICE_ONLY_TOOLS = frozenset({"browser_upload_file"})
-
-
 def describe_for_device(
     schemas: list[dict[str, Any]],
     config: dict[str, Any] | None,
@@ -249,10 +245,10 @@ def describe_for_device(
     and browser_navigate how the browser there opens the session's own servers.
 
     Only for a session whose ``config`` names a device; a cloud session's
-    list is returned without DEVICE_ONLY_TOOLS.  Input is never mutated.
+    list is returned as it is.  Input is never mutated.
     """
     if device_of(config) is None:
-        return [schema for schema in schemas if schema["function"]["name"] not in DEVICE_ONLY_TOOLS]
+        return list(schemas)
     described: list[dict[str, Any]] = []
     for schema in schemas:
         if schema["function"]["name"] == "terminal":

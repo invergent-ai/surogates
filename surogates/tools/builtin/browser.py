@@ -10,6 +10,9 @@ from typing import Any, Callable
 from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
+import httpx
+
+from surogates.tools.utils.url_safety import is_always_blocked_url
 from surogates.browser.base import (
     BrowserBudgetExhaustedError,
     BrowserCreditsExhaustedError,
@@ -1472,10 +1475,19 @@ UPLOAD_FILE_SCHEMA = {
             "items": {"type": "string"},
             "minItems": 1,
             "maxItems": _MAX_UPLOAD_FILES,
-            "description": "Files of the chat's folder, as read_file names them.",
+            "description": "In a chat on the user's computer: files of the chat's folder, as read_file names them.",
+        },
+        "urls": {
+            "type": "array",
+            "items": {"type": "string"},
+            "minItems": 1,
+            "maxItems": _MAX_UPLOAD_FILES,
+            "description": (
+                "Elsewhere: web links to the files (http or https, up to 2 GB each). The browser downloads "
+                "them itself. Add name=<file name with extension> to a link that ends in a bare id."
+            ),
         },
     },
-    "required": ["paths"],
     "additionalProperties": False,
 }
 
@@ -1501,22 +1513,65 @@ def _wrong_upload_paths(paths: Any) -> str | None:
     return None
 
 
+def _wrong_upload_urls(urls: Any) -> str | None:
+    """What is wrong with an upload's *urls*, or None for 1 to 10 http(s) links."""
+    if not isinstance(urls, list) or not 1 <= len(urls) <= _MAX_UPLOAD_FILES:
+        return f"'urls' must be a list of 1 to {_MAX_UPLOAD_FILES} web links"
+    for at, url in enumerate(urls, start=1):
+        parts = urlsplit(url) if isinstance(url, str) else None
+        if parts is None or parts.scheme not in ("http", "https") or not parts.netloc:
+            return f"Each of 'urls' must be an http or https link: item {at} is not"
+        if is_always_blocked_url(url):
+            return f"Item {at} of 'urls' points at a cloud metadata address, which is never fetched"
+    return None
+
+
 @answering_refusals
 async def _browser_upload_file_handler(
     arguments: dict[str, Any],
     *,
+    tenant: Any = None,
     session_id: UUID | str | None = None,
+    browser_pool: BrowserPool | None = None,
+    browser_control: BrowserControlStore | None = None,
+    _client_factory: Callable[..., Any] = _default_client_factory,
+    workspace_path: str | None = None,
     session_config: dict[str, Any] | None = None,
     workspace_io: Any = None,
+    channel: str | None = None,
     **_: Any,
 ) -> str:
     if not (isinstance(workspace_io, DeviceWorkspaceIO) and session_id is not None):
         if _on_a_computer(session_config):
             return browser_unavailable_result(_NO_COMPUTER)
-        return json.dumps({
-            "error": "unsupported",
-            "detail": "Files can be given to a page only in a chat on a folder of the user's computer.",
-        })
+        if "urls" not in arguments:
+            return json.dumps({
+                "error": "unsupported",
+                "detail": "This browser is not on the user's computer: give the files as 'urls', web links it downloads.",
+            })
+        wrong = _wrong_upload_urls(arguments.get("urls"))
+        if wrong is not None:
+            return json.dumps({"error": "upload_failed", "detail": wrong})
+        preflight = await _resolve_session_browser(
+            channel=channel,
+            tenant=tenant,
+            session_id=session_id,
+            browser_pool=browser_pool,
+            browser_control=browser_control,
+            workspace_path=workspace_path,
+            session_config=session_config,
+            workspace_io=workspace_io,
+        )
+        if isinstance(preflight, str):
+            return preflight
+        _browser_id, endpoint, snapshot_cache = preflight
+        client = _make_client(_client_factory, endpoint, snapshot_cache)
+        async with client:
+            try:
+                given = await client.set_input_files_from_urls(list(arguments["urls"]))
+            except (RuntimeError, httpx.HTTPError) as exc:
+                return json.dumps({"error": "upload_failed", "detail": str(exc) or type(exc).__name__})
+        return json.dumps({"uploaded": given.get("files", 0), "to": given.get("to")})
     paths = arguments.get("paths")
     wrong = _wrong_upload_paths(paths)
     if wrong is not None:
@@ -1678,9 +1733,10 @@ def register(registry: ToolRegistry) -> None:
         schema=ToolSchema(
             name="browser_upload_file",
             description=(
-                "Give files of the chat's folder to the page's file input. Click its "
-                "upload button or the file input first: the page asks for a file, "
-                "and this answers it. The browser's notices say when a page asked."
+                "Give files to the page's file input. Click its upload button or the "
+                "file input first: the page asks for a file, and this answers it. On the "
+                "user's computer, files of the chat's folder ('paths'); elsewhere, web links "
+                "the browser downloads itself ('urls', up to 2 GB each)."
             ),
             parameters=UPLOAD_FILE_SCHEMA,
         ),
