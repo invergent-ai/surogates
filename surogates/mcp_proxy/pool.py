@@ -33,6 +33,7 @@ from surogates.mcp_proxy.loader import (
     debrand_composio_text,
 )
 from surogates.tools.mcp.client import (
+    TRANSIENT_CONNECT_FAILURES,
     _MCP_AVAILABLE,
     _UTILITY_OFFER,
     _connect_failures,
@@ -60,11 +61,16 @@ _MAX_TENANT_APPROVALS = 10_000
 #: names starves only itself.
 _MAX_APPROVALS_PER_SERVER = 1_000
 _MAX_APPROVALS_PER_TENANT = 20_000
-#: Seconds after a server's last connect attempt failed before a tool list
-#: tries it again.  Within them a list answers at once, still naming the
-#: server unavailable: a server that stays down would otherwise cost every
-#: wake its connect retries (up to ~100 s).
+#: Seconds after a server's first failed connect before it is tried again,
+#: in the background (a tool list never waits for it).  Each further failure
+#: doubles it, up to _MAX_UNAVAILABLE_RETRY_COOLDOWN.
 _UNAVAILABLE_RETRY_COOLDOWN = 120.0
+_MAX_UNAVAILABLE_RETRY_COOLDOWN = 1800.0
+
+
+def _retry_cooldown(failures: int) -> float:
+    """Seconds to wait before trying a server again after *failures* failed attempts in a row."""
+    return min(_UNAVAILABLE_RETRY_COOLDOWN * 2 ** max(failures - 1, 0), _MAX_UNAVAILABLE_RETRY_COOLDOWN)
 
 
 class _ApprovalRoom:
@@ -115,6 +121,13 @@ def _prefixed_name(
 ) -> str:
     """Full agent-scoped server name used as key in the global _servers dict."""
     return f"{_tenant_prefix(org_id, user_id, agent_id)}__{server_name}"
+
+
+def _discovery_config(config: dict[str, Any]) -> dict[str, Any]:
+    """*config* as discovery gets it: with the resource / prompt utility
+    tools registered whatever the server offers (a list leaves out those it
+    does not offer, read from the live connection: ``visible_schemas``)."""
+    return {**config, "tools": {**(config.get("tools") or {}), "utilities": "all"}}
 
 
 def _flatten_openai_schema(schema: dict[str, Any]) -> dict[str, Any]:
@@ -172,21 +185,26 @@ class PoolEntry:
     # ``get_prompt``), called as that MCP method, never as ``tools/call``.
     utility_index: dict[str, str] = field(default_factory=dict)
     # Configured servers that could not be connected: original name -> why
-    # (``timeout``, ``refused`` or ``error``).  An entry with any is kept for
-    # the servers that did connect (their calls, eviction, invalidation) but
-    # is never a complete tool list: once a server's cooldown is over
-    # (``retry_due``) the next tool list tries it again.
+    # (``timeout``, ``refused`` or ``error``).  Their tools are missing from
+    # ``tool_schemas``; a tool list names them, and those that failed on a
+    # timeout or a refusal are tried again in the background once their
+    # cooldown is over (``due_for_retry``).
     unavailable: dict[str, str] = field(default_factory=dict)
     # When each unavailable server's last connect attempt failed
-    # (``time.monotonic``).
+    # (``time.monotonic``), and how many attempts in a row have failed.
     failed_at: dict[str, float] = field(default_factory=dict)
+    failures: dict[str, int] = field(default_factory=dict)
+    # ``user_id`` is a service account's id (audit rows of a retry's scans).
+    is_service_account: bool = False
 
-    def retry_due(self, now: float) -> bool:
-        """Whether an unavailable server's cooldown
-        (``_UNAVAILABLE_RETRY_COOLDOWN``) is over at *now*."""
-        return any(
-            now - self.failed_at.get(name, float("-inf")) >= _UNAVAILABLE_RETRY_COOLDOWN
-            for name in self.unavailable
+    def due_for_retry(self, now: float) -> list[str]:
+        """The unavailable servers to try again at *now*: those that failed
+        on a timeout or a refusal (a config, auth or policy error fails the
+        same way again) and whose cooldown is over."""
+        return sorted(
+            name for name, why in self.unavailable.items()
+            if why in TRANSIENT_CONNECT_FAILURES
+            and now - self.failed_at.get(name, float("-inf")) >= _retry_cooldown(self.failures.get(name, 1))
         )
 
 
@@ -239,6 +257,9 @@ class ConnectionPool:
         # collected mid-flight (CPython only keeps weak refs to tasks);
         # each removes itself via a done-callback.
         self._invalidation_tasks: set[asyncio.Task] = set()
+        # The background retry of each tenant's unavailable servers, one at
+        # a time per tenant (``retry_unavailable_servers``).
+        self._retry_tasks: dict[tuple[UUID, UUID, str], asyncio.Task] = {}
         self._eviction_task: asyncio.Task | None = None
         self._governance_enabled = governance_enabled
         self._audit_store = audit_store
@@ -276,6 +297,9 @@ class ConnectionPool:
             except (asyncio.CancelledError, Exception):
                 pass
         self._invalidation_tasks.clear()
+        for task in list(self._retry_tasks.values()):
+            task.cancel()
+        self._retry_tasks.clear()
 
         for entry in list(self._entries.values()):
             await self._disconnect_entry(entry)
@@ -287,17 +311,11 @@ class ConnectionPool:
     # ------------------------------------------------------------------
 
     def get_cached_schemas(
-        self, org_id: UUID, user_id: UUID, agent_id: str, *, retry_unavailable: bool = False,
+        self, org_id: UUID, user_id: UUID, agent_id: str,
     ) -> list[dict[str, Any]] | None:
-        """Return cached tool schemas if the agent is connected, else None.
-
-        With *retry_unavailable* (a tool list), None too once an unavailable
-        server's cooldown is over (``PoolEntry.retry_due``): the list tries it
-        again.  Within the cooldown, and for a tool call, the servers that are
-        connected answer.
-        """
+        """Return cached tool schemas if the agent is connected, else None."""
         entry = self._entries.get((org_id, user_id, agent_id))
-        if entry is None or (retry_unavailable and entry.retry_due(time.monotonic())):
+        if entry is None:
             return None
         entry.last_used = time.monotonic()
         self._touch_approvals((org_id, user_id, agent_id))
@@ -391,10 +409,9 @@ class ConnectionPool:
         their tool schemas.
 
         Idempotent — if already connected, returns cached schemas.  A
-        configured server that could not be connected is tried again by the
-        first call after its cooldown (``_UNAVAILABLE_RETRY_COOLDOWN``); within
-        it the cached schemas are returned.  The servers that are connected
-        stay connected and their tools stay listed.
+        configured server that could not be connected is left out (named in
+        ``PoolEntry.unavailable``) and tried again in the background
+        (:meth:`retry_unavailable_servers`), never while a list waits.
 
         ``is_service_account`` marks ``user_id`` as a service-account id
         rather than a real ``users.id``; downstream audit writes use
@@ -404,94 +421,45 @@ class ConnectionPool:
         lock = self._locks.setdefault(key, asyncio.Lock())
 
         async with lock:
-            now = time.monotonic()
             entry = self._entries.get(key)
-            if entry is not None and not entry.retry_due(now):
-                entry.last_used = now
+            if entry is not None:
+                entry.last_used = time.monotonic()
                 self._touch_approvals(key)
                 return entry.tool_schemas
-            # Unavailable servers still in their cooldown are not tried this
-            # time: they stay unavailable as they were.
-            cooling: dict[str, tuple[str, float]] = {}
-            if entry is not None:
-                # Its connected servers are reused below: not idle meanwhile.
-                entry.last_used = now
-                cooling = {
-                    name: (why, entry.failed_at[name])
-                    for name, why in entry.unavailable.items()
-                    if name in configs
-                    and now - entry.failed_at.get(name, float("-inf")) < _UNAVAILABLE_RETRY_COOLDOWN
-                }
 
-            # Prefix each server name for tenant isolation.  The resource /
-            # prompt utility tools are registered for every server here; a
-            # list leaves out those whose server offers nothing of that kind,
-            # read from the live connection (``visible_schemas``).
+            # Prefix each server name for tenant isolation.
             prefixed: dict[str, dict[str, Any]] = {}
             original_names: list[str] = []
             for name, cfg in configs.items():
                 pname = _prefixed_name(org_id, user_id, agent_id, name)
-                prefixed[pname] = {**cfg, "tools": {**(cfg.get("tools") or {}), "utilities": "all"}}
+                prefixed[pname] = _discovery_config(cfg)
                 original_names.append(name)
 
             from surogates.tools.registry import ToolRegistry
 
             temp_registry = ToolRegistry()
-            # Servers an earlier attempt connected are not connected again
-            # (discovery skips them): their tools are listed from the live
-            # connection.
+            # A server of this tenant still connected (discovery skips it) is
+            # listed from its live connection.
             with _lock:
-                live = {pname: _servers[pname] for pname in prefixed if pname in _servers}
-            live_names: list[str] = []
-            for pname, server in live.items():
-                live_names += _register_server_tools(pname, server, prefixed[pname], temp_registry)
-            names_by_key = dict(zip(prefixed, original_names))
-            registered = await asyncio.to_thread(
+                adopted = {pname: _servers[pname] for pname in prefixed if pname in _servers}
+            for pname, server in adopted.items():
+                _register_server_tools(pname, server, prefixed[pname], temp_registry)
+            await asyncio.to_thread(
                 discover_mcp_tools,
-                servers={pname: cfg for pname, cfg in prefixed.items() if names_by_key[pname] not in cooling},
+                servers=prefixed,
                 registry=temp_registry,
             )
-            registered = [*registered, *live_names]
-            # The enabled servers left without a connection, and why; those
-            # still cooling down keep their reason and failure time.
-            failed_at = time.monotonic()
+            # The servers connected now (read again: one adopted above may
+            # have been shut down meanwhile), and the enabled ones left
+            # without a connection, with why.
             with _lock:
+                owners = {pname: _servers[pname] for pname in prefixed if pname in _servers}
                 unavailable = {
                     name: _connect_failures.pop(pname, "error")
-                    for pname, name in names_by_key.items()
-                    if name not in cooling
-                    and pname not in _servers
+                    for pname, name in zip(prefixed, original_names)
+                    if pname not in _servers
                     and _parse_boolish(configs[name].get("enabled", True), default=True)
                 }
-            failed = {name: failed_at for name in unavailable}
-            for name, (why, when) in cooling.items():
-                unavailable[name] = why
-                failed[name] = when
-
-            # ``ToolRegistry.get_schemas`` emits OpenAI's nested
-            # ``{"type":"function","function":{"name",...}}`` shape; the
-            # rest of this method (and the ``/mcp/v1/tools/list`` route
-            # contract) work on a flat ``{name,description,parameters}``
-            # shape, so unwrap once here. Skipping this step is what
-            # makes the proxy advertise empty-named tools and the worker
-            # silently register zero MCP tools.
-            schemas = [
-                _flatten_openai_schema(s)
-                for s in temp_registry.get_schemas(names=set(registered))
-            ]
-            for s in schemas:
-                tool = temp_registry.get(s["name"])
-                if tool is not None and tool.schema.annotations:
-                    s["annotations"] = tool.schema.annotations
-
-            # Build clean schemas and reverse tool index.
-            tenant_pfx = sanitize_mcp_name_component(
-                _tenant_prefix(org_id, user_id, agent_id),
-            )
-            clean_schemas: list[dict[str, Any]] = []
-            seen_names: set[str] = set()
-            tool_index: dict[str, tuple[str, str]] = {}
-            utility_index: dict[str, str] = {}
 
             # Per-tenant MCPGovernance over the tenant's approved
             # fingerprints, keyed by (server, tool), never shared with
@@ -503,110 +471,25 @@ class ConnectionPool:
                 tenant_governance = MCPGovernance(fingerprints=approvals, wording=self._scan_wording)
                 approval_room = _ApprovalRoom(approvals)
 
-            for schema in schemas:
-                clean = dict(schema)
-                # The proxy's own name for the tool, under the tenant-scoped
-                # server key (``mcp__{tenant_prefix}__{server}__{tool}``,
-                # shortened: it is never parsed back).
-                raw_name = clean.get("name", "")
-                clean_name = raw_name
+            clean_schemas, tool_index, utility_index = [], {}, {}
+            if self._locks.get(key) is lock:
+                clean_schemas, tool_index, utility_index = await self._clean_schemas(
+                    key, temp_registry, owners, configs,
+                    governance=tenant_governance, approval_room=approval_room,
+                    is_service_account=is_service_account, taken=set(),
+                )
+            if self._locks.get(key) is not lock:
+                # The agent was invalidated (or evicted) while this connected:
+                # its entry must not come back, and what this call connected
+                # or adopted belongs to no entry.
+                await self._shutdown_servers(owners)
+                logger.info(
+                    "MCP connect for org=%s user=%s agent=%s dropped: the agent changed meanwhile",
+                    org_id, user_id, agent_id,
+                )
+                return []
 
-                # Build reverse index for O(1) tool call routing.
-                # Find which prefixed server owns this tool, and the MCP
-                # name the tool is called by there.
-                owning_server_key: str | None = None
-                original_tool: str = ""
-                utility: str | None = None
-                with _lock:
-                    for server_key, server in _servers.items():
-                        if raw_name in (getattr(server, "_registered_tool_names", None) or ()):
-                            owning_server_key = server_key
-                            original_tool = (getattr(server, "_tool_names", None) or {}).get(raw_name, raw_name)
-                            utility = (getattr(server, "_utility_names", None) or {}).get(raw_name)
-                            break
-                if owning_server_key is not None:
-                    expected = f"{_tenant_prefix(org_id, user_id, agent_id)}__"
-                    plain = owning_server_key[len(expected):] if owning_server_key.startswith(expected) else owning_server_key
-                    # The name the agent knows: ``mcp__{server}__{tool}``,
-                    # shortened when an engine would refuse it.
-                    clean_name = mcp_tool_name(plain, original_tool)
-                    clean["server"] = plain
-                    # A description the harness wrote (a utility's, or the
-                    # stand-in for a tool the server left undescribed) names
-                    # the server by the name the agent knows, not by the
-                    # tenant-scoped key with its org / user / agent ids.
-                    clean["description"] = str(clean.get("description", "")).replace(owning_server_key, plain)
-                clean["name"] = clean_name
-
-                # Governance scan — run before adding the tool to the
-                # advertised schema set so unsafe tools never reach the
-                # agent.  Skipped when governance is disabled on the pool.
-                if tenant_governance is not None:
-                    original_server = ""
-                    if owning_server_key is not None:
-                        # Strip the agent prefix back off the server key.
-                        expected_prefix = f"{_tenant_prefix(org_id, user_id, agent_id)}__"
-                        if owning_server_key.startswith(expected_prefix):
-                            original_server = owning_server_key[len(expected_prefix):]
-                        else:
-                            original_server = owning_server_key
-
-                    # The Composio Tool Router is a first-party, platform-minted
-                    # server (we create the session against backend.composio.dev
-                    # with our own API key). Its meta-tool descriptions
-                    # legitimately use imperative guidance ("you must …") and
-                    # remote-execution fields ("command"/"code_to_execute") that
-                    # trip the third-party tool-poisoning / description-injection
-                    # heuristics. Exempt it from the scan-drop so
-                    # COMPOSIO_SEARCH_TOOLS (and the bash/workbench executors)
-                    # reach the agent — without SEARCH_TOOLS the router cannot
-                    # discover or execute any app tool and is dead weight.
-                    is_trusted_server = original_server == COMPOSIO_SERVER_NAME
-                    if not is_trusted_server and not await self._scan_and_record(
-                        governance=tenant_governance,
-                        org_id=org_id,
-                        user_id=user_id,
-                        server_name=original_server,
-                        tool_name=original_tool or clean_name,
-                        schema=clean,
-                        is_service_account=is_service_account,
-                        server_identity=_server_identity(configs.get(original_server)),
-                        approval_room=approval_room,
-                    ):
-                        continue  # unsafe or rug-pulled — exclude from advertised set
-
-                    # Debrand the Composio router's advertised name + description
-                    # so the model never reads (and then echoes) the brand. The
-                    # reverse-route below keeps using the real upstream tool name
-                    # (``original_tool``), so calls still reach Composio.
-                    if is_trusted_server:
-                        # Named from the debranded server and tool, so the
-                        # name keeps its ``mcp__tool_router__`` prefix and is
-                        # shortened (if at all) after debranding.
-                        clean["name"] = fit_tool_name(
-                            debrand_composio_text(sanitize_mcp_name_component(original_server)),
-                            debrand_composio_text(sanitize_mcp_name_component(original_tool or clean_name)),
-                        )
-                        clean["description"] = debrand_composio_text(
-                            clean.get("description", ""),
-                        )
-                        clean_name = clean["name"]
-
-                if clean_name in seen_names:
-                    # Two tools under one name (their names sanitize alike):
-                    # the first keeps it, as in process.
-                    logger.warning(
-                        "MCP tool %s from server %s shares its name %s with an earlier tool -- skipped",
-                        original_tool, owning_server_key, clean_name,
-                    )
-                    continue
-                seen_names.add(clean_name)
-                clean_schemas.append(clean)
-                if owning_server_key is not None:
-                    tool_index[clean_name] = (owning_server_key, original_tool)
-                if utility is not None:
-                    utility_index[clean_name] = utility
-
+            failed_at = time.monotonic()
             entry = PoolEntry(
                 org_id=org_id,
                 user_id=user_id,
@@ -617,15 +500,16 @@ class ConnectionPool:
                 server_configs={
                     name: dict(cfg) for name, cfg in configs.items()
                 },
-                sanitized_prefix=tenant_pfx,
+                sanitized_prefix=sanitize_mcp_name_component(
+                    _tenant_prefix(org_id, user_id, agent_id),
+                ),
                 governance=tenant_governance,
                 utility_index=utility_index,
                 unavailable=unavailable,
-                failed_at=failed,
+                failed_at={name: failed_at for name in unavailable},
+                failures={name: 1 for name in unavailable},
+                is_service_account=is_service_account,
             )
-            # Kept even with a server unavailable, so the connected ones are
-            # evicted and invalidated with it; ``unavailable`` makes a tool
-            # list after the cooldown try again rather than take this one.
             self._entries[key] = entry
 
             logger.info(
@@ -637,12 +521,245 @@ class ConnectionPool:
             if unavailable:
                 logger.warning(
                     "MCP server(s) unavailable for org=%s user=%s agent=%s: %s "
-                    "-- not cached, a tool list after %.0fs tries again",
+                    "-- tried again in the background after %.0fs",
                     org_id, user_id, agent_id,
                     ", ".join(f"{name} ({why})" for name, why in sorted(unavailable.items())),
                     _UNAVAILABLE_RETRY_COOLDOWN,
                 )
             return clean_schemas
+
+    async def _clean_schemas(
+        self,
+        key: tuple[UUID, UUID, str],
+        temp_registry: Any,
+        owners: dict[str, Any],
+        configs: dict[str, dict[str, Any]],
+        *,
+        governance: MCPGovernance | None,
+        approval_room: _ApprovalRoom | None,
+        is_service_account: bool,
+        taken: set[str],
+    ) -> tuple[list[dict[str, Any]], dict[str, tuple[str, str]], dict[str, str]]:
+        """The advertised schemas of the tools in *temp_registry* that the
+        connected servers *owners* (tenant-scoped key -> server) registered,
+        with their reverse index and utility index.
+
+        A tool no server in *owners* owns is never listed: its name is the
+        tenant-scoped key, with the org / user / agent ids.  Names in *taken*
+        are already advertised.
+        """
+        org_id, user_id, agent_id = key
+        tenant_key = f"{_tenant_prefix(org_id, user_id, agent_id)}__"
+
+        # ``ToolRegistry.get_schemas`` emits OpenAI's nested
+        # ``{"type":"function","function":{"name",...}}`` shape; the
+        # rest of this method (and the ``/mcp/v1/tools/list`` route
+        # contract) work on a flat ``{name,description,parameters}``
+        # shape, so unwrap once here. Skipping this step is what
+        # makes the proxy advertise empty-named tools and the worker
+        # silently register zero MCP tools.
+        schemas = [
+            _flatten_openai_schema(s)
+            for s in temp_registry.get_schemas(names=set(temp_registry.tool_names))
+        ]
+        for s in schemas:
+            tool = temp_registry.get(s["name"])
+            if tool is not None and tool.schema.annotations:
+                s["annotations"] = tool.schema.annotations
+
+        clean_schemas: list[dict[str, Any]] = []
+        seen_names: set[str] = set(taken)
+        tool_index: dict[str, tuple[str, str]] = {}
+        utility_index: dict[str, str] = {}
+
+        for schema in schemas:
+            clean = dict(schema)
+            # The proxy's own name for the tool, under the tenant-scoped
+            # server key (``mcp__{tenant_prefix}__{server}__{tool}``,
+            # shortened: it is never parsed back).
+            raw_name = clean.get("name", "")
+
+            # Build reverse index for O(1) tool call routing.
+            # Find which prefixed server owns this tool, and the MCP
+            # name the tool is called by there.
+            owning_server_key: str | None = None
+            original_tool: str = ""
+            utility: str | None = None
+            with _lock:
+                for server_key, server in owners.items():
+                    if raw_name in (getattr(server, "_registered_tool_names", None) or ()):
+                        owning_server_key = server_key
+                        original_tool = (getattr(server, "_tool_names", None) or {}).get(raw_name, raw_name)
+                        utility = (getattr(server, "_utility_names", None) or {}).get(raw_name)
+                        break
+            if owning_server_key is None:
+                logger.warning("MCP tool %s of no connected server left out of the tool list", raw_name)
+                continue
+            plain = owning_server_key[len(tenant_key):] if owning_server_key.startswith(tenant_key) else owning_server_key
+            # The name the agent knows: ``mcp__{server}__{tool}``,
+            # shortened when an engine would refuse it.
+            clean_name = mcp_tool_name(plain, original_tool)
+            clean["server"] = plain
+            # A description the harness wrote (a utility's, or the
+            # stand-in for a tool the server left undescribed) names
+            # the server by the name the agent knows, not by the
+            # tenant-scoped key with its org / user / agent ids.
+            clean["description"] = str(clean.get("description", "")).replace(owning_server_key, plain)
+            clean["name"] = clean_name
+
+            # Governance scan — run before adding the tool to the
+            # advertised schema set so unsafe tools never reach the
+            # agent.  Skipped when governance is disabled on the pool.
+            if governance is not None:
+                original_server = plain
+
+                # The Composio Tool Router is a first-party, platform-minted
+                # server (we create the session against backend.composio.dev
+                # with our own API key). Its meta-tool descriptions
+                # legitimately use imperative guidance ("you must …") and
+                # remote-execution fields ("command"/"code_to_execute") that
+                # trip the third-party tool-poisoning / description-injection
+                # heuristics. Exempt it from the scan-drop so
+                # COMPOSIO_SEARCH_TOOLS (and the bash/workbench executors)
+                # reach the agent — without SEARCH_TOOLS the router cannot
+                # discover or execute any app tool and is dead weight.
+                is_trusted_server = original_server == COMPOSIO_SERVER_NAME
+                if not is_trusted_server and not await self._scan_and_record(
+                    governance=governance,
+                    org_id=org_id,
+                    user_id=user_id,
+                    server_name=original_server,
+                    tool_name=original_tool or clean_name,
+                    schema=clean,
+                    is_service_account=is_service_account,
+                    server_identity=_server_identity(configs.get(original_server)),
+                    approval_room=approval_room,
+                ):
+                    continue  # unsafe or rug-pulled — exclude from advertised set
+
+                # Debrand the Composio router's advertised name + description
+                # so the model never reads (and then echoes) the brand. The
+                # reverse-route below keeps using the real upstream tool name
+                # (``original_tool``), so calls still reach Composio.
+                if is_trusted_server:
+                    # Named from the debranded server and tool, so the
+                    # name keeps its ``mcp__tool_router__`` prefix and is
+                    # shortened (if at all) after debranding.
+                    clean["name"] = fit_tool_name(
+                        debrand_composio_text(sanitize_mcp_name_component(original_server)),
+                        debrand_composio_text(sanitize_mcp_name_component(original_tool or clean_name)),
+                    )
+                    clean["description"] = debrand_composio_text(
+                        clean.get("description", ""),
+                    )
+                    clean_name = clean["name"]
+
+            if clean_name in seen_names:
+                # Two tools under one name (their names sanitize alike):
+                # the first keeps it, as in process.
+                logger.warning(
+                    "MCP tool %s from server %s shares its name %s with an earlier tool -- skipped",
+                    original_tool, owning_server_key, clean_name,
+                )
+                continue
+            seen_names.add(clean_name)
+            clean_schemas.append(clean)
+            tool_index[clean_name] = (owning_server_key, original_tool)
+            if utility is not None:
+                utility_index[clean_name] = utility
+        return clean_schemas, tool_index, utility_index
+
+    # ------------------------------------------------------------------
+    # Background retry of unavailable servers
+    # ------------------------------------------------------------------
+
+    def retry_unavailable_servers(self, org_id: UUID, user_id: UUID, agent_id: str) -> None:
+        """Start, in the background, a retry of the agent's unavailable
+        servers whose cooldown is over (:meth:`PoolEntry.due_for_retry`).
+
+        One retry at a time per tenant, one connect attempt per server; it
+        adds a server's tools to the entry when it connects.  Returns at
+        once: a tool list never waits for it.
+        """
+        key = (org_id, user_id, agent_id)
+        entry = self._entries.get(key)
+        if entry is None or key in self._retry_tasks:
+            return
+        due = entry.due_for_retry(time.monotonic())
+        if not due:
+            return
+        task = asyncio.create_task(self._retry_servers(key, entry, due), name="mcp-pool-retry")
+        self._retry_tasks[key] = task
+
+        def _done(done: asyncio.Task) -> None:
+            if self._retry_tasks.get(key) is done:
+                del self._retry_tasks[key]
+
+        task.add_done_callback(_done)
+
+    async def _retry_servers(self, key: tuple[UUID, UUID, str], entry: PoolEntry, due: list[str]) -> None:
+        """Try *due* (unavailable servers of *entry*) once more each, and
+        fold the result into *entry* unless it was invalidated, evicted or
+        replaced meanwhile."""
+        from surogates.tools.registry import ToolRegistry
+
+        names_by_key = {
+            _prefixed_name(*key, name): name for name in due if name in entry.server_configs
+        }
+        prefixed = {
+            pname: _discovery_config(entry.server_configs[name]) for pname, name in names_by_key.items()
+        }
+        temp_registry = ToolRegistry()
+        try:
+            await asyncio.to_thread(
+                discover_mcp_tools, servers=prefixed, registry=temp_registry, retry=False,
+            )
+        except Exception:
+            logger.warning("MCP background retry for agent %s failed", key[2], exc_info=True)
+        with _lock:
+            owners = {pname: _servers[pname] for pname in prefixed if pname in _servers}
+            reasons = {
+                name: _connect_failures.pop(pname, "error")
+                for pname, name in names_by_key.items() if pname not in _servers
+            }
+
+        clean_schemas, tool_index, utility_index = [], {}, {}
+        if owners and self._entries.get(key) is entry:
+            # Only the newly connected servers' tools are scanned: the live
+            # ones keep the schemas they were approved with.
+            clean_schemas, tool_index, utility_index = await self._clean_schemas(
+                key, temp_registry, owners, entry.server_configs,
+                governance=entry.governance,
+                approval_room=_ApprovalRoom(self._tenant_approvals(key)) if entry.governance is not None else None,
+                is_service_account=entry.is_service_account,
+                taken={s.get("name", "") for s in entry.tool_schemas},
+            )
+        if self._entries.get(key) is not entry:
+            await self._shutdown_servers(owners)
+            return
+
+        now = time.monotonic()
+        entry.tool_schemas = [*entry.tool_schemas, *clean_schemas]
+        entry.tool_index = {**entry.tool_index, **tool_index}
+        entry.utility_index = {**entry.utility_index, **utility_index}
+        for pname in owners:
+            name = names_by_key[pname]
+            entry.unavailable.pop(name, None)
+            entry.failed_at.pop(name, None)
+            entry.failures.pop(name, None)
+        for name, why in reasons.items():
+            entry.unavailable[name] = why
+            entry.failed_at[name] = now
+            entry.failures[name] = entry.failures.get(name, 1) + 1
+        logger.info(
+            "MCP background retry for org=%s user=%s agent=%s: connected %s; still unavailable %s",
+            key[0], key[1], key[2],
+            ", ".join(sorted(names_by_key[p] for p in owners)) or "none",
+            ", ".join(
+                f"{name} ({why}, next try in {_retry_cooldown(entry.failures[name]):.0f}s)"
+                for name, why in sorted(reasons.items())
+            ) or "none",
+        )
 
     # ------------------------------------------------------------------
     # Governance scan helper
@@ -968,7 +1085,20 @@ class ConnectionPool:
                 server = _servers.pop(prefixed, None)
                 if server is not None:
                     servers_to_shutdown.append(server)
+        await self._shutdown(servers_to_shutdown)
 
+    async def _shutdown_servers(self, servers: dict[str, Any]) -> None:
+        """Remove *servers* (tenant-scoped key -> server) from the
+        module-level dict, where they are still those, and shut them down."""
+        with _lock:
+            gone = {key: server for key, server in servers.items() if _servers.get(key) is server}
+            for key in gone:
+                del _servers[key]
+        await self._shutdown(list(gone.values()))
+
+    @staticmethod
+    async def _shutdown(servers_to_shutdown: list[Any]) -> None:
+        """Shut *servers_to_shutdown* down on the loop their sessions run on."""
         # ``server.shutdown()`` awaits ``self._task``, which was created on
         # the dedicated ``_mcp_loop`` thread (HTTP/stdio sessions and their
         # streams are bound to it).  Eviction / invalidation runs on a
@@ -1006,6 +1136,10 @@ class ConnectionPool:
         scheduled on the running loop.
         """
         keys = [k for k in self._entries if k[2] == agent_id]
+        # A connect in progress (its lock taken, no entry yet) sees its lock
+        # gone and keeps nothing (``ensure_connected``).
+        for key in [k for k in self._locks if k[2] == agent_id]:
+            self._locks.pop(key, None)
         # The approvals stay: an invalidation follows any edit of the agent,
         # and the next connection is held against them like any other.  A
         # server an admin repoints has a new identity (``_server_identity``)

@@ -89,8 +89,8 @@ class ToolListResponse(BaseModel):
 
     tools: list[ToolSchema]
     # The attached servers whose tools are missing from ``tools`` because
-    # they could not be connected; a list after their cooldown tries them
-    # again.  Sent only
+    # they could not be connected; they are tried again in the background.
+    # Sent only
     # when there are any (the route excludes unset fields), so the body is
     # unchanged otherwise and an older worker ignores it.
     unavailable: list[UnavailableServer] = Field(default_factory=list)
@@ -114,9 +114,10 @@ async def _ensure_tenant_connected(
 
     Returns cached schemas if the tenant is already connected, otherwise
     loads configs from DB + platform and connects.  With
-    *retry_unavailable* (a tool list), a server that could not be
-    connected is tried again once its cooldown is over; a tool call goes on
-    with the servers that are connected.
+    *retry_unavailable* (a tool list), the cached answer also starts a
+    background retry of the servers that could not be connected, once their
+    cooldown is over (:meth:`ConnectionPool.retry_unavailable_servers`); the
+    list never waits for it.
 
     ``agent_id`` flows from the proxy route (where
     ``agent_runtime_context_dep`` resolves the per-request
@@ -125,10 +126,10 @@ async def _ensure_tenant_connected(
     ``list_tools`` is a metadata probe with no agent in scope and
     passes ``None``.
     """
-    cached = pool.get_cached_schemas(
-        auth.org_id, auth.user_id, agent_id, retry_unavailable=retry_unavailable,
-    )
+    cached = pool.get_cached_schemas(auth.org_id, auth.user_id, agent_id)
     if cached is not None:
+        if retry_unavailable:
+            pool.retry_unavailable_servers(auth.org_id, auth.user_id, agent_id)
         return cached
 
     configs = await load_mcp_configs(
@@ -192,7 +193,8 @@ async def list_tools(
     A server's resource / prompt tools are listed only when it has
     resources / prompts (:meth:`ConnectionPool.visible_schemas`).  An
     attached server that could not be connected is named in
-    ``unavailable``, and tried again once its cooldown is over.
+    ``unavailable``, and tried again in the background once its cooldown is
+    over.
     """
     _bind_agent(auth, ctx)
     pool: ConnectionPool = request.app.state.pool
@@ -206,7 +208,7 @@ async def list_tools(
     # Named as in the agent's tool names (debranded, as those are).
     unavailable = [
         UnavailableServer(
-            name=debrand_composio_text(sanitize_mcp_name_component(name)),
+            name=debrand_composio_text(sanitize_mcp_name_component(name))[:64],
             reason=reason,
         )
         for name, reason in sorted(

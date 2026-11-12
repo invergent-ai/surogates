@@ -3,11 +3,11 @@
 Under load a connect could hit its timeout once: the MCP proxy then cached a
 tool list without that server's tools ("Connected 1 MCP server(s) ... (0
 tools)"), returned it for every later list, and the agent worked on with only
-the built-in tools and no word of what was missing.  Now a failed connect is
-tried again after a short pause; a server that still cannot be reached is not
-cached as connected (a tool list after its cooldown tries it again; one within
-it answers at once) and is named in the list, and the session's prompt says its
-tools are missing.
+the built-in tools and no word of what was missing.  Now a connect that fails
+on a timeout or a refusal is tried again after a short pause; a server that
+still cannot be reached is named in the list, the session's prompt says its
+tools are missing, and it is tried again in the background (one attempt, after
+a cooldown that doubles each time), while every list answers at once.
 """
 
 from __future__ import annotations
@@ -25,24 +25,26 @@ from uuid import uuid4
 import httpx
 import pytest
 
+from surogates.audit import AuditType
 from surogates.harness.prompt import PromptBuilder
 from surogates.mcp_proxy import pool as pool_module
-from surogates.mcp_proxy.pool import _UNAVAILABLE_RETRY_COOLDOWN, ConnectionPool, _prefixed_name
+from surogates.mcp_proxy.pool import _UNAVAILABLE_RETRY_COOLDOWN, ConnectionPool, _prefixed_name, _retry_cooldown
 from surogates.orchestrator.mcp_client import McpProxyClient
 from surogates.session.models import Session
 from surogates.tenant.context import TenantContext
 from surogates.tools.mcp import client as mcp_client
-from surogates.tools.mcp.client import MCPServerTask, _connect_failure_kind
+from surogates.tools.mcp.client import MCPServerTask, _connect_failure_kind, _register_server_tools
 from surogates.tools.registry import ToolRegistry
 
 CONFIGS = {"crm": {"url": "http://crm"}, "files": {"url": "http://files"}}
 
 
 class _Upstream:
-    """MCP servers by plain name: each fails its first ``fails[name]`` connects."""
+    """MCP servers by plain name: each takes ``delay[name]`` seconds and fails its first ``fails[name]`` connects."""
 
     def __init__(self) -> None:
         self.fails: dict[str, float] = {}
+        self.delay: dict[str, float] = {}
         self.error: dict[str, type[BaseException]] = {}
         self.connects: Counter[str] = Counter()
         self.asked: set[str] = set()
@@ -51,6 +53,7 @@ class _Upstream:
         plain = name.rsplit("__", 1)[-1]
         self.asked.add(name)
         self.connects[plain] += 1
+        await asyncio.sleep(self.delay.get(plain, 0))
         if self.connects[plain] <= self.fails.get(plain, 0):
             raise self.error.get(plain, TimeoutError)()
         server = MCPServerTask(name)
@@ -92,8 +95,33 @@ def _later(monkeypatch, seconds: float) -> None:
     monkeypatch.setattr(pool_module, "time", SimpleNamespace(monotonic=lambda: real() + seconds))
 
 
+async def _retried(pool: ConnectionPool, tenant: tuple) -> None:
+    """Start the background retry of *tenant*'s unavailable servers and wait for it."""
+    pool.retry_unavailable_servers(*tenant)
+    task = pool._retry_tasks.get(tenant)
+    assert task is not None
+    await task
+
+
+def _tenant_keys(tenant: tuple) -> list[str]:
+    prefix = _prefixed_name(*tenant, "")
+    return [k for k in mcp_client._servers if k.startswith(prefix)]
+
+
+class _Audit:
+    def __init__(self) -> None:
+        self.rows: list[dict] = []
+
+    async def emit(self, **row):
+        self.rows.append(row)
+        return len(self.rows)
+
+    def scans(self) -> list[dict]:
+        return [r for r in self.rows if r["type"] == AuditType.POLICY_MCP_SCAN]
+
+
 # ---------------------------------------------------------------------------
-# Connect retries in the pool
+# The first connect: retries within the budget
 # ---------------------------------------------------------------------------
 
 
@@ -104,12 +132,11 @@ async def test_a_server_that_fails_its_first_connect_is_listed_after_a_retry(ups
     assert {"mcp__crm__lookup", "mcp__files__lookup"} <= names
     assert upstream.connects == {"crm": 2, "files": 1}
     assert pool.unavailable_servers(*tenant) == {}
-    assert pool.get_cached_schemas(*tenant, retry_unavailable=True) is not None
     assert caplog.text.count("connect attempt 1 of 3 failed (timeout) -- retrying in 0s") == 1
     assert "Failed to connect to MCP server" not in caplog.text
 
 
-async def test_a_server_that_never_answers_is_named_unavailable_and_not_cached(upstream, caplog):
+async def test_a_server_that_never_answers_is_named_unavailable(upstream, caplog):
     upstream.fails["crm"] = math.inf
     pool, tenant = ConnectionPool(), _tenant()
     names = await _list(pool, tenant)
@@ -117,85 +144,39 @@ async def test_a_server_that_never_answers_is_named_unavailable_and_not_cached(u
     assert not any(n.startswith("mcp__crm__") for n in names)
     assert upstream.connects["crm"] == 3  # the first connect and two retries
     assert pool.unavailable_servers(*tenant) == {"crm": "timeout"}
-    # Never a complete tool list: once the cooldown is over a list tries again.
-    assert pool._entries[tenant].retry_due(time.monotonic() + _UNAVAILABLE_RETRY_COOLDOWN)
-    # A tool call goes on with the connected server.
-    assert pool.get_cached_schemas(*tenant) is not None
+    # Tried again only after its cooldown.
+    entry = pool._entries[tenant]
+    assert entry.due_for_retry(time.monotonic()) == []
+    assert entry.due_for_retry(time.monotonic() + _UNAVAILABLE_RETRY_COOLDOWN) == ["crm"]
     # The existing warning, once, with the server's full key; one line per retry.
     crm_key = _prefixed_name(*tenant, "crm")
     assert caplog.text.count(f"Failed to connect to MCP server '{crm_key}': ") == 1
     assert caplog.text.count(f"MCP server '{crm_key}': connect attempt ") == 2
 
 
-async def test_a_list_within_the_cooldown_answers_at_once_and_still_names_the_server(upstream, monkeypatch):
-    upstream.fails["crm"] = math.inf
+async def test_a_hanging_connect_ends_within_the_budget(upstream, monkeypatch):
+    monkeypatch.setattr(mcp_client, "_CONNECT_BUDGET_SECONDS", 0.3)
+    upstream.delay["crm"] = 30
     pool, tenant = ConnectionPool(), _tenant()
-    await _list(pool, tenant)
-    _later(monkeypatch, _UNAVAILABLE_RETRY_COOLDOWN - 1)
-    assert pool.get_cached_schemas(*tenant, retry_unavailable=True) is not None
-    assert "mcp__files__lookup" in await _list(pool, tenant)
-    assert upstream.connects == {"crm": 3, "files": 1}  # no connect attempt
+    started = time.perf_counter()
+    names = await _list(pool, tenant, {"crm": {"url": "http://crm", "connect_timeout": 60}, **{"files": CONFIGS["files"]}})
+    assert time.perf_counter() - started < 3
+    assert "mcp__files__lookup" in names
+    assert upstream.connects["crm"] == 1  # no time left for a retry
     assert pool.unavailable_servers(*tenant) == {"crm": "timeout"}
 
 
-async def test_a_list_after_the_cooldown_tries_again_and_lists_a_recovered_server(upstream, monkeypatch):
-    upstream.fails["crm"] = 3  # every attempt of the first list fails
-    pool, tenant = ConnectionPool(), _tenant()
-    assert "mcp__crm__lookup" not in await _list(pool, tenant)
-    _later(monkeypatch, _UNAVAILABLE_RETRY_COOLDOWN + 1)
-    assert pool.get_cached_schemas(*tenant, retry_unavailable=True) is None
-    assert "mcp__crm__lookup" in await _list(pool, tenant)
-    assert pool.unavailable_servers(*tenant) == {}
-    assert pool.get_cached_schemas(*tenant, retry_unavailable=True) is not None
-    await _list(pool, tenant)
-    assert upstream.connects == {"crm": 4, "files": 1}
-    target = pool.resolve_call_target(*tenant, "mcp__crm__lookup")
-    assert target is not None and target[:2] == ("crm", "lookup")
-
-
-async def test_only_servers_past_their_cooldown_are_tried_again(upstream):
-    upstream.fails.update(crm=math.inf, docs=math.inf)
-    pool, tenant = ConnectionPool(), _tenant()
-    configs = {**CONFIGS, "docs": {"url": "http://docs"}}
-    await _list(pool, tenant, configs)
-    pool._entries[tenant].failed_at["crm"] -= _UNAVAILABLE_RETRY_COOLDOWN  # crm's cooldown is over, not docs'
-    await _list(pool, tenant, configs)
-    assert upstream.connects == {"crm": 6, "docs": 3, "files": 1}
-    assert pool.unavailable_servers(*tenant) == {"crm": "timeout", "docs": "timeout"}
-    entry = pool._entries[tenant]
-    assert entry.failed_at["crm"] > entry.failed_at["docs"]  # docs keeps its failure time
-
-
-async def test_servers_that_connected_are_not_connected_again_while_another_is_retried(upstream, monkeypatch):
+async def test_a_config_or_auth_error_is_not_retried(upstream, monkeypatch, caplog):
     upstream.fails["crm"] = math.inf
+    upstream.error["crm"] = ValueError
     pool, tenant = ConnectionPool(), _tenant()
     await _list(pool, tenant)
-    files_key = _prefixed_name(*tenant, "files")
-    files_server = mcp_client._servers[files_key]
-    _later(monkeypatch, _UNAVAILABLE_RETRY_COOLDOWN + 1)
-    again = await _list(pool, tenant)
-    assert upstream.connects == {"crm": 6, "files": 1}
-    assert mcp_client._servers[files_key] is files_server
-    assert "mcp__files__lookup" in again
-    assert pool.resolve_call_target(*tenant, "mcp__files__lookup")[:2] == ("files", "lookup")
-    tenant_keys = [k for k in mcp_client._servers if k.startswith(files_key.rsplit("__", 1)[0])]
-    assert tenant_keys == [files_key]
-
-
-async def test_lists_that_waited_for_an_attempt_take_its_result(upstream):
-    upstream.fails["crm"] = math.inf
-    pool, tenant = ConnectionPool(), _tenant()
-    await asyncio.gather(*(_list(pool, tenant) for _ in range(3)))
-    assert upstream.connects["crm"] == 3  # one attempt (a connect and two retries), not three
-
-
-async def test_a_retry_is_not_started_once_the_budget_is_spent(upstream, monkeypatch):
-    monkeypatch.setattr(mcp_client, "_CONNECT_BUDGET_SECONDS", 0.0)
-    upstream.fails["crm"] = 1
-    pool, tenant = ConnectionPool(), _tenant()
-    assert "mcp__crm__lookup" not in await _list(pool, tenant)
     assert upstream.connects["crm"] == 1
-    assert pool.unavailable_servers(*tenant) == {"crm": "timeout"}
+    assert pool.unavailable_servers(*tenant) == {"crm": "error"}
+    assert "retrying in" not in caplog.text
+    _later(monkeypatch, 3600)
+    pool.retry_unavailable_servers(*tenant)
+    assert tenant not in pool._retry_tasks
 
 
 async def test_a_refused_connect_is_named_refused(upstream):
@@ -203,6 +184,7 @@ async def test_a_refused_connect_is_named_refused(upstream):
     upstream.error["crm"] = ConnectionRefusedError
     pool, tenant = ConnectionPool(), _tenant()
     await _list(pool, tenant)
+    assert upstream.connects["crm"] == 3
     assert pool.unavailable_servers(*tenant) == {"crm": "refused"}
 
 
@@ -210,7 +192,96 @@ async def test_a_disabled_server_is_not_named_unavailable(upstream):
     pool, tenant = ConnectionPool(), _tenant()
     await _list(pool, tenant, {**CONFIGS, "crm": {"url": "http://crm", "enabled": False}})
     assert pool.unavailable_servers(*tenant) == {}
-    assert pool.get_cached_schemas(*tenant, retry_unavailable=True) is not None
+    assert upstream.connects["crm"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Later: the background retry
+# ---------------------------------------------------------------------------
+
+
+async def test_a_server_that_comes_back_is_listed_after_a_background_retry(upstream, monkeypatch):
+    upstream.fails["crm"] = 3  # every attempt of the first connect fails
+    audit = _Audit()
+    pool, tenant = ConnectionPool(governance_enabled=True, audit_store=audit), _tenant()
+    assert "mcp__crm__lookup" not in await _list(pool, tenant)
+    files_key = _prefixed_name(*tenant, "files")
+    files_server = mcp_client._servers[files_key]
+    scans = len(audit.scans())
+
+    _later(monkeypatch, _UNAVAILABLE_RETRY_COOLDOWN + 1)
+    await _retried(pool, tenant)
+    assert "mcp__crm__lookup" in {s["name"] for s in pool.get_cached_schemas(*tenant)}
+    assert pool.unavailable_servers(*tenant) == {}
+    assert pool.resolve_call_target(*tenant, "mcp__crm__lookup")[:2] == ("crm", "lookup")
+    # One attempt; the connected server untouched, and its tools not scanned again.
+    assert upstream.connects == {"crm": 4, "files": 1}
+    assert mcp_client._servers[files_key] is files_server
+    assert sorted(_tenant_keys(tenant)) == sorted([files_key, _prefixed_name(*tenant, "crm")])
+    new_scans = audit.scans()[scans:]
+    assert new_scans and all("crm" in str(r["data"]) and "files" not in str(r["data"]) for r in new_scans)
+
+
+async def test_each_failed_retry_doubles_the_cooldown(upstream, monkeypatch):
+    upstream.fails["crm"] = math.inf
+    pool, tenant = ConnectionPool(), _tenant()
+    await _list(pool, tenant)
+    _later(monkeypatch, _UNAVAILABLE_RETRY_COOLDOWN + 1)
+    await _retried(pool, tenant)
+    assert upstream.connects["crm"] == 4  # one attempt, not three
+    assert pool._entries[tenant].failures["crm"] == 2
+    _later(monkeypatch, _UNAVAILABLE_RETRY_COOLDOWN + 1 + _retry_cooldown(2) - 10)
+    pool.retry_unavailable_servers(*tenant)
+    assert tenant not in pool._retry_tasks
+    _later(monkeypatch, _UNAVAILABLE_RETRY_COOLDOWN + 1 + _retry_cooldown(2) + 1)
+    await _retried(pool, tenant)
+    assert upstream.connects["crm"] == 5
+    assert [_retry_cooldown(n) for n in (1, 2, 3, 10)] == [120, 240, 480, 1800]
+
+
+async def test_an_invalidation_during_the_first_connect_keeps_nothing(upstream):
+    upstream.delay["crm"] = 0.3
+    pool, tenant = ConnectionPool(), _tenant()
+    connecting = asyncio.create_task(pool.ensure_connected(*tenant, CONFIGS))
+    await asyncio.sleep(0.1)
+    pool.invalidate_agent("agent")
+    assert await connecting == []
+    assert tenant not in pool._entries
+    assert _tenant_keys(tenant) == []
+
+
+async def test_an_invalidation_during_a_background_retry_does_not_bring_the_entry_back(upstream, monkeypatch):
+    upstream.fails["crm"] = 3
+    pool, tenant = ConnectionPool(), _tenant()
+    await _list(pool, tenant)
+    upstream.delay["crm"] = 0.3  # the retry connects, slowly
+    _later(monkeypatch, _UNAVAILABLE_RETRY_COOLDOWN + 1)
+    pool.retry_unavailable_servers(*tenant)
+    retry = pool._retry_tasks[tenant]
+    await asyncio.sleep(0.1)
+    pool.invalidate_agent("agent")
+    await retry
+    await asyncio.gather(*pool._invalidation_tasks)
+    assert upstream.connects["crm"] == 4
+    assert tenant not in pool._entries and pool.get_cached_schemas(*tenant) is None
+    assert _tenant_keys(tenant) == []
+
+
+async def test_a_tool_of_no_connected_server_is_never_listed_by_its_raw_name(monkeypatch):
+    def discover(servers, registry):
+        # Registered, but the server is no longer connected (shut down meanwhile).
+        for key, config in servers.items():
+            server = MCPServerTask(key)
+            server.session = SimpleNamespace()
+            server._tools = [SimpleNamespace(name="lookup", description="Look up.", inputSchema={})]
+            server._registered_tool_names = _register_server_tools(key, server, config, registry)
+        return []
+
+    monkeypatch.setattr(pool_module, "discover_mcp_tools", discover)
+    pool, tenant = ConnectionPool(), _tenant()
+    schemas = await pool.ensure_connected(*tenant, {"world": {"url": "http://w"}})
+    assert schemas == []
+    assert pool.unavailable_servers(*tenant) == {"world": "error"}
 
 
 @pytest.mark.parametrize(("error", "kind"), [
@@ -248,9 +319,8 @@ async def test_a_connect_that_times_out_leaves_no_task_running(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def _route(pool: ConnectionPool, tenant: tuple, monkeypatch):
+def _app(pool: ConnectionPool, tenant: tuple, monkeypatch, loads: list | None = None):
     from fastapi import FastAPI
-    from fastapi.testclient import TestClient
 
     from surogates.mcp_proxy.auth import ProxyAuthContext, get_proxy_auth
     from surogates.mcp_proxy.routes import router
@@ -259,6 +329,8 @@ def _route(pool: ConnectionPool, tenant: tuple, monkeypatch):
     org, user, agent = tenant
 
     async def load_mcp_configs(**_kwargs):
+        if loads is not None:
+            loads.append(1)
         return dict(CONFIGS)
 
     monkeypatch.setattr("surogates.mcp_proxy.routes.load_mcp_configs", load_mcp_configs)
@@ -272,7 +344,13 @@ def _route(pool: ConnectionPool, tenant: tuple, monkeypatch):
         agent_id=agent, org_id=str(org), enabled=True, config_version=1, storage_key_prefix="",
         mcp_server_ids=("crm-id", "files-id"))
     app.dependency_overrides[rate_limit_dep] = lambda: None
-    return TestClient(app)
+    return app
+
+
+def _route(pool: ConnectionPool, tenant: tuple, monkeypatch, loads: list | None = None):
+    from fastapi.testclient import TestClient
+
+    return TestClient(_app(pool, tenant, monkeypatch, loads))
 
 
 def _worker_client(body: dict) -> McpProxyClient:
@@ -296,21 +374,21 @@ def _context_section(mcp_unavailable) -> str:
     return PromptBuilder(tenant, session=session, mcp_unavailable=mcp_unavailable)._context_section()
 
 
-LINE = "- MCP server `crm` could not be reached this session (timeout); its tools are missing."
+LINE = "- MCP server `crm` could not be reached right now (timeout); its tools are missing."
 
 
 async def test_the_list_route_names_an_unavailable_server_and_the_prompt_says_so(upstream, monkeypatch):
     monkeypatch.setenv("SUROGATES_JWT_SECRET", "test-secret-for-sandbox-tokens-32b")
     upstream.fails["crm"] = math.inf
-    pool, tenant = ConnectionPool(), _tenant()
-    route = _route(pool, tenant, monkeypatch)
+    pool, tenant, loads = ConnectionPool(), _tenant(), []
+    route = _route(pool, tenant, monkeypatch, loads)
     listed = route.post("/mcp/v1/tools/list", params={"agent_id": "agent"}, json={})
     assert listed.status_code == 200
     body = listed.json()
     assert body["unavailable"] == [{"name": "crm", "reason": "timeout"}]
-    # Within the cooldown the list answers at once and still names the server.
+    # The next list answers from the entry, still naming the server.
     assert route.post("/mcp/v1/tools/list", params={"agent_id": "agent"}, json={}).json() == body
-    assert upstream.connects["crm"] == 3
+    assert upstream.connects["crm"] == 3 and len(loads) == 1
     assert "mcp__files__lookup" in {t["name"] for t in body["tools"]}
     # Nothing of the tenant reaches the agent: no org, user or agent id.
     assert not any(str(part) in listed.text for part in tenant[:2])
@@ -331,6 +409,49 @@ async def test_the_list_body_is_unchanged_when_every_server_connected(upstream, 
     body = _route(pool, tenant, monkeypatch).post("/mcp/v1/tools/list", params={"agent_id": "agent"}, json={}).json()
     assert set(body) == {"tools"}
     assert all(set(t) == {"name", "description", "parameters", "annotations", "server"} for t in body["tools"])
+
+
+async def test_lists_answer_at_once_while_a_background_retry_runs(upstream, monkeypatch):
+    upstream.fails["crm"] = math.inf
+    pool, tenant, loads = ConnectionPool(), _tenant(), []
+    transport = httpx.ASGITransport(app=_app(pool, tenant, monkeypatch, loads))
+    async with httpx.AsyncClient(transport=transport, base_url="http://proxy") as proxy:
+        async def listed() -> tuple[float, dict]:
+            started = time.perf_counter()
+            body = (await proxy.post("/mcp/v1/tools/list", params={"agent_id": "agent"}, json={})).json()
+            return time.perf_counter() - started, body
+
+        await listed()
+        upstream.delay["crm"] = 1.0  # the retry's connect is slow
+        _later(monkeypatch, _UNAVAILABLE_RETRY_COOLDOWN + 1)
+        elapsed, body = await listed()  # starts the background retry
+        assert elapsed < 0.5 and body["unavailable"] == [{"name": "crm", "reason": "timeout"}]
+        retry = pool._retry_tasks[tenant]
+        elapsed, body = await listed()  # while it runs
+        assert elapsed < 0.5 and body["unavailable"] == [{"name": "crm", "reason": "timeout"}]
+        assert pool._retry_tasks[tenant] is retry and not retry.done()
+        await retry
+    assert len(loads) == 1  # answered from the entry, configs not loaded again
+    assert upstream.connects["crm"] == 4
+
+
+def test_the_prompt_names_only_servers_the_session_is_offered(monkeypatch):
+    from surogates.orchestrator import worker
+
+    unavailable = [("crm", "timeout"), ("eog_1", "timeout"), ("tool_router", "refused")]
+    assert worker._unavailable_mcp_in_scope(unavailable, session_config={}, mcp_scope=None) == unavailable
+    monkeypatch.setattr(worker, "dimension_allowlist", lambda config, dimension: frozenset({"id"}))
+    assert worker._unavailable_mcp_in_scope(
+        unavailable, session_config={}, mcp_scope=({"eog-1"}, set()),
+    ) == [("eog_1", "timeout")]
+    assert worker._unavailable_mcp_in_scope(
+        unavailable, session_config={}, mcp_scope=({"eog-1"}, {"gmail"}),
+    ) == [("eog_1", "timeout"), ("tool_router", "refused")]
+    assert worker._unavailable_mcp_in_scope(unavailable, session_config={}, mcp_scope=None) == []
+    monkeypatch.setattr(worker, "dimension_allowlist", lambda config, dimension: None)
+    assert worker._unavailable_mcp_in_scope(
+        unavailable, session_config={"allowed_tools": ["mcp__crm__lookup", "read_file"]}, mcp_scope=None,
+    ) == [("crm", "timeout")]
 
 
 def test_the_prompt_says_nothing_when_every_server_connected():

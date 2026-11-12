@@ -130,7 +130,7 @@ class PromptBuilder:
         # a one-to-one session, so the agent never asks who it is talking to.
         self._speaker: tuple[str, str] | None = speaker
         # (server, reason) of each attached MCP server the proxy could not
-        # connect this wake: names cut to tool-name characters, reasons
+        # connect for this wake: names cut to tool-name characters, reasons
         # ``timeout`` / ``refused`` / ``error`` (``McpProxyClient``).
         self._mcp_unavailable: list[tuple[str, str]] = list(mcp_unavailable or [])
         self.skills: list = skills or []
@@ -922,7 +922,7 @@ class PromptBuilder:
         # searched for them, or worked on as if they were there.
         for server, reason in self._mcp_unavailable:
             parts.append(
-                f"- MCP server `{server}` could not be reached this session "
+                f"- MCP server `{server}` could not be reached right now "
                 f"({reason}); its tools are missing."
             )
 

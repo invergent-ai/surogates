@@ -135,15 +135,19 @@ if _MCP_AVAILABLE and not _MCP_MESSAGE_HANDLER_SUPPORTED:
 
 _DEFAULT_TOOL_TIMEOUT = 120      # seconds for tool calls
 _DEFAULT_CONNECT_TIMEOUT = 60    # seconds for initial connection per server
-# A server whose connect fails at discovery is tried again after these pauses
-# (seconds), each retry within its connect_timeout; under load a connect can
-# time out once and succeed a moment later.
+# A server whose connect fails at discovery on a timeout or a refusal is tried
+# again after these pauses (seconds), each retry within its connect_timeout;
+# under load a connect can time out once and succeed a moment later.
 _CONNECT_RETRY_DELAYS = (2.0, 5.0)
-# Every connect attempt of one discovery ends within this many seconds, so
-# the MCP proxy answers its caller (who waits 120 s for a tool list) in time.
-# A retry with less than _MIN_CONNECT_RETRY_SECONDS left is not started.
+# Every connect attempt of one discovery ends within this many seconds, the
+# first one included, so the MCP proxy answers its caller (who waits 120 s
+# for a tool list) in time.  A retry with less than
+# _MIN_CONNECT_RETRY_SECONDS left is not started.
 _CONNECT_BUDGET_SECONDS = 100.0
 _MIN_CONNECT_RETRY_SECONDS = 5.0
+# The failures (``_connect_failure_kind``) worth trying again.  A config,
+# auth or policy error ("error") fails the same way the next time.
+TRANSIENT_CONNECT_FAILURES = frozenset({"timeout", "refused"})
 _MAX_RECONNECT_RETRIES = 5
 _MAX_BACKOFF_SECONDS = 60
 _DEFAULT_CIRCUIT_FAILURE_THRESHOLD = 3
@@ -1970,6 +1974,8 @@ async def _discover_and_register_server(
 def discover_mcp_tools(
     servers: Dict[str, dict],
     registry: Any,
+    *,
+    retry: bool = True,
 ) -> List[str]:
     """Connect to MCP servers, discover tools, and register them.
 
@@ -1981,9 +1987,10 @@ def discover_mcp_tools(
 
     Idempotent for already-connected servers. If some servers failed on a
     previous call, only the missing ones are retried.  Within one call a
-    server whose connect fails is tried again after each pause in
-    ``_CONNECT_RETRY_DELAYS`` (all within ``_CONNECT_BUDGET_SECONDS``); one
-    that still fails is logged and its reason kept in ``_connect_failures``.
+    server whose connect fails on a timeout or a refusal is tried again after
+    each pause in ``_CONNECT_RETRY_DELAYS`` (not with ``retry=False``); every
+    attempt ends within ``_CONNECT_BUDGET_SECONDS``.  A server that still
+    fails is logged and its reason kept in ``_connect_failures``.
 
     Args:
         servers: Mapping of ``{server_name: server_config}``.
@@ -2022,47 +2029,52 @@ def discover_mcp_tools(
     # Start the background event loop for MCP connections
     _ensure_mcp_loop()
 
-    async def _discover_one(name: str, cfg: dict, limit: Optional[float]) -> List[str]:
+    async def _discover_one(name: str, cfg: dict, limit: float) -> List[str]:
         """Connect to a single server and return its registered tool names.
 
-        A retry's connect ends by *limit* seconds (the time left in the budget)."""
-        timeout = None
-        if limit is not None:
-            timeout = min(float(cfg.get("connect_timeout", _DEFAULT_CONNECT_TIMEOUT)), limit)
+        The connect ends by *limit* seconds (the time left in the budget)."""
+        timeout = min(float(cfg.get("connect_timeout", _DEFAULT_CONNECT_TIMEOUT)), max(limit, 0.0))
         return await _discover_and_register_server(name, cfg, registry, connect_timeout=timeout)
 
     async def _discover_all():
-        # Connect to all servers in PARALLEL.  Those that fail are tried
-        # again after each pause in _CONNECT_RETRY_DELAYS while the budget
-        # lasts; those that connected are not touched again.
+        # Connect to all servers in PARALLEL.  Those that fail on a timeout
+        # or a refusal are tried again after each pause in
+        # _CONNECT_RETRY_DELAYS while the budget lasts; those that connected
+        # are not touched again.
         deadline = time.monotonic() + _CONNECT_BUDGET_SECONDS
-        attempts = 1 + len(_CONNECT_RETRY_DELAYS)
+        attempts = 1 + len(_CONNECT_RETRY_DELAYS) if retry else 1
         pending = dict(new_servers)
-        limit: Optional[float] = None
+        limit = deadline - time.monotonic()
+        failed: Dict[str, BaseException] = {}
         for attempt in range(1, attempts + 1):
             results = await asyncio.gather(
                 *(_discover_one(name, cfg, limit) for name, cfg in pending.items()),
                 return_exceptions=True,
             )
-            failed = {
-                name: result
-                for name, result in zip(pending, results)
-                if isinstance(result, BaseException)
-            }
-            if not failed or attempt == attempts:
+            retryable: Dict[str, BaseException] = {}
+            for name, result in zip(pending, results):
+                if not isinstance(result, BaseException):
+                    continue
+                if _connect_failure_kind(result) in TRANSIENT_CONNECT_FAILURES:
+                    retryable[name] = result
+                else:
+                    failed[name] = result
+            if not retryable or attempt == attempts:
+                failed.update(retryable)
                 break
             delay = _CONNECT_RETRY_DELAYS[attempt - 1]
             limit = deadline - time.monotonic() - delay
             if limit < _MIN_CONNECT_RETRY_SECONDS:
+                failed.update(retryable)
                 break
-            for name, result in failed.items():
+            for name, result in retryable.items():
                 logger.warning(
                     "MCP server '%s': connect attempt %d of %d failed (%s) -- retrying in %.0fs: %s",
                     name, attempt, attempts, _connect_failure_kind(result), delay,
                     _format_connect_error(result),
                 )
             await asyncio.sleep(delay)
-            pending = {name: new_servers[name] for name in failed}
+            pending = {name: new_servers[name] for name in retryable}
 
         for name, result in failed.items():
             with _lock:
