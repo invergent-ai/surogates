@@ -14,12 +14,36 @@ from __future__ import annotations
 
 import json
 import logging
+from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
 from surogates.tools.loader import SkillDef
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class ExpertScope:
+    """What bounds an expert the current wake consults.
+
+    *withheld*: the tools the consulting session could not be sent
+    (``unusable_tool_names``) or call unasked (its policy); the expert's
+    model is not sent them either, whatever its ``expert_tools`` name.
+    *gate*: the session's ``GovernanceGate``; the expert's tool calls are
+    checked against it.  ``None``: no gate known, the expert's router keeps
+    an open one, as before.
+    """
+
+    withheld: frozenset[str] = frozenset()
+    gate: Any | None = None
+
+
+#: Set by the harness for each wake, before any tool runs (each wake runs in
+#: a task of its own).  Where nothing set it (a test, a harness built without
+#: it) nothing is withheld, as before.
+expert_scope: ContextVar[ExpertScope] = ContextVar("surogates_expert_scope", default=ExpertScope())
 
 # Maximum characters for a single tool result in the expert's context.
 _MAX_TOOL_RESULT_CHARS: int = 20_000
@@ -108,12 +132,16 @@ async def run_expert_loop(
 
     from surogates.session.events import EventType
 
-    # Build the scoped tool set -- only tools declared in the expert's config.
-    allowed_tools = set(expert.expert_tools) if expert.expert_tools else set()
+    # Build the scoped tool set -- only tools declared in the expert's config,
+    # less those the consulting session may not be sent.
+    withheld = expert_scope.get().withheld
+    allowed_tools = {name for name in expert.expert_tools or () if name not in withheld}
     tool_schemas = tool_registry.get_schemas(names=allowed_tools) if allowed_tools else []
 
     # Build expert messages with system prompt + user task.
-    system_prompt = _build_expert_system_prompt(expert)
+    system_prompt = _build_expert_system_prompt(
+        expert, [name for name in expert.expert_tools or () if name in allowed_tools],
+    )
     user_content = _build_user_message(task, context)
 
     messages: list[dict[str, Any]] = [
@@ -189,11 +217,16 @@ async def run_expert_loop(
             for tc in message.tool_calls:
                 tool_name = tc.function.name
 
-                # Enforce scoping: reject tool calls outside allowed set.
-                if allowed_tools and tool_name not in allowed_tools:
+                # Enforce scoping: the expert calls only what it was sent.  An
+                # expert sent no tools runs none (a withheld one included).
+                if tool_name not in allowed_tools:
                     result = json.dumps({
                         "error": f"Tool '{tool_name}' is not available to this expert. "
-                        f"Available tools: {', '.join(sorted(allowed_tools))}",
+                        + (
+                            f"Available tools: {', '.join(sorted(allowed_tools))}"
+                            if allowed_tools
+                            else "It has no tools."
+                        ),
                     })
                 else:
                     result = await tool_router.execute(
@@ -248,12 +281,14 @@ def _absolute_endpoint(endpoint: str, llm_base_url: str | None) -> str:
     return f"{parts.scheme}://{parts.netloc}{endpoint}"
 
 
-def _build_expert_system_prompt(expert: SkillDef) -> str:
+def _build_expert_system_prompt(expert: SkillDef, tools: list[str] | None = None) -> str:
     """Build the system prompt for the expert's mini-loop.
 
     Uses the SKILL.md body as the primary instructions, with a preamble
-    identifying the expert's role and constraints.
+    identifying the expert's role and constraints.  *tools* are the tools
+    it is sent (default: all its ``expert_tools``).
     """
+    tools = list(expert.expert_tools or ()) if tools is None else tools
     parts: list[str] = [
         f"You are an expert assistant specialised in: {expert.description}",
         "",
@@ -262,9 +297,9 @@ def _build_expert_system_prompt(expert: SkillDef) -> str:
         "text. Be concise and precise.",
     ]
 
-    if expert.expert_tools:
+    if tools:
         parts.append(
-            f"\nYou have access to these tools: {', '.join(expert.expert_tools)}. "
+            f"\nYou have access to these tools: {', '.join(tools)}. "
             "Do not attempt to call tools not in this list."
         )
 

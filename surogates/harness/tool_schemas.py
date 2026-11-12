@@ -167,6 +167,50 @@ def drop_unusable_tools(
     Never returns an empty list (a request with no tools at all is worse
     than an oversized one), except where only unwired media tools were left.
     """
+    drop = unusable_tool_names(
+        has_kbs=has_kbs,
+        has_channel=has_channel,
+        makes_routines=makes_routines,
+        reads_routines=reads_routines,
+        confirms_routines=confirms_routines,
+        is_whiteboard=is_whiteboard,
+        is_voice=is_voice,
+        has_forms=has_forms,
+        has_file_pane=has_file_pane,
+        has_image_model=has_image_model,
+        has_video_model=has_video_model,
+    )
+    if not drop:
+        return schemas
+
+    kept = [s for s in schemas if s["function"]["name"] not in drop]
+    if kept:
+        return kept
+    # Never empty, but never by sending a media tool with no model behind it:
+    # it could only answer "not available" (an empty list sends no tools).
+    unwired = {
+        name for name, wired in (("generate_image", has_image_model), ("generate_video", has_video_model))
+        if not wired
+    }
+    return [s for s in schemas if s["function"]["name"] not in unwired]
+
+
+def unusable_tool_names(
+    *,
+    has_kbs: bool,
+    has_channel: bool,
+    makes_routines: bool,
+    reads_routines: bool = True,
+    confirms_routines: bool = True,
+    is_whiteboard: bool = False,
+    is_voice: bool = False,
+    has_forms: bool = False,
+    has_file_pane: bool = True,
+    has_image_model: bool = True,
+    has_video_model: bool = True,
+) -> frozenset[str]:
+    """The tools ``drop_unusable_tools`` takes off a request with these facts, whichever tools the request holds:
+    what a consulted expert's model, which picks its own tools, must not be sent either."""
     drop: set[str] = set()
     if not has_kbs:
         drop |= _KB_TOOLS
@@ -190,19 +234,7 @@ def drop_unusable_tools(
         drop.add("generate_image")
     if not has_video_model:
         drop.add("generate_video")
-    if not drop:
-        return schemas
-
-    kept = [s for s in schemas if s["function"]["name"] not in drop]
-    if kept:
-        return kept
-    # Never empty, but never by sending a media tool with no model behind it:
-    # it could only answer "not available" (an empty list sends no tools).
-    unwired = {
-        name for name, wired in (("generate_image", has_image_model), ("generate_video", has_video_model))
-        if not wired
-    }
-    return [s for s in schemas if s["function"]["name"] not in unwired]
+    return frozenset(drop)
 
 
 # What only a session on a folder of the user's computer can use: a cloud session is not offered it.
