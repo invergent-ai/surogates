@@ -657,7 +657,7 @@ async def test_a_masters_prompt_runs_the_project(api):
     assert "## The project's folder" not in said
     # A thread is named by its title, not linked: the chat opens no link to a thread, and its card is where it opens.
     assert "Name a thread by its title and never write a link to it" in prompt
-    assert "# Worker Delegation" not in prompt
+    assert "# Coordinating agents" not in prompt
     assert "# Available Sub-Agents" not in prompt
     assert prompt.endswith(
         "## Session instructions\n\nProject: Quarterly report\n\nGoal: The board's Q3 report\n\nUse euros."
@@ -667,7 +667,7 @@ async def test_a_masters_prompt_runs_the_project(api):
 async def test_a_coordinator_chat_keeps_its_delegation_prompt(api):
     chat = await api.client.post("/v1/sessions", json={"config": {"coordinator": True}}, headers=api.auth())
     prompt = await system_prompt(api, await api.app.state.session_store.get_session(UUID(chat.json()["id"])))
-    assert "# Worker Delegation" in prompt
+    assert "# Coordinating agents" in prompt
     assert "# Available Sub-Agents" in prompt
     assert "# Running a project" not in prompt
 

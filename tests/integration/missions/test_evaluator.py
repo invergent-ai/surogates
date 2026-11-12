@@ -7,17 +7,19 @@ from unittest.mock import AsyncMock
 import pytest
 from sqlalchemy import select
 
-from surogates.db.models import Event, Session as ORMSession, Task
+from surogates.db.models import Event, Session as ORMSession
 from surogates.missions.commands import handle_mission_create
 from surogates.missions.store import MissionStore
+
+from tests.integration.missions.conftest import a_mission_agent
 from surogates.session.events import EventType
 
 
 @pytest.mark.asyncio(loop_scope="session")
-async def test_trigger_on_task_terminal_event(
+async def test_trigger_on_an_ended_mission_agent(
     session_factory, session_store, org_id, user_id, chat_session,
 ):
-    """A mission task transitioning to done makes should_evaluate return True."""
+    """A mission agent that ended makes should_evaluate return True."""
     from surogates.missions.evaluator import should_evaluate
 
     store = MissionStore(session_factory)
@@ -29,14 +31,7 @@ async def test_trigger_on_task_terminal_event(
         mission_store=store,
     )
 
-    async with session_factory() as db:
-        db.add(Task(
-            org_id=org_id, parent_session_id=chat_session.id,
-            goal="t", status="done",
-            completed_at=datetime.now(timezone.utc).replace(tzinfo=None),
-            mission_id=created.mission_id,
-        ))
-        await db.commit()
+    await a_mission_agent(session_factory, chat_session, created.mission_id, status="completed", updated_at=datetime.now(timezone.utc).replace(tzinfo=None))
 
     decision = await should_evaluate(
         mission_id=created.mission_id,
@@ -46,7 +41,7 @@ async def test_trigger_on_task_terminal_event(
         rate_limit_seconds=30,
     )
     assert decision.should is True
-    assert decision.trigger == "task_terminal"
+    assert decision.trigger == "agent_ended"
 
 
 @pytest.mark.asyncio(loop_scope="session")
@@ -133,7 +128,7 @@ async def test_rate_limit_blocks_within_window(
 
 
 @pytest.mark.asyncio(loop_scope="session")
-async def test_first_evaluation_ignores_tasks_predating_mission(
+async def test_first_evaluation_ignores_agents_that_ended_before_the_mission(
     session_factory, session_store, org_id, user_id, chat_session,
 ):
     """Terminal tasks completed BEFORE the mission was created must not
@@ -159,15 +154,7 @@ async def test_first_evaluation_ignores_tasks_predating_mission(
     pre_mission = mission.created_at - timedelta(hours=1)
     if pre_mission.tzinfo is not None:
         pre_mission = pre_mission.replace(tzinfo=None)
-    async with session_factory() as db:
-        db.add(Task(
-            org_id=org_id, parent_session_id=chat_session.id,
-            goal="stale verifier from a prior mission",
-            status="done",
-            completed_at=pre_mission,
-            mission_id=created.mission_id,
-        ))
-        await db.commit()
+    await a_mission_agent(session_factory, chat_session, created.mission_id, status="completed", updated_at=pre_mission)
 
     decision = await should_evaluate(
         mission_id=created.mission_id,
@@ -181,7 +168,7 @@ async def test_first_evaluation_ignores_tasks_predating_mission(
 
 
 @pytest.mark.asyncio(loop_scope="session")
-async def test_old_terminal_task_does_not_retrigger_after_evaluation(
+async def test_an_agent_that_ended_before_the_last_evaluation_does_not_retrigger(
     session_factory, session_store, org_id, user_id, chat_session,
 ):
     """A terminal task that was already evaluated does not retrigger forever."""
@@ -195,14 +182,7 @@ async def test_old_terminal_task_does_not_retrigger_after_evaluation(
         session_store=session_store, session_factory=session_factory,
         mission_store=store,
     )
-    async with session_factory() as db:
-        db.add(Task(
-            org_id=org_id, parent_session_id=chat_session.id,
-            goal="old verifier", status="done",
-            completed_at=datetime.now(timezone.utc).replace(tzinfo=None),
-            mission_id=created.mission_id,
-        ))
-        await db.commit()
+    await a_mission_agent(session_factory, chat_session, created.mission_id, status="completed", updated_at=datetime.now(timezone.utc).replace(tzinfo=None))
 
     await store.record_evaluation(
         created.mission_id, result="needs_revision",
@@ -239,7 +219,7 @@ async def test_apply_verdict_satisfied_marks_status_terminal(
         verdict={"result": "satisfied", "explanation": "rubric met", "feedback": ""},
         coordinator_session_id=chat_session.id,
         session_store=session_store, mission_store=store,
-        trigger="task_terminal",
+        trigger="agent_ended",
     )
     m = await store.get(created.mission_id)
     assert m.status == "satisfied"
@@ -272,7 +252,7 @@ async def test_apply_verdict_needs_revision_emits_continuation(
         },
         coordinator_session_id=chat_session.id,
         session_store=session_store, mission_store=store,
-        trigger="task_terminal",
+        trigger="agent_ended",
     )
     m = await store.get(created.mission_id)
     assert m.status == "active"
@@ -319,14 +299,14 @@ async def test_apply_verdict_max_iterations_reached(
         verdict={"result": "needs_revision", "explanation": "", "feedback": ""},
         coordinator_session_id=chat_session.id,
         session_store=session_store, mission_store=store,
-        trigger="task_terminal",
+        trigger="agent_ended",
     )
     m = await store.get(created.mission_id)
     assert m.status == "max_iterations_reached"
 
 
 @pytest.mark.asyncio(loop_scope="session")
-async def test_harness_runs_evaluator_when_mission_task_completed(
+async def test_harness_runs_evaluator_when_a_mission_agent_completed(
     session_factory, session_store, org_id, user_id, chat_session,
 ):
     """End-to-end: with an active mission and a done mission-task, the
@@ -341,14 +321,7 @@ async def test_harness_runs_evaluator_when_mission_task_completed(
         session_store=session_store, session_factory=session_factory,
         mission_store=store,
     )
-    async with session_factory() as db:
-        db.add(Task(
-            org_id=org_id, parent_session_id=chat_session.id,
-            goal="t", status="done",
-            completed_at=datetime.now(timezone.utc).replace(tzinfo=None),
-            mission_id=created.mission_id,
-        ))
-        await db.commit()
+    await a_mission_agent(session_factory, chat_session, created.mission_id, status="completed", updated_at=datetime.now(timezone.utc).replace(tzinfo=None))
 
     judge = AsyncMock(return_value={
         "result": "satisfied", "explanation": "ok", "feedback": "",
@@ -387,14 +360,7 @@ async def test_harness_evaluator_records_parse_failure_on_bad_judge_output(
         session_store=session_store, session_factory=session_factory,
         mission_store=store,
     )
-    async with session_factory() as db:
-        db.add(Task(
-            org_id=org_id, parent_session_id=chat_session.id,
-            goal="t", status="done",
-            completed_at=datetime.now(timezone.utc).replace(tzinfo=None),
-            mission_id=created.mission_id,
-        ))
-        await db.commit()
+    await a_mission_agent(session_factory, chat_session, created.mission_id, status="completed", updated_at=datetime.now(timezone.utc).replace(tzinfo=None))
 
     bad_judge = AsyncMock(side_effect=MissionJudgeParseError("not JSON"))
 
@@ -437,14 +403,7 @@ async def test_harness_transport_failure_does_not_consume_iteration_budget(
         session_store=session_store, session_factory=session_factory,
         mission_store=store,
     )
-    async with session_factory() as db:
-        db.add(Task(
-            org_id=org_id, parent_session_id=chat_session.id,
-            goal="t", status="done",
-            completed_at=datetime.now(timezone.utc).replace(tzinfo=None),
-            mission_id=created.mission_id,
-        ))
-        await db.commit()
+    await a_mission_agent(session_factory, chat_session, created.mission_id, status="completed", updated_at=datetime.now(timezone.utc).replace(tzinfo=None))
 
     transport_failed_judge = AsyncMock(
         side_effect=RuntimeError("provider 429 rate-limit"),
@@ -479,47 +438,18 @@ async def test_harness_transport_failure_does_not_consume_iteration_budget(
     assert m.evaluator_parse_failures == 0
 
 
-async def _fan_out(session_factory, org_id, session_id, mission_id):
-    """Two researchers feeding a writer, feeding a verifier."""
-    from surogates.db.models import TaskLink
+async def _fan_out(session_factory, coordinator, mission_id):
+    """Two researchers: one finished, one still running."""
+    finished = await a_mission_agent(session_factory, coordinator, mission_id, status="completed")
+    running = await a_mission_agent(session_factory, coordinator, mission_id, status="active")
+    return {"finished": finished.id, "running": running.id}
 
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
+
+async def _set_status(session_factory, session_id, status):
     async with session_factory() as db:
-        finished = Task(
-            org_id=org_id, parent_session_id=session_id, goal="research a",
-            status="done", completed_at=now, mission_id=mission_id,
-        )
-        running = Task(
-            org_id=org_id, parent_session_id=session_id, goal="research b",
-            status="running", mission_id=mission_id,
-        )
-        writer = Task(
-            org_id=org_id, parent_session_id=session_id, goal="write",
-            status="todo", mission_id=mission_id,
-        )
-        verifier = Task(
-            org_id=org_id, parent_session_id=session_id, goal="verify",
-            status="todo", mission_id=mission_id,
-        )
-        db.add_all([finished, running, writer, verifier])
-        await db.flush()
-        db.add_all([
-            TaskLink(parent_id=finished.id, child_id=writer.id),
-            TaskLink(parent_id=running.id, child_id=writer.id),
-            TaskLink(parent_id=writer.id, child_id=verifier.id),
-        ])
-        await db.commit()
-        return {
-            "finished": finished.id, "running": running.id,
-            "writer": writer.id, "verifier": verifier.id,
-        }
-
-
-async def _set_status(session_factory, task_id, status):
-    async with session_factory() as db:
-        task = await db.get(Task, task_id)
-        task.status = status
-        task.completed_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        row = await db.get(ORMSession, session_id)
+        row.status = status
+        row.updated_at = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(seconds=5)
         await db.commit()
 
 
@@ -542,69 +472,34 @@ async def test_the_judge_waits_while_the_fan_out_is_running(
         org_id=org_id, user_id=user_id, session_id=sess.id,
         agent_id="a", description="d", rubric="r",
     )
-    tasks = await _fan_out(session_factory, org_id, sess.id, mid)
+    agents = await _fan_out(session_factory, sess, mid)
 
     decision = await should_evaluate(
         mission_id=mid, coordinator_last_response="Waiting.",
         session_factory=session_factory, mission_store=store,
     )
-    assert (decision.should, decision.trigger) == (False, "tasks_in_flight")
+    assert (decision.should, decision.trigger) == (False, "agents_in_flight")
 
-    # A claim does not jump the queue either: the verifier has not run.
+    # A claim does not jump the queue either: the second researcher has not reported.
     claimed = await should_evaluate(
         mission_id=mid, coordinator_last_response="Done.\n[[mission-complete]]",
         session_factory=session_factory, mission_store=store,
     )
-    assert (claimed.should, claimed.trigger) == (False, "tasks_in_flight")
+    assert (claimed.should, claimed.trigger) == (False, "agents_in_flight")
 
-    # Research done, the writer not yet promoted by the tick: still waiting.
-    await _set_status(session_factory, tasks["running"], "done")
-    between = await should_evaluate(
-        mission_id=mid, coordinator_last_response="Waiting.",
-        session_factory=session_factory, mission_store=store,
-    )
-    assert between.trigger == "tasks_in_flight"
-
-    await _set_status(session_factory, tasks["writer"], "done")
-    await _set_status(session_factory, tasks["verifier"], "done")
+    await _set_status(session_factory, agents["running"], "completed")
     settled = await should_evaluate(
         mission_id=mid, coordinator_last_response="Waiting.",
         session_factory=session_factory, mission_store=store,
     )
-    assert (settled.should, settled.trigger) == (True, "task_terminal")
-
-
-@pytest.mark.asyncio(loop_scope="session")
-async def test_a_failed_task_lets_the_judge_look_at_the_stuck_graph(
-    session_factory, session_store, org_id, user_id,
-):
-    """Its children will never start, so waiting for them would hang forever."""
-    from surogates.missions.evaluator import should_evaluate
-
-    sess = await session_store.create_session(
-        org_id=org_id, user_id=user_id, agent_id="a", channel="web",
-    )
-    store = MissionStore(session_factory)
-    mid = await store.create(
-        org_id=org_id, user_id=user_id, session_id=sess.id,
-        agent_id="a", description="d", rubric="r",
-    )
-    tasks = await _fan_out(session_factory, org_id, sess.id, mid)
-
-    await _set_status(session_factory, tasks["running"], "failed")
-
-    decision = await should_evaluate(
-        mission_id=mid, coordinator_last_response="Waiting.",
-        session_factory=session_factory, mission_store=store,
-    )
-    assert (decision.should, decision.trigger) == (True, "task_terminal")
+    assert (settled.should, settled.trigger) == (True, "agent_ended")
 
 
 @pytest.mark.asyncio(loop_scope="session")
 async def test_running_work_still_trips_the_budget(
     session_factory, session_store, org_id, user_id,
 ):
-    """Waiting for tasks must not let a mission spend past its allowance."""
+    """Waiting for agents must not let a mission spend past its allowance."""
     from surogates.missions.evaluator import should_evaluate
 
     sess = await session_store.create_session(
@@ -615,7 +510,7 @@ async def test_running_work_still_trips_the_budget(
         org_id=org_id, user_id=user_id, session_id=sess.id,
         agent_id="a", description="d", rubric="r",
     )
-    await _fan_out(session_factory, org_id, sess.id, mid)
+    await _fan_out(session_factory, sess, mid)
     await store.set_budget(mid, budget_tokens=10)
     async with session_factory() as db:
         row = await db.get(ORMSession, sess.id)

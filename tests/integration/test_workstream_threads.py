@@ -591,7 +591,7 @@ async def test_a_threads_prompt_keeps_it_to_its_goal(api):
     assert "every path starts at its top," in prompt
     assert "save them in your own folder." in prompt
     assert "# Running a project" not in prompt
-    assert "# Worker Delegation" not in prompt
+    assert "# Coordinating agents" not in prompt
     assert prompt.endswith(
         "## Session instructions\n\nProject: Quarterly report\nThread: Draft A\nFolder: threads/Draft A/"
     )

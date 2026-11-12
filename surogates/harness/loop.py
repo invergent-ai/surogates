@@ -6025,7 +6025,9 @@ class AgentHarness(
         elif explicit_allowed:
             tool_filter = set(config["allowed_tools"])
         else:
-            tool_filter = set(self._tools.tool_names) - set(config.get("excluded_tools") or [])
+            # The task tools are a coordinator's only.
+            excluded = set(config.get("excluded_tools") or []) | {"spawn_task", "unblock_task", "cancel_task"}
+            tool_filter = set(self._tools.tool_names) - excluded
 
         tool_filter = self._apply_execution_context_gates(session, tool_filter)
 
