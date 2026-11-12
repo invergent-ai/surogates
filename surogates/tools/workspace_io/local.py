@@ -591,7 +591,11 @@ _FOLDER_FLAGS = getattr(os, "O_PATH", os.O_RDONLY) | getattr(os, "O_DIRECTORY", 
 #: Whether this system opens, makes, removes, renames and stats by folder
 #: descriptor (POSIX does; os.replace shares os.rename's).  Without it a
 #: write goes by path, as before.
-_BY_FOLDER = bool(_O_NOFOLLOW) and {os.open, os.mkdir, os.unlink, os.rename, os.stat} <= os.supports_dir_fd
+_BY_FOLDER = (
+    bool(_O_NOFOLLOW)
+    and {os.open, os.mkdir, os.unlink, os.rename, os.stat} <= os.supports_dir_fd
+    and os.stat in os.supports_follow_symlinks
+)
 _SWAPPED = "a folder on the file's path was replaced after the path was checked; nothing outside the workspace was touched"
 
 

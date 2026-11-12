@@ -102,6 +102,7 @@ async def test_a_file_name_swapped_for_a_link_is_replaced_not_followed(places):
     assert (out / "target.txt").read_text() == "outside"
     assert not (ws / "a" / "b" / "target.txt").is_symlink()
     assert (ws / "a" / "b" / "target.txt").read_bytes() == b"inside"
+    assert stat.S_IMODE(os.stat(ws / "a" / "b" / "target.txt").st_mode) != 0o600  # the link's target lends no mode
 
 
 async def test_a_write_still_makes_its_folders_keeps_the_mode_and_replaces(places):
