@@ -1,0 +1,152 @@
+"""A folder swapped for a link between the path check and a read cannot make the worker read outside the workspace.
+
+The read side of #651: ``resolve()`` checks a path and ``read``, ``read_lines``, ``stat``, ``list_dir``,
+``local_file`` and ``ripgrep`` used it later by path.  A command still running in the workspace could swap a folder
+on it for a link to somewhere else in between, and the worker (which srt does not confine) read what the link
+pointed at: files srt denies to commands, another session's workspace.  They now reach the file or folder from the
+workspace one folder at a time, with no link followed.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+from pathlib import Path
+
+import pytest
+
+from surogates.tools.workspace_io import local as local_module
+from surogates.tools.workspace_io.local import LocalWorkspaceIO, _paths_back
+
+pytestmark = pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW"), reason="POSIX only")
+
+
+@pytest.fixture
+def places(tmp_path):
+    ws, out = tmp_path / "ws", tmp_path / "outside"
+    (ws / "a" / "b").mkdir(parents=True)
+    (ws / "a" / "b" / "notes.txt").write_text("inside\n")
+    (out / "b").mkdir(parents=True)
+    (out / "b" / "notes.txt").write_text("SECRET\n")
+    (out / "b" / "secret.txt").write_text("SECRET\n")
+    return ws, out
+
+
+def _swap(ws: Path, out: Path) -> None:
+    """What a command in the workspace can do at any moment: put a link where a folder was."""
+    (ws / "a").rename(ws / "a.old")
+    (ws / "a").symlink_to(out, target_is_directory=True)
+
+
+async def test_a_read_through_a_swapped_folder_is_refused(places):
+    ws, out = places
+    wio = LocalWorkspaceIO(str(ws))
+    key = await wio.resolve("a/b/notes.txt")
+    _swap(ws, out)
+    with pytest.raises(PermissionError, match="replaced after the path was checked") as refused:
+        await wio.read(key)
+    assert str(ws.parent) not in str(refused.value)
+    with pytest.raises(PermissionError):
+        await wio.read_lines(key, encoding="utf-8", offset=1, limit=10, max_bytes=1000)
+
+
+async def test_stat_and_list_dir_through_a_swapped_folder_see_nothing_outside(places):
+    ws, out = places
+    wio = LocalWorkspaceIO(str(ws))
+    key, folder = await wio.resolve("a/b/secret.txt"), await wio.resolve("a/b")
+    _swap(ws, out)
+    assert await wio.stat(key) is None
+    with pytest.raises(PermissionError):
+        await wio.list_dir(folder)
+
+
+async def test_a_file_name_swapped_for_a_link_is_not_read(places):
+    ws, out = places
+    wio = LocalWorkspaceIO(str(ws))
+    key = await wio.resolve("a/b/notes.txt")
+    (ws / "a" / "b" / "notes.txt").unlink()
+    (ws / "a" / "b" / "notes.txt").symlink_to(out / "b" / "secret.txt")
+    with pytest.raises(PermissionError):
+        await wio.read(key)
+    assert await wio.stat(key) is None
+
+
+@pytest.mark.skipif(not local_module._PROC_FDS, reason="needs /proc")
+async def test_a_parser_reads_the_file_the_walk_reached_under_its_own_name(places):
+    ws, out = places
+    wio = LocalWorkspaceIO(str(ws))
+    key = await wio.resolve("a/b/notes.txt")
+    async with wio.local_file(key) as local:
+        assert local.name == "notes.txt" and local.suffix == ".txt"
+        _swap(ws, out)  # swapped while the parser has the path: it still reads the workspace's file
+        assert local.read_text() == "inside\n"
+    assert not local.exists()
+    with pytest.raises(PermissionError):
+        async with wio.local_file(key):
+            pass
+
+
+async def test_reads_still_work(places):
+    ws, _ = places
+    (ws / "shortcut").symlink_to(ws / "a" / "b", target_is_directory=True)
+    wio = LocalWorkspaceIO(str(ws))
+    key = await wio.resolve("a/b/notes.txt")
+    assert await wio.read(key) == b"inside\n"
+    assert await wio.read(key, max_bytes=3) == b"ins"
+    page = await wio.read_lines(key, encoding="utf-8", offset=1, limit=10, max_bytes=1000)
+    assert page.data == b"inside\n"
+    st = await wio.stat(key)
+    assert st is not None and not st.is_dir and st.size == 7
+    assert (await wio.stat(str(ws))).is_dir
+    assert sorted(await wio.list_dir(str(ws))) == ["a", "shortcut"]
+    assert await wio.list_dir(await wio.resolve("shortcut")) == ["notes.txt"]  # resolve() followed it
+    assert await wio.stat(await wio.resolve("a/missing.txt")) is None
+    with pytest.raises(FileNotFoundError):
+        await wio.read(await wio.resolve("a/missing.txt"))
+    with pytest.raises(IsADirectoryError):
+        await wio.read(await wio.resolve("a"))
+    with pytest.raises(NotADirectoryError):
+        await wio.list_dir(key)
+
+
+def test_ripgreps_paths_are_written_back_as_keys():
+    assert _paths_back("./sub/a.txt\n./b.md\n", "./", "/ws/", "files") == "/ws/sub/a.txt\n/ws/b.md\n"
+    assert _paths_back("./sub/a.txt:3\n", "./", "/ws/", "count") == "/ws/sub/a.txt:3\n"
+    line = json.dumps({"type": "match", "data": {"path": {"text": "./sub/a.txt"}, "lines": {"text": "./x\n"}}},
+                      separators=(",", ":"))
+    back = json.loads(_paths_back(line, "./", "/ws/", "json"))
+    assert back["data"]["path"]["text"] == "/ws/sub/a.txt" and back["data"]["lines"]["text"] == "./x\n"
+    assert _paths_back('{"data":{"path":{"text":"/proc/9/fd/5"}}}', "/proc/9/fd/5", "/ws/a.txt", "json") == \
+        '{"data":{"path":{"text":"/ws/a.txt"}}}'
+
+
+@pytest.mark.skipif(not local_module._PROC_FDS, reason="needs /proc")
+async def test_ripgrep_runs_in_the_folder_the_walk_reached(places, monkeypatch):
+    """ripgrep takes a path: it is started in the folder the walk opened, whatever the path names by then."""
+    ws, out = places
+    wio = LocalWorkspaceIO(str(ws))
+    folder = await wio.resolve("a")
+    seen = {}
+
+    class _Proc:
+        returncode = 0
+
+        async def communicate(self):
+            return b"./b/notes.txt\n", b""
+
+    async def exec_(program, *args, cwd=None, **_kwargs):
+        seen["cwd"] = os.path.realpath(cwd) if cwd else None
+        seen["target"] = args[-1]
+        seen["inode"] = os.stat(cwd).st_ino if cwd else None
+        return _Proc()
+
+    monkeypatch.setattr(local_module, "_RIPGREP_PATH", "rg")
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", exec_)
+    inode = os.stat(ws / "a").st_ino
+    out_text = await wio.ripgrep(folder, mode="files", pattern="*.txt")
+    assert seen["target"] == "." and seen["inode"] == inode
+    assert out_text == f"{folder}/b/notes.txt\n"
+    _swap(ws, out)
+    with pytest.raises(PermissionError):
+        await wio.ripgrep(folder, mode="files", pattern="*.txt")
