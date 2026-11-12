@@ -133,3 +133,61 @@ async def test_dispatch_hands_the_tool_null(arguments):
 
     assert await registry.dispatch("api_fetch", arguments) == "ok"
     assert seen == [{"method": "GET", "url": "u", "params": None, "body": None}]
+
+
+def test_a_union_of_two_object_shapes_is_not_guessed():
+    # Which branch applies depends on the value; restoring by the first one would turn b's plain string into null.
+    schema = {"type": "object", "properties": {"spec": {"oneOf": [
+        {"type": "object", "properties": {"kind": {"const": "a"}, "x": UNION}},
+        {"type": "object", "properties": {"kind": {"const": "b"}, "x": {"type": "string"}}},
+    ]}}}
+
+    assert restore_json_nulls({"spec": {"kind": "b", "x": "null"}}, schema) == {"spec": {"kind": "b", "x": "null"}}
+
+
+@pytest.mark.parametrize("bad", [5, True, "string", {"type": "null"}])
+def test_a_malformed_combinator_is_ignored_not_raised(bad):
+    schema = {"type": "object", "properties": {"spec": {"anyOf": bad}, "body": UNION}}
+
+    assert restore_json_nulls({"spec": {"x": "null"}, "body": "null"}, schema) == {"spec": {"x": "null"}, "body": None}
+
+
+def test_the_callers_arguments_are_not_changed_in_place():
+    args = {"method": "GET", "url": "u", "params": "null", "body": "null"}
+
+    restored = restore_json_nulls(args, _api_fetch_schema())
+
+    assert restored["body"] is None
+    assert args == {"method": "GET", "url": "u", "params": "null", "body": "null"}
+
+
+def test_a_ref_is_not_walked_but_a_nullable_ref_parameter_is_restored():
+    schema = {
+        "type": "object",
+        "$defs": {"Filter": {"type": "object", "properties": {"owner": UNION}}},
+        "properties": {
+            "filter": {"anyOf": [{"$ref": "#/$defs/Filter"}, {"type": "null"}]},
+            "inner": {"$ref": "#/$defs/Filter"},
+        },
+    }
+
+    assert restore_json_nulls({"filter": "null", "inner": {"owner": "null"}}, schema) == {
+        "filter": None, "inner": {"owner": "null"},
+    }
+
+
+@pytest.mark.parametrize("prop", [
+    {"type": "integer", "nullable": True},
+    {"type": "array", "items": {"type": "string"}, "nullable": True},
+    {"anyOf": [{"type": "object", "properties": {"a": {"type": "string"}}}, {"type": "null"}]},
+])
+def test_a_nullable_parameter_of_any_type_gets_null_for_the_string_null(prop):
+    schema = {"type": "object", "properties": {"x": prop}}
+
+    assert restore_json_nulls({"x": "null"}, schema) == {"x": None}
+
+
+def test_a_parameter_that_takes_the_word_null_as_a_value_keeps_it():
+    schema = {"type": "object", "properties": {"mode": {"type": ["string", "null"], "enum": ["null", "first", None]}}}
+
+    assert restore_json_nulls({"mode": "null"}, schema) == {"mode": "null"}
