@@ -95,6 +95,9 @@ class PromptRequest(BaseModel):
     idempotency_key: str | None = Field(default=None, max_length=200)
     metadata: dict | None = None
     skill_overrides: dict[str, SkillOverride] | None = None
+    # A saved browser login the session starts logged in with: the agent's own, or the
+    # caller's. Whose it is is checked when the browser starts; another's is never loaded.
+    browser_profile_id: UUID | None = None
 
 
 class PromptAccepted(BaseModel):
@@ -224,6 +227,8 @@ async def _submit_one(
     }
     if body.metadata:
         config["pipeline_metadata"] = body.metadata
+    if body.browser_profile_id is not None:
+        config["browser"] = {"profile_id": str(body.browser_profile_id)}
 
     # Session-scoped skill overrides (SkillOpt candidate bodies) are
     # gated behind the worker kill switch.  When disabled we drop them
