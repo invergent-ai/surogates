@@ -12,6 +12,8 @@ context to prevent collisions across organisations and users.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import copy
 import hashlib
 import json
 import logging
@@ -88,6 +90,11 @@ def _note_failed_attempt(entry: "PoolEntry", failed: dict[str, str]) -> None:
         entry.unavailable[name] = why
         entry.failed_at[name] = now
         entry.failures[name] = entry.failures.get(name, 1) + 1
+
+
+#: Seconds at least between two re-lists of one server's tools when it keeps
+#: saying they changed (``ConnectionPool._tools_changed``).
+_RELIST_MIN_INTERVAL = 5.0
 
 
 def _retry_cooldown(failures: int) -> float:
@@ -285,6 +292,12 @@ class ConnectionPool:
         # The background retry of each tenant's unavailable servers, one at
         # a time per tenant (``retry_unavailable_servers``).
         self._retry_tasks: dict[tuple[UUID, UUID, str], asyncio.Task] = {}
+        # A server's tools listed anew after it said they changed
+        # (``notifications/tools/list_changed``): one re-list at a time per
+        # tenant and server, and one more queued when it says so again
+        # meanwhile (``_tools_changed``).
+        self._relist_tasks: dict[tuple[tuple[UUID, UUID, str], str], asyncio.Task] = {}
+        self._relist_again: set[tuple[tuple[UUID, UUID, str], str]] = set()
         # Per agent, how many times it was invalidated: a connect that sees
         # the count change while it runs keeps nothing (``ensure_connected``).
         self._agent_epochs: dict[str, int] = {}
@@ -328,6 +341,10 @@ class ConnectionPool:
         for task in list(self._retry_tasks.values()):
             task.cancel()
         self._retry_tasks.clear()
+        self._relist_again.clear()
+        for task in list(self._relist_tasks.values()):
+            task.cancel()
+        self._relist_tasks.clear()
 
         for entry in list(self._entries.values()):
             await self._disconnect_entry(entry)
@@ -557,6 +574,9 @@ class ConnectionPool:
                 is_service_account=is_service_account,
             )
             self._entries[key] = entry
+            self._follow_tool_changes(key, {
+                name: owners[pname] for pname, name in zip(prefixed, original_names) if pname in owners
+            })
 
             logger.info(
                 "Connected %d MCP server(s) for org=%s user=%s agent=%s "
@@ -822,6 +842,7 @@ class ConnectionPool:
         entry.tool_schemas = [*entry.tool_schemas, *clean_schemas]
         entry.tool_index = {**entry.tool_index, **tool_index}
         entry.utility_index = {**entry.utility_index, **utility_index}
+        self._follow_tool_changes(key, {names_by_key[pname]: server for pname, server in owners.items()})
         for pname in owners:
             name = names_by_key[pname]
             entry.unavailable.pop(name, None)
@@ -837,6 +858,113 @@ class ConnectionPool:
                 f"{_retry_cooldown(entry.failures[name]) if why in _RETRIED_SOON else _MAX_UNAVAILABLE_RETRY_COOLDOWN:.0f}s)"
                 for name, why in sorted(reasons.items())
             ) or "none",
+        )
+
+    # ------------------------------------------------------------------
+    # A server whose tools changed (notifications/tools/list_changed)
+    # ------------------------------------------------------------------
+
+    def _follow_tool_changes(self, key: tuple[UUID, UUID, str], servers: dict[str, Any]) -> None:
+        """Have each of *servers* (configured name -> connected server) of
+        tenant *key* tell this pool when its tool list changes: the MCP client
+        lists its tools anew on ``notifications/tools/list_changed`` and calls
+        ``_on_tools_changed`` on its own loop; the pool's entry then lists that
+        server's tools anew (:meth:`_relist_server`) on the pool's loop."""
+        loop = asyncio.get_running_loop()
+        for name, server in servers.items():
+            def changed(_server_name: str, _tool_names: list[str], name: str = name, server: Any = server) -> None:
+                # A pool whose loop has closed lists nothing any more.
+                with contextlib.suppress(RuntimeError):
+                    loop.call_soon_threadsafe(self._tools_changed, key, name, server)
+            server._on_tools_changed = changed
+
+    def _tools_changed(self, key: tuple[UUID, UUID, str], name: str, server: Any, *, delay: float = 0.0) -> None:
+        """Start the re-list of *server*'s tools in tenant *key*'s entry, or,
+        while one runs, queue one more: a burst of notifications costs two
+        re-lists, the second at least ``_RELIST_MIN_INTERVAL`` after the first."""
+        job = (key, name)
+        task = self._relist_tasks.get(job)
+        if task is not None and not task.done():
+            self._relist_again.add(job)
+            return
+        task = asyncio.create_task(self._relist_server(key, name, server, delay=delay), name="mcp-pool-relist")
+        self._relist_tasks[job] = task
+
+        def _done(done: asyncio.Task) -> None:
+            if self._relist_tasks.get(job) is done:
+                del self._relist_tasks[job]
+            if done.cancelled():
+                self._relist_again.discard(job)
+                return
+            if (error := done.exception()) is not None:
+                logger.error(
+                    "MCP tool re-list for org=%s user=%s agent=%s server %s raised",
+                    key[0], key[1], key[2], name, exc_info=error,
+                )
+            if job in self._relist_again:
+                self._relist_again.discard(job)
+                self._tools_changed(key, name, server, delay=_RELIST_MIN_INTERVAL)
+
+        task.add_done_callback(_done)
+
+    async def _relist_server(self, key: tuple[UUID, UUID, str], name: str, server: Any, *, delay: float = 0.0) -> None:
+        """List *server*'s tools anew in tenant *key*'s entry: scanned as at
+        a connect (a tool whose definition changed after its approval is a
+        rug-pull: audited and left out), then put in place of the server's
+        tools there.  Nothing is done for an entry or a connection that is
+        gone or replaced."""
+        from surogates.tools.registry import ToolRegistry
+
+        if delay:
+            await asyncio.sleep(delay)
+        entry = self._entries.get(key)
+        config = entry.server_configs.get(name) if entry is not None else None
+        pname = _prefixed_name(*key, name)
+        with _lock:
+            live = _servers.get(pname) is server
+        if entry is None or config is None or not live:
+            return
+        # The server's tool list now, read from a copy: its connection's own
+        # name maps are the MCP client's, on its own loop.
+        listed = copy.copy(server)
+        temp_registry = ToolRegistry()
+        listed._registered_tool_names = _register_server_tools(
+            pname, listed, _discovery_config(config), temp_registry,
+        )
+
+        def theirs() -> set[str]:
+            return {n for n, (owner, _tool) in entry.tool_index.items() if owner == pname}
+
+        clean_schemas, tool_index, utility_index = await self._clean_schemas(
+            key, temp_registry, {pname: listed}, entry.server_configs,
+            governance=entry.governance,
+            approval_room=_ApprovalRoom(self._tenant_approvals(key)) if entry.governance is not None else None,
+            is_service_account=entry.is_service_account,
+            taken={s.get("name", "") for s in entry.tool_schemas} - theirs(),
+        )
+        with _lock:
+            live = _servers.get(pname) is server
+        if self._entries.get(key) is not entry or not live:
+            return
+        old = theirs()
+        # Another server's tool may have taken a name meanwhile: it keeps it.
+        taken = {s.get("name", "") for s in entry.tool_schemas} - old
+        clean_schemas = [s for s in clean_schemas if s["name"] not in taken]
+        kept = {s["name"] for s in clean_schemas}
+        entry.tool_schemas = [*(s for s in entry.tool_schemas if s.get("name", "") not in old), *clean_schemas]
+        entry.tool_index = {
+            **{n: r for n, r in entry.tool_index.items() if n not in old},
+            **{n: r for n, r in tool_index.items() if n in kept},
+        }
+        entry.utility_index = {
+            **{n: u for n, u in entry.utility_index.items() if n not in old},
+            **{n: u for n, u in utility_index.items() if n in kept},
+        }
+        logger.info(
+            "MCP server %s of org=%s user=%s agent=%s changed its tools: %d listed (was %d); "
+            "added %s; removed %s",
+            name, key[0], key[1], key[2], len(kept), len(old),
+            ", ".join(sorted(kept - old)) or "none", ", ".join(sorted(old - kept)) or "none",
         )
 
     # ------------------------------------------------------------------
