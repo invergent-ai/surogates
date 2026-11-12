@@ -12,7 +12,7 @@ import shlex
 from pathlib import Path
 from typing import Any
 
-from surogates.harness.context_files import scan_context_content
+from surogates.harness.context_files import read_context_file, scan_context_content
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +54,8 @@ class SubdirectoryHintTracker:
             resolved = str(Path(initial_cwd).resolve())
             self._visited.add(resolved)
         self._cwd: str = initial_cwd or "/"
+        # The session's workspace: a hint file's link is followed only into it.
+        self._workspace: str | None = initial_cwd or None
 
     def check_tool_call(
         self, tool_name: str, tool_args: dict[str, Any]
@@ -178,10 +180,9 @@ class SubdirectoryHintTracker:
 
         for filename in HINT_FILENAMES:
             hint_path = dir_path / filename
-            if not hint_path.is_file():
-                continue
             try:
-                content = hint_path.read_text(encoding="utf-8").strip()
+                # Never through a link out of the workspace (read_context_file).
+                content = (read_context_file(hint_path, self._workspace) or "").strip()
                 if not content:
                     continue
                 content = scan_context_content(content, filename)

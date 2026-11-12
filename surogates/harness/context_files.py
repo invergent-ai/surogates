@@ -13,8 +13,11 @@ SOUL.md is loaded independently (always, from asset root).
 from __future__ import annotations
 
 import codecs
+import errno
 import logging
+import os
 import re
+import stat
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -117,6 +120,68 @@ async def load_soul_md(bundle) -> str | None:
     return truncate_context(content, filename="SOUL.md", readable=False)
 
 
+def read_context_file(path: Path, workspace: str | None) -> str | None:
+    """The text of the context file *path* for the prompt, or None.
+
+    Never through a link out of the workspace: a link at the file's name is
+    followed only to a regular file inside *workspace* (read through the
+    no-follow walk from its root); one that points elsewhere is skipped,
+    with one warning naming the file, and its content is never read.  A file
+    inside the workspace is reached from its root one folder at a time with
+    no link followed (``LocalWorkspaceIO``), so a folder swapped for a link
+    meanwhile reads nothing outside it either.  Only a regular file is read,
+    without waiting (a FIFO by the name is no context file).  Strict UTF-8.
+    """
+    from surogates.tools.workspace_io.local import _BY_FOLDER, _open_to_read
+
+    root = os.path.realpath(workspace) if workspace else None
+
+    def inside(target: str) -> bool:
+        return root is not None and target.startswith(root + os.sep)
+
+    def shown() -> str:
+        return os.path.relpath(path, root) if root and inside(str(path)) else path.name
+
+    try:
+        if os.path.islink(path):
+            target = os.path.realpath(path)
+            if not inside(target):
+                logger.warning("Context file %s is a link out of the workspace: skipped, not read", shown())
+                return None
+            source = target
+        else:
+            # Its folder as resolved, so a file in the workspace is read
+            # through the walk from the workspace's root.
+            source = os.path.join(os.path.realpath(path.parent), path.name)
+        if inside(source) and _BY_FOLDER:
+            with _open_to_read(root, source) as fh:
+                data = fh.read()
+        else:
+            fd = os.open(source, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+            with os.fdopen(fd, "rb") as fh:
+                if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+                    return None
+                os.set_blocking(fh.fileno(), True)
+                data = fh.read()
+    except FileNotFoundError:
+        return None
+    except PermissionError:
+        # Refused by the walk: a folder on the way, or the name, was swapped
+        # for a link after the check.
+        logger.warning("Context file %s could not be read inside the workspace: skipped", shown())
+        return None
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            logger.warning("Context file %s is a link out of the workspace: skipped, not read", shown())
+        elif exc.errno not in (errno.ENOTDIR, errno.EISDIR, errno.EINVAL):
+            logger.warning("Failed to read %s", shown())
+        return None
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
 def load_project_context(workspace_path: str | None) -> str | None:
     """Discover and load project context from workspace.
 
@@ -133,17 +198,11 @@ def load_project_context(workspace_path: str | None) -> str | None:
     current = start
     for _ in range(20):  # safety limit
         for filename in PROJECT_CONTEXT_FILENAMES:
-            candidate = current / filename
-            if candidate.is_file():
-                try:
-                    content = candidate.read_text(encoding="utf-8").strip()
-                    if not content:
-                        continue
-                    content = scan_context_content(content, filename)
-                    return truncate_context(content)
-                except OSError:
-                    logger.warning("Failed to read %s", candidate)
-                    continue
+            text = read_context_file(current / filename, workspace_path)
+            content = (text or "").strip()
+            if content:
+                content = scan_context_content(content, filename)
+                return truncate_context(content)
 
         if current == stop_at:
             break

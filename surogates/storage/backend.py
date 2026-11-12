@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import errno
 import os
 import shutil
 import stat
@@ -242,15 +243,33 @@ class LocalBackend:
 
     async def read(self, bucket: str, key: str) -> bytes:
         path = self._resolve(bucket, key)
-        if not path.is_file():
-            raise KeyError(f"{bucket}/{key}")
-        return path.read_bytes()
+        return self._read_resolved(bucket, key, path)
 
     async def read_text(self, bucket: str, key: str, encoding: str = "utf-8") -> str:
         path = self._resolve(bucket, key)
-        if not path.is_file():
-            raise KeyError(f"{bucket}/{key}")
-        return path.read_text(encoding=encoding)
+        return self._read_resolved(bucket, key, path).decode(encoding)
+
+    def _read_resolved(self, bucket: str, key: str, path: Path) -> bytes:
+        """The object at *path* (``_resolve`` checked it is in the bucket),
+        reached from the bucket's root one folder at a time with no link
+        followed: a folder swapped for a link after the check (a bucket that
+        holds workspaces commands write to) reads nothing outside it.
+        KeyError where no regular file is."""
+        from surogates.tools.workspace_io.local import _BY_FOLDER, _open_to_read
+
+        if not _BY_FOLDER:
+            if not path.is_file():
+                raise KeyError(f"{bucket}/{key}")
+            return path.read_bytes()
+        try:
+            with _open_to_read(str(self._bucket_path(bucket)), str(path)) as fh:
+                return fh.read()
+        except (FileNotFoundError, NotADirectoryError, IsADirectoryError):
+            raise KeyError(f"{bucket}/{key}") from None
+        except OSError as exc:
+            if exc.errno == errno.EINVAL:  # not a regular file
+                raise KeyError(f"{bucket}/{key}") from None
+            raise
 
     async def write(self, bucket: str, key: str, data: bytes) -> None:
         path = self._resolve(bucket, key)
