@@ -270,7 +270,9 @@ async def _image_ref_to_data_url(
     # make it read a file outside the workspace nor tell that file's size.
     from surogates.tools.workspace_io.local import LocalWorkspaceIO
 
-    validate_path(workspace_path, image_ref)  # refused as before: no workspace, or out of it
+    # Load-bearing, not redundant: LocalWorkspaceIO(None) would read anywhere,
+    # so no workspace, or a reference out of it, is refused here as before.
+    validate_path(workspace_path, image_ref)
     return await _image_from_workspace_io(LocalWorkspaceIO(workspace_path), image_ref)
 
 

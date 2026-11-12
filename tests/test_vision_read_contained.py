@@ -93,3 +93,22 @@ async def test_a_folder_swapped_after_the_workspaces_own_check_is_refused_by_the
     with pytest.raises(ValueError) as refused:  # the walk sees no file there: nothing outside is stat'ed or read
         await _image_ref_to_data_url("pics/chart.png", workspace_path=str(ws))
     assert "OUTSIDE" not in str(refused.value)
+
+
+async def test_a_folder_swapped_between_the_stat_and_the_read_is_refused(places, monkeypatch):
+    """The read walks again: swapped after the stat found the image, it reads nothing outside."""
+    from surogates.tools.workspace_io.local import LocalWorkspaceIO
+
+    ws, out = places
+    real = LocalWorkspaceIO.stat
+
+    async def stat_then_swap(self, key):
+        found = await real(self, key)
+        (ws / "pics").rename(ws / "pics.old")
+        (ws / "pics").symlink_to(out, target_is_directory=True)
+        return found
+
+    monkeypatch.setattr(LocalWorkspaceIO, "stat", stat_then_swap)
+    with pytest.raises(ValueError, match="Could not read image pics/chart.png: Refused") as refused:
+        await _image_ref_to_data_url("pics/chart.png", workspace_path=str(ws))
+    assert "OUTSIDE" not in str(refused.value) and str(ws) not in str(refused.value)
