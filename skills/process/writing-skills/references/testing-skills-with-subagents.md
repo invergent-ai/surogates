@@ -29,7 +29,7 @@ Don't test:
 
 | TDD Phase     | Skill Testing        | What You Do                                              |
 |---------------|----------------------|----------------------------------------------------------|
-| **RED**       | Baseline test        | Run scenario WITHOUT skill via `delegate_task`, watch fail |
+| **RED**       | Baseline test        | Run scenario WITHOUT skill with `agent`, watch fail |
 | **Verify RED**| Capture rationalizations | Document exact failures verbatim                       |
 | **GREEN**     | Write skill          | Address specific baseline failures                        |
 | **Verify GREEN** | Pressure test     | Run scenario WITH skill, verify compliance               |
@@ -47,7 +47,7 @@ This is identical to TDD's "write failing test first" — you MUST see what agen
 **Process:**
 
 - [ ] **Create pressure scenarios** (3+ combined pressures).
-- [ ] **Run WITHOUT the skill** via `delegate_task` — give the sub-agent a realistic task with pressures.
+- [ ] **Run WITHOUT the skill** with `agent` — give the sub-agent a realistic task with pressures.
 - [ ] **Document choices and rationalizations** word-for-word.
 - [ ] **Identify patterns** — which excuses appear repeatedly?
 - [ ] **Note effective pressures** — which scenarios trigger violations?
@@ -269,7 +269,7 @@ Before deploying a skill, verify you followed RED-GREEN-REFACTOR:
 
 **RED Phase:**
 - [ ] Created pressure scenarios (3+ combined pressures).
-- [ ] Ran scenarios WITHOUT the skill via `delegate_task` (baseline).
+- [ ] Ran scenarios WITHOUT the skill with `agent` (baseline).
 - [ ] Documented agent failures and rationalizations verbatim.
 
 **GREEN Phase:**

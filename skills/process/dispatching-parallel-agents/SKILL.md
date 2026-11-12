@@ -1,6 +1,6 @@
 ---
 name: dispatching-parallel-agents
-description: Split 2+ independent investigations or tasks across sub-agents (delegate_task) and merge the results.
+description: Split 2+ independent investigations or tasks across sub-agents (the agent tool) and merge the results.
 version: 1.0.0
 author: Surogate Agent (adapted from obra/superpowers)
 license: MIT
@@ -51,12 +51,14 @@ digraph when_to_use {
 
 ## Dispatch Tools (Surogates)
 
-Two surogates tools dispatch sub-agents. Pick based on what you need back.
+One tool starts sub-agents: **`agent(description, prompt, agent_type=..., run_in_background=...)`**. Each call starts one agent in a fresh session, from its prompt alone.
 
-- **`delegate_task(goal, context, agent_type=...)`** — One-shot focused work in a fresh session. Returns the sub-agent's final response. Use when you want a synthesized answer back: research, review, focused investigation, focused fix.
-- **`spawn_worker(goal, agent_type=...)`** — Spawn a coordinator-style worker. Returns immediately with a `worker_id`; results arrive as later user-role messages with a `[Worker ... completed]` prefix. Use when you want to do other work while the sub-agent runs, or when you need to send follow-ups via `send_worker_message`.
+- **In the background** (the default in a main session) the call returns an `agent_id` at once, and the report arrives later as a notification. Use it to fan out, or to do other work while the agents run. Never state or guess a result before its notification arrives.
+- **In the foreground** (`run_in_background=false`) the call waits and returns the agent's report. Use it when you need the answer before your next step.
 
-For straightforward parallel investigation/fix work, `delegate_task` is usually the right tool — call it multiple times in the same response to fan out.
+`send_message(to=<agent_id>, ...)` sends a running or finished agent a follow-up; `stop_agent(agent_id)` stops one; `list_agents()` lists them.
+
+For parallel investigation or fix work, call `agent` several times in the same response (at most 5 calls a response).
 
 ## The Pattern
 
@@ -84,12 +86,12 @@ Each sub-agent gets:
 Call the dispatch tool multiple times in the **same response** to fan out:
 
 ```
-delegate_task(goal="Fix failures in agent-tool-abort.test.ts", context="...")
-delegate_task(goal="Fix failures in batch-completion-behavior.test.ts", context="...")
-delegate_task(goal="Fix failures in tool-approval-race-conditions.test.ts", context="...")
+agent(description="Fix abort tests", prompt="Fix the failures in agent-tool-abort.test.ts. ...")
+agent(description="Fix batch tests", prompt="Fix the failures in batch-completion-behavior.test.ts. ...")
+agent(description="Fix approval tests", prompt="Fix the failures in tool-approval-race-conditions.test.ts. ...")
 ```
 
-All three execute concurrently. The harness gathers results before your next turn.
+All three run concurrently. Each report reaches you as a notification when its agent ends.
 
 ### 4. Review and Integrate
 
@@ -109,9 +111,11 @@ Good sub-agent prompts are:
 3. **Specific about output** — What should the sub-agent return?
 
 ```
-delegate_task(
-  goal="Fix the 3 failing tests in src/agents/agent-tool-abort.test.ts",
-  context="""
+agent(
+  description="Fix abort tests",
+  prompt="""
+    Fix the 3 failing tests in src/agents/agent-tool-abort.test.ts.
+
     Failing tests:
     1. "should abort tool with partial output capture" — expects 'interrupted at' in message
     2. "should handle mixed completed and aborted tools" — fast tool aborted instead of completed
@@ -186,7 +190,7 @@ After sub-agents return:
 
 **Decision:** Independent domains — abort logic separate from batch completion separate from race conditions.
 
-**Dispatch (same response, three `delegate_task` calls):**
+**Dispatch (same response, three `agent` calls):**
 - Sub-agent 1 → Fix `agent-tool-abort.test.ts`.
 - Sub-agent 2 → Fix `batch-completion-behavior.test.ts`.
 - Sub-agent 3 → Fix `tool-approval-race-conditions.test.ts`.

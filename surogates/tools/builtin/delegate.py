@@ -67,9 +67,8 @@ _TRACE_SUMMARY_LIMIT: int = 10
 
 # Tools that should never run inside a delegated child, regardless of
 # agent_type preset or parent toolset. ``ask_user_question`` would
-# block waiting for human input the child has no surface for; the
-# coordinator-family tools shouldn't let a child fork its own worker
-# pool.
+# block waiting for human input the child has no surface for: a child
+# asks its parent with ``send_message`` instead.
 _DELEGATION_ALWAYS_BLOCKED_TOOLS: frozenset[str] = frozenset({
     "ask_user_question",
 })

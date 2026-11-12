@@ -2,7 +2,7 @@
 
 ## What is the Board?
 
-The coordination board is the **shared, verified context** for a fan-out of parallel agents. When a session spawns children (via `spawn_worker`, `delegate_task`, or `spawn_task`), the whole fan-out tree forms a **coordination group** sharing one board of compact, typed notes. Workers post what they learn; every group member — siblings, retries, and the coordinator — sees it without the information being routed (and diluted) through the parent.
+The coordination board is the **shared, verified context** for a fan-out of parallel agents. When a session starts children (with `agent`, or a project's master its threads), the whole fan-out tree forms a **coordination group** sharing one board of compact, typed notes. Workers post what they learn; every group member — siblings, retries, and the coordinator — sees it without the information being routed (and diluted) through the parent.
 
 Without the board, results flow only upward: a child reports to its parent at completion, and siblings are mutually blind. With the board, a dead end hit by worker 1 is a `FAIL` note that worker 2 reads *before* repeating it.
 
@@ -21,9 +21,9 @@ A new `RESULT` from the same writer supersedes its previous one (latest wins). `
 
 Automatic — no flag, no configuration:
 
-1. On a session's **first spawn** (any of the three paths), it self-assigns `context_group_id = str(its own session id)` and the child inherits it.
-2. All later spawns — including grandchildren via orchestrator-role delegation and **task retry attempts** — inherit the same group id: one board per fan-out tree.
-3. Board tools (`share_note`, `read_board`, `expand_note`) appear automatically for group members and never for solo sessions (gated in `_filter_effective_tools`, force-added past restrictive AgentDef allowlists — the `worker_*` self-tool idiom).
+1. When a session starts its **first child**, it self-assigns `context_group_id = str(its own session id)` and the child inherits it.
+2. All later children — including grandchildren started by its agents — inherit the same group id: one board per fan-out tree.
+3. Board tools (`share_note`, `read_board`, `expand_note`) appear automatically for group members and never for solo sessions (gated in `_filter_effective_tools`, and kept past a restrictive AgentDef allowlist).
 
 ## Writing Notes — `share_note`
 
@@ -80,4 +80,4 @@ The admission verifier uses the tenant's existing summary model — no new model
 
 ## Relationship to Missions
 
-A mission coordinator spawning tasks is a fan-out root, so a board forms automatically: mission workers coordinate, retries inherit verified knowledge from failed attempts, and the coordinator receives live deltas instead of waiting for `worker_complete` summaries. The judge, continuation loop, and mission state machine are untouched — a bad note can mislead a worker but cannot flip a mission verdict.
+A mission coordinator starting agents is a fan-out root, so a board forms automatically: the mission's agents coordinate, a later agent reads what an earlier one verified or found to fail, and the coordinator receives live deltas instead of waiting for the agents' reports. The judge, continuation loop, and mission state machine are untouched — a bad note can mislead an agent but cannot flip a mission verdict.

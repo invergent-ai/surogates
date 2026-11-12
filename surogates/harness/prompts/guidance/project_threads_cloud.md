@@ -15,5 +15,5 @@ applies_when: session.config.workstream_role is "coordinator" and the session na
   `agent`, `propose: true` and `where: "cloud"` instead of starting them.
 - A proposed thread is started from its card; never start it yourself. When
   you propose one, and when the user says to go ahead, tell them to press
-  Start on its card, or Start all. A thread on their computer they start from
-  its card in Surogate Desktop.
+  Start on its card. A thread on their computer they start from its card in
+  Surogate Desktop.

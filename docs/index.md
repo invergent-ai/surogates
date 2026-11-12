@@ -86,20 +86,16 @@ Built on Kubernetes, Surogates implements the [Managed Agents architecture](http
 - Sub-agents vs. skills vs. experts (when to use which)
 - `AGENT.md` format and frontmatter
 - 4-layer loading (platform > user FS > org DB > user DB)
-- Spawning with `spawn_worker` / `delegate_task` and `agent_type`
+- Starting and following agents with the agent family (`agent`, `send_message`, `list_agents`, `stop_agent`, `monitor`) and `agent_type`
 - Governance policy profile composition (narrowing semantics)
 - "Running" panel + session tree endpoints
 - Web UI library page and REST API reference
 
-### [11a. Tasks](tasks/index.md)
-- What is a task? (durable, DAG-aware coordination on top of `spawn_worker`)
-- Tasks vs. `delegate_task` vs. `spawn_worker` (when to use which)
-- Status state machine (`todo` -> `ready` -> `running` -> `done` / `blocked` / `failed` / `cancelled`)
-- The six tools (`spawn_task`, `unblock_task`, `cancel_task`, `worker_block`, `worker_complete`, `worker_context`)
-- Dispatcher tick (promote, finalize, enqueue at 5s cadence)
-- Retry-with-history and prior-attempt context injection
-- Event vocabulary (`worker.complete` extended with `task_id`, plus `task.blocked` / `task.failed`)
-- **Missions** (rubric-judged, long-running objectives): `/mission` slash command, evaluator triggers, verifier-task pattern, mission dashboard, pause/resume/cancel
+### [11a. Missions](missions/index.md)
+- Rubric-judged, long-running objectives: the `/mission` slash command
+- The mission's agents (the ones its coordinator starts while it is active)
+- When the judge runs, and the verifier-agent pattern
+- Rubric refinement, mission states, pause/resume/cancel, the mission dashboard
 
 ### [11b. Deep Research](deep-research/index.md)
 - Two-agent workflow (planner + writer) for citation-grounded long-form reports
@@ -107,7 +103,7 @@ Built on Kubernetes, Surogates implements the [Managed Agents architecture](http
 - `/deep-research <topic>` slash command (single-shot, no retry, no batch fan-out)
 - `research_memory` + `research_outline` tools (shared `.research/` workspace dir)
 - `create_artifact` Guard 3 (rejects markdown bodies with dangling `[S#]` citations)
-- Operational guardrails: 15-min delegation timeout, planner self-recursion blocked, sub-agent sessions read-only
+- Operational guardrails: one-hour wait for the writer, planner self-recursion blocked, one deep-research agent at a time, sub-agent sessions read-only
 
 ### [12. Experts](experts/index.md)
 - What is an expert? (task-specialized model as a skill)

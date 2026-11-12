@@ -1,15 +1,16 @@
 # Plan Document Reviewer Prompt Template
 
-Use this template when dispatching a plan document reviewer sub-agent via `delegate_task`.
+Use this template when starting a plan document reviewer sub-agent with the `agent` tool.
 
 **Purpose:** Verify the plan is complete, matches the spec, and has proper task decomposition.
 
 **Dispatch after:** The complete plan is written.
 
 ```
-delegate_task(
-  goal="Review plan document",
-  context="""
+agent(
+  description="Review plan document",
+  run_in_background=False,
+  prompt="""
     You are a plan document reviewer. Verify this plan is complete and ready for implementation.
 
     **Plan to review:** <PLAN_FILE_PATH>

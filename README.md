@@ -118,12 +118,12 @@ up to `max_attempts` — with the prior attempts injected into the retry's conte
 so it does not repeat itself.
 
 **Missions** sit on top: `/mission <description>` plus a written rubric. A
-coordinator decomposes the goal into work tasks and a verifier task, and an LLM
-judge grades the workstream whenever a task terminates — `satisfied`,
+coordinator starts agents for the work and a verifier agent, and an LLM judge
+grades the work whenever one of the mission's agents ends: `satisfied`,
 `needs_revision`, `blocked` or `failed`. Pause, resume and cancel without losing
-in-flight workers.
+the agents that run.
 
-→ [Tasks and Missions](docs/tasks/index.md)
+→ [Missions](docs/missions/index.md)
 
 </details>
 
@@ -336,7 +336,7 @@ Kubernetes, depending on the marker.
 
 **Build with it** — [Tools](docs/tools/index.md) · [Skills](docs/skills/index.md) · [Sub-Agents](docs/sub-agents/index.md) · [Experts](docs/experts/index.md) · [MCP](docs/mcp-integration/index.md) · [Memory](docs/memory/index.md) · [Commands](docs/commands/index.md)
 
-**Long-horizon work** — [Tasks and Missions](docs/tasks/index.md) · [Goals](docs/goals/index.md) · [Research Missions](docs/research-missions/index.md) · [Deep Research](docs/deep-research/index.md) · [Coordination Board](docs/board/index.md)
+**Long-horizon work** — [Missions](docs/missions/index.md) · [Goals](docs/goals/index.md) · [Deep Research](docs/deep-research/index.md) · [Coordination Board](docs/board/index.md)
 
 **Reach users** — [Channels](docs/channels/index.md) · [Agent Inbox](docs/agent-inbox/index.md) · [Browser Use](docs/browser-use/index.md)
 

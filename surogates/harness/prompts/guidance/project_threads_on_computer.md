@@ -17,4 +17,4 @@ applies_when: session.config.workstream_role is "coordinator" and session.config
   of the folder of its own, and its changes land in the folder.
 - You cannot start a thread yourself: the user starts each from its card, in
   Surogate Desktop on that computer. When you propose one, and when the user
-  says to go ahead, tell them to press Start on its card, or Start all.
+  says to go ahead, tell them to press Start on its card.

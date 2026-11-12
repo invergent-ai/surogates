@@ -14,7 +14,7 @@ requires_tools: [skill_manage]
 
 **Writing skills IS Test-Driven Development applied to process documentation.**
 
-You write test cases (pressure scenarios with sub-agents via `delegate_task`), watch them fail (baseline behavior), write the skill (documentation), watch tests pass (agents comply), and refactor (close loopholes).
+You write test cases (pressure scenarios with sub-agents started by `agent`), watch them fail (baseline behavior), write the skill (documentation), watch tests pass (agents comply), and refactor (close loopholes).
 
 **Core principle:** If you didn't watch an agent fail without the skill, you don't know if the skill teaches the right thing.
 
@@ -34,7 +34,7 @@ A **skill** is a reference guide for proven techniques, patterns, or tools. Skil
 
 | TDD Concept             | Skill Creation                                       |
 |-------------------------|------------------------------------------------------|
-| **Test case**           | Pressure scenario with sub-agent (`delegate_task`)   |
+| **Test case**           | Pressure scenario with sub-agent (`agent`)            |
 | **Production code**     | Skill document (SKILL.md)                            |
 | **Test fails (RED)**    | Agent violates rule without skill (baseline)         |
 | **Test passes (GREEN)** | Agent complies with skill present                    |
@@ -363,7 +363,7 @@ description: Use when implementing any feature or bugfix, before writing impleme
 
 ### RED: Write Failing Test (Baseline)
 
-Run a pressure scenario with a sub-agent via `delegate_task` **WITHOUT** the skill. Document exact behavior:
+Run a pressure scenario with a sub-agent started by `agent` **WITHOUT** the skill. Document exact behavior:
 - What choices did they make?
 - What rationalizations did they use (verbatim)?
 - Which pressures triggered violations?
@@ -422,7 +422,7 @@ Deploying untested skills = deploying untested code. It's a violation of quality
 
 **RED Phase — Write Failing Test:**
 - [ ] Create pressure scenarios (3+ combined pressures for discipline skills).
-- [ ] Run scenarios WITHOUT skill via `delegate_task` — document baseline behavior verbatim.
+- [ ] Run scenarios WITHOUT skill with `agent` — document baseline behavior verbatim.
 - [ ] Identify patterns in rationalizations / failures.
 
 **GREEN Phase — Write Minimal Skill:**
@@ -435,7 +435,7 @@ Deploying untested skills = deploying untested code. It's a violation of quality
 - [ ] Addresses specific baseline failures identified in RED.
 - [ ] Code inline OR link to separate file.
 - [ ] One excellent example (not multi-language).
-- [ ] Run scenarios WITH skill via `delegate_task` — verify agents now comply.
+- [ ] Run scenarios WITH skill with `agent` — verify agents now comply.
 
 **REFACTOR Phase — Close Loopholes:**
 - [ ] Identify NEW rationalizations from testing.
