@@ -184,7 +184,8 @@ async def test_a_storage_read_through_a_folder_swapped_after_its_check_is_refuse
 
     assert await backend.read("b", "ws/a/credentials") == b"mine\n"
     monkeypatch.setattr(backend, "_resolve", resolve_then_swap)
-    with pytest.raises(PermissionError):
+    # A bucket has no links: the key through one names no object.
+    with pytest.raises(KeyError):
         await backend.read("b", "ws/a/credentials")
 
 
