@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from surogates.harness.prompt import PromptBuilder
+from surogates.harness.prompt import WORKSPACE_TOOLS, PromptBuilder
 from surogates.session.models import Session
 from surogates.tenant.context import TenantContext
 
@@ -41,7 +41,7 @@ def test_a_session_without_file_tools_or_terminal_gets_no_workspace_block():
 
 
 def test_a_session_with_a_file_tool_or_the_terminal_gets_the_workspace_block():
-    for tool in ("read_file", "write_file", "terminal"):
+    for tool in sorted(WORKSPACE_TOOLS):
         section = _context(MCP_AGENT_TOOLS | {tool})
         assert "- **Workspace**: `$HOME` (your working directory)" in section, tool
         assert "## Workspace" in section, tool
