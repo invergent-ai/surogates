@@ -16,8 +16,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import logging
 import errno
+import logging
 import os
 import shutil
 import stat
@@ -247,7 +247,8 @@ class LocalBackend:
 
     async def read_text(self, bucket: str, key: str, encoding: str = "utf-8") -> str:
         path = self._resolve(bucket, key)
-        return self._read_resolved(bucket, key, path).decode(encoding)
+        # As Path.read_text did: universal newlines.
+        return self._read_resolved(bucket, key, path).decode(encoding).replace("\r\n", "\n").replace("\r", "\n")
 
     def _read_resolved(self, bucket: str, key: str, path: Path) -> bytes:
         """The object at *path* (``_resolve`` checked it is in the bucket),

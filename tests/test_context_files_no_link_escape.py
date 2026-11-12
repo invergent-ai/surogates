@@ -56,7 +56,7 @@ def test_an_agents_md_linked_out_of_the_workspace_is_skipped_with_a_warning(plac
     caplog.set_level(logging.WARNING, logger="surogates.harness.context_files")
     assert "SECRET" not in _system_prompt_context(ws)
     assert load_project_context(str(ws)) is None
-    assert "Context file AGENTS.md is a link out of the workspace" in caplog.text
+    assert "Context file AGENTS.md leads out of the workspace" in caplog.text
     assert str(out) not in caplog.text
 
 
@@ -112,6 +112,61 @@ def test_a_subdirectory_hint_linked_out_of_the_workspace_is_skipped(places):
     assert "Other rules." in (tracker.check_tool_call("read_file", {"path": "other/x.py"}) or "")
 
 
+def test_a_hint_folder_that_is_a_link_out_gives_no_hint(places):
+    ws, out = places
+    (out / "AGENTS.md").write_text("SECRET rules")
+    (out / "x.py").write_text("")
+    (ws / "sub").symlink_to(out, target_is_directory=True)
+    tracker = SubdirectoryHintTracker(initial_cwd=str(ws))
+    assert "SECRET" not in (tracker.check_tool_call("read_file", {"path": "sub/x.py"}) or "")
+    # Nor an absolute path out of the workspace.
+    assert "SECRET" not in (tracker.check_tool_call("read_file", {"path": str(out / "x.py")}) or "")
+
+
+def test_a_hint_folder_swapped_after_the_tracker_saw_it_is_skipped(places):
+    from surogates.harness.context_files import read_context_file
+
+    ws, out = places
+    (out / "AGENTS.md").write_text("SECRET rules")
+    (ws / "h").mkdir()
+    seen = ws / "h" / "AGENTS.md"  # the path as the tracker resolved it, while h was a folder
+    (ws / "h").rmdir()
+    (ws / "h").symlink_to(out, target_is_directory=True)
+    assert read_context_file(seen, str(ws)) is None
+
+
+def test_without_a_workspace_a_linked_hint_file_is_skipped(places):
+    ws, out = places
+    (ws / "sub").mkdir()
+    (ws / "sub" / "AGENTS.md").symlink_to(out / "credentials")
+    tracker = SubdirectoryHintTracker()
+    assert "SECRET" not in (tracker.check_tool_call("read_file", {"path": str(ws / "sub" / "main.py")}) or "")
+
+
+def test_a_context_file_with_other_names_is_skipped(places):
+    ws, out = places
+    os.link(out / "credentials", ws / "AGENTS.md")  # a hard link: the same file, outside too
+    assert load_project_context(str(ws)) is None
+
+
+def test_a_context_file_that_is_not_utf8_gives_way_to_the_next(places):
+    ws, _ = places
+    (ws / "AGENTS.md").write_bytes(b"\xff\xfe not text")
+    (ws / "CLAUDE.md").write_text("Use tabs.")
+    assert "Use tabs." in load_project_context(str(ws))
+
+
+def test_a_huge_context_file_is_read_only_up_to_the_cap(places):
+    from surogates.harness.context_files import MAX_CONTEXT_FILE_BYTES, read_context_file
+
+    ws, _ = places
+    with open(ws / "AGENTS.md", "wb") as fh:
+        fh.write(b"rules ")
+        fh.truncate(50 * MAX_CONTEXT_FILE_BYTES)  # sparse: what a command can make in no time
+    text = read_context_file(ws / "AGENTS.md", str(ws))
+    assert text is not None and text.startswith("rules ") and len(text) <= MAX_CONTEXT_FILE_BYTES
+
+
 async def test_a_storage_read_through_a_folder_swapped_after_its_check_is_refused(places, monkeypatch):
     ws, out = places
     base = ws.parent / "storage"
@@ -138,6 +193,8 @@ async def test_storage_reads_still_answer_as_before(tmp_path):
     await backend.write("b", "x/y.txt", b"hello")
     assert await backend.read("b", "x/y.txt") == b"hello"
     assert await backend.read_text("b", "x/y.txt") == "hello"
+    await backend.write("b", "x/crlf.txt", b"a\r\nb\rc\n")
+    assert await backend.read_text("b", "x/crlf.txt") == "a\nb\nc\n"  # universal newlines, as before
     for missing in ("x/none.txt", "x", "x/y.txt/z"):
         with pytest.raises(KeyError):
             await backend.read("b", missing)
