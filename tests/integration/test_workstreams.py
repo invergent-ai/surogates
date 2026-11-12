@@ -629,15 +629,20 @@ async def test_a_chats_model_calls_its_tools_as_before(api, monkeypatch, streame
     assert answered == {"call_todo": '{"ok": true}', "call_agent": '{"ok": true}'}
 
 
-async def system_prompt(api, session) -> str:
+async def system_prompt(api, session, tools: frozenset[str] = frozenset()) -> str:
     tenant = TenantContext(
         org_id=api.org_id, user_id=api.user_id, org_config={}, user_preferences={},
         permissions=frozenset(), asset_root="/tmp/test",
     )
-    builder = PromptBuilder(tenant, session=session, available_agents=[
+    builder = PromptBuilder(tenant, session=session, available_tools=set(tools), available_agents=[
         AgentDef(name="analyst", description="Reads the numbers", system_prompt="", source="platform"),
     ])
-    return await _make_harness(prompt_builder=builder)._build_system_prompt(session)
+    registry = ToolRegistry()
+    if "agent" in tools:
+        from surogates.tools.builtin import agents
+
+        agents.register(registry)
+    return await _make_harness(prompt_builder=builder, tool_registry=registry)._build_system_prompt(session)
 
 
 async def test_a_masters_prompt_runs_the_project(api):
@@ -666,7 +671,9 @@ async def test_a_masters_prompt_runs_the_project(api):
 
 async def test_a_coordinator_chat_keeps_its_delegation_prompt(api):
     chat = await api.client.post("/v1/sessions", json={"config": {"coordinator": True}}, headers=api.auth())
-    prompt = await system_prompt(api, await api.app.state.session_store.get_session(UUID(chat.json()["id"])))
+    prompt = await system_prompt(
+        api, await api.app.state.session_store.get_session(UUID(chat.json()["id"])), frozenset({"agent"}),
+    )
     assert "# Coordinating agents" in prompt
     assert "# Available Sub-Agents" in prompt
     assert "# Running a project" not in prompt
