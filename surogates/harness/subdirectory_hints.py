@@ -8,11 +8,12 @@ the system prompt.
 from __future__ import annotations
 
 import logging
+import os
 import shlex
 from pathlib import Path
 from typing import Any
 
-from surogates.harness.context_files import scan_context_content
+from surogates.harness.context_files import read_context_file, scan_context_content
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +55,21 @@ class SubdirectoryHintTracker:
             resolved = str(Path(initial_cwd).resolve())
             self._visited.add(resolved)
         self._cwd: str = initial_cwd or "/"
+        # The session's workspace: hints come only from folders in it, and a
+        # hint file's link is followed only into it.
+        self._workspace: str | None = initial_cwd or None
+        self._workspace_root: str | None = os.path.realpath(initial_cwd) if initial_cwd else None
+
+    def _in_workspace(self, folder: str) -> bool:
+        """Whether *folder* (resolved) is the workspace or in it; any folder
+        where no workspace is known."""
+        root = self._workspace_root
+        if root is None:
+            return True
+        try:
+            return os.path.commonpath([root, folder]) == root
+        except ValueError:
+            return False
 
     def check_tool_call(
         self, tool_name: str, tool_args: dict[str, Any]
@@ -131,7 +147,9 @@ class SubdirectoryHintTracker:
                 resolved = str(p)
                 if resolved in self._visited:
                     break
-                if p.is_dir():
+                # Hints come only from the session's workspace: a folder out
+                # of it (an absolute path, ~, .., or a folder link) gives none.
+                if p.is_dir() and self._in_workspace(resolved):
                     candidates.add(resolved)
                 parent = p.parent
                 if parent == p:
@@ -178,10 +196,9 @@ class SubdirectoryHintTracker:
 
         for filename in HINT_FILENAMES:
             hint_path = dir_path / filename
-            if not hint_path.is_file():
-                continue
             try:
-                content = hint_path.read_text(encoding="utf-8").strip()
+                # Never through a link out of the workspace (read_context_file).
+                content = (read_context_file(hint_path, self._workspace) or "").strip()
                 if not content:
                     continue
                 content = scan_context_content(content, filename)
