@@ -292,8 +292,11 @@ async def test_only_a_master_is_sent_the_family_with_propose_and_resolve(api, mo
 
 async def test_an_agent_with_a_tool_allow_list_still_starts_threads(api):
     # Studio does not know projects, so a policy never names the thread tools.
+    from surogates.harness.subagents import kept_family_gate
+
     master = await master_of(api, await create(api))
-    gate = build_governance_gate({"enabled": True, "allowed_tools": ["web_search"]})
+    policy = build_governance_gate({"enabled": True, "allowed_tools": ["web_search"]})
+    gate = await kept_family_gate(policy, master, api.app.state.session_store)
     result = await call_tool(api, master, "agent", gate=gate, description="Draft A", prompt="Draft A.")
     assert result["status"] == "running", result
 

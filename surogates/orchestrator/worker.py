@@ -25,6 +25,7 @@ from surogates.harness.loop import AgentHarness
 from surogates.harness.model_metadata import get_model_info
 from surogates.harness.procedure_tools import gate_skill_step
 from surogates.harness.prompt import PromptBuilder
+from surogates.harness.subagents import kept_family_gate, warn_unknown_tools
 from surogates.harness.tool_schemas import has_file_pane
 from surogates.keel.intake import intake_case_types
 from surogates.keel.steps import case_scope_of, gate_case_tools, is_case_session
@@ -2072,6 +2073,7 @@ async def run_worker(settings: Settings) -> None:
             bundle=bundle,
             system_bundle=system_bundle,
         )
+        warn_unknown_tools(available_agents, set(tool_registry.tool_names))
         # A Pro-tier session would consult its own model, so the advisor
         # leaves the prompt roster (and with it the advisor guidance).
         from surogates.tools.builtin.advisor_expert import (
@@ -2135,9 +2137,10 @@ async def run_worker(settings: Settings) -> None:
         )
         # Per-wake enforcement gate from the agent's runtime-config
         # governance projection (allow/deny lists + egress composed onto the
-        # platform floor, frozen).  Built once: the prompt surface reads its
-        # allow-list here, and the harness gets this same gate.
-        governance_gate = build_governance_gate(ctx.governance)
+        # platform floor, frozen), with what this session keeps of the agent
+        # family whatever the policy says.  Built once: the prompt surface
+        # reads its allow-list here, and the harness gets this same gate.
+        governance_gate = await kept_family_gate(build_governance_gate(ctx.governance), session, session_store)
         # Principal-aware tool-set filtering: ``create_artifact``
         # requires the harness API client (so the session must have a
         # principal AND ``use_api_for_harness_tools`` must be on), and

@@ -61,32 +61,87 @@ def offer_family(tools: set[str], config: dict | None, *, root: bool = True) -> 
     (``COMPANION_TOOLS``) go to a session offered ``agent`` and to every agent
     the ``agent`` tool started, unless the session's config leaves them out by
     name; ``monitor`` only to a *root* session that runs commands
-    (``monitor_allowed``).
+    (``monitor_allowed``).  What the session keeps whatever its tool list says
+    (``kept_whatever_policy``) it has unless its config excludes it by name.
     """
     result = set(tools) - COMPANION_TOOLS - {MONITOR_TOOL}
     config = config or {}
-    if "agent" in result or isinstance(config.get(DISPATCH_KEY), dict):
+    excluded = set(config.get("excluded_tools") or ())
+    # A sub-agent can always reach the agent that started it, whatever its type's tool list, as a task worker
+    # kept its self-tools; kept only this way, it reaches its parent and nobody else.  A project's master keeps
+    # the family, its only way to give out work.
+    kept = kept_whatever_policy(config, has_agents=False) - excluded
+    if "agent" in result or isinstance(config.get(DISPATCH_KEY), dict) or kept:
         allowed = config.get("allowed_tools")
-        excluded = set(config.get("excluded_tools") or ())
         from surogates.devices.binding import device_of
 
         companions = set(COMPANION_TOOLS)
         if "terminal" in result and device_of(config) is None and root and monitor_allowed(config):
             companions.add(MONITOR_TOOL)
         result |= {name for name in companions if name not in excluded and (not allowed or name in allowed)}
-        if isinstance(config.get(DISPATCH_KEY), dict) and "send_message" not in excluded:
-            # A sub-agent can always reach the agent that started it, whatever its type's tool list, as a task
-            # worker keeps its self-tools; kept only this way, it reaches its parent and nobody else.
-            result.add("send_message")
-    return result
+    return result | kept
 
 
-def parent_only(config: dict | None) -> bool:
-    """Whether a sub-agent with *config* has ``send_message`` only to reach its parent: its tool list leaves it
-    out, and ``offer_family`` put it back for that alone."""
+def kept_whatever_policy(config: dict | None, *, has_agents: bool) -> frozenset[str]:
+    """What of the family a session with *config* keeps whatever its agent's policy or its tool list says.
+
+    A project's master keeps the family: Studio's policy editor does not
+    know projects, and a master that can start no thread does no work.  A
+    sub-agent keeps ``send_message``, to reach the agent that started it.  A
+    session that started agents (*has_agents*) keeps listing, messaging and
+    stopping them, so a policy cannot strand work that waits on it.  Nothing
+    else: a policy that denies ``agent`` denies starting agents.
+    """
+    from surogates.workstreams import is_project_master
+
     config = config or {}
+    kept: set[str] = set()
+    if is_project_master(config):
+        kept |= {"agent"} | COMPANION_TOOLS
+    if isinstance(config.get(DISPATCH_KEY), dict):
+        kept.add("send_message")
+    if has_agents:
+        kept |= COMPANION_TOOLS
+    return frozenset(kept)
+
+
+async def kept_family_gate(gate: Any, session: Any, store: Any) -> Any:
+    """*gate*, an agent's policy, as *session* gets it: with what the session keeps of the family whatever the
+    policy says (``kept_whatever_policy``).  The worker builds one per wake, and the harness, the prompt and
+    every tool call read it."""
+    from surogates.governance.policy import KeptFamilyGate
+
+    has_agents = await store.has_event(session.id, EventType.DELEGATION_START)
+    return KeptFamilyGate(gate, kept_whatever_policy(session.config, has_agents=has_agents))
+
+
+#: The (agent type, tool) pairs this process has already warned of (``warn_unknown_tools``).
+_WARNED_UNKNOWN_TOOLS: set[tuple[str, str]] = set()
+
+
+def warn_unknown_tools(agents: Any, known: set[str]) -> None:
+    """Warn, once per process for each agent type and name, of a tool an agent type's ``tools`` or
+    ``disallowed_tools`` names that this runtime does not have: such a name is ignored.  A bundle published
+    before a tool was removed still names it.  MCP tools are left out: they come and go with their servers."""
+    for agent in agents:
+        for name in [*(agent.tools or ()), *(agent.disallowed_tools or ())]:
+            if name in known or name.startswith("mcp__") or (agent.name, name) in _WARNED_UNKNOWN_TOOLS:
+                continue
+            _WARNED_UNKNOWN_TOOLS.add((agent.name, name))
+            logger.warning(
+                "Agent type %r names the tool %r, which this runtime does not have; it is ignored", agent.name, name,
+            )
+
+
+def parent_only(config: dict | None, *, kept_only: bool = False) -> bool:
+    """Whether a sub-agent with *config* has ``send_message`` only to reach its parent: its tool list leaves it
+    out and ``offer_family`` put it back for that alone, or its agent's policy denies it and the session's gate
+    keeps it for that alone (*kept_only*, ``KeptFamilyGate.kept_only``)."""
+    config = config or {}
+    if not isinstance(config.get(DISPATCH_KEY), dict):
+        return False
     allowed = config.get("allowed_tools")
-    return isinstance(config.get(DISPATCH_KEY), dict) and bool(allowed) and "send_message" not in allowed
+    return kept_only or (bool(allowed) and "send_message" not in allowed)
 
 
 def monitor_allowed(config: dict | None) -> bool:

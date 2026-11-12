@@ -693,3 +693,37 @@ def _strictest_egress_default(base: str | None, profile: str | None) -> str:
     return "allow" if all(v == "allow" for v in candidates) else "deny"
 
 
+
+
+class KeptFamilyGate:
+    """An agent's policy (*inner*) as one session gets it: the family's tools in
+    *kept* (``subagents.kept_whatever_policy``) are offered and allowed whatever
+    the policy says, and meet only the platform floor's checks.  Everything else
+    is *inner*'s."""
+
+    def __init__(self, inner: GovernanceGate, kept: frozenset[str]) -> None:
+        self._inner = inner
+        self._kept = frozenset(kept)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    def offers(self, tool_name: str) -> bool:
+        return tool_name in self._kept or self._inner.offers(tool_name)
+
+    def runs_unasked(self, tool_name: str) -> bool:
+        return tool_name in self._kept or self._inner.runs_unasked(tool_name)
+
+    def check(self, tool_name: str, arguments: dict[str, Any] | None = None, **kwargs: Any) -> PolicyDecision:
+        if tool_name in self._kept:
+            from surogates.runtime.governance import floor_gate
+
+            return floor_gate().check(tool_name, arguments, **kwargs)
+        return self._inner.check(tool_name, arguments, **kwargs)
+
+    def kept_only(self, tool_name: str) -> bool:
+        """Whether *tool_name* is offered only because it is kept: the policy itself does not offer it."""
+        return tool_name in self._kept and not self._inner.offers(tool_name)
+
+    def with_profile(self, profile: dict[str, Any]) -> KeptFamilyGate:
+        return KeptFamilyGate(self._inner.with_profile(profile), self._kept)

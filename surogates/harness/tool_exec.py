@@ -2145,6 +2145,7 @@ async def _run_single_tool(
                     interrupt_check=interrupt_check,
                     task_id=sandbox_session_key(session),
                     offered_tools=offered_tools,
+                    governance_gate=governance_gate,
                     # The proxy fakes what it cannot tell is a read; this call was judged one here.
                     **({"simulation_read": True} if simulation_changes is False else {}),
                 )

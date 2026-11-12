@@ -651,7 +651,10 @@ async def _send_message_handler(arguments: dict[str, Any], **kwargs: Any) -> str
         return _error("you were not started by another agent: there is no parent to message")
     from surogates.harness.subagents import parent_only
 
-    if parent_only(sender.config) and to.lower() != "parent" and to != str(sender.parent_id):
+    # A sub-agent whose policy denies send_message has it from its gate for its parent alone.
+    kept_only = getattr(kwargs.get("governance_gate"), "kept_only", None)
+    parent_only_here = parent_only(sender.config, kept_only=bool(kept_only and kept_only("send_message")))
+    if parent_only_here and to.lower() != "parent" and to != str(sender.parent_id):
         return _error("you may message only the agent that started you")
     try:
         target = await resolve_agent(session_store, kwargs.get("session_factory"), sender, to)
