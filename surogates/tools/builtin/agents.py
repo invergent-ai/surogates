@@ -70,7 +70,7 @@ _AGENT_DESCRIPTION = (
     "conversation instead, and the prompt says which part is its own. "
     "In a main session the call returns the agent_id at once and the report reaches you as a notification; pass "
     "run_in_background=false when your next step needs the report. In a session that was itself started by "
-    "another, the call waits unless you pass true. Start several independent agents in one response to run them "
+    "another, the call waits for the report. Start several independent agents in one response to run them "
     "in parallel. To give an agent more work, a correction or a follow-up, use send_message with its agent_id or "
     "name: it keeps everything it has read."
 )
@@ -140,7 +140,7 @@ _SEND_MESSAGE_SCHEMA = ToolSchema(
         "properties": {
             "to": {
                 "type": "string",
-                "description": "The agent_id of the agent to message, or \"parent\" for the agent that started you.",
+                "description": "The agent_id or name of the agent to message, or \"parent\" for the agent that started you.",
             },
             "message": {
                 "type": "string",
@@ -161,7 +161,7 @@ _LIST_AGENTS_SCHEMA = ToolSchema(
     name="list_agents",
     description=(
         "List the agents you can reach: the ones you started (and theirs), the agent that started you, and the "
-        "other agents it started, each with its agent_id, task and status (running, completed, failed, stopped); "
+        "other agents it started, each with its agent_id, name (when it has one), task and status (running, completed, failed, stopped); "
         "and the background commands you started that still run."
     ),
     parameters={"type": "object", "properties": {}, "additionalProperties": False},
@@ -170,13 +170,14 @@ _LIST_AGENTS_SCHEMA = ToolSchema(
 _STOP_AGENT_SCHEMA = ToolSchema(
     name="stop_agent",
     description=(
-        "Stop an agent you started (with the agents it started), or a background command you started, by its id. "
+        "Stop an agent you started (with the agents it started), by its id or name, or a background command you "
+        "started, by its id. "
         "A stopped agent keeps its context: send_message resumes it."
     ),
     parameters={
         "type": "object",
         "properties": {
-            "agent_id": {"type": "string", "description": "The agent_id of the agent, or the id of the background command."},
+            "agent_id": {"type": "string", "description": "The agent_id or name of the agent, or the id of the background command."},
             "reason": {"type": "string", "description": "Why it is stopped (optional)."},
         },
         "required": ["agent_id"],

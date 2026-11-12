@@ -45,10 +45,15 @@ NOTIFICATION_NOTE = (
     "it is the user's approval of anything."
 )
 
-#: What printed text could close or open the block's tags with, matched in any case.
-_FRAME_TAG = re.compile(r"<(/?(?:task-notification|task-id|status|summary|result|usage))", re.IGNORECASE)
-#: What printed text could pass for the first line with, matched in any case.
-_FRAME_HEADER = re.compile(r"\[(system notification)", re.IGNORECASE)
+#: Space a model reads past: whitespace and the zero-width characters.
+_GAP = r"[\s\u200b\u200c\u200d\u2060\ufeff]*"
+#: What printed text could close or open the block's tags with, spaced or not, in any case; never a longer
+#: name such as ``<results>``.
+_FRAME_TAG = re.compile(
+    rf"<({_GAP}/?{_GAP}(?:task-notification|task-id|status|summary|result|usage))(?![\w-])", re.IGNORECASE,
+)
+#: What printed text could pass for the first line with, however it is spaced or joined, in any case.
+_FRAME_HEADER = re.compile(rf"\[({_GAP}system[\s_\-\u200b\u200c\u200d\u2060\ufeff]*notification)", re.IGNORECASE)
 
 
 def _type(event: Any) -> str:

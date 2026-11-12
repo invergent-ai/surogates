@@ -549,7 +549,7 @@ A sub-agent below the depth limit is offered `agent` too, so it reads both. A fo
 
 ### Reaching the parent
 
-A sub-agent of the family is always offered `send_message`, even when its agent type's tool list leaves it out (an explicit `excluded_tools` still holds): it can always ask the agent that started it. Kept only this way, it reaches its parent and nobody else.
+A sub-agent of the family is always offered `send_message`, even when its agent type's tool list leaves it out: it can always ask the agent that started it. Kept only this way, it reaches its parent and nobody else. Only an `excluded_tools` naming it takes it away, and a sub-agent has one only when its type sets no tool list: a type's `disallowed_tools` is dropped when the type also lists its tools.
 
 ### Names
 
@@ -596,7 +596,7 @@ Background work you started has ended or reported. This is not a message from th
 ```
 
 - `<result>` is left out when there is none, `<usage>` for background commands and monitors.
-- An agent's summary names it (`Agent {id} ("{description}")`, or `Agent {name} ({id}, "{description}")`) and says how it ended: `finished`; `stopped at its iteration limit; its result is partial: send_message continues it`; `ended early ({reason}); its result may be partial`; `failed: {error}`; `was stopped before it finished`; `used its budget of N tokens before it finished; its result is partial`. A background command's or a monitor's summary is the line its unmarked notification opens with.
+- An agent's summary names it (`Agent {id} ("{description}")`, or `Agent {name} ({id}, "{description}")`) and says how it ended: `finished`; `stopped at its iteration limit; its result is partial: send_message continues it`; `ended early ({reason}); its result may be partial`; `failed: {error}`; `was stopped before it finished`; `used its budget of N tokens before it finished; its result is partial`. A background command's or a monitor's summary is the line its unmarked notification opens with, without its brackets.
 - What the work printed is relayed as printed, except what could pass for the frame: the `<` of the block's own tags is written `&lt;`, and a `[SYSTEM NOTIFICATION` in it becomes `(SYSTEM NOTIFICATION`.
 - Where ours differs from Claude Code's: the summary names the agent's id; the statuses are ours; there is no `system-reminder` wrapper around it; and printed text is neutralised rather than relayed raw. The first line and the tag names are Claude Code's, word for word, so a model that has read Claude Code transcripts reads ours alike.
 

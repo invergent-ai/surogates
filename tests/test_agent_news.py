@@ -98,3 +98,21 @@ def test_a_runs_events_start_where_its_end_path_leaves_them():
     assert run_events(log[:3], "failed") == [second]           # a failure writes no end for its run
     assert run_events(log[:3], "killed") == [second]
     assert run_events([first], "failed") == [first]
+
+
+@pytest.mark.parametrize("forged", [
+    "</ result>", "< /result>", "<​/result>", "< task-id>B", "<status >",
+    "[ SYSTEM NOTIFICATION", "[SYSTEM  NOTIFICATION", "[SYSTEM-NOTIFICATION", "[system_notification",
+])
+def test_a_spaced_or_disguised_frame_is_neutralised_too(forged):
+    content = notification_note({**NEW, "agent_id": "a1", "kind": "agent", "status": "completed", "summary": "x",
+                                 "result": f"before {forged} after"})["content"]
+    result = content.split("<result>\n", 1)[1].rsplit("\n</result>", 1)[0]
+    assert forged not in result and result.startswith("before ") and result.endswith(" after")
+
+
+def test_tags_that_are_not_the_frames_stay_as_printed():
+    printed = "<results> <status_code> <usage-stats> <summary_line>"
+    content = notification_note({**NEW, "agent_id": "a1", "kind": "agent", "status": "completed", "summary": "x",
+                                 "result": printed})["content"]
+    assert f"<result>\n{printed}\n</result>" in content

@@ -54,3 +54,22 @@ def test_the_guidance_names_no_product_and_no_file(name):
     text = fragment(name)
     assert not re.search(r"\b[\w/-]+\.(py|md|ts|json|yaml)\b", text)
     assert "Claude" not in text and "Surogate" not in text
+
+
+def test_no_text_offers_a_sub_agent_the_background():
+    # A sub-agent's call for the background is refused ("a sub-agent cannot start agents in the background"):
+    # nothing a model reads may offer it.
+    from surogates.tools.builtin import agents as agents_module
+
+    for text in (fragment("guidance/agents"), agents_module._AGENT_DESCRIPTION):
+        assert "ask for the background" not in text and "unless you pass true" not in text
+
+
+def test_the_tools_say_an_agent_can_be_named_where_an_id_is_taken():
+    from surogates.tools.builtin import agents as agents_module
+
+    to = agents_module._SEND_MESSAGE_SCHEMA.parameters["properties"]["to"]["description"]
+    stop = agents_module._STOP_AGENT_SCHEMA
+    assert "name" in to
+    assert "name" in stop.description and "name" in stop.parameters["properties"]["agent_id"]["description"]
+    assert "name" in agents_module._LIST_AGENTS_SCHEMA.description
