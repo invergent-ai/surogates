@@ -29,18 +29,26 @@ _SENSITIVE_QUERY_PARAMS = frozenset(
     }
 )
 
-_SECRET_ENV_NAMES = r"(?:API_?KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIALS?|AUTH)"
-# The secret word is a whole part of the name (``GITHUB_TOKEN``,
-# ``OPENAI_API_KEY``, ``AUTH_SECRET``), not a piece of a longer word: code
-# such as ``AUTHORITY_RANK = {...}`` or ``MAX_TOKENS = 4096`` is not a
-# secret.  The spacing around ``=`` is kept as written.
+_SECRET_ENV_NAMES = (
+    r"(?:API_?KEYS?|TOKENS?|SECRET_?KEYS?|SECRETS?|PASSWORDS?|PASSWD|CREDENTIALS?"
+    r"|AUTH(?:ENTICATION|ORIZATION)?)"
+)
+# The secret word ends the name or a ``_``-part of it (``GITHUB_TOKEN``,
+# ``PGPASSWORD``, ``OPENAI_API_KEY``, ``AUTH_SECRET``, ``API_KEYS``), never
+# runs into a longer word: code such as ``AUTHORITY_RANK = {...}`` or
+# ``TOKENIZER=...`` is not a secret, nor a count such as ``MAX_TOKENS = 4096``
+# (a ``...TOKENS`` name with a number).  Bounded
+# repetitions (no catastrophic backtracking); the spacing around ``=`` is
+# kept as written.
 _ENV_ASSIGN_RE = re.compile(
-    rf"((?<![A-Za-z0-9_])(?:[A-Z0-9]+_)*{_SECRET_ENV_NAMES}(?:_[A-Z0-9]+)*)(?![A-Za-z0-9_])"
+    rf"((?<![A-Z0-9_])[A-Z0-9_]{{0,50}}{_SECRET_ENV_NAMES}(?:_[A-Z0-9]{{1,50}}){{0,8}})(?![A-Za-z0-9_])"
     r"(\s*=\s*)(['\"]?)(\S+)\3"
 )
-# A value that is code, not a literal: ``os.getenv("TOKEN")``,
-# ``settings["api_key"]``, ``{...}`` / ``[...]`` / ``(...)``.
-_CODE_VALUE_RE = re.compile(r"(?:[A-Za-z_][A-Za-z0-9_.]*)?[(\[{]")
+# A value that is a lookup in code, not a literal: ``os.getenv("TOKEN")``,
+# ``os.getenv("TOKEN",``, ``settings['api_key']``, ``get_token()``.  Matched
+# whole; anything else after the name (a password with a bracket in it) is
+# still a value.
+_CODE_VALUE_RE = re.compile(r"[A-Za-z_][\w.]*(?:\(\)|[(\[](['\"])[A-Za-z_][\w.-]*\1(?:[)\]]|,)?)")
 _JSON_KEY_NAMES = (
     r"(?:api_?[Kk]ey|token|secret|password|access_token|refresh_token|"
     r"auth_token|bearer|secret_value|raw_secret|secret_input|key_material)"
@@ -49,13 +57,15 @@ _JSON_FIELD_RE = re.compile(
     rf'("{_JSON_KEY_NAMES}")\s*:\s*"([^"]+)"',
     re.IGNORECASE,
 )
-# The token (a placeholder such as "<access token>" may hold spaces), then
-# any closing punctuation after it ("... Bearer <jwt>`)."), which is prose
-# and stays as written.
+# The token: a bracketed placeholder such as "<access token>" (it may hold
+# spaces), else everything up to the next space, of which closing
+# punctuation ("... Bearer <jwt>`).") is prose and stays outside the mask
+# (``_mask_bearer``).  Greedy, so no catastrophic backtracking.
 _AUTH_HEADER_RE = re.compile(
-    r"(Authorization:\s*Bearer\s+)(<[A-Za-z][A-Za-z _-]{0,39}>|\S+?)([).,;:!?'\"`]*)(?=\s|$)",
+    r"(Authorization:\s*Bearer\s+)(<[A-Za-z][A-Za-z _-]{0,39}>(?=[).,;:!?'\"`]*(?:\s|$))|\S+)",
     re.IGNORECASE,
 )
+_TRAILING_PROSE = ").,;:!?'\"`"
 _TELEGRAM_RE = re.compile(r"(bot)?(\d{8,}):([-A-Za-z0-9_]{30,})")
 _PRIVATE_KEY_RE = re.compile(
     r"-----BEGIN[A-Z ]*PRIVATE KEY-----[\s\S]*?-----END[A-Z ]*PRIVATE KEY-----"
@@ -138,35 +148,52 @@ def mask_secret(
 
 # A template placeholder where a secret would go is not a secret: documents,
 # code and answers name them ("Bearer <jwt>", "API_KEY=<your-key>",
-# "Bearer $TOKEN", "TOKEN=${TOKEN}", "YOUR_API_KEY").  Masking one changes
-# what the text says (a stored "Bearer ***" read as a markdown divider) and
-# protects nothing.  The shapes are narrow on purpose: a bracketed or
-# $-prefixed NAME of letters, underscores, hyphens or spaces with no digit
-# (random tokens carry digits), a your- name, or pure filler.
-_PLACEHOLDER_RE = re.compile(
-    r"(?:"
-    r"<[A-Za-z][A-Za-z _-]{0,39}>"
-    r"|\{\{?\s*[A-Za-z][A-Za-z _.-]{0,39}\s*\}?\}"
-    r"|\$\{[A-Za-z][A-Za-z_]{0,39}\}"
-    r"|\$[A-Z][A-Z_]{0,39}"
-    r"|\[[A-Za-z][A-Za-z _-]{0,39}\]"
-    r"|your[_-][A-Za-z_-]{1,40}"
-    r"|x{3,}|X{3,}|\*{3,}|\.{3}|\u2026"
-    r")",
-    re.IGNORECASE,
+# "Bearer $TOKEN", "TOKEN=${GITHUB_TOKEN}", "YOUR_API_KEY", "[REDACTED]").
+# Masking one changes what the text says (a stored "Bearer ***" read as a
+# markdown divider) and protects nothing.  The shapes are narrow on purpose:
+# - <name>, {name}, {{ name }}, [name]: letters, spaces, "_", "-" (and "."
+#   in braces), no digit, and one of the words a placeholder names
+#   (``_PLACEHOLDER_WORDS``): "<CorrectHorseBatteryStaple>" is masked;
+# - $NAME / ${NAME}: an environment variable whose last "_"-part is a secret
+#   word ($TOKEN, $GITHUB_TOKEN, ${API_KEY}); "$UPERSECRETPASSWORD" is masked;
+# - your-name / YOUR_NAME with a placeholder word in it;
+# - an existing mask or an ellipsis: ***, ..., \u2026.
+_PLACEHOLDER_WORDS = frozenset({
+    "token", "key", "apikey", "api", "jwt", "secret", "password", "passwd", "pass", "auth", "bearer",
+    "credential", "credentials", "access", "redacted", "value", "here", "your", "placeholder", "id",
+})
+_ENV_SECRET_PARTS = frozenset({
+    "token", "key", "apikey", "secret", "password", "passwd", "pass", "jwt", "credential", "credentials", "auth",
+})
+_BRACKETED_RE = re.compile(
+    r"<([A-Za-z][A-Za-z _-]{0,39})>|\{\{\s*([A-Za-z][A-Za-z _.-]{0,39}?)\s*\}\}"
+    r"|\{([A-Za-z][A-Za-z _.-]{0,39})\}|\[([A-Za-z][A-Za-z _-]{0,39})\]"
 )
-_PLACEHOLDER_CASED_RE = re.compile(r"\$[A-Z][A-Z_]{0,39}")
+_ENV_REF_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z_]{0,39})\}|\$([A-Z_][A-Z_]{0,39})")
+_YOUR_RE = re.compile(r"[Yy][Oo][Uu][Rr][_-]([A-Za-z_-]{1,40})")
+_FILLER_RE = re.compile(r"\*{3,}|\.{3}|\u2026")
+
+
+def _words(text: str) -> list[str]:
+    return [w.lower() for w in re.split(r"[^A-Za-z]+", text) if w]
 
 
 def _is_placeholder(value: str) -> bool:
-    """*value* is a template placeholder, not a secret (see ``_PLACEHOLDER_RE``)."""
-    if not _PLACEHOLDER_RE.fullmatch(value):
-        return False
-    # ``$NAME`` counts only in capitals (an environment variable), so a
-    # "$ecret"-style password is still masked.
-    if value.startswith("$") and not value.startswith("${"):
-        return bool(_PLACEHOLDER_CASED_RE.fullmatch(value))
-    return True
+    """*value* is a template placeholder, not a secret (shapes above)."""
+    if _FILLER_RE.fullmatch(value):
+        return True
+    m = _BRACKETED_RE.fullmatch(value)
+    if m:
+        inner = next(g for g in m.groups() if g is not None)
+        return any(w in _PLACEHOLDER_WORDS for w in _words(inner))
+    m = _ENV_REF_RE.fullmatch(value)
+    if m:
+        parts = (m.group(1) or m.group(2)).lower().split("_")
+        return parts[-1] in _ENV_SECRET_PARTS
+    m = _YOUR_RE.fullmatch(value)
+    if m:
+        return any(w in _PLACEHOLDER_WORDS - {"your"} for w in _words(m.group(1)))
+    return False
 
 
 def _mask_token(token: str) -> str:
@@ -179,9 +206,15 @@ def _mask_token(token: str) -> str:
 
 def _mask_env_assignment(m: re.Match[str]) -> str:
     name, eq, quote, value = m.group(1), m.group(2), m.group(3), m.group(4)
-    if _CODE_VALUE_RE.match(value):
+    if _CODE_VALUE_RE.fullmatch(value) or (name.endswith("TOKENS") and value.isdigit()):
         return m.group(0)
     return f"{name}{eq}{quote}{_mask_token(value)}{quote}"
+
+
+def _mask_bearer(m: re.Match[str]) -> str:
+    token = m.group(2)
+    core = token.rstrip(_TRAILING_PROSE) or token
+    return m.group(1) + _mask_token(core) + token[len(core):]
 
 
 def _redact_query_string(query: str) -> str:
@@ -253,7 +286,7 @@ def redact_sensitive_text(
             text,
         )
 
-    text = _AUTH_HEADER_RE.sub(lambda m: m.group(1) + _mask_token(m.group(2)) + m.group(3), text)
+    text = _AUTH_HEADER_RE.sub(_mask_bearer, text)
     text = _TELEGRAM_RE.sub(lambda m: f"{m.group(1) or ''}{m.group(2)}:***", text)
     text = _PRIVATE_KEY_RE.sub("[REDACTED PRIVATE KEY]", text)
     text = _DB_CONNSTR_RE.sub(lambda m: f"{m.group(1)}***{m.group(3)}", text)

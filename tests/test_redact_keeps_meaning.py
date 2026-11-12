@@ -48,7 +48,9 @@ def test_a_placeholder_where_a_token_would_go_is_kept() -> None:
         "export OPENAI_API_KEY=<your-key>",
         "OPENAI_API_KEY=YOUR_API_KEY",
         "TOKEN=${TOKEN}",
-        '{"token": "<token>", "password": "xxxxxx"}',
+        '{"token": "<token>", "password": "[REDACTED]"}',
+        "export GITHUB_TOKEN=$GITHUB_TOKEN",
+        "Authorization: Bearer {api_key}",
     ):
         assert redact_sensitive_data(text, phones=False) == text, text
 
@@ -70,6 +72,22 @@ def test_real_secrets_are_still_masked_in_events() -> None:
         "API_KEY=<a1b2c3d4e5f6>": "a1b2c3d4e5f6",
         '{"token": "abc123def456ghi789xyz"}': "def456ghi789",
         "https://api.example.test/cb?code=oauth-code&access_token=opaque-token": "opaque-token",
+        # glued or plural names, and passwords with brackets: masked as before
+        "PGPASSWORD=Xq7rT2mLp9sKd4": "Xq7rT2mLp9sKd4",
+        "NGROK_AUTHTOKEN=2aBcD3eFgH4iJkL5mNoP6qRs": "2aBcD3eFgH4iJkL5mNoP6qRs",
+        "SECRETKEY=Zx9Yw8Vu7Ts6Rq5Po4": "Zx9Yw8Vu7Ts6Rq5Po4",
+        "AUTHENTICATION_KEY=a1b2c3d4e5f6g7h8i9j0": "a1b2c3d4e5f6g7h8i9j0",
+        "API_KEYS=k1a2b3c4d5e6f7g8h9,k9z8y7x6w5v4u3t2": "k1a2b3c4d5e6f7g8h9",
+        "VALID_TOKENS=a1b2c3d4e5f6g7h8i9j0": "a1b2c3d4e5f6g7h8i9j0",
+        "DB_PASSWORD=Xk9(mP2!vL": "Xk9(mP2!vL",
+        "ADMIN_PASSWORD=Summer[2024]!": "Summer[2024]",
+        "PASSWORD=(Tr0ub4dor3)": "Tr0ub4dor3",
+        'DOCKER_AUTH_CONFIG={"auths":{"r.test":{"auth":"dXNlcjpzM2NyM3RQYXNz"}}}': "dXNlcjpzM2NyM3RQYXNz",
+        # letters-only or $-prefixed secrets are not placeholders
+        "API_KEY=<CorrectHorseBatteryStaple>": "CorrectHorseBatteryStaple",
+        "PASSWORD=your-horse-battery-staple": "horse-battery-staple",
+        "PASSWORD=$UPERSECRETPASSWORD": "UPERSECRETPASSWORD",
+        '{"password": "[opensesame]"}': "opensesame",
         "postgresql://app:db-password@example.test:5432/app": "db-password",
         "jwt=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.payload.signature": "payload.signature",
     }
@@ -85,6 +103,21 @@ def test_numbers_and_code_are_not_read_as_phones_or_secrets_in_events() -> None:
         "Billed_Revenue_Cents: 18500000+18750000+19000000",
         "AUTHORITY_RANK = {'Head office': 30, 'Service lead': 20}",
         "MAX_TOKENS = 4096",
+        "TOKENIZER=cl100k_base",
         'API_KEY = os.getenv("API_KEY")',
+        "token = settings['api_token']",
     ):
         assert redact_sensitive_data(text, phones=False) == text, text
+
+
+def test_long_inputs_redact_in_linear_time() -> None:
+    import time
+
+    for text in (
+        "Authorization: Bearer a" + "." * 50_000 + "x",
+        "TOKEN_" * 8_000 + "X",
+        "A_" * 25_000 + "TOKEN_X",
+    ):
+        started = time.perf_counter()
+        redact_sensitive_data(text, phones=False)
+        assert time.perf_counter() - started < 0.5
