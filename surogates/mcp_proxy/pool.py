@@ -557,13 +557,11 @@ class ConnectionPool:
 
             from surogates.tools.registry import ToolRegistry
 
+            # Discovery's registry is the MCP client's: the scan reads a
+            # snapshot of every connected server instead (``_tools_snapshot``),
+            # a server of this tenant still connected (discovery skips it)
+            # included.
             temp_registry = ToolRegistry()
-            # A server of this tenant still connected (discovery skips it) is
-            # listed from its live connection.
-            with _lock:
-                adopted = {pname: _servers[pname] for pname in prefixed if pname in _servers}
-            for pname, server in adopted.items():
-                _register_server_tools(pname, server, prefixed[pname], temp_registry)
             await asyncio.to_thread(
                 discover_mcp_tools,
                 servers=prefixed,
@@ -655,7 +653,8 @@ class ConnectionPool:
                     ", ".join(f"{name} ({why})" for name, why in sorted(unavailable.items())),
                     _UNAVAILABLE_RETRY_COOLDOWN,
                 )
-            return clean_schemas
+            # What wiring may have taken off already is not answered.
+            return entry.tool_schemas
 
     async def _clean_schemas(
         self,
@@ -841,13 +840,9 @@ class ConnectionPool:
         prefixed = {
             pname: _discovery_config(entry.server_configs[name]) for pname, name in names_by_key.items()
         }
+        # As at the first connect: a due server already connected (discovery
+        # skips it) is scanned from a snapshot of its live connection.
         temp_registry = ToolRegistry()
-        # A due server already connected (discovery skips it) is listed
-        # from its live connection, as at the first connect.
-        with _lock:
-            adopted = {pname: _servers[pname] for pname in prefixed if pname in _servers}
-        for pname, server in adopted.items():
-            _register_server_tools(pname, server, prefixed[pname], temp_registry)
         try:
             await asyncio.to_thread(
                 discover_mcp_tools, servers=prefixed, registry=temp_registry, retry=False,

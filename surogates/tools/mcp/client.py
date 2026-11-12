@@ -815,9 +815,9 @@ class MCPServerTask:
         self._refresh_lock = asyncio.Lock()
         self._registry: Optional[Any] = None
         self._on_tools_changed: Optional[Any] = None
-        # A refresh is started and has not yet begun listing: one more
-        # notification meanwhile needs no refresh of its own.
-        self._refresh_queued = False
+        # The refresh started and not yet listing: one more notification
+        # meanwhile needs no refresh of its own.
+        self._refresh_queued: Optional[asyncio.Task] = None
         self._circuit_failure_count = 0
         self._circuit_open_until = 0.0
         self._circuit_failure_threshold = _DEFAULT_CIRCUIT_FAILURE_THRESHOLD
@@ -899,11 +899,11 @@ class MCPServerTask:
                             # Awaited here, the session would wait forever.
                             # At most one refresh running and one waiting: a
                             # burst of notifications costs two lists.
-                            if not self._refresh_queued:
-                                self._refresh_queued = True
+                            if self._refresh_queued is None:
                                 task = asyncio.get_running_loop().create_task(
                                     self._refresh_tools_logged(), name="mcp-tools-refresh",
                                 )
+                                self._refresh_queued = task
                                 _refresh_tasks.add(task)
                                 task.add_done_callback(_refresh_tasks.discard)
                         case PromptListChangedNotification():
@@ -921,7 +921,11 @@ class MCPServerTask:
         try:
             await self._refresh_tools()
         except asyncio.CancelledError:
-            self._refresh_queued = False  # cancelled while it waited: none is queued any more
+            # Cancelled while it waited for the lock: it was the one queued.
+            # One that had the lock cleared it itself, and a newer one may be
+            # queued now.
+            if self._refresh_queued is asyncio.current_task():
+                self._refresh_queued = None
             raise
         except Exception:
             logger.exception("MCP server '%s': refreshing its tools failed", self.name)
@@ -935,12 +939,12 @@ class MCPServerTask:
         -- atomic from the event loop's perspective.
         """
         if self._registry is None:
-            self._refresh_queued = False
+            self._refresh_queued = None
             return
 
         async with self._refresh_lock:
             # A notification from now on needs a list after this one.
-            self._refresh_queued = False
+            self._refresh_queued = None
             # 1. Fetch current tool list from server
             tools_result = await self.session.list_tools()
             new_mcp_tools = tools_result.tools if hasattr(tools_result, "tools") else []
