@@ -10,7 +10,7 @@ from uuid import UUID
 
 from surogates.session.events import EventType
 from surogates.tools.builtin.expert_feedback import record_expert_outcome
-from surogates.tools.builtin.expert_loop import ExpertBudgetExceeded, run_expert_loop
+from surogates.tools.builtin.expert_loop import ExpertBudgetExceeded, expert_scope, run_expert_loop
 from surogates.tools.loader import SkillDef
 
 logger = logging.getLogger(__name__)
@@ -241,10 +241,11 @@ class ExpertConsultationService:
         from surogates.governance.policy import GovernanceGate
         from surogates.tools.router import ToolRouter
 
+        # The consulting session's policy holds for its expert's calls too.
         return ToolRouter(
             self._tool_registry,
             self._sandbox_pool,
-            GovernanceGate(),
+            expert_scope.get().gate or GovernanceGate(),
         )
 
 

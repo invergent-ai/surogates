@@ -22,7 +22,7 @@ import re
 import logging
 import os
 import traceback
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
@@ -131,6 +131,7 @@ from surogates.session.execution_context import is_scheduled_run, is_unattended
 from surogates.tools.builtin.case_item import item_awaiting_report
 from surogates.tools.builtin.case_step import step_awaiting_report, step_given_back
 from surogates.tools.builtin.send_form import SENT as FORM_SENT
+from surogates.tools.builtin.expert_loop import ExpertScope, expert_scope
 from surogates.tools.builtin.media_gen import unwired_media_tools
 from surogates.keel.items import ITEM_NUDGE, is_case_item, item_contract_of
 from surogates.tools.builtin.ask_user_question import DISMISSED, TIMED_OUT
@@ -166,6 +167,7 @@ from surogates.harness.tool_schemas import (
     drop_unusable_tools,
     filter_schemas_for_tenant,
     has_file_pane,
+    unusable_tool_names,
 )
 from surogates.harness.title_generator import maybe_generate_session_title
 from surogates.runtime.context import SlashCommandConfig
@@ -1912,6 +1914,65 @@ class AgentHarness(
                     exc_info=True,
                 )
 
+    def _tool_usability(self, session: Session, offered: Iterable[str]) -> dict[str, bool]:
+        """The facts ``drop_unusable_tools`` decides on for *session*, whose request
+        holds the tools named *offered*."""
+        offered = frozenset(offered)
+        whatsapp_forms = getattr(self, "_whatsapp_forms", ())
+        _media = getattr(self, "_media_gen", None)
+        _unwired_media = unwired_media_tools(_media) if _media is not None else set()
+        return dict(
+            # Default to "has it" when the attribute is absent: an
+            # unknown resource must never cause a tool to vanish.
+            has_kbs=getattr(self._prompt, "has_kbs", True),
+            **channel_tool_flags(getattr(session, "channel", None)),
+            # A chat with an owner of its own makes and changes its agent's
+            # schedules, and a scheduled run changes its own (the tools it
+            # may not call are taken off in _run_loop); anything someone owns,
+            # helpers included, can read them.  Whether a tool is allowed at
+            # all is the policy's, by name; whether /loop is on, the
+            # agent's.  No evaluation row: no one is behind it.
+            makes_routines=(
+                (session.parent_id is None or is_scheduled_run(session))
+                and (session.user_id or session.service_account_id) is not None
+                and not is_eval_session(session)
+                # /loop switched off for the agent: its schedules stay
+                # readable, but none is made or changed.
+                and self._slash_command_enabled("loop", session)
+            ),
+            # A run changes only its own, unasked; elsewhere a yes comes from
+            # the question tool, or the operator's own word in Studio.
+            confirms_routines=(
+                is_scheduled_run(session)
+                or session.channel == "studio"
+                or "ask_user_question" in offered
+            ),
+            reads_routines=(
+                (session.user_id or session.service_account_id) is not None
+                and not is_eval_session(session)
+            ),
+            # The same fact that decided the prompt's whiteboard
+            # contract, so prose and schema cannot disagree.
+            is_whiteboard=getattr(self._prompt, "has_whiteboard", False),
+            has_forms=capabilities_for(session.channel).forms and bool(whatsapp_forms),
+            has_file_pane=has_file_pane(session),
+            # The worker's media wiring for this wake (``None``: a harness
+            # built without it keeps the tools, as before).
+            has_image_model="generate_image" not in _unwired_media,
+            has_video_model="generate_video" not in _unwired_media,
+        )
+
+    def _withhold_from_experts(self, usable: dict[str, bool]) -> None:
+        """Keep from any expert this wake consults what *usable* takes off the
+        session's request, and what its policy lets no one call unasked; the
+        expert's calls are checked against the session's policy
+        (``expert_loop.expert_scope``)."""
+        withheld = unusable_tool_names(**usable)
+        gate = self._governance_gate
+        if gate is not None:
+            withheld |= {name for name in self._tools.tool_names if not gate.runs_unasked(name)}
+        expert_scope.set(ExpertScope(withheld=frozenset(withheld), gate=gate))
+
     # ------------------------------------------------------------------
     # Slash-command capability gate
     # ------------------------------------------------------------------
@@ -2649,6 +2710,9 @@ class AgentHarness(
             # the two paths so we don't double-emit a skill.invoked when
             # the service already emitted expert.delegation.
             elif last_user_content.startswith("/"):
+                # An expert consulted here gets only tools the session could
+                # be sent, as one its model consults does.
+                self._withhold_from_experts(self._tool_usability(session, self._tools.tool_names))
                 expansion = await expand_slash_skill(
                     text=last_user_content,
                     tools=self._tools,
@@ -3204,49 +3268,10 @@ class AgentHarness(
         # Schemas ship on every request, so an unusable one is paid for
         # on every turn of every session.
         whatsapp_forms = getattr(self, "_whatsapp_forms", ())
-        _media = getattr(self, "_media_gen", None)
-        _unwired_media = unwired_media_tools(_media) if _media is not None else set()
-        tool_schemas = drop_unusable_tools(
-            tool_schemas,
-            # Default to "has it" when the attribute is absent: an
-            # unknown resource must never cause a tool to vanish.
-            has_kbs=getattr(self._prompt, "has_kbs", True),
-            **channel_tool_flags(getattr(session, "channel", None)),
-            # A chat with an owner of its own makes and changes its agent's
-            # schedules, and a scheduled run changes its own (the tools it
-            # may not call are taken off below); anything someone owns,
-            # helpers included, can read them.  Whether a tool is allowed at
-            # all is the policy's, by name, above; whether /loop is on, the
-            # agent's.  No evaluation row: no one is behind it.
-            makes_routines=(
-                (session.parent_id is None or is_scheduled_run(session))
-                and (session.user_id or session.service_account_id) is not None
-                and not is_eval_session(session)
-                # /loop switched off for the agent: its schedules stay
-                # readable, but none is made or changed.
-                and self._slash_command_enabled("loop", session)
-            ),
-            # A run changes only its own, unasked; elsewhere a yes comes from
-            # the question tool, or the operator's own word in Studio.
-            confirms_routines=(
-                is_scheduled_run(session)
-                or session.channel == "studio"
-                or any(s["function"]["name"] == "ask_user_question" for s in tool_schemas)
-            ),
-            reads_routines=(
-                (session.user_id or session.service_account_id) is not None
-                and not is_eval_session(session)
-            ),
-            # The same fact that decided the prompt's whiteboard
-            # contract, so prose and schema cannot disagree.
-            is_whiteboard=getattr(self._prompt, "has_whiteboard", False),
-            has_forms=capabilities_for(session.channel).forms and bool(whatsapp_forms),
-            has_file_pane=has_file_pane(session),
-            # The worker's media wiring for this wake (``None``: a harness
-            # built without it keeps the tools, as before).
-            has_image_model="generate_image" not in _unwired_media,
-            has_video_model="generate_video" not in _unwired_media,
-        )
+        usable = self._tool_usability(session, (s["function"]["name"] for s in tool_schemas))
+        tool_schemas = drop_unusable_tools(tool_schemas, **usable)
+        # A consulted expert's model is not sent them either.
+        self._withhold_from_experts(usable)
         tool_schemas = describe_for_device(tool_schemas, session.config)
         tool_schemas = describe_for_conversation(
             tool_schemas, channel=session.channel, forms=whatsapp_forms,

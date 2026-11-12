@@ -230,6 +230,15 @@ class GovernanceGate:
             _DEFAULT_ROLE, set(),
         )
 
+    def runs_unasked(self, tool_name: str) -> bool:
+        """Whether *tool_name* may be called with no one asked first: what
+        :meth:`offers`, less a tool that needs approval.  A caller that cannot
+        ask anyone (a consulted expert's loop) is sent only these."""
+        decision = self._name_decision(tool_name)
+        if decision is not None:
+            return decision.allowed
+        return self.offers(tool_name)
+
     def allow_listed(self, names: Iterable[str]) -> frozenset[str]:
         """Those of *names* this gate's allow-list holds, less any it denies;
         none under an open or deny-only policy, which has no allow-list."""
