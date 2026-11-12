@@ -45,10 +45,16 @@ SERVER_OWNED_KEYS: tuple[str, ...] = (
 )
 
 #: Policy names that stand for the family's tools: a policy that names ``delegate_task`` names the
-#: tools that take its place, and one that names ``terminal`` names ``monitor``.
+#: tools that take its place, one that names ``terminal`` names ``monitor``, and one that names the
+#: coordinator's worker tools names the ``agent`` tools that do their work.
 STANDS_IN_FOR: dict[str, tuple[str, ...]] = {
     "delegate_task": ("agent", "send_message", "list_agents", "stop_agent"),
     "terminal": ("monitor",),
+    # The coordinator's worker tools: ``agent`` starts in the background what
+    # ``spawn_worker`` starts, so a policy on them binds the agent family too.
+    "spawn_worker": ("agent", "send_message", "list_agents", "stop_agent"),
+    "send_worker_message": ("send_message",),
+    "stop_worker": ("stop_agent",),
 }
 
 #: The tools that go with ``agent``: offered to a session that may start agents, and to every agent it started.

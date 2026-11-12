@@ -75,7 +75,7 @@ class PolicyDecision:
 
 def _with_stand_ins(names: set[str] | None, *, starting_work: bool = False) -> set[str] | None:
     """*names* with the tools each stands for (``surogates.harness.subagents.STANDS_IN_FOR``) added; with
-    *starting_work*, only those that start work (``agent``, ``monitor``)."""
+    *starting_work*, only those that start work (``agent``, ``monitor``, ``delegate_task``)."""
     if not names:
         return names
     from surogates.harness.subagents import STANDS_IN_FOR
@@ -85,7 +85,7 @@ def _with_stand_ins(names: set[str] | None, *, starting_work: bool = False) -> s
         # ``delegate_task`` stays callable beside ``agent``: what binds one binds the other.
         aliases.add("delegate_task")
     if starting_work:
-        aliases &= {"agent", "monitor"}
+        aliases &= {"agent", "monitor", "delegate_task"}
     return set(names) | aliases
 
 
