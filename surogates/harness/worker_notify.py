@@ -94,7 +94,7 @@ async def emit_and_wake(
     The parent's own ``org_id``/``agent_id`` select the work queue, not the
     child's.  Failing to resolve the parent is logged and swallowed — the
     event write is the durable part, and the caller is mid-teardown.
-    """"""
+    """
     try:
         await session_store.emit_event(parent_session_id, event_type, payload)
     except Exception:
