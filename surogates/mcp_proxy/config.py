@@ -8,7 +8,7 @@ pool tuning.
 from __future__ import annotations
 
 import os
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings
@@ -41,6 +41,11 @@ class McpProxySettings(BaseSettings):
 
     # Security
     encryption_key: str = ""  # Fernet key for credential vault
+    # MCP tool scan: "advisory" keeps a tool whose description trips only one
+    # of AGT's wording heuristics (a URL, a send verb, a "you must" rule, an
+    # id that looks like base64) and audits the hit; "drop" drops it, as
+    # before (SUROGATES_MCP_SCAN_WORDING).
+    mcp_scan_wording: Literal["advisory", "drop"] = "advisory"
 
     log_level: str = "INFO"
 
