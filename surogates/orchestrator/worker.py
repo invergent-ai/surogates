@@ -376,11 +376,11 @@ def _filter_effective_tools(
     # Last: a Keel case's sessions are offered only the case's tools, and only
     # its step's own session the step tools.  The schemas apply the same gate
     # last (``AgentHarness._tool_filter_for_session_impl``).
-    # Then the sub-agent family: ``agent`` in ``delegate_task``'s place with parity on, none of it with parity
-    # off, as the harness offers the schemas (``AgentHarness._tool_filter_for_session_impl``).
-    from surogates.harness.subagents import apply_parity
+    # Then the sub-agent family's companions, where ``agent`` is offered, as the harness offers the schemas
+    # (``AgentHarness._tool_filter_for_session_impl``).
+    from surogates.harness.subagents import offer_family
 
-    return apply_parity(
+    return offer_family(
         gate_case_tools(result, session), session.config, root=getattr(session, "parent_id", None) is None,
     )
 

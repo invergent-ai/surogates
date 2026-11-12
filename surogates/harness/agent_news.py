@@ -11,11 +11,10 @@ woken by it, and the notification is the input of the turn it gets.
 Every message is built from the event's payload alone: the live loop and
 replay must produce the same bytes.
 
-A notification written to a session that has the ``agent`` tool family
-carries a mark (``format``: ``NEW_FORMAT``) and reads as a tagged system
-notification, in the shape Claude Code's sub-agents use.  Any other reads as
-it always has, so a notification never reads differently from how it was
-first read.
+Every notification written now carries a mark (``format``: ``NEW_FORMAT``)
+and reads as a tagged system notification, in the shape Claude Code's
+sub-agents use.  One written before the mark existed reads as it always has,
+so a notification never reads differently from how it was first read.
 """
 
 from __future__ import annotations
@@ -167,22 +166,6 @@ def _tagged_note(data: dict) -> dict:
         )
     parts.append("</task-notification>")
     return {"role": "user", "content": "\n".join(parts)}
-
-
-async def mark_format(store: Any, session_id: Any, payload: dict) -> dict:
-    """*payload*, marked with the family's format when the session it is written to has the family.
-
-    Never raises: a session that cannot be read gets the payload unmarked, which reads as it always has.
-    """
-    try:
-        from surogates.harness.subagents import parity_enabled
-
-        session = await store.get_session(session_id)
-        if parity_enabled(getattr(session, "config", None)):
-            return {**payload, "format": NEW_FORMAT}
-    except Exception:
-        logger.warning("Could not read session %s to mark its notification's format", session_id, exc_info=True)
-    return payload
 
 
 def _todays_note(data: dict) -> dict:

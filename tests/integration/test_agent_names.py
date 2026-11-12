@@ -11,7 +11,7 @@ from surogates.harness.subagents import DISPATCH_KEY
 from surogates.session.events import EventType
 from tests.test_steer_loop import _final_response
 
-from .test_agent_tool import PARITY, a_chat, calling, chats, children, tool_result  # noqa: F401  (chats is a fixture)
+from .test_agent_tool import a_chat, calling, chats, children, tool_result  # noqa: F401  (chats is a fixture)
 from .test_command_wake_once import workers  # noqa: F401  (a fixture)
 from .test_devices import api  # noqa: F401  (a fixture)
 
@@ -33,7 +33,7 @@ def named(children_, name: str):
 
 
 async def test_an_agent_started_with_a_name_is_messaged_stopped_and_listed_by_it(chats):  # noqa: F811
-    chat = await a_chat(chats, PARITY)
+    chat = await a_chat(chats)
     chats.replies = [
         agent_call("call_a", description="Count open items", prompt="Count them.", name="counter",
                 run_in_background=True),
@@ -53,7 +53,7 @@ async def test_an_agent_started_with_a_name_is_messaged_stopped_and_listed_by_it
 
 
 async def test_the_newest_agent_with_a_name_answers_to_it(chats):  # noqa: F811
-    chat = await a_chat(chats, PARITY)
+    chat = await a_chat(chats)
     for call in ("call_a", "call_b"):
         chats.replies = [
             agent_call(call, description="Count open items", prompt="Count them.", name="counter",
@@ -77,7 +77,7 @@ async def test_the_newest_agent_with_a_name_answers_to_it(chats):  # noqa: F811
 
 @pytest.mark.parametrize("name", ["parent", "Parent", "a9f1c2d6-0000-4000-8000-000000000000", "proc_1", "1st", "a b", "x" * 41])
 async def test_a_name_that_could_be_read_as_something_else_is_refused(chats, name):  # noqa: F811
-    chat = await a_chat(chats, PARITY)
+    chat = await a_chat(chats)
     chats.replies = [
         agent_call("call_a", description="Count", prompt="Count them.", name=name, run_in_background=True),
         _final_response("No."),
@@ -89,7 +89,7 @@ async def test_a_name_that_could_be_read_as_something_else_is_refused(chats, nam
 
 
 async def test_a_sub_agent_messages_a_sibling_by_its_name(chats):  # noqa: F811
-    chat = await a_chat(chats, PARITY)
+    chat = await a_chat(chats)
     chats.replies = [
         agent_call("call_r", description="Read the tracker", prompt="Read it.", name="reader", run_in_background=True),
         agent_call("call_w", description="Write the summary", prompt="Write it.", name="writer", run_in_background=True),
@@ -110,7 +110,7 @@ async def test_a_sub_agent_messages_a_sibling_by_its_name(chats):  # noqa: F811
 
 
 async def test_a_notification_carries_the_agents_name(chats):  # noqa: F811
-    chat = await a_chat(chats, PARITY)
+    chat = await a_chat(chats)
     chats.replies = [
         agent_call("call_a", description="Count open items", prompt="Count them.", name="counter",
                 run_in_background=True),

@@ -465,7 +465,7 @@ class TestWorkerNotification:
 class TestDelegateQueueFix:
     @pytest.mark.asyncio
     async def test_uses_work_queue_not_task_queue(self) -> None:
-        from surogates.tools.builtin.delegate import _delegate_handler
+        from tests.test_delegate import _run_agent
 
         parent_id = uuid4()
         child_id = uuid4()
@@ -488,7 +488,7 @@ class TestDelegateQueueFix:
         redis = _make_redis()
         org_id = uuid4()
 
-        await _delegate_handler(
+        await _run_agent(
             {"goal": "Test task"},
             session_store=store,
             redis=redis,

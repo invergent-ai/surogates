@@ -551,7 +551,7 @@ def wait_note(data: dict) -> dict | None:
 def worker_news(event_type: str, data: dict, answered: frozenset[str] = frozenset()) -> dict | None:
     """The message a coordinator reads a worker's news as: its report, or a
     thread the user started; None for a spawn the coordinator made, and for
-    the report of a ``delegate_task`` helper whose call got its result
+    the report of a foreground agent whose call got its result
     (*answered*, ``loop_pending.answered_helpers``): its parent has it as
     that call's result (``worker_notify.is_delegated``)."""
     if (data or {}).get("delegated") and str((data or {}).get("worker_id")) in answered:
@@ -752,7 +752,7 @@ class ContextReplayMixin:
         # ``workspace_path.rstrip("/")``.
         workspace_root = (workspace_path or "").rstrip("/")
         events = _in_typed_order(events)
-        # The helpers whose delegate_task call got their result, in the whole
+        # The helpers whose agent call got their result, in the whole
         # log: a helper's report can land after the call has returned.
         answered = answered_helpers(events)
         messages: list[dict] = []

@@ -11,7 +11,7 @@ list before every LLM API call:
   removed from replayed messages. 
 - **Duplicate tool call deduplication** -- removes duplicate (name, arguments)
   pairs from a tool call batch. 
-- **Delegate task capping** -- caps the number of ``delegate_task`` calls per turn.
+- **Delegation capping** -- caps the number of ``agent`` calls per turn.
 """
 
 from __future__ import annotations
@@ -259,7 +259,6 @@ def deduplicate_tool_calls(tool_calls: list[dict]) -> list[dict]:
 _MAX_DELEGATE_CALLS: int = 5
 
 _DELEGATION_TOOL_NAMES: frozenset[str] = frozenset({
-    "delegate_task",
     "spawn_worker",
     "agent",
 })
@@ -271,7 +270,7 @@ def cap_delegate_calls(
 ) -> list[dict]:
     """Cap the number of delegation calls in a single turn.
 
-    Limits both ``delegate_task`` and ``spawn_worker`` calls to prevent
+    Limits both ``agent`` and ``spawn_worker`` calls to prevent
     unbounded fan-out.  Preserves all non-delegation calls.
     """
     delegates: list[dict] = []

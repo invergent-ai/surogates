@@ -299,10 +299,9 @@ from surogates.harness.loop_pending import (
 from surogates.harness.agent_news import agent_news_unread, started_notified_work, starts_notified_work
 from surogates.harness.subagents import (
     BUDGET_REASON,
-    REPLACED_TOOL,
     TOKEN_BUDGET_REPORT_REQUEST,
-    apply_parity,
     budget_of,
+    offer_family,
     over_budget,
     runs_in_background,
 )
@@ -562,7 +561,7 @@ _COMMAND_FOR_THE_MODEL = "deep-research"
 #: Commands that do their work in the conversation itself.  A project's
 #: master works through threads: a goal or a mission there could neither
 #: delegate nor do the work, ``/deep-research`` hands its
-#: topic to ``delegate_task``, and ``/code`` clones into the project's shared
+#: topic to an ``agent``, and ``/code`` clones into the project's shared
 #: workspace.  ``/loop`` (a routine), ``/compress`` and ``/clear`` still run.
 _PROJECT_MASTER_REFUSED_COMMANDS = frozenset({
     "goal", "mission", "code", "deep-research",
@@ -1289,7 +1288,7 @@ class AgentHarness(
             session_id,
             types=[
                 EventType.LLM_REQUEST, EventType.WORKER_COMPLETE, EventType.WORKER_FAILED,
-                # Which delegate_task helpers' reports are their calls' results (``answered_helpers``).
+                # Which foreground agents' reports are their calls' results (``answered_helpers``).
                 EventType.DELEGATION_COMPLETE, EventType.DELEGATION_FAILED,
             ],
         )
@@ -1343,8 +1342,8 @@ class AgentHarness(
         coordinator whose mission is in flight, of its helpers: replay puts
         a report before the first request written after it, so one that
         request did not read would stand ahead of the turn's answer, and
-        the next turn's request would end on that answer.  A ``delegate_task``
-        parent, which a master never is, already has its child's result as
+        the next turn's request would end on that answer.  A foreground ``agent``
+        call's parent, which a master never is, already has its child's result as
         the tool's result.  A session that started background work which
         reports back (``started_notified_work``) reads its notifications
         live too.
@@ -1373,7 +1372,7 @@ class AgentHarness(
         return held, max(event.id for event in events)
 
     async def _answered_helpers(self, session: Session, events: list) -> frozenset[str]:
-        """The ``delegate_task`` helpers whose call got their result (``answered_helpers``), read from the log only
+        """The foreground agents whose call got their result (``answered_helpers``), read from the log only
         when *events* hold a report of one."""
         if not any((event.data or {}).get("delegated") for event in events):
             return frozenset()
@@ -3308,9 +3307,6 @@ class AgentHarness(
         offered_tools = (
             frozenset(s["function"]["name"] for s in tool_schemas) | deferred_tools.names
         )
-        if "agent" in offered_tools:
-            # ``agent`` stands in for ``delegate_task``, which stays callable under its old name.
-            offered_tools |= {REPLACED_TOOL}
 
         # The browser pause notice costs a Redis read, and only a session
         # that can drive a browser can ever be holding one.
@@ -4410,7 +4406,7 @@ class AgentHarness(
                     continue  # re-enter the loop without appending anything
                 invalid_json_retries = 0  # reset on a turn with valid args
 
-            # 5b. Deduplicate tool calls and cap delegate_task calls.  The
+            # 5b. Deduplicate tool calls and cap agent calls.  The
             # streaming executor already applied both rules on add, so the
             # persisted message matches what executes on either path.
             tool_calls_raw = deduplicate_tool_calls(tool_calls_raw)
@@ -6145,9 +6141,8 @@ class AgentHarness(
         # Last, as in ``worker._filter_effective_tools``: a Keel case's
         # sessions keep only the case's tools, and only its step's own
         # session gets the step tools, which every other session loses.
-        # Then the sub-agent family: ``agent`` in ``delegate_task``'s place
-        # with parity on, none of it with parity off.
-        return apply_parity(gate_case_tools(tool_filter, session), config, root=session.parent_id is None)
+        # Then the sub-agent family's companions, where ``agent`` is offered.
+        return offer_family(gate_case_tools(tool_filter, session), config, root=session.parent_id is None)
 
     @staticmethod
     def _dynamic_loop_wait_succeeded(

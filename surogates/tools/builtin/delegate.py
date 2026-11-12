@@ -1,32 +1,21 @@
-"""Built-in ``delegate_task`` tool -- sub-agent delegation.
+"""The run path of the ``agent`` tool: a sub-agent's child session, from its start to its report.
 
-Spawns one or more child sessions that run in their own context window,
-waits for them to complete, and returns the children's final responses
-as the tool result.
+``agent`` (``tools/builtin/agents.py``) calls ``_run_single_delegation``,
+which creates the child session on the ``delegation`` channel, gives it its
+tools (``child_tool_policy``), and in the foreground waits for its report.
 
-Supports:
-
-- **Batch fan-out**: pass ``goals`` (array) to launch N children in
-  parallel; results are returned as a JSON list.
-- **Role-based recursion**: ``role="orchestrator"`` lets a child delegate
-  further; ``role="leaf"`` (default) strips ``delegate_task`` from the
-  child's toolset.
 - **Depth limit**: parent sessions track ``delegation_depth`` in their
-  config. Calls deeper than ``_MAX_DELEGATION_DEPTH`` are rejected.
+  config; ``agent`` refuses a start at ``_MAX_DELEGATION_DEPTH``.
 - **Session tracing**: emits ``DELEGATION_START`` / ``DELEGATION_COMPLETE``
   / ``DELEGATION_FAILED`` events on the parent with a tool-call trace
   built from the child's event log. A short trace summary is appended
-  to the tool result text so the LLM can judge child reliability.
+  to the result text so the LLM can judge child reliability.
 - **Progress**: while polling, emits ``DELEGATION_PROGRESS`` on the parent
   for the child's newest tool call, so the parent's chat is not silent
   while it waits.
 - **Stale detection**: while polling, emits ``DELEGATION_STALE`` once
   per child when the child has been idle past a threshold (different
   thresholds for "idle" vs "in tool"); the hard timeout still applies.
-
-The handler requires ``session_store``, ``redis``, ``tenant``,
-``session_id``, and ``budget`` to be passed as keyword arguments by the
-harness loop (which injects them automatically).
 """
 
 from __future__ import annotations
@@ -40,9 +29,7 @@ from uuid import UUID
 
 from surogates.channels.constants import session_queue_priority
 from surogates.config import enqueue_session
-from surogates.runtime.turn_slots import turn_waiting
 from surogates.session.events import EventType
-from surogates.tools.registry import ToolRegistry, ToolSchema
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +47,7 @@ _MAX_DELEGATION_DEPTH: int = 2
 # batched fan-out.  These workflows are expensive (they themselves
 # spawn sub-agents and run multi-round web extraction); allowing a
 # parent that is *already* one of them to delegate to another, or
-# letting a single ``delegate_task`` call spawn N of them in parallel,
+# letting one response start N of them in parallel,
 # turns one user prompt into a runaway fleet of long-running sessions
 # that each burn the full timeout.
 _NON_RECURSIVE_AGENT_TYPES: frozenset[str] = frozenset({
@@ -78,7 +65,6 @@ _IN_TOOL_STALE_THRESHOLD_SECONDS: float = 180.0
 # trace lives in the DELEGATION_COMPLETE event payload.
 _TRACE_SUMMARY_LIMIT: int = 10
 
-_VALID_ROLES = {"leaf", "orchestrator"}
 
 # Tools that should never run inside a delegated child, regardless of
 # agent_type preset or parent toolset. ``ask_user_question`` would
@@ -102,277 +88,17 @@ _FILE_WRITE_TOOLS: frozenset[str] = frozenset({"write_file", "patch"})
 _FILE_READ_TOOLS: frozenset[str] = frozenset({"read_file"})
 
 
-_DELEGATE_SCHEMA = ToolSchema(
-    name="delegate_task",
-    description=(
-        (
-            "Hand self-contained sub-tasks to sub-agents, each in a fresh session: "
-            "`goal` for one, `goals` for several in parallel. Give each the context "
-            "it needs (it cannot see this conversation). Use it for large independent"
-            " pieces of work, not for single lookups."
-        )
-    ),
-    parameters={
-        "type": "object",
-        "properties": {
-            "goal": {
-                "type": "string",
-                "description": (
-                    "Clear description of what the sub-agent should "
-                    "accomplish. Use either `goal` or `goals`, not both."
-                ),
-            },
-            "goals": {
-                "type": "array",
-                "description": (
-                    (
-                        "Several tasks to run in parallel: objects with their own goal and "
-                        "optional context, model, agent_type, role. Use goal or goals, not both."
-                    )
-                ),
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "goal": {"type": "string"},
-                        "context": {"type": "string"},
-                        "model": {"type": "string"},
-                        "agent_type": {"type": "string"},
-                        "role": {
-                            "type": "string",
-                            "enum": ["leaf", "orchestrator"],
-                        },
-                    },
-                    "required": ["goal"],
-                    "additionalProperties": False,
-                },
-            },
-            "context": {
-                "type": "string",
-                "description": "Relevant context the sub-agent needs to know.",
-            },
-            "model": {
-                "type": "string",
-                "description": "Optional model override for the sub-agent.",
-            },
-            "agent_type": {
-                "type": "string",
-                "description": (
-                    (
-                        "Optional pre-configured sub-agent type (its prompt, tools, model and "
-                        "limits)."
-                    )
-                ),
-            },
-            "role": {
-                "type": "string",
-                "enum": ["leaf", "orchestrator"],
-                "description": (
-                    (
-                        "'leaf' (default): the child cannot delegate further; 'orchestrator': it "
-                        "may delegate one more level."
-                    )
-                ),
-            },
-        },
-        "required": [],
-        "additionalProperties": False,
-    },
-)
-
-
-def register(registry: ToolRegistry) -> None:
-    """Register the ``delegate_task`` tool."""
-    registry.register(
-        name="delegate_task",
-        schema=_DELEGATE_SCHEMA,
-        handler=_delegate_handler,
-        toolset="core",
-    )
-
-
-def _normalize_tasks(arguments: dict[str, Any]) -> list[dict[str, Any]] | str:
-    """Resolve scalar/batch arguments into a list of task dicts.
-
-    Returns the task list on success, or an error string on validation
-    failure. The list always has at least one item.
-    """
-    goal = arguments.get("goal")
-    goals = arguments.get("goals")
-
-    if goal and goals:
-        return "provide either `goal` or `goals`, not both"
-    if not goal and not goals:
-        return "either `goal` or `goals` is required"
-
-    shared_context = arguments.get("context") or ""
-    shared_model = arguments.get("model")
-    shared_agent_type = arguments.get("agent_type")
-    shared_role = arguments.get("role") or "leaf"
-    if shared_role not in _VALID_ROLES:
-        return f"invalid role: {shared_role!r}"
-
-    if goal:
-        return [{
-            "goal": str(goal),
-            "context": shared_context,
-            "model": shared_model,
-            "agent_type": shared_agent_type,
-            "role": shared_role,
-        }]
-
-    if not isinstance(goals, list) or not goals:
-        return "`goals` must be a non-empty array"
-
-    tasks: list[dict[str, Any]] = []
-    for idx, item in enumerate(goals):
-        if not isinstance(item, dict):
-            return f"goals[{idx}] must be an object"
-        item_goal = item.get("goal")
-        if not item_goal:
-            return f"goals[{idx}].goal is required"
-        item_role = item.get("role") or shared_role
-        if item_role not in _VALID_ROLES:
-            return f"goals[{idx}].role invalid: {item_role!r}"
-        tasks.append({
-            "goal": str(item_goal),
-            "context": item.get("context") or shared_context,
-            "model": item.get("model") or shared_model,
-            "agent_type": item.get("agent_type") or shared_agent_type,
-            "role": item_role,
-        })
-    return tasks
-
-
-async def _delegate_handler(
-    arguments: dict[str, Any],
-    **kwargs: Any,
-) -> str:
-    """Create one or more child sessions, run them concurrently, and
-    return their results.
-
-    Required kwargs (injected by the harness):
-        session_store, redis, tenant, session_id, budget, session_factory.
-    """
-    session_store = kwargs.get("session_store")
-    redis = kwargs.get("redis")
-    tenant = kwargs.get("tenant")
-    parent_session_id_str = kwargs.get("session_id")
-    budget = kwargs.get("budget")
-    session_factory = kwargs.get("session_factory")
-    memory_manager = kwargs.get("memory_manager")
-    bundle = kwargs.get("bundle")
-
-    if session_store is None:
-        return json.dumps({"error": "session_store not available for delegation"})
-    if tenant is None:
-        return json.dumps({"error": "tenant context not available for delegation"})
-    if parent_session_id_str is None:
-        return json.dumps({"error": "parent session_id not available for delegation"})
-
-    normalized = _normalize_tasks(arguments)
-    if isinstance(normalized, str):
-        return json.dumps({"error": normalized})
-    tasks = normalized
-    batch_mode = arguments.get("goals") is not None
-
-    parent_session_id = UUID(str(parent_session_id_str))
-    parent_session = await session_store.get_session(parent_session_id)
-    parent_config = parent_session.config or {}
-    parent_depth = int(parent_config.get("delegation_depth") or 0)
-
-    if parent_depth >= _MAX_DELEGATION_DEPTH:
-        return json.dumps({
-            "error": (
-                f"delegation depth limit reached "
-                f"({parent_depth}/{_MAX_DELEGATION_DEPTH}); cannot nest "
-                "further."
-            ),
-        })
-    child_depth = parent_depth + 1
-
-    # Guard against runaway fan-out / recursion of expensive workflows
-    # like deep-research.  Two distinct cases:
-    #
-    #   (c) parent IS already running as one of these agent types and
-    #       tries to delegate to the *same* type -- a planner spawning
-    #       another planner.  Even within the depth cap this multiplies
-    #       work and burns the timeout on every node.
-    #
-    #   (d) a single ``delegate_task`` call fans the same expensive
-    #       agent type out across N goals in parallel.  One user prompt
-    #       producing four ~15-minute children is exactly the failure
-    #       mode that motivated this guard.
-    parent_agent_type = parent_config.get("agent_type") or ""
-    non_recursive_in_batch = [
-        t["agent_type"] for t in tasks
-        if t["agent_type"] in _NON_RECURSIVE_AGENT_TYPES
-    ]
-    if parent_agent_type in _NON_RECURSIVE_AGENT_TYPES:
-        for t in tasks:
-            if t["agent_type"] == parent_agent_type:
-                return json.dumps({
-                    "error": (
-                        f"agent_type {parent_agent_type!r} cannot "
-                        f"delegate to itself; finish the current "
-                        f"workflow or hand off to a different agent "
-                        f"type."
-                    ),
-                })
-    if len(tasks) > 1 and non_recursive_in_batch:
-        return json.dumps({
-            "error": (
-                "batch ``goals`` may not include agent_type "
-                f"{sorted(set(non_recursive_in_batch))} -- these "
-                "workflows must be delegated one at a time so they do "
-                "not fan out into a runaway fleet."
-            ),
-        })
-
-    # Split remaining budget evenly across children when batched.
-    remaining = budget.remaining if budget else _CHILD_MAX_ITERATIONS
-    per_child_budget = max(1, remaining // max(1, len(tasks)))
-
-    # The parent is about to spend up to an hour idle inside
-    # _poll_child_completion waiting for its children, so its turn gives its
-    # worker and tenant slots back for the duration -- otherwise a deep
-    # delegation chain saturates its own per-tenant cap with sleepers.
-    async with turn_waiting():
-        results = await asyncio.gather(*[
-            _run_single_delegation(
-                task=task,
-                parent_session=parent_session,
-                child_depth=child_depth,
-                child_iteration_cap=min(_CHILD_MAX_ITERATIONS, per_child_budget),
-                session_store=session_store,
-                redis=redis,
-                tenant=tenant,
-                session_factory=session_factory,
-                memory_manager=memory_manager,
-                bundle=bundle,
-                live_parent_config=kwargs.get("session_config"),
-            )
-            for task in tasks
-        ], return_exceptions=False)
-
-    if batch_mode:
-        return json.dumps([
-            {"goal": task["goal"], "result": result_text}
-            for task, result_text in zip(tasks, results)
-        ])
-    return results[0]
-
-
 def child_tool_policy(
     *,
     parent_config: dict[str, Any],
     agent_def: Any | None,
     role: str,
-    leaf_tools: tuple[str, ...] = ("delegate_task",),
+    leaf_tools: tuple[str, ...] = ("agent",),
 ) -> tuple[list[str] | None, list[str]]:
     """The tools a delegated child may use: its ``allowed_tools`` (None for no allowlist) and ``excluded_tools``.
 
     A leaf loses *leaf_tools*, the tools that would start a child of its own,
-    unless its agent type lists ``delegate_task`` (it is an orchestrator by
+    unless its agent type lists ``agent`` (it is an orchestrator by
     definition).
     """
     allowed_tools: list[str] | None = None
@@ -420,19 +146,19 @@ def child_tool_policy(
         elif t not in excluded_tools:
             excluded_tools.append(t)
 
-    # Leaf role: strip delegate_task -- UNLESS the agent_def itself
-    # lists delegate_task as required.  Some agent types are orchestrators
-    # by definition (e.g. ``deep-research``, which uses delegate_task
+    # Leaf role: strip agent -- UNLESS the agent_def itself
+    # lists agent as required.  Some agent types are orchestrators
+    # by definition (e.g. ``deep-research``, which uses agent
     # to hand off to ``research-writer``); stripping the tool there
     # turns a structural workflow into a runtime failure where the
     # planner literally cannot reach the writer and falls back to
     # writing prose in-place.  Treat the agent_def's tool list as
-    # authoritative: if it advertises delegate_task, the agent is an
+    # authoritative: if it advertises agent, the agent is an
     # orchestrator no matter what the caller passed for ``role``.
     agent_def_requires_delegate = (
         agent_def is not None
         and agent_def.tools is not None
-        and "delegate_task" in agent_def.tools
+        and "agent" in agent_def.tools
     )
     if role == "leaf" and not agent_def_requires_delegate:
         for leaf_tool in leaf_tools:
@@ -456,7 +182,7 @@ async def _run_single_delegation(
     memory_manager: Any,
     bundle: Any | None = None,
     live_parent_config: dict[str, Any] | None = None,
-    leaf_tools: tuple[str, ...] = ("delegate_task",),
+    leaf_tools: tuple[str, ...] = ("agent",),
     extra_config: dict[str, Any] | None = None,
     seed: list[dict] | None = None,
     start_extra: dict[str, Any] | None = None,
@@ -464,8 +190,7 @@ async def _run_single_delegation(
 ) -> str:
     """Spawn one child, poll it, emit lifecycle events, and return its result.
 
-    The ``agent`` tool starts its sub-agents here too: *leaf_tools* are the
-    tools a leaf child loses, *extra_config* goes into the child's config,
+    *leaf_tools* are the tools a leaf child loses, *extra_config* goes into the child's config,
     *seed* (a fork's conversation) is the child's context before its brief,
     *start_extra* goes into ``delegation.start``.  *on_started*, given the
     child's session once it is queued, returns the call's result to end the
@@ -521,7 +246,7 @@ async def _run_single_delegation(
     # ``live_parent_config`` is the calling harness's session_config
     # kwarg: mirroring the group id into it lets the parent's board
     # hook deliver the join snapshot in THIS wake — right after
-    # delegate_task returns — so the model summarizes child results
+    # the agent call returns — so the model summarizes child results
     # with the verified board in view.  Concurrent delegations race
     # benignly (identical value, idempotent set).
     await ensure_group_and_inherit(
@@ -621,7 +346,7 @@ async def _run_single_delegation(
             # /artifacts/{artifact_id}`` instead of the chat's own
             # session id.  Propagation cascades naturally up the
             # delegation chain because the parent's own
-            # ``delegate_task`` handler will run the same scan on
+            # run path will run the same scan on
             # whichever events it gets back from THIS session,
             # preserving the original ``originating_session_id``.
             await _propagate_child_artifacts(
@@ -695,7 +420,7 @@ async def _run_single_delegation(
         return json.dumps({"error": outcome["reason"]})
 
     except Exception as exc:
-        logger.exception("delegate_task failed for parent %s", parent_session_id)
+        logger.exception("Sub-agent run failed for parent %s", parent_session_id)
         return json.dumps({"error": f"Delegation failed: {exc}"})
 
 

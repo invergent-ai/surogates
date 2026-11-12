@@ -79,8 +79,7 @@ TOOL_LOCATIONS: dict[str, ToolLocation] = {
     "generate_image": ToolLocation.HARNESS,
     "generate_video": ToolLocation.HARNESS,
     "ask_user_question": ToolLocation.HARNESS,
-    "delegate_task": ToolLocation.HARNESS,
-    # The sub-agent family: sessions and events, like delegate_task.
+    # The sub-agent family: sessions and events.
     "agent": ToolLocation.HARNESS,
     "send_message": ToolLocation.HARNESS,
     "list_agents": ToolLocation.HARNESS,

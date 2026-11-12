@@ -280,7 +280,7 @@ async def test_only_a_master_is_sent_the_thread_tools(api, monkeypatch, session_
         assert not sent & THREAD_TOOLS, session.config
         if session is thread:
             # A thread does the work itself, and may delegate a side task or ask the user.
-            assert {"write_file", "terminal", "delegate_task", "ask_user_question"} <= sent
+            assert {"write_file", "terminal", "agent", "ask_user_question"} <= sent
             assert not sent & {"spawn_worker", "send_worker_message", "stop_worker", "spawn_task"}
 
 
@@ -1098,7 +1098,7 @@ async def test_a_finished_chat_takes_a_turn_on_the_report_of_a_worker_it_spawned
 
 
 async def test_a_late_report_of_a_delegated_child_wakes_no_one(api, monkeypatch):
-    # ``delegate_task`` waits for its child itself: a report after the tool gave up is not one the chat waits for.
+    # A foreground ``agent`` call waits for its child itself: a report after the tool gave up is not one the chat waits for.
     chat = await a_chat(api)
     child = await create_child_session(store=api.app.state.session_store, parent=chat, channel="delegation")
     await turn_of_the_master_ends(api, chat, "The research timed out.")

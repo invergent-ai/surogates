@@ -1,10 +1,9 @@
 """Built-in ``agent`` tool: start a sub-agent, in the foreground or the background, fresh or forked.
 
-Offered in place of ``delegate_task`` when sub-agent parity is on
-(``surogates.harness.subagents``).  A sub-agent is a child session on the
-delegation channel, started through ``delegate_task``'s own path
-(``delegate._run_single_delegation``): the same tool inheritance, depth limit,
-iteration cap and events.
+The one way an agent starts a sub-agent (``surogates.harness.subagents``).
+A sub-agent is a child session on the delegation channel, started through
+``delegate._run_single_delegation``: tool inheritance, the depth limit, the
+iteration cap and the ``delegation.*`` events.
 
 - Background (the default for a main session): the call returns the
   ``agent_id`` at once.  When the agent ends, its parent gets an
@@ -35,7 +34,6 @@ from surogates.harness.agent_news import fenced
 from surogates.harness.subagents import (
     AGENT_BUDGET_KEY,
     DISPATCH_KEY,
-    PARITY_KEY,
     budget_for_children,
     budget_left,
     budget_of,
@@ -900,9 +898,9 @@ async def _start_agent(
         memory_manager=kwargs.get("memory_manager"),
         bundle=kwargs.get("bundle"),
         live_parent_config=kwargs.get("session_config"),
-        leaf_tools=("delegate_task", "agent"),
+        leaf_tools=("agent",),
         extra_config={
-            PARITY_KEY: True, DISPATCH_KEY: dispatch,
+            DISPATCH_KEY: dispatch,
             **({AGENT_BUDGET_KEY: {"tokens": child_tokens}} if child_tokens else {}),
         },
         seed=seed,
@@ -913,7 +911,7 @@ async def _start_agent(
     try:
         if background:
             return await run
-        # The parent's turn gives its slots back while it waits, as delegate_task's does.
+        # The parent's turn gives its slots back while it waits.
         async with turn_waiting():
             result = await run
     finally:

@@ -982,19 +982,10 @@ class KeelSettings(BaseSettings):
 
 
 class AgentsSettings(BaseSettings):
-    """Sub-agents as an agent dispatches them on its own.
-
-    ``subagent_parity`` gives every session the ``agent`` tool family (start
-    a sub-agent in the foreground or the background, or a fork of the
-    conversation) in place of ``delegate_task``, which stays callable under
-    its old name.  Off by default: the tools the model sees are unchanged.
-    A session's own ``subagent_parity`` config key, true or false, wins over
-    it, and its sub-agents inherit the session's.
-    """
+    """Sub-agents as an agent dispatches them on its own, with the ``agent`` tool family."""
 
     model_config = {"env_prefix": "SUROGATES_AGENTS_"}
 
-    subagent_parity: bool = False
     # The tokens (input + output) each sub-agent the ``agent`` tool starts may
     # use, its own sub-agents' included; 0 for no limit.  A session's
     # ``agent_token_budget`` config key wins for the agents it starts; only the

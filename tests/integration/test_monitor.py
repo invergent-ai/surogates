@@ -13,12 +13,11 @@ import pytest_asyncio
 from surogates.harness import background_watch as watch_module
 from surogates.harness.agent_news import NEW_FORMAT, notification_note
 from surogates.harness.background_watch import HERE, BackgroundWatch
-from surogates.harness.subagents import PARITY_KEY
 from surogates.session.events import EventType
 from surogates.tools.builtin import agents as agents_module
 from tests.test_steer_loop import _final_response
 
-from .test_agent_tool import PARITY, a_chat, calling, chats  # noqa: F401  (chats is a fixture)
+from .test_agent_tool import a_chat, calling, chats  # noqa: F401  (chats is a fixture)
 from .test_background_completions import Daemon, daemon_registry  # noqa: F401  (a fixture)
 from .test_command_wake_once import workers  # noqa: F401  (a fixture)
 from .test_devices import api  # noqa: F401  (a fixture)
@@ -58,7 +57,7 @@ async def start(api, session, command, **arguments):  # noqa: F811
 
 
 async def a_session(api) -> UUID:  # noqa: F811
-    created = await api.client.post("/v1/sessions", json={"config": PARITY}, headers=api.auth())
+    created = await api.client.post("/v1/sessions", json={"config": {}}, headers=api.auth())
     return UUID(created.json()["id"])
 
 
@@ -74,16 +73,14 @@ async def test_each_line_reaches_the_session_then_the_end(api, here_watch):  # n
     assert outputs and all(n["kind"] == "monitor" and n["summary"] == "Watch the ticks" for n in ended)
     end = ended[-1]
     assert end["status"] == "failed" and end["exit_code"] == 3
-    assert notification_note(end)["content"].startswith(f"[Monitor {started['monitor_id']} (Watch the ticks) ended: its command exited with code 3")
-    assert notification_note(outputs[0])["content"].startswith(f"[Monitor {started['monitor_id']} (Watch the ticks): 1 new line]\n```\nfirst\n```")
+    assert f"<summary>Monitor {started['monitor_id']} (Watch the ticks) ended: its command exited with code 3" in notification_note(end)["content"]
+    assert f"<summary>Monitor {started['monitor_id']} (Watch the ticks): 1 new line</summary>\n<result>\nfirst\n</result>" in notification_note(outputs[0])["content"]
     assert await queued(api, await store.get_session(chat))
 
 
-async def test_a_flagged_sessions_command_end_is_marked_and_reads_in_the_new_format(api, here_watch):  # noqa: F811
-    # The API drops the family's keys a client sends: the flag is the server's to write.
+async def test_a_commands_end_is_marked_and_reads_in_the_new_format(api, here_watch):  # noqa: F811
     store = api.app.state.session_store
     chat = await a_session(api)
-    await store.update_session_config_key(chat, PARITY_KEY, True)
     started = await start(api, chat, "echo done; exit 0")
     ended = await until(lambda: notes_until_end(store, chat))
     end = ended[-1]
@@ -124,9 +121,7 @@ async def test_a_monitor_past_its_timeout_is_killed_and_says_so(api, here_watch)
                      monitor=("Watch the ticks", 0.8, 30))
     ended = await until(lambda: notes_until_end(store, chat))
     assert ended[-1]["status"] == "killed" and ended[-1]["reason"] == "its timeout passed"
-    assert notification_note(ended[-1])["content"].startswith(
-        f"[Monitor {started['session_id']} (Watch the ticks) stopped: its timeout passed",
-    )
+    assert f"<summary>Monitor {started['session_id']} (Watch the ticks) stopped: its timeout passed" in notification_note(ended[-1])["content"]
     from surogates.tools.utils.process_registry import process_registry
 
     await until(lambda: asyncio.sleep(0, result=process_registry.poll(started["session_id"])["status"] != "running"))
@@ -142,9 +137,7 @@ async def test_stop_agent_ends_a_monitor(api, here_watch):  # noqa: F811
     assert stopped["agent_id"] == started["monitor_id"]
     ended = await until(lambda: notes_until_end(store, chat))
     assert ended[-1]["status"] == "killed"
-    assert notification_note(ended[-1])["content"].startswith(
-        f"[Monitor {started['monitor_id']} (Watch the ticks) stopped: its command was killed",
-    )
+    assert f"<summary>Monitor {started['monitor_id']} (Watch the ticks) stopped: its command was killed" in notification_note(ended[-1])["content"]
 
 
 async def test_a_line_with_no_end_comes_in_pieces_of_bounded_size(api, here_watch):  # noqa: F811
@@ -186,14 +179,14 @@ async def test_a_stopped_sessions_monitor_is_killed_and_sends_no_more_lines(api,
 
 
 async def test_a_sub_agent_and_a_thread_are_not_offered_monitor_and_may_not_start_one(api, here_watch):  # noqa: F811
-    from surogates.harness.subagents import DISPATCH_KEY, PARITY_KEY, apply_parity
+    from surogates.harness.subagents import DISPATCH_KEY, offer_family
 
     for config in ({DISPATCH_KEY: {"mode": "background"}}, {"workstream_role": "thread"}, {"under_thread": True}):
-        offered = apply_parity({"terminal", "delegate_task"}, {PARITY_KEY: True, **config})
+        offered = offer_family({"terminal", "agent"}, config)
         assert "monitor" not in offered, config
-    assert "monitor" in apply_parity({"terminal", "delegate_task"}, {PARITY_KEY: True})
+    assert "monitor" in offer_family({"terminal", "agent"}, {})
     # Nor to any session with a parent: a helper's, a worker's or a routine run's end is its parent's news.
-    assert "monitor" not in apply_parity({"terminal", "delegate_task"}, {PARITY_KEY: True}, root=False)
+    assert "monitor" not in offer_family({"terminal", "agent"}, {}, root=False)
     store = api.app.state.session_store
     child = await a_session(api)
     await store.update_session_config_key(child, DISPATCH_KEY, {"mode": "background"})
@@ -305,7 +298,7 @@ async def test_a_chat_is_offered_monitor_and_woken_by_its_lines(chats, daemon_re
 
     monkeypatch.setattr("tests.integration.test_agent_tool.REAL", REAL | {"monitor"})
     try:
-        chat = await a_chat(chats, PARITY)
+        chat = await a_chat(chats)
         chats.replies = [
             calling("monitor", "call_mon", command="sleep 4; echo deploy finished", description="Wait for the deploy"),
             _final_response("Watching the deploy."),

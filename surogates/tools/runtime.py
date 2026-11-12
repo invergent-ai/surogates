@@ -109,7 +109,6 @@ class ToolRuntime:
             kb_tools,
             office,  # office_read, office_edit (live document editing through runtime-office)
             loop_control,
-            delegate,
             expert,
             terminal,  # also registers the 'process' tool
             session_search,

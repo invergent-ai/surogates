@@ -33,12 +33,12 @@ def _event_type(event: Any) -> str:
     return event.type.value if isinstance(event.type, EventType) else str(event.type)
 
 
-#: The ``delegation.failed`` reason of a ``delegate_task`` call that gave up on its helper, which may still run.
+#: The ``delegation.failed`` reason of a foreground ``agent`` call that gave up on its agent, which may still run.
 GAVE_UP_ON_HELPER = "Delegation timed out"
 
 
 def answered_helpers(events: list[Any]) -> frozenset[str]:
-    """The ``delegate_task`` helpers in *events* whose call got their result: a ``delegation.complete``, or a
+    """The foreground agents in *events* whose call got their result: a ``delegation.complete``, or a
     ``delegation.failed`` other than a call that gave up on its helper.  Such a helper's report is no news:
     its parent has it as the call's result.  One whose call gave up, was cut off or broke has none, and its
     report is read as any helper's."""
@@ -55,7 +55,7 @@ def answered_helpers(events: list[Any]) -> frozenset[str]:
 
 
 def read_as_result(event: Any, answered: frozenset[str]) -> bool:
-    """Whether *event* is the report of a ``delegate_task`` helper whose call got its result (*answered*)."""
+    """Whether *event* is the report of a foreground agent whose call got its result (*answered*)."""
     data = getattr(event, "data", None) or {}
     return bool(data.get("delegated")) and str(data.get("worker_id")) in answered
 
@@ -418,7 +418,7 @@ def _awaited_report_unread(session: Any, events: list[Any]) -> bool:
     report comes in its next turn, and the caller has most often ended its
     turn long before its worker ends: the report is that turn's to read.
     Such a worker is one a ``worker.spawned`` in the caller's log names.  A
-    ``delegate_task`` child is not: its tool waits for it and hands its
+    foreground ``agent`` child is not: its call waits for it and hands its
     result back as the tool's, so a report of its that comes later comes
     after the tool gave up on it, which the caller already told its user.
     And only a session that waits on its workers so (``_waits_on_its_workers``).

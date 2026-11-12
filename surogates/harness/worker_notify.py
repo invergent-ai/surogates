@@ -36,7 +36,7 @@ _MAX_LEFT_OUT_NAMED = 200
 
 
 def is_delegated(session: Any) -> bool:
-    """Whether *session* is a ``delegate_task`` helper: its parent waits for it in the tool call that started
+    """Whether *session* is a helper the ``agent`` tool started (the delegation channel): its parent waits for it in the tool call that started
     it, and has its result as that call's result.  Its report says so (``delegated``), and the parent does not
     read it a second time (``loop_context_replay.worker_news``)."""
     return getattr(session, "channel", None) == "delegation"
@@ -185,7 +185,7 @@ async def notify_parent_on_completion(
     A thread's helper whose hand-back failed reports *unkept*: ``kept``
     false, and ``left``, the files kept apart, which its thread's copy lacks.
 
-    A ``delegate_task`` helper's report is marked *delegated* (``is_delegated``).
+    A helper's report is marked *delegated* (``is_delegated``).
     """
     try:
         from surogates.harness.message_utils import extract_final_response

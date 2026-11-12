@@ -516,23 +516,21 @@ For batched goals, the result is a JSON array:
 Errors and timeouts are returned per-child as `{"error": "..."}` JSON
 in the `result` field; the surrounding tool call does not fail.
 
-## 13. The `agent` Tool Family (sub-agent parity)
+## 13. The `agent` Tool Family
 
-An agent can dispatch sub-agents on its own, in the foreground or the background, and talk to them while they run. The family is off by default: with it off, the tools the model sees are unchanged.
+An agent dispatches sub-agents on its own, in the foreground or the background, and talks to them while they run. The family is the one way to start a sub-agent.
 
-### Switching it on
+### Config keys and policies
 
-Set `agents.subagent_parity: true` on the workers (env `SUROGATES_AGENTS_SUBAGENT_PARITY=true`). It applies to every session the workers run.
+The session config keys of the family (`agent_dispatch`, `agent_token_budget`, `agent_budget`, and `delegation_depth`) are written by the server only. A client that names one in a new session's `config` has it removed.
 
-The session config keys of the family (`subagent_parity`, `agent_dispatch`, `agent_token_budget`, `agent_budget`, and `delegation_depth`) are written by the server only. A client that names one in a new session's `config` has it removed. The `agent` tool writes `subagent_parity: true` into each sub-agent's config, so its sub-agents keep the family whatever the setting.
-
-With it on, `agent` takes `delegate_task`'s place wherever the session may delegate. A governance policy that names `delegate_task` names `agent` too (allow, deny and approval), and one that names `terminal` names `monitor`. `delegate_task` stays callable under its old name. An explicit `excluded_tools: ["agent"]` holds.
+A governance policy names the family's tools by their own names. One that names `terminal` names `monitor` too, since `monitor` runs commands. An explicit `excluded_tools: ["agent"]` holds.
 
 ### Tools
 
 | Tool | What it does |
 |---|---|
-| `agent(description, prompt, agent_type?, model?, run_in_background?, fork?, name?)` | Starts a sub-agent: a child session on the delegation channel, through `delegate_task`'s own path (tool inheritance, depth limit 2, iteration cap, 5 calls a response). In the background (the default for a main session) it returns `{"agent_id", "status": "running"}` at once; in the foreground (`run_in_background=false`, and the default for any session with a parent, which reports its own end once) it waits and returns the report with `[agent_id: …]`. A main session's call that did not ask for the background and would pass the background limit runs in the foreground instead of being refused; at most 5 of a session's agents run in the background at a time, and a sub-agent cannot start background agents. `fork`: the child starts from the parent's conversation up to the call, then the brief. Below the depth limit a sub-agent gets `agent` too. |
+| `agent(description, prompt, agent_type?, model?, run_in_background?, fork?, name?)` | Starts a sub-agent: a child session on the delegation channel (tool inheritance, depth limit 2, iteration cap, 5 calls a response). In the background (the default for a main session) it returns `{"agent_id", "status": "running"}` at once; in the foreground (`run_in_background=false`, and the default for any session with a parent, which reports its own end once) it waits and returns the report with `[agent_id: …]`. A main session's call that did not ask for the background and would pass the background limit runs in the foreground instead of being refused; at most 5 of a session's agents run in the background at a time, and a sub-agent cannot start background agents. `fork`: the child starts from the parent's conversation up to the call, then the brief. Below the depth limit a sub-agent gets `agent` too. |
 | `send_message(to, message, summary)` | To an agent the caller started, its parent (`"parent"`), or a sibling; same organisation only. A running agent reads it before its next step. One at rest resumes with its context and the message, if the caller may resume it: the agent that started it may resume a completed or failed one, or one it stopped itself; a sub-agent may resume its parent from a finished turn only, never from its user's stop. Otherwise the message waits in its log, unread until something else wakes it. |
 | `list_agents()` | The agents the caller can reach, with status, and the background commands it started. |
 | `stop_agent(agent_id)` | Stops an agent the caller started (with its own agents), or a background command it started. A stopped agent keeps its context: `send_message` from the agent that stopped it resumes it. A user's stop of it, later, is the user's to lift. |
@@ -575,7 +573,7 @@ The end of background work reaches the session that started it as an `agent.noti
 
 - `usage` (an agent's end): `{subagent_tokens, tool_uses, duration_ms}`. Tokens are the agent's and its own agents' so far, tool calls the agent's so far, and the duration that of the run that just ended (a resumed agent's later notification counts its whole life's tokens and calls, but only its last run's time).
 - `name`: the agent's name, when it was started with one.
-- `format`: `task-notification` when the session it was written to has the `agent` family.
+- `format`: `task-notification`, on every notification written now.
 
 The session reads it as news. A session at work reads it before its next model request; a resting session is woken by it, and it is the input of the new turn. Replay puts it before the first request after it, so a rebuilt request is the one that was sent.
 
@@ -600,7 +598,7 @@ Background work you started has ended or reported. This is not a message from th
 - What the work printed is relayed as printed, except what could pass for the frame: the `<` of the block's own tags is written `&lt;`, and a `[SYSTEM NOTIFICATION` in it becomes `(SYSTEM NOTIFICATION`.
 - Where ours differs from Claude Code's: the summary names the agent's id; the statuses are ours; there is no `system-reminder` wrapper around it; and printed text is neutralised rather than relayed raw. The first line and the tag names are Claude Code's, word for word, so a model that has read Claude Code transcripts reads ours alike.
 
-A notification without the mark (every one written to a session without the family, and every one written before the family's format existed) reads as it always has: a bracketed first line, then the report, or the command's output in a code fence. The format is chosen when a notification is written, never when it is read, so nothing in a log ever reads differently.
+A notification without the mark (every one written before the family's format existed) reads as it always has: a bracketed first line, then the report, or the command's output in a code fence. The format is chosen when a notification is written, never when it is read, so nothing in a log ever reads differently.
 
 ### Budget
 

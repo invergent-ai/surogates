@@ -3,8 +3,8 @@
 The base LLM decides when to consult an expert and receives the
 expert's deliverable back as a tool response.  The expert runs its
 own scoped mini agent loop with a restricted tool set and bounded
-iteration budget.  This is distinct from ``delegate_task``, which
-spawns sub-agents in fresh sessions for multi-step work.
+iteration budget.  This is distinct from ``agent``, which
+starts sub-agents in fresh sessions for multi-step work.
 
 The handler requires ``tenant``, ``session_id``, ``tool_router``,
 and ``tool_registry`` to be passed as keyword arguments by the

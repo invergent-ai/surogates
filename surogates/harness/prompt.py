@@ -543,9 +543,9 @@ class PromptBuilder:
             return ""
 
         spawn_tools = [
-            f"``{name}``" for name in ("spawn_task", "spawn_worker", "delegate_task", "agent")
+            f"``{name}``" for name in ("spawn_task", "spawn_worker", "agent")
             if name in self._available_tools
-        ] or ["``spawn_task``", "``spawn_worker``", "``delegate_task``"]
+        ] or ["``spawn_task``", "``spawn_worker``", "``agent``"]
         rendered = (
             "# Available Sub-Agents\n"
             f"Pass ``agent_type=<name>`` to {_or_list(spawn_tools)} to use one of "
@@ -604,7 +604,7 @@ class PromptBuilder:
         Lists active experts (``type=expert`` and ``expert_status="active"``)
         with their description and trigger phrases. The LLM uses
         ``consult_expert(expert, task)`` to consult one; the block also
-        disambiguates from ``delegate_task`` which has a different
+        disambiguates from ``agent`` which has a different
         purpose (multi-step sub-agent work in a fresh session).
 
         Returns an empty string when no active experts are loaded so the
@@ -649,7 +649,7 @@ class PromptBuilder:
             "Call `consult_expert(expert, task)` when a request falls "
             "within an expert's specialty — for example, a SQL writer for "
             "query-shaped questions or a code reviewer for inspecting a "
-            "file. Do NOT use `delegate_task` for this — that tool spawns "
+            "file. Do NOT use `agent` for this — that tool starts "
             "sub-agents for multi-step work in a fresh session; experts "
             "are single-shot specialists.\n"
             "Prefer a domain expert whenever one covers the subject. "

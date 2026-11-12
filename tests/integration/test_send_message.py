@@ -14,14 +14,14 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from surogates.harness.subagents import DISPATCH_KEY, PARITY_KEY
+from surogates.harness.subagents import DISPATCH_KEY
 from surogates.session.events import EventType
 from surogates.session.provisioning import create_child_session
 from surogates.tools.builtin import agents as agents_module
 from tests.test_steer_loop import _final_response
 
 from .conftest import create_org
-from .test_agent_tool import PARITY, a_chat, calling, chats, children, tool_result  # noqa: F401  (chats is a fixture)
+from .test_agent_tool import a_chat, calling, chats, children, tool_result  # noqa: F401  (chats is a fixture)
 from .test_command_wake_once import workers  # noqa: F401  (a fixture)
 from .test_devices import api  # noqa: F401  (a fixture)
 from .test_workstream_threads import TODO_CALL, queued
@@ -49,7 +49,7 @@ async def send(chats, sender, to, message="Also count the closed ones.", summary
 
 
 async def test_a_running_agent_reads_a_message_before_its_next_step(chats):  # noqa: F811
-    chat = await a_chat(chats, PARITY)
+    chat = await a_chat(chats)
     child = await a_background_agent(chats, chat)
     sent: list[dict] = []
 
@@ -72,7 +72,7 @@ async def test_a_running_agent_reads_a_message_before_its_next_step(chats):  # n
 
 
 async def test_a_finished_agent_resumes_with_its_context_and_reports_again_as_a_notification(chats):  # noqa: F811
-    chat = await a_chat(chats, PARITY)
+    chat = await a_chat(chats)
     child = await a_background_agent(chats, chat)
     chats.replies = [_final_response("There are 12 open items.")]
     await chats.wake(child.id)
@@ -107,11 +107,11 @@ async def test_a_finished_agent_resumes_with_its_context_and_reports_again_as_a_
 
 
 async def test_a_foreground_agent_continued_by_a_message_reports_as_a_notification(chats):  # noqa: F811
-    chat = await a_chat(chats, PARITY)
+    chat = await a_chat(chats)
     parent = await chats.session(chat)
     child = await create_child_session(
         store=chats.store, parent=parent, channel="delegation",
-        config={PARITY_KEY: True, DISPATCH_KEY: {"description": "Read the tracker", "mode": "foreground", "fork": False,
+        config={DISPATCH_KEY: {"description": "Read the tracker", "mode": "foreground", "fork": False,
                                                 "tool_call_id": "call_x", "parent": str(chat)}},
     )
     await chats.store.update_session_status(child.id, "completed")
@@ -126,7 +126,7 @@ async def test_a_foreground_agent_continued_by_a_message_reports_as_a_notificati
 
 
 async def test_an_agent_messages_the_agent_that_started_it(chats):  # noqa: F811
-    chat = await a_chat(chats, PARITY)
+    chat = await a_chat(chats)
     child = await a_background_agent(chats, chat)
     assert await chats.status(chat) == "completed"
     chats.replies = [
@@ -147,7 +147,7 @@ async def test_an_agent_messages_the_agent_that_started_it(chats):  # noqa: F811
 
 
 async def test_a_message_reaches_only_the_senders_own_tree_and_organisation(chats):  # noqa: F811
-    chat, stranger = await a_chat(chats, PARITY), await a_chat(chats, PARITY)
+    chat, stranger = await a_chat(chats), await a_chat(chats)
     first = await a_background_agent(chats, chat, "First")
     chats.replies = [
         calling("agent", "call_two", description="Second", prompt="Count the closed items.", run_in_background=True),
@@ -180,7 +180,7 @@ async def test_a_message_reaches_only_the_senders_own_tree_and_organisation(chat
 
 
 async def test_a_sub_agent_never_undoes_its_users_stop_of_its_parent(chats):  # noqa: F811
-    chat = await a_chat(chats, PARITY)
+    chat = await a_chat(chats)
     child = await a_background_agent(chats, chat)
     # The user stops the chat (the pause route's write): its agent keeps running.
     await chats.store.emit_event(chat, EventType.SESSION_PAUSE, {}, status="paused")
@@ -191,31 +191,31 @@ async def test_a_sub_agent_never_undoes_its_users_stop_of_its_parent(chats):  # 
 
 
 async def test_a_foreground_agent_whose_call_still_waits_is_not_switched(chats):  # noqa: F811
-    chat = await a_chat(chats, PARITY)
+    chat = await a_chat(chats)
     child = await create_child_session(
         store=chats.store, parent=await chats.session(chat), channel="delegation",
-        config={PARITY_KEY: True, DISPATCH_KEY: {"description": "Read", "mode": "foreground", "parent": str(chat)}},
+        config={DISPATCH_KEY: {"description": "Read", "mode": "foreground", "parent": str(chat)}},
     )
     assert (await send(chats, chat, child.id))["status"] == "delivered"
     assert (await chats.session(child.id)).config[DISPATCH_KEY]["mode"] == "foreground"
 
 
 async def test_only_an_agent_of_the_family_speaks_up_to_its_parent(chats):  # noqa: F811
-    chat = await a_chat(chats, PARITY)
+    chat = await a_chat(chats)
     worker = await create_child_session(store=chats.store, parent=await chats.session(chat), channel="worker",
-                                        config={PARITY_KEY: True})
+                                        config={})
     assert (await send(chats, worker.id, "parent"))["error"].startswith("no agent ")
 
 
 async def test_a_sub_agent_does_not_resume_its_own_finished_agent(chats):  # noqa: F811
-    chat = await a_chat(chats, PARITY)
+    chat = await a_chat(chats)
     middle = await create_child_session(
         store=chats.store, parent=await chats.session(chat), channel="delegation",
-        config={PARITY_KEY: True, DISPATCH_KEY: {"description": "Lead", "mode": "foreground", "parent": str(chat)}},
+        config={DISPATCH_KEY: {"description": "Lead", "mode": "foreground", "parent": str(chat)}},
     )
     leaf = await create_child_session(
         store=chats.store, parent=middle, channel="delegation",
-        config={PARITY_KEY: True, DISPATCH_KEY: {"description": "Read", "mode": "foreground", "parent": str(middle.id)}},
+        config={DISPATCH_KEY: {"description": "Read", "mode": "foreground", "parent": str(middle.id)}},
     )
     await chats.store.update_session_status(leaf.id, "completed")
     answer = await send(chats, middle.id, leaf.id)
@@ -223,7 +223,7 @@ async def test_a_sub_agent_does_not_resume_its_own_finished_agent(chats):  # noq
 
 
 async def test_a_queued_message_never_brings_back_a_failed_parent(chats):  # noqa: F811
-    chat = await a_chat(chats, PARITY)
+    chat = await a_chat(chats)
     child = await a_background_agent(chats, chat)
     await chats.store.update_session_status(chat, "failed")
     answer = await send(chats, child.id, "parent", message="Done counting.", summary="Done")
@@ -240,7 +240,7 @@ async def test_a_resume_and_a_start_at_once_stay_within_the_background_cap(chats
     from surogates.tools.builtin import delegate
 
     monkeypatch.setattr(agents_module, "MAX_RUNNING_IN_BACKGROUND", 2)
-    chat = await a_chat(chats, PARITY)
+    chat = await a_chat(chats)
     running = await a_background_agent(chats, chat, "Running")
     chats.replies = [
         calling("agent", "call_two", description="Done", prompt="Count the closed items.", run_in_background=True),
@@ -325,7 +325,7 @@ async def a_reader(chats, chat):  # noqa: F811
 
 async def test_a_sub_agent_whose_type_lists_its_tools_can_still_message_its_parent(chats, monkeypatch):  # noqa: F811
     a_reader_type(monkeypatch)
-    chat = await a_chat(chats, PARITY)
+    chat = await a_chat(chats)
     child = await a_reader(chats, chat)
     assert child.config["allowed_tools"] == ["read_file"]
     chats.replies = [
@@ -339,7 +339,7 @@ async def test_a_sub_agent_whose_type_lists_its_tools_can_still_message_its_pare
 
 async def test_such_a_sub_agent_cannot_message_its_siblings(chats, monkeypatch):  # noqa: F811
     a_reader_type(monkeypatch)
-    chat = await a_chat(chats, PARITY)
+    chat = await a_chat(chats)
     child = await a_reader(chats, chat)
     chats.replies = [
         calling("agent", "call_count", description="Count open items", prompt="Count them.", run_in_background=True),

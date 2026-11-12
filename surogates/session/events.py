@@ -174,7 +174,7 @@ class EventType(str, Enum):
     # step's report to Keel carries every page its sessions read.
     KB_PAGE_READ = "kb.page_read"
 
-    # Sub-agent delegation (delegate_task tool)
+    # Sub-agent runs (the agent tool)
     DELEGATION_START = "delegation.start"
     DELEGATION_COMPLETE = "delegation.complete"
     DELEGATION_FAILED = "delegation.failed"

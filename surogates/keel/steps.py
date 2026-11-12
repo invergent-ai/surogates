@@ -179,9 +179,7 @@ CASE_ALLOWED_TOOLS: frozenset[str] = frozenset({
     # ``skill_step`` is bookkeeping for a procedure skill, as the other two are
     # for the skills themselves.
     "skills_list", "skill_view", "skill_step", "todo", "vision_analyze",
-    "delegate_task", "spawn_worker", "send_worker_message", "stop_worker",
-    # ``delegate_task``'s place with sub-agent parity on (``surogates.harness.subagents``).
-    "agent",
+    "spawn_worker", "send_worker_message", "stop_worker", "agent",
 })
 #: What a person's case agent is never offered of the tools a case allows: it
 #: reads the case only through Keel (:data:`KEEL_CASE_TOOLS`) and drafts only
@@ -190,7 +188,7 @@ CASE_ALLOWED_TOOLS: frozenset[str] = frozenset({
 #: the case's own workspace.
 CASE_AGENT_REFUSED: frozenset[str] = frozenset({
     "skills_list", "skill_view", "skill_step", "terminal", "process", "write_file", "patch",
-    "office_read", "office_edit", "delegate_task", "spawn_worker", "send_worker_message", "stop_worker", "agent",
+    "office_read", "office_edit", "spawn_worker", "send_worker_message", "stop_worker", "agent",
 })
 #: What a rerun and its helpers are never offered of the tools a case allows: a
 #: rerun runs on a copy of the case's past, so it may not run a command or
@@ -409,9 +407,6 @@ def gate_case_tools(tools: set[str], session: object) -> set[str]:
     scope = case_scope_of(session)
     if scope is not None and scope.tools is not None:
         named = set(scope.tools)
-        if "delegate_task" in named:
-            # ``agent`` takes its place with sub-agent parity on (``surogates.harness.subagents``).
-            named.add("agent")
         kept = {name for name in kept if name in named or name in ALWAYS_KEPT or platform(name)}
     if rerun_kind_of(session) is not None:
         kept -= RERUN_REFUSED

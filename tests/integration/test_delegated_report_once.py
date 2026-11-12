@@ -1,4 +1,4 @@
-"""A ``delegate_task`` helper's result reaches its parent once: as the call's result.
+"""A foreground ``agent`` helper's result reaches its parent once: as the call's result.
 
 The helper's turn end also writes a report to its parent, as any helper's
 does.  The parent waits for the helper inside the call and already has the
@@ -31,7 +31,7 @@ pytestmark = pytest.mark.asyncio(loop_scope="session")
 def delegating(goal: str) -> tuple[dict, dict]:
     return (
         {"role": "assistant", "content": "", "tool_calls": [
-            {"id": "call_delegate", "type": "function", "function": {"name": "delegate_task", "arguments": f'{{"goal": "{goal}"}}'}},
+            {"id": "call_delegate", "type": "function", "function": {"name": "agent", "arguments": f'{{"description": "Count", "prompt": "{goal}", "run_in_background": false}}'}},
         ]},
         {"model": "test-model", "finish_reason": "tool_calls", "input_tokens": 1, "output_tokens": 1},
     )
@@ -49,7 +49,7 @@ async def test_a_delegated_helpers_report_is_not_read_again_after_its_calls_resu
         if ends == "completed":
             await answered(workers.api, helper, "There are 12 open items.")
             await turn_ends(workers.api, helper)
-            # What delegate_task writes once it has the helper's result.
+            # What the agent call writes once it has the helper's result.
             await workers.store.emit_event(chat, EventType.DELEGATION_COMPLETE, {"child_session_id": str(helper.id)})
         else:
             await notify_parent_on_failure(

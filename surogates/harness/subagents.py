@@ -1,12 +1,10 @@
 """Sub-agents an agent dispatches on its own: the ``agent`` tool family and what binds it together.
 
-With ``subagent_parity`` on (``AgentsSettings``; a session's own config key
-wins), a session is offered ``agent`` in place of ``delegate_task``: one tool
-that starts a sub-agent in the foreground (it waits for the report) or in the
-background (it returns the agent's id at once, and the agent's end reaches it
-as an ``agent.notification``), from a fresh context or from a fork of the
-conversation.  ``delegate_task`` stays callable under its old name.  Off, the
-tools the model sees are those it always saw.
+``agent`` starts a sub-agent in the foreground (it waits for the report) or in
+the background (it returns the agent's id at once, and the agent's end reaches
+its parent as an ``agent.notification``), from a fresh context or from a fork
+of the conversation.  ``send_message``, ``list_agents``, ``stop_agent`` and
+``monitor`` go with it.
 
 A sub-agent the ``agent`` tool started carries ``agent_dispatch`` in its
 config: what it was started for, how, and by which call.
@@ -21,8 +19,6 @@ from surogates.session.events import EventType
 
 logger = logging.getLogger(__name__)
 
-#: A session's config key that turns the family on or off for it (and its sub-agents).
-PARITY_KEY = "subagent_parity"
 #: A sub-agent's config key: how the ``agent`` tool started it.
 DISPATCH_KEY = "agent_dispatch"
 #: A session's config key: the token budget of each agent it starts (``AgentsSettings.agent_token_budget``).
@@ -38,67 +34,37 @@ TOKEN_BUDGET_REPORT_REQUEST = (
     "with your report to the agent that started you: what you found and did so far, and what is still left undone."
 )
 
-#: The config keys of the family only the server writes: a client naming one could switch the family on
-#: against the deployment's setting, pose as another agent's sub-agent, or lift its own depth or budget.
+#: The config keys of the family only the server writes: a client naming one could pose as another agent's
+#: sub-agent, or lift its own depth or budget.
 SERVER_OWNED_KEYS: tuple[str, ...] = (
-    PARITY_KEY, DISPATCH_KEY, "agent_token_budget", "agent_budget", "delegation_depth",
+    DISPATCH_KEY, "agent_token_budget", "agent_budget", "delegation_depth",
 )
 
-#: Policy names that stand for the family's tools: a policy that names ``delegate_task`` names the
-#: tools that take its place, one that names ``terminal`` names ``monitor``, and one that names the
-#: coordinator's worker tools names the ``agent`` tools that do their work.
+#: Policy names that stand for the family's tools: a policy that names ``terminal`` names ``monitor``, which
+#: runs commands too.
 STANDS_IN_FOR: dict[str, tuple[str, ...]] = {
-    "delegate_task": ("agent", "send_message", "list_agents", "stop_agent"),
     "terminal": ("monitor",),
-    # The coordinator's worker tools: ``agent`` starts in the background what
-    # ``spawn_worker`` starts, so a policy on them binds the agent family too.
-    "spawn_worker": ("agent", "send_message", "list_agents", "stop_agent"),
-    "send_worker_message": ("send_message",),
-    "stop_worker": ("stop_agent",),
 }
 
 #: The tools that go with ``agent``: offered to a session that may start agents, and to every agent it started.
 COMPANION_TOOLS: frozenset[str] = frozenset({"send_message", "list_agents", "stop_agent"})
 #: Offered with the companions where the session runs commands (``terminal``), never on the user's computer.
 MONITOR_TOOL = "monitor"
-#: The tools of the family, offered only with parity on.
-PARITY_TOOLS: frozenset[str] = frozenset({"agent", MONITOR_TOOL}) | COMPANION_TOOLS
-#: The tool ``agent`` stands in for; with parity on it is no longer offered, but still callable.
-REPLACED_TOOL = "delegate_task"
+#: The tools of the family.
+FAMILY_TOOLS: frozenset[str] = frozenset({"agent", MONITOR_TOOL}) | COMPANION_TOOLS
 
 
-def parity_enabled(config: dict | None) -> bool:
-    """Whether a session with *config* has the ``agent`` tool family: its own key, else the deployment's setting."""
-    value = (config or {}).get(PARITY_KEY)
-    if isinstance(value, bool):
-        return value
-    try:
-        from surogates.config import load_settings
+def offer_family(tools: set[str], config: dict | None, *, root: bool = True) -> set[str]:
+    """*tools*, a session's offered set, with the family's companions decided.
 
-        return bool(load_settings().agents.subagent_parity)
-    except Exception:
-        logger.debug("Could not read the agents settings; sub-agent parity stays off", exc_info=True)
-        return False
-
-
-def apply_parity(tools: set[str], config: dict | None, *, root: bool = True) -> set[str]:
-    """*tools*, a session's offered set, with the family in or out.
-
-    On: ``agent`` takes ``delegate_task``'s place wherever the session may
-    delegate, so a policy that denies ``delegate_task`` denies ``agent``
-    too.  Its companions (``COMPANION_TOOLS``) go to such a session and to
-    every agent the ``agent`` tool started, unless the session's config
-    leaves them out by name; ``monitor`` only to a *root* session
-    (``monitor_allowed``).  Off: none of the family.
+    ``agent`` stays where the session's filters left it.  Its companions
+    (``COMPANION_TOOLS``) go to a session offered ``agent`` and to every agent
+    the ``agent`` tool started, unless the session's config leaves them out by
+    name; ``monitor`` only to a *root* session that runs commands
+    (``monitor_allowed``).
     """
-    result = set(tools) - PARITY_TOOLS
+    result = set(tools) - COMPANION_TOOLS - {MONITOR_TOOL}
     config = config or {}
-    if not parity_enabled(config):
-        return result
-    if REPLACED_TOOL in result:
-        result.discard(REPLACED_TOOL)
-        if "agent" not in set(config.get("excluded_tools") or ()):
-            result.add("agent")
     if "agent" in result or isinstance(config.get(DISPATCH_KEY), dict):
         allowed = config.get("allowed_tools")
         excluded = set(config.get("excluded_tools") or ())
@@ -117,7 +83,7 @@ def apply_parity(tools: set[str], config: dict | None, *, root: bool = True) -> 
 
 def parent_only(config: dict | None) -> bool:
     """Whether a sub-agent with *config* has ``send_message`` only to reach its parent: its tool list leaves it
-    out, and ``apply_parity`` put it back for that alone."""
+    out, and ``offer_family`` put it back for that alone."""
     config = config or {}
     allowed = config.get("allowed_tools")
     return isinstance(config.get(DISPATCH_KEY), dict) and bool(allowed) and "send_message" not in allowed
@@ -344,13 +310,14 @@ async def tell_parent(
     its token budget); *result* the agent's last words.  Best effort: the agent's own log keeps its end whatever
     becomes of this.
     """
-    from surogates.harness.agent_news import MAX_RESULT_CHARS, mark_format
+    from surogates.harness.agent_news import MAX_RESULT_CHARS, NEW_FORMAT
     from surogates.harness.worker_notify import notify_parent_of_task_event
 
     dispatch = dispatch_of(session) or {}
     payload: dict[str, Any] = {
         "agent_id": str(session.id), "kind": "agent", "status": status,
         "summary": str(dispatch.get("description") or ""), "result": (result or "")[:MAX_RESULT_CHARS],
+        "format": NEW_FORMAT,
     }
     if status == "budget":
         payload["budget_tokens"] = budget_of(session)
@@ -400,7 +367,6 @@ async def tell_parent(
     except Exception:
         logger.warning("Could not close the run of agent %s in its parent's log", session.id, exc_info=True)
     try:
-        payload = await mark_format(store, session.parent_id, payload)
         await notify_parent_of_task_event(
             session_store=store, parent_session_id=session.parent_id,
             event_type=EventType.AGENT_NOTIFICATION, payload=payload, redis=redis,

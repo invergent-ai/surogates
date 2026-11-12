@@ -1,4 +1,4 @@
-"""Tests for ``agent_type`` argument in spawn_worker and delegate_task.
+"""Tests for ``agent_type`` argument in spawn_worker and agent.
 
 Covers resolution, config hydration, explicit-argument precedence, and
 error paths when an unknown or disabled agent type is referenced.
@@ -15,6 +15,8 @@ import pytest
 
 from surogates.harness.budget import IterationBudget
 from surogates.tools.loader import AgentDef
+
+from tests.test_delegate import _run_agent
 
 
 def _default_workspace_config() -> dict:
@@ -319,11 +321,11 @@ class TestSpawnWorkerAgentType:
 
 
 # =========================================================================
-# delegate_task with agent_type
+# agent with agent_type
 # =========================================================================
 
 
-class TestDelegateTaskAgentType:
+class TestAgentAgentType:
 
     @pytest.mark.asyncio
     async def test_agent_type_populates_child_config(self) -> None:
@@ -354,7 +356,7 @@ class TestDelegateTaskAgentType:
                 delegate, "_poll_child_completion",
                 AsyncMock(return_value=json.dumps({"ok": True})),
             ):
-                await delegate._delegate_handler(
+                await _run_agent(
                     {"goal": "analyze", "agent_type": "analyzer"},
                     session_store=store,
                     redis=_make_redis(),
@@ -382,7 +384,7 @@ class TestDelegateTaskAgentType:
             "surogates.harness.agent_resolver.resolve_agent_by_name",
             AsyncMock(return_value=None),
         ):
-            result = await delegate._delegate_handler(
+            result = await _run_agent(
                 {"goal": "x", "agent_type": "nope"},
                 session_store=store,
                 redis=_make_redis(),
@@ -411,7 +413,7 @@ class TestDelegateTaskAgentType:
             delegate, "_poll_child_completion",
             AsyncMock(return_value="done"),
         ):
-            await delegate._delegate_handler(
+            await _run_agent(
                 {"goal": "x"},
                 session_store=store,
                 redis=_make_redis(),
@@ -466,7 +468,7 @@ class TestSharedWorkspace:
             delegate, "_poll_child_completion",
             AsyncMock(return_value="done"),
         ):
-            await delegate._delegate_handler(
+            await _run_agent(
                 {"goal": "x"},
                 session_store=store,
                 redis=_make_redis(),
@@ -503,7 +505,7 @@ class TestSharedWorkspace:
             delegate, "_poll_child_completion",
             AsyncMock(return_value="done"),
         ):
-            await delegate._delegate_handler(
+            await _run_agent(
                 {"goal": "x"},
                 session_store=store,
                 redis=_make_redis(),

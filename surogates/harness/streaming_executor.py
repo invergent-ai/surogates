@@ -607,7 +607,7 @@ class StreamingToolExecutor:
     def _promote_batch_parallel_tools(self) -> None:
         """Promote delegation-style tools to parallel-eligible post-stream.
 
-        Delegation tools (``delegate_task``, ``spawn_worker``) are kept out
+        Delegation tools (``agent``, ``spawn_worker``) are kept out
         of :data:`~surogates.harness.tool_exec.PARALLEL_TOOLS` so the
         streaming executor doesn't speculatively spawn child sessions
         mid-stream -- if the stream were later discarded, those sessions

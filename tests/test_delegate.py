@@ -1,4 +1,4 @@
-"""Tests for the ``delegate_task`` built-in tool.
+"""Tests for a sub-agent's run path, driven through a foreground ``agent`` call.
 
 Covers: backwards-compatible single delegation, batch fan-out, depth
 limit, role-based tool stripping, session tracing, and stale detection.
@@ -20,7 +20,6 @@ import surogates.tools.builtin.delegate as delegate_module
 from surogates.harness.budget import IterationBudget
 from surogates.session.events import EventType
 from surogates.session.models import Event, Session
-from surogates.tools.builtin.delegate import _delegate_handler
 
 
 # ─── fakes ─────────────────────────────────────────────────────────────
@@ -145,7 +144,7 @@ def _install_stub_agent_resolver(
 
     When *captured_kwargs* is provided, the resolver call's kwargs are
     written into it so tests can assert that the harness threads the
-    bundle through to the resolver -- without that, ``delegate_task``
+    bundle through to the resolver -- without that, ``agent``
     cannot find sub-agents that only exist in the per-agent Hub bundle
     (the deep-research workflow regression that prompted this thread).
     """
@@ -199,6 +198,21 @@ def _complete_response_events(text: str) -> list[Event]:
     ]
 
 
+async def _run_agent(arguments: dict, **kwargs):
+    """A foreground ``agent`` call: the run path a sub-agent takes from its start to its report."""
+    from unittest.mock import Mock, patch
+
+    from surogates.tools.builtin import agents
+
+    call = {"description": "Test task", "prompt": arguments["goal"], "run_in_background": False}
+    call.update({key: arguments[key] for key in ("agent_type", "model") if key in arguments})
+    if not isinstance(kwargs.get("session_factory"), Mock):
+        return await agents._agent_handler(call, **kwargs)
+    # A mocked database holds no running agents.
+    with patch.object(agents, "_running_agents", AsyncMock(return_value=[])):
+        return await agents._agent_handler(call, **kwargs)
+
+
 # ─── single-task path ─────────────────────────────────────────────────
 
 
@@ -210,7 +224,7 @@ async def test_single_goal_returns_child_response_and_emits_lifecycle(
     store = FakeStore(parent, child_events=_complete_response_events("done"))
     _install_stub_child_session(monkeypatch, store)
 
-    result = await _delegate_handler(
+    result = await _run_agent(
         {"goal": "Fix tests"},
         session_store=store,
         redis=None,
@@ -225,7 +239,7 @@ async def test_single_goal_returns_child_response_and_emits_lifecycle(
     assert EventType.DELEGATION_COMPLETE in parent_types
     start_data = next(d for t, d in store.parent_emitted if t == EventType.DELEGATION_START)
     assert start_data["goal"] == "Fix tests"
-    assert start_data["role"] == "leaf"
+    assert start_data["role"] == "orchestrator"
     assert start_data["depth"] == 1
 
 
@@ -241,7 +255,7 @@ async def test_a_helpers_files_not_kept_are_named_on_one_line_of_the_result_what
     store = FakeStore(parent, child_events=events)
     _install_stub_child_session(monkeypatch, store)
 
-    result = await _delegate_handler(
+    result = await _run_agent(
         {"goal": "Draft the sources"},
         session_store=store,
         redis=None,
@@ -264,68 +278,7 @@ async def test_a_helpers_files_not_kept_are_named_on_one_line_of_the_result_what
 # ─── validation ────────────────────────────────────────────────────────
 
 
-@pytest.mark.asyncio
-async def test_missing_goal_and_goals_returns_error() -> None:
-    parent = _parent_session()
-    store = FakeStore(parent)
-
-    result = await _delegate_handler(
-        {},
-        session_store=store,
-        redis=None,
-        tenant=object(),
-        session_id=str(parent.id),
-        budget=IterationBudget(max_total=10),
-    )
-
-    assert "either `goal` or `goals` is required" in result
-    assert store.parent_emitted == []
-
-
-@pytest.mark.asyncio
-async def test_goal_and_goals_both_set_returns_error() -> None:
-    parent = _parent_session()
-    store = FakeStore(parent)
-
-    result = await _delegate_handler(
-        {"goal": "x", "goals": [{"goal": "y"}]},
-        session_store=store,
-        redis=None,
-        tenant=object(),
-        session_id=str(parent.id),
-        budget=IterationBudget(max_total=10),
-    )
-
-    assert "provide either `goal` or `goals`" in result
-
-
 # ─── batch fan-out ────────────────────────────────────────────────────
-
-
-@pytest.mark.asyncio
-async def test_batch_goals_returns_combined_results(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    parent = _parent_session()
-    store = FakeStore(parent, child_events=_complete_response_events("ok"))
-    _install_stub_child_session(monkeypatch, store)
-
-    result = await _delegate_handler(
-        {"goals": [{"goal": "task A"}, {"goal": "task B"}]},
-        session_store=store,
-        redis=None,
-        tenant=object(),
-        session_id=str(parent.id),
-        budget=IterationBudget(max_total=20),
-    )
-
-    parsed = json.loads(result)
-    assert len(parsed) == 2
-    assert {p["goal"] for p in parsed} == {"task A", "task B"}
-    # One DELEGATION_START + DELEGATION_COMPLETE per child.
-    types = [t for t, _ in store.parent_emitted]
-    assert types.count(EventType.DELEGATION_START) == 2
-    assert types.count(EventType.DELEGATION_COMPLETE) == 2
 
 
 # ─── depth limit ──────────────────────────────────────────────────────
@@ -333,12 +286,12 @@ async def test_batch_goals_returns_combined_results(
 
 @pytest.mark.asyncio
 async def test_depth_limit_rejects_grandchild_delegation() -> None:
-    # Parent is itself a depth-2 child — calling delegate_task should
+    # Parent is itself a depth-2 child — calling agent should
     # refuse to spawn a third level.
     parent = _parent_session(delegation_depth=2)
     store = FakeStore(parent)
 
-    result = await _delegate_handler(
+    result = await _run_agent(
         {"goal": "deep"},
         session_store=store,
         redis=None,
@@ -360,7 +313,7 @@ async def test_child_inherits_incremented_depth(
     store = FakeStore(parent, child_events=_complete_response_events("ok"))
     captured = _install_stub_child_session(monkeypatch, store)
 
-    await _delegate_handler(
+    await _run_agent(
         {"goal": "go"},
         session_store=store,
         redis=None,
@@ -376,15 +329,15 @@ async def test_child_inherits_incremented_depth(
 
 
 @pytest.mark.asyncio
-async def test_leaf_role_excludes_delegate_task_from_child(
+async def test_a_child_at_the_depth_limit_is_a_leaf_without_agent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    parent = _parent_session()
+    parent = _parent_session(delegation_depth=1)
     store = FakeStore(parent, child_events=_complete_response_events("ok"))
     captured = _install_stub_child_session(monkeypatch, store)
 
-    await _delegate_handler(
-        {"goal": "x", "role": "leaf"},
+    await _run_agent(
+        {"goal": "x"},
         session_store=store,
         redis=None,
         tenant=object(),
@@ -393,19 +346,19 @@ async def test_leaf_role_excludes_delegate_task_from_child(
     )
 
     excluded = captured["config"].get("excluded_tools", [])
-    assert "delegate_task" in excluded
+    assert "agent" in excluded
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_role_does_not_exclude_delegate_task(
+async def test_a_child_below_the_depth_limit_keeps_agent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     parent = _parent_session()
     store = FakeStore(parent, child_events=_complete_response_events("ok"))
     captured = _install_stub_child_session(monkeypatch, store)
 
-    await _delegate_handler(
-        {"goal": "x", "role": "orchestrator"},
+    await _run_agent(
+        {"goal": "x"},
         session_store=store,
         redis=None,
         tenant=object(),
@@ -414,7 +367,7 @@ async def test_orchestrator_role_does_not_exclude_delegate_task(
     )
 
     excluded = captured["config"].get("excluded_tools", [])
-    assert "delegate_task" not in excluded
+    assert "agent" not in excluded
 
 
 # ─── trace ────────────────────────────────────────────────────────────
@@ -451,7 +404,7 @@ async def test_completion_emits_trace_in_event_and_result(
     store = FakeStore(parent, child_events=child_events)
     _install_stub_child_session(monkeypatch, store)
 
-    result = await _delegate_handler(
+    result = await _run_agent(
         {"goal": "x"},
         session_store=store,
         redis=None,
@@ -498,7 +451,7 @@ async def test_stale_detection_emits_event_on_idle_child(
     monkeypatch.setattr(delegate_module, "_DELEGATION_TIMEOUT_SECONDS", 0.5)
 
     result = await asyncio.wait_for(
-        _delegate_handler(
+        _run_agent(
             {"goal": "x"},
             session_store=store,
             redis=None,
@@ -544,7 +497,7 @@ async def test_agent_def_tools_are_authoritative_over_parent_allowlist(
         agent_def=_StubAgentDef(tools=["read_file", "exec_shell"]),
     )
 
-    await _delegate_handler(
+    await _run_agent(
         {"goal": "x", "agent_type": "engineer"},
         session_store=store,
         redis=None,
@@ -567,35 +520,22 @@ async def test_agent_def_tools_are_authoritative_over_parent_allowlist(
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_agent_type_keeps_delegate_task_at_default_role(
+async def test_an_agent_type_listing_agent_keeps_it_at_the_depth_limit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Regression: a sub-agent whose AGENT.md lists ``delegate_task`` in
-    its tools is an orchestrator by definition (e.g. ``deep-research``,
-    which uses delegate_task to hand off to ``research-writer``).  The
-    default role on ``delegate_task`` is ``leaf``, and the leaf-role
-    strip used to unconditionally remove ``delegate_task`` from the
-    child's allowlist -- which left a planner literally unable to spawn
-    its writer and silently turned the workflow into a no-op.  The fix
-    treats the agent_def's tool list as authoritative: if it advertises
-    delegate_task, leaf-role strip is skipped.
-    """
-    parent = _parent_session()
+    """A sub-agent type whose AGENT.md lists ``agent`` is an orchestrator by definition (``deep-research``
+    hands off to ``research-writer`` with it): a child at the depth limit keeps it."""
+    parent = _parent_session(delegation_depth=1)
     store = FakeStore(parent, child_events=_complete_response_events("ok"))
     captured = _install_stub_child_session(monkeypatch, store)
     _install_stub_agent_resolver(
         monkeypatch,
         agent_def=_StubAgentDef(
-            tools=[
-                "web_search", "web_extract", "research_memory",
-                "research_outline", "delegate_task", "ask_user_question",
-            ],
+            tools=["web_search", "web_extract", "research_memory", "research_outline", "agent"],
         ),
     )
 
-    await _delegate_handler(
-        # Default role; the LLM dispatch is the realistic case (no
-        # ``role`` kwarg sent by the model).
+    await _run_agent(
         {"goal": "research X", "agent_type": "deep-research"},
         session_store=store,
         redis=None,
@@ -604,21 +544,14 @@ async def test_orchestrator_agent_type_keeps_delegate_task_at_default_role(
         budget=IterationBudget(max_total=10),
     )
 
-    allowed = captured["config"]["allowed_tools"]
-    assert "delegate_task" in allowed, (
-        "deep-research's AGENT.md lists delegate_task; leaf-strip "
-        "must NOT remove it (it's the hand-off mechanism)"
-    )
+    assert "agent" in captured["config"]["allowed_tools"]
 
 
 @pytest.mark.asyncio
-async def test_leaf_role_still_strips_delegate_when_agent_def_silent(
+async def test_an_agent_type_silent_on_agent_loses_it_at_the_depth_limit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Counter-test for the orchestrator carve-out: a leaf agent_def
-    that does NOT advertise delegate_task still has it stripped.  Keeps
-    the original guardrail intact for regular leaf workers."""
-    parent = _parent_session()
+    parent = _parent_session(delegation_depth=1)
     store = FakeStore(parent, child_events=_complete_response_events("ok"))
     captured = _install_stub_child_session(monkeypatch, store)
     _install_stub_agent_resolver(
@@ -626,7 +559,7 @@ async def test_leaf_role_still_strips_delegate_when_agent_def_silent(
         agent_def=_StubAgentDef(tools=["read_file", "write_file"]),
     )
 
-    await _delegate_handler(
+    await _run_agent(
         {"goal": "x", "agent_type": "engineer"},
         session_store=store,
         redis=None,
@@ -635,18 +568,14 @@ async def test_leaf_role_still_strips_delegate_when_agent_def_silent(
         budget=IterationBudget(max_total=10),
     )
 
-    allowed = captured["config"]["allowed_tools"]
-    assert "delegate_task" not in allowed, (
-        "engineer agent_def doesn't list delegate_task; leaf-role "
-        "strip should still remove it from the child"
-    )
+    assert "agent" not in captured["config"]["allowed_tools"]
 
 
 @pytest.mark.asyncio
 async def test_delegate_forwards_bundle_to_agent_resolver(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Regression: ``delegate_task`` with ``agent_type=<name>`` resolves
+    """Regression: ``agent`` with ``agent_type=<name>`` resolves
     the sub-agent through the tenant catalog *plus the per-agent Hub
     bundle*; the deep-research planner and writer only exist in the
     bundle, so without the bundle being threaded through the resolver
@@ -663,7 +592,7 @@ async def test_delegate_forwards_bundle_to_agent_resolver(
     )
 
     sentinel_bundle = object()
-    await _delegate_handler(
+    await _run_agent(
         {"goal": "x", "agent_type": "deep-research"},
         session_store=store,
         redis=None,
@@ -677,7 +606,7 @@ async def test_delegate_forwards_bundle_to_agent_resolver(
 
 
 @pytest.mark.asyncio
-async def test_deep_research_cannot_delegate_to_deep_research(
+async def test_deep_research_cannot_start_deep_research(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Regression (c): a planner already running as ``deep-research``
@@ -697,7 +626,7 @@ async def test_deep_research_cannot_delegate_to_deep_research(
     # patching create_child_session keeps that path inert if reached.
     captured_create = _install_stub_child_session(monkeypatch, store)
 
-    result_json = await _delegate_handler(
+    result_json = await _run_agent(
         {"goal": "more research", "agent_type": "deep-research"},
         session_store=store,
         redis=None,
@@ -708,59 +637,9 @@ async def test_deep_research_cannot_delegate_to_deep_research(
 
     parsed = json.loads(result_json)
     assert "error" in parsed
-    assert "cannot delegate to itself" in parsed["error"]
+    assert "cannot start another of its own type" in parsed["error"]
     # No child config was captured -- the guard fired before spawn.
     assert "config" not in captured_create
-
-
-@pytest.mark.asyncio
-async def test_batch_goals_rejects_deep_research_fanout(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Regression (d): a single ``delegate_task`` with ``goals=[...]``
-    targeting ``agent_type=deep-research`` must be rejected.  One call
-    producing three concurrent deep-research planners is exactly the
-    fan-out pattern that turned one user prompt into a runaway fleet.
-    """
-    parent = _parent_session()
-    store = FakeStore(parent, child_events=_complete_response_events("ok"))
-    _install_stub_agent_resolver(
-        monkeypatch, agent_def=_StubAgentDef(),
-    )
-    captured_create = _install_stub_child_session(monkeypatch, store)
-
-    result_json = await _delegate_handler(
-        {
-            "goals": [
-                {"goal": "topic A", "agent_type": "deep-research"},
-                {"goal": "topic B", "agent_type": "deep-research"},
-                {"goal": "topic C", "agent_type": "deep-research"},
-            ],
-        },
-        session_store=store,
-        redis=None,
-        tenant=object(),
-        session_id=str(parent.id),
-        budget=IterationBudget(max_total=10),
-    )
-
-    parsed = json.loads(result_json)
-    assert "error" in parsed
-    assert "deep-research" in parsed["error"]
-    assert "one at a time" in parsed["error"]
-    # Counter-check: a single-goal call with the same agent_type must
-    # still go through -- the guard targets fan-out, not the agent type
-    # in isolation.
-    captured_create.clear()
-    await _delegate_handler(
-        {"goal": "topic A", "agent_type": "deep-research"},
-        session_store=store,
-        redis=None,
-        tenant=object(),
-        session_id=str(parent.id),
-        budget=IterationBudget(max_total=10),
-    )
-    assert "config" in captured_create
 
 
 @pytest.mark.asyncio
@@ -771,7 +650,7 @@ async def test_child_inherits_parent_allowlist_when_no_preset(
     store = FakeStore(parent, child_events=_complete_response_events("ok"))
     captured = _install_stub_child_session(monkeypatch, store)
 
-    await _delegate_handler(
+    await _run_agent(
         {"goal": "x"},
         session_store=store,
         redis=None,
@@ -792,7 +671,7 @@ async def test_child_inherits_parent_excluded_tools(
     store = FakeStore(parent, child_events=_complete_response_events("ok"))
     captured = _install_stub_child_session(monkeypatch, store)
 
-    await _delegate_handler(
+    await _run_agent(
         {"goal": "x"},
         session_store=store,
         redis=None,
@@ -820,7 +699,7 @@ async def test_blocklist_filters_ask_user_question_from_preset_allowlist(
         agent_def=_StubAgentDef(tools=["read_file", "ask_user_question", "spawn_worker"]),
     )
 
-    await _delegate_handler(
+    await _run_agent(
         {"goal": "x", "agent_type": "engineer"},
         session_store=store,
         redis=None,
@@ -877,7 +756,7 @@ async def test_file_changes_surface_in_event_and_result(
     store = FakeStore(parent, child_events=child_events)
     _install_stub_child_session(monkeypatch, store)
 
-    result = await _delegate_handler(
+    result = await _run_agent(
         {"goal": "x"},
         session_store=store,
         redis=None,
@@ -922,7 +801,7 @@ async def test_the_files_a_helper_wrote_and_read_are_named_on_the_results_one_li
     store = FakeStore(parent, child_events=child_events)
     _install_stub_child_session(monkeypatch, store)
 
-    result = await _delegate_handler(
+    result = await _run_agent(
         {"goal": "x"},
         session_store=store,
         redis=None,
@@ -976,7 +855,7 @@ async def test_file_changes_deduplicate_repeat_writes(
     store = FakeStore(parent, child_events=child_events)
     _install_stub_child_session(monkeypatch, store)
 
-    await _delegate_handler(
+    await _run_agent(
         {"goal": "x"},
         session_store=store,
         redis=None,
@@ -999,7 +878,7 @@ async def test_blocklist_appears_in_excluded_tools_when_no_allowlist(
     store = FakeStore(parent, child_events=_complete_response_events("ok"))
     captured = _install_stub_child_session(monkeypatch, store)
 
-    await _delegate_handler(
+    await _run_agent(
         {"goal": "x"},
         session_store=store,
         redis=None,
@@ -1048,7 +927,7 @@ async def test_the_parent_hears_each_tool_call_its_child_makes(
     _install_stub_child_session(monkeypatch, store)
     monkeypatch.setattr(delegate_module, "_POLL_INTERVAL_SECONDS", 0.0)
 
-    result = await _delegate_handler(
+    result = await _run_agent(
         {"goal": "post it"},
         session_store=store,
         redis=None,

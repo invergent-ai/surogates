@@ -464,7 +464,7 @@ async def test_a_master_does_a_simple_thing_itself_and_gives_out_the_rest(api, m
     # Research, a site's study and every other piece of work are a thread's.
     assert not sent & {
         "web_search", "web_extract", "browser_navigate", "create_artifact", "vision_analyze",
-        "spawn_worker", "send_worker_message", "stop_worker", "delegate_task",
+        "spawn_worker", "send_worker_message", "stop_worker", "agent",
         "spawn_task", "unblock_task", "cancel_task", "run_coding_agent",
     }
 
@@ -474,7 +474,7 @@ async def test_a_mission_coordinator_keeps_its_own_tools(api):
     session = await api.app.state.session_store.get_session(UUID(chat.json()["id"]))
     session.config.update(coordinator=True, strict_coordinator=True)
     tools = harness_with_every_tool()._tool_filter_for_session(session)
-    assert {"spawn_worker", "delegate_task", "spawn_task", "run_coding_agent"} <= tools
+    assert {"spawn_worker", "agent", "spawn_task", "run_coding_agent"} <= tools
     assert not tools & {"read_file", "kb_read_page"}
 
 
@@ -596,7 +596,7 @@ def unknown(name: str, sent: set[str]) -> str:
 @pytest.mark.parametrize("streamed", [False, True], ids=["sequential", "streamed"])
 async def test_a_masters_model_cannot_call_a_tool_it_was_not_offered(api, monkeypatch, streamed):
     master = await master_of(api, await create(api))
-    refused = {"spawn_task": {}, "delegate_task": {}, "run_coding_agent": {}}
+    refused = {"spawn_task": {}, "agent": {}, "run_coding_agent": {}}
     sent, ran, answered = await turn_calling(monkeypatch, master, refused, streamed=streamed)
     ran.assert_not_awaited()
     assert answered == {f"call_{name}": unknown(name, sent) for name in refused}
@@ -625,9 +625,9 @@ async def test_a_masters_model_makes_a_routine(api, monkeypatch, session_factory
 async def test_a_chats_model_calls_its_tools_as_before(api, monkeypatch, streamed):
     chat = await api.client.post("/v1/sessions", json={}, headers=api.auth())
     session = await api.app.state.session_store.get_session(UUID(chat.json()["id"]))
-    _, ran, answered = await turn_calling(monkeypatch, session, {"todo": {}, "delegate_task": {}}, streamed=streamed)
-    assert [call.args[0] for call in ran.await_args_list] == ["todo", "delegate_task"]
-    assert answered == {"call_todo": '{"ok": true}', "call_delegate_task": '{"ok": true}'}
+    _, ran, answered = await turn_calling(monkeypatch, session, {"todo": {}, "agent": {}}, streamed=streamed)
+    assert [call.args[0] for call in ran.await_args_list] == ["todo", "agent"]
+    assert answered == {"call_todo": '{"ok": true}', "call_agent": '{"ok": true}'}
 
 
 async def system_prompt(api, session) -> str:

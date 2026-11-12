@@ -33,16 +33,16 @@ def _section(tools: set[str]) -> str:
 
 
 def test_it_names_the_spawn_tools_the_session_has() -> None:
-    section = _section({"spawn_task", "delegate_task"})
+    section = _section({"spawn_task", "agent"})
 
-    assert "``spawn_task`` or ``delegate_task``" in section
+    assert "``spawn_task`` or ``agent``" in section
     assert "spawn_worker" not in section
 
 
 def test_it_lists_all_three_when_the_session_has_all_three() -> None:
-    section = _section({"spawn_task", "spawn_worker", "delegate_task"})
+    section = _section({"spawn_task", "spawn_worker", "agent"})
 
-    assert "``spawn_task``, ``spawn_worker`` or ``delegate_task``" in section
+    assert "``spawn_task``, ``spawn_worker`` or ``agent``" in section
 
 
 def test_one_tool_reads_as_one_tool() -> None:

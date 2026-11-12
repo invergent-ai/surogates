@@ -130,7 +130,7 @@ COORDINATOR_IMPLEMENTATION_TOOLS: frozenset[str] = frozenset({
 # place: it reads the project's files and knowledge bases, makes a file or a
 # small edit, and runs a quick command.  Anything more it gives out only
 # through the thread tools: workers, tasks and delegation are taken away, and
-# so is the coding tool, which like ``delegate_task`` holds the turn.  The web,
+# so is the coding tool, which like a waiting ``agent`` call holds the turn.  The web,
 # the browser and images stay a thread's.
 PROJECT_MASTER_OWN_TOOLS: frozenset[str] = frozenset({
     "read_file",
@@ -145,7 +145,7 @@ PROJECT_MASTER_OWN_TOOLS: frozenset[str] = frozenset({
     "kb_search_pages",
 })
 PROJECT_MASTER_EXCLUDED_TOOLS: frozenset[str] = WORKER_EXCLUDED_TOOLS | {
-    "delegate_task",
+    "agent",
     "run_coding_agent",
 }
 # What the master of a project made on a computer is not sent besides: every

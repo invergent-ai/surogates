@@ -665,12 +665,12 @@ async def test_a_helper_starting_call_the_allow_list_refuses_takes_no_snapshot_a
     await store.update_session_config_key(thread.id, "tool_allow_list", ["terminal"])
     # Bounded: a delegation let through waits on its helper, and would hang the test.
     await asyncio.wait_for(a_turn(api, monkeypatch, await store.get_session(thread.id), [
-        calling(("delegate_task", {"goal": "Summarise the report."})),
+        calling(("agent", {"description": "Summary", "prompt": "Summarise the report."})),
         _final_response("Summarised it myself."),
     ], pool=SandboxPool(pods)), 60)
     [answer] = [json.loads(e.data["content"]) for e in await store.get_events(thread.id, types=[EventType.TOOL_RESULT])
-                if e.data["name"] == "delegate_task"]
-    assert answer == {"error": "Tool 'delegate_task' is not in this session's allow-list. Allowed: ['terminal']"}
+                if e.data["name"] == "agent"]
+    assert answer == {"error": "Tool 'agent' is not in this session's allow-list. Allowed: ['terminal']"}
     # A call that never runs takes no snapshot of the copy.
     [call] = await store.get_events(thread.id, types=[EventType.TOOL_CALL])
     assert "checkpoint_hash" not in call.data
@@ -753,7 +753,7 @@ async def test_every_tool_that_starts_a_session_is_named_as_handing_a_threads_co
     )
 
     # The tools whose step puts a thread's copy on its hand-off first, for the helper they start.
-    assert HELPER_STARTING_TOOLS == {"delegate_task", "spawn_worker", "spawn_task", "agent"}
+    assert HELPER_STARTING_TOOLS == {"spawn_worker", "spawn_task", "agent"}
     # A thread schedules no routine: its runs would work on old files, and land only at the thread's next turn.
     assert THREAD_REFUSED_TOOLS == {"cron_create"}
     # Every other tool that starts a session is named, with why the thread's rule leaves it: it reaches a

@@ -115,7 +115,12 @@ def the_helper_is_on_a_copy_of_its_own(pods, thread, helper) -> None:
     assert pods.copies[str(helper.id)] != pods.copies[str(thread.id)]
 
 
-async def test_a_helper_started_by_delegate_task_works_on_a_copy_of_its_own_and_its_work_lands_with_the_thread(api, monkeypatch, pods):
+
+def _goal(tool: str, goal: str) -> dict:
+    """The arguments that start a helper on *goal* with *tool*."""
+    return {"description": "Helper", "prompt": goal} if tool == "agent" else {"goal": goal}
+
+async def test_a_helper_started_by_agent_works_on_a_copy_of_its_own_and_its_work_lands_with_the_thread(api, monkeypatch, pods):
     master = await master_of(api, await create(api))
     thread = await a_thread(api, "Draft A", master)
     mine, theirs = SandboxPool(pods), SandboxPool(pods)  # the thread's worker, and its helper's
@@ -132,7 +137,7 @@ async def test_a_helper_started_by_delegate_task_works_on_a_copy_of_its_own_and_
     monkeypatch.setattr(delegate_module, "_poll_child_completion", the_helper_runs)
     await asyncio.wait_for(a_turn(api, monkeypatch, thread, [
         calling(("terminal", {"command": "echo outline > outline.md"})),
-        calling(("delegate_task", {"goal": "Draft the sources."})),
+        calling(("agent", {"description": "Helper", "prompt": "Draft the sources."})),
         # The helper handed back before its turn's end: its file is in the thread's copy when the step answers.
         calling(("terminal", {"command": "cat sources.md > seen.md"})),
         _final_response("Done."),
@@ -283,11 +288,11 @@ async def test_a_helper_that_fails_leaves_its_files_apart_and_its_thread_is_told
     monkeypatch.setattr(delegate_module, "_poll_child_completion", the_helper_fails)
     await asyncio.wait_for(a_turn(api, monkeypatch, thread, [
         calling(("terminal", {"command": "echo outline > outline.md"})),
-        calling(("delegate_task", {"goal": "Draft the sources."})),
+        calling(("agent", {"description": "Helper", "prompt": "Draft the sources."})),
         _final_response("Done."),
     ], pool=mine), 120)
     [helper] = await helpers_of(api, thread)
-    [result] = await results_of(api, thread, "delegate_task")
+    [result] = await results_of(api, thread, "agent")
     # The step's result names the files the helper left, which are not in the thread's copy.
     assert "Report.docx, sources.md" in result, result
     # Kept in the history, apart; the thread's own work landed, and none of the helper's.
@@ -374,19 +379,19 @@ async def test_a_helper_starting_call_that_starts_none_hands_nothing_on_and_leav
     looping = a_looping_harness(api, monkeypatch, thread, [
         calling(("terminal", {"command": "echo outline > outline.md"})),
         # No goal: the tool refuses the call itself.  Or governance denies the tool to this agent.
-        calling(("delegate_task", {} if refused_by == "the tool itself" else {"goal": "Draft the sources."})),
+        calling(("agent", {} if refused_by == "the tool itself" else {"description": "Helper", "prompt": "Draft the sources."})),
         calling(("memory", {"action": "add", "content": "x"})),
         _final_response("Done."),
     ], pool=mine, during=stops)
     if refused_by == "governance":
-        looping._governance_gate = GovernanceGate(denied_tools={"delegate_task"})
+        looping._governance_gate = GovernanceGate(denied_tools={"agent"})
     locks = await project_locks_taken(monkeypatch)
     await asyncio.wait_for(the_loop_runs(api, looping, thread), 60)
     if refused_by == "governance":
         # A tool the policy denies is not even offered: the call never runs.
-        assert await results_of(api, thread, "delegate_task") == []
+        assert await results_of(api, thread, "agent") == []
     else:
-        [refusal] = await results_of(api, thread, "delegate_task")
+        [refusal] = await results_of(api, thread, "agent")
         assert "error" in json.loads(refusal), refusal
     # No helper, no lock asked, nothing pushed; and the stop after it found nothing to drop, and asked no lock either.
     assert await helpers_of(api, thread) == []
@@ -450,7 +455,7 @@ async def test_a_helper_that_fails_after_starting_a_helper_of_its_own_lands_none
     thread = await a_thread(api, "Draft A", master)
     pods = stored(api, thread, tmp_path)
     mine, theirs = SandboxPool(pods), SandboxPool(pods)
-    monkeypatch.setattr(agent_resolver, "resolve_agent_by_name", AsyncMock(return_value=an_agent("terminal", "delegate_task")))
+    monkeypatch.setattr(agent_resolver, "resolve_agent_by_name", AsyncMock(return_value=an_agent("terminal", "agent")))
     monkeypatch.setattr(loop_module, "_MAX_PROVIDER_ERROR_RETRIES", 0)
     handed_on = handed_on_to(api, monkeypatch, pods, thread)
     poll = delegate_module._poll_child_completion
@@ -462,7 +467,7 @@ async def test_a_helper_that_fails_after_starting_a_helper_of_its_own_lands_none
             with monkeypatch.context() as its_own:
                 await a_turn(api, its_own, helper, [
                     calling(("terminal", {"command": "echo half made > first.md"})),
-                    calling(("delegate_task", {"goal": "Check it."})),
+                    calling(("agent", {"description": "Helper", "prompt": "Check it."})),
                     THE_PROVIDER_FAILS,
                 ], pool=theirs)
         else:
@@ -472,7 +477,7 @@ async def test_a_helper_that_fails_after_starting_a_helper_of_its_own_lands_none
     monkeypatch.setattr(delegate_module, "_poll_child_completion", each_runs)
     await asyncio.wait_for(a_turn(api, monkeypatch, thread, [
         calling(("terminal", {"command": "echo outline > outline.md"})),
-        calling(("delegate_task", {"goal": "Draft the sources.", "agent_type": "lead"})),
+        calling(("agent", {"description": "Helper", "prompt": "Draft the sources.", "agent_type": "lead"})),
         _final_response("Done."),
     ], pool=mine), 120)
     [helper] = await helpers_of(api, thread)
@@ -482,7 +487,7 @@ async def test_a_helper_that_fails_after_starting_a_helper_of_its_own_lands_none
     assert "first.md" not in (pods.project / "seen.txt").read_text().split()
     # So its failed turn's file, written before that step, is kept apart whole with what it wrote after, and the
     # thread is told; it never lands.  Its own helper's finished work does.
-    [result] = await results_of(api, thread, "delegate_task")
+    [result] = await results_of(api, thread, "agent")
     assert "first.md" in result, result
     assert git(pods.project / "_history", "show", f"refs/helpers/{thread.id}/{helper.id}:first.md") == "half made"
     assert pods.real_names() == ["Report.docx", "notes.txt", "outline.md", "second.md", "seen.txt"]
@@ -690,14 +695,14 @@ async def woken_with_nothing_started(api, monkeypatch, pool, helper) -> list[str
 
 
 @pytest.mark.parametrize("command", sorted(COMMANDS_A_THREAD_REFUSES))
-@pytest.mark.parametrize("tool", ["delegate_task", "spawn_worker"])
+@pytest.mark.parametrize("tool", ["agent", "spawn_worker"])
 async def test_a_threads_helper_whose_goal_is_a_command_its_thread_may_not_run_is_refused_it_too(api, monkeypatch, pods, command, tool):
     thread = await a_coordinating_thread(api)
     mine, theirs = SandboxPool(pods), SandboxPool(pods)
     # A helper that is waited for: its outcome, without its turn.  It is woken below, as a worker wakes it.
     monkeypatch.setattr(delegate_module, "_poll_child_completion", AsyncMock(return_value={"status": "failed", "reason": "not run here"}))
     await asyncio.wait_for(a_turn(api, monkeypatch, thread, [
-        calling((tool, {"goal": COMMANDS_A_THREAD_REFUSES[command]})), _final_response("Done."),
+        calling((tool, _goal(tool, COMMANDS_A_THREAD_REFUSES[command]))), _final_response("Done."),
     ], pool=mine), 120)
     # Its goal is its first message, word for word: read as a command, it gets the answer its thread gets.
     [helper] = await helpers_of(api, thread)
@@ -728,15 +733,14 @@ NO_OTHER_WAY = "yet, and has no other way to do it: tell the user it cannot be d
 
 
 @pytest.mark.parametrize("tool, arguments, kind", [
-    ("delegate_task", {"goal": "Heat pumps in cold climates", "agent_type": "deep-research"}, "deep-research"),
-    ("delegate_task", {"goals": [{"goal": "Part one."}, {"goal": "Heat pumps", "agent_type": "deep-research"}]}, "deep-research"),
-    ("delegate_task", {"goal": "Write the report.", "agent_type": "research-writer"}, "research-writer"),
+    ("agent", {"description": "Research", "prompt": "Heat pumps in cold climates", "agent_type": "deep-research"}, "deep-research"),
+    ("agent", {"description": "Write", "prompt": "Write the report.", "agent_type": "research-writer"}, "research-writer"),
     ("spawn_worker", {"goal": "Heat pumps in cold climates", "agent_type": "deep-research"}, "deep-research"),
-], ids=["delegate_task", "one goal of several", "the writer alone", "spawn_worker"])
+], ids=["agent", "the writer alone", "spawn_worker"])
 async def test_a_thread_and_its_helpers_start_no_research_sub_agent_by_its_type(api, monkeypatch, pods, tool, arguments, kind):
     thread = await a_coordinating_thread(api)
     # The agent has the sub-agents: nothing but the thread's rule stands between the call and them.
-    monkeypatch.setattr(agent_resolver, "resolve_agent_by_name", AsyncMock(return_value=an_agent("terminal", "delegate_task")))
+    monkeypatch.setattr(agent_resolver, "resolve_agent_by_name", AsyncMock(return_value=an_agent("terminal", "agent")))
     monkeypatch.setattr(delegate_module, "_poll_child_completion", AsyncMock(return_value={"status": "failed", "reason": "not run here"}))
     locks = await project_locks_taken(monkeypatch)
     await asyncio.wait_for(a_turn(api, monkeypatch, thread, [
@@ -764,7 +768,7 @@ async def test_what_a_thread_has_no_other_way_to_do_is_refused_in_words_that_sen
         assert thread_refusal(name) == f"A thread can't start {name} yet: do this step in the thread itself."
 
 
-@pytest.mark.parametrize("tool", ["delegate_task", "spawn_worker", "spawn_task"])
+@pytest.mark.parametrize("tool", ["agent", "spawn_worker", "spawn_task"])
 async def test_a_step_whose_hand_off_fails_starts_no_helper_on_old_files_and_says_so(api, monkeypatch, pods, tool):
     thread = await a_coordinating_thread(api)
     monkeypatch.setattr(delegate_module, "_poll_child_completion", AsyncMock(return_value={"status": "failed", "reason": "not run here"}))
@@ -775,7 +779,7 @@ async def test_a_step_whose_hand_off_fails_starts_no_helper_on_old_files_and_say
     monkeypatch.setattr(History, "hand_off", fails)
     await asyncio.wait_for(a_turn(api, monkeypatch, thread, [
         calling(("terminal", {"command": "echo outline > outline.md"})),
-        calling((tool, {"goal": "Draft the sources from outline.md."})),
+        calling((tool, _goal(tool, "Draft the sources from outline.md."))),
         _final_response("Done."),
     ], pool=SandboxPool(pods)), 120)
     # A helper started now would work without this turn's outline, and nobody would know: none is started.

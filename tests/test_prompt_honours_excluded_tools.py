@@ -94,14 +94,14 @@ def test_restricting_renders_the_agents_section_again():
 
     session = _chat({"coordinator": True, "excluded_tools": ["spawn_task", "spawn_worker"]})
     builder = PromptBuilder(
-        _tenant(session), session=session, available_tools={"spawn_task", "spawn_worker", "delegate_task"},
+        _tenant(session), session=session, available_tools={"spawn_task", "spawn_worker", "agent"},
         available_agents=[AgentDef(name="analyst", description="Reads the numbers", system_prompt="",
                                    source="platform")],
     )
     assert "spawn_task" in builder._available_agents_section()
-    builder.restrict_tools({"delegate_task"})
+    builder.restrict_tools({"agent"})
     section = builder._available_agents_section()
-    assert "delegate_task" in section and "spawn_task" not in section
+    assert "``agent``" in section and "spawn_task" not in section
 
 
 async def test_the_compaction_measure_is_narrowed_too():

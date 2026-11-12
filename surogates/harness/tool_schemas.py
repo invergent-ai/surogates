@@ -2,7 +2,7 @@
 
 Strips parameters that cannot resolve for the current tenant so the
 LLM never sees them and cannot hallucinate values.  Currently gates the
-``agent_type`` parameter on ``delegate_task`` / ``spawn_worker``: when
+``agent_type`` parameter on ``agent`` / ``spawn_worker``: when
 the tenant has no enabled sub-agents, no value for it can resolve, so
 it is removed from the exported schema.
 """
@@ -31,7 +31,6 @@ from surogates.tools.builtin.send_form import describe_forms
 from surogates.tools.builtin.terminal import DEVICE_GIT_NOTE, DEVICE_MAPPING_NOTE
 
 _AGENT_TYPE_GATED_TOOLS: frozenset[str] = frozenset({
-    "delegate_task",
     "agent",
     "spawn_worker",
     "spawn_task",

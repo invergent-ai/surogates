@@ -281,7 +281,7 @@ def make_skipped_tool_result(
 
 
 # ---------------------------------------------------------------------------
-# Final response extraction (shared by delegate_task and worker_notify)
+# Final response extraction (shared by the agent tool and worker_notify)
 # ---------------------------------------------------------------------------
 
 
