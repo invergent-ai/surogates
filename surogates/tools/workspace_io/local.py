@@ -684,7 +684,8 @@ def _replace_file(dir_fd: int | None, name: str, data: bytes) -> None:
             with contextlib.suppress(OSError):
                 st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
                 if stat_module.S_ISREG(st.st_mode):
-                    os.fchmod(fh.fileno(), stat_module.S_IMODE(st.st_mode))
+                    # Its permission bits, never set-id or sticky bits a planted file carries.
+                    os.fchmod(fh.fileno(), stat_module.S_IMODE(st.st_mode) & 0o777)
         os.replace(tmp, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
     except Exception:
         with contextlib.suppress(OSError):

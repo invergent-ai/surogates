@@ -6,7 +6,6 @@ import functools
 import json
 import logging
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlsplit
 from uuid import UUID, uuid4
@@ -81,7 +80,8 @@ from surogates.devices.workspace import DeviceOperationError, said
 from surogates.session.events import EventType
 from surogates.tools.registry import ToolRegistry, ToolSchema
 from surogates.tools.utils.tool_result_storage import WORKSPACE_STORAGE_DIR, keep_out_of_git
-from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
+from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError, validate_path
+from surogates.tools.workspace_io.local import write_in_workspace
 
 logger = logging.getLogger(__name__)
 
@@ -1251,9 +1251,6 @@ def _save_screenshot_to_workspace(
 ) -> str | None:
     if not workspace_path:
         return None
-
-    from surogates.tools.utils.workspace_sandbox import validate_path
-    from surogates.tools.workspace_io.local import write_in_workspace
 
     try:
         # Never by path: a link planted at the screenshot's name, or a folder

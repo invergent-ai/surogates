@@ -83,3 +83,40 @@ def test_a_screenshot_folder_that_is_a_link_out_is_refused(places):
     (ws / "shots").symlink_to(out, target_is_directory=True)
     assert _save_screenshot_to_workspace(PNG, workspace_path=str(ws), relative_path="shots/page.png") is None
     assert sorted(p.name for p in out.iterdir()) == ["victim"]
+
+
+def test_a_screenshot_folder_swapped_after_the_check_does_not_carry_it_outside(places, monkeypatch):
+    """The write itself is contained: a folder swapped for a link after validate_path still writes nothing outside."""
+    ws, out = places
+    from surogates.tools.builtin import browser
+
+    (ws / "shots").mkdir()
+    real_validate = browser.validate_path
+
+    def validate_then_swap(root, path):
+        key = real_validate(root, path)
+        (ws / "shots").rename(ws / "shots.old")
+        (ws / "shots").symlink_to(out, target_is_directory=True)
+        return key
+
+    monkeypatch.setattr(browser, "validate_path", validate_then_swap)
+    assert _save_screenshot_to_workspace(PNG, workspace_path=str(ws), relative_path="shots/page.png") is None
+    assert sorted(p.name for p in out.iterdir()) == ["victim"]
+
+
+def test_a_link_planted_at_the_screenshots_name_after_the_check_is_replaced(places, monkeypatch):
+    ws, out = places
+    from surogates.tools.builtin import browser
+
+    (ws / "shots").mkdir()
+    real_validate = browser.validate_path
+
+    def validate_then_plant(root, path):
+        key = real_validate(root, path)
+        (ws / "shots" / "page.png").symlink_to(out / "victim")
+        return key
+
+    monkeypatch.setattr(browser, "validate_path", validate_then_plant)
+    assert _save_screenshot_to_workspace(PNG, workspace_path=str(ws), relative_path="shots/page.png") == "shots/page.png"
+    assert (out / "victim").read_text() == "not the workspace's"
+    assert (ws / "shots" / "page.png").read_bytes() == PNG and not (ws / "shots" / "page.png").is_symlink()
