@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import errno
+import io
 import logging
 import os
 import shutil
@@ -216,12 +217,47 @@ class LocalBackend:
         self._base = Path(base_path)
 
     def _resolve(self, bucket: str, key: str) -> Path:
-        """Build an absolute path, rejecting traversal attempts."""
-        path = (self._base / bucket / key).resolve()
-        bucket_root = (self._base / bucket).resolve()
-        if not path.is_relative_to(bucket_root):
-            raise ValueError(f"Path traversal denied: {key}")
-        return path
+        """The object's path under the bucket's root, as its key names it.
+
+        A bucket has no links: a folder on a disk can hold one, put there by
+        whoever writes the folder (a session's commands, in its workspace
+        under ``sessions/``), and following it reached another session's
+        objects, or anything on the host.  So the key is never resolved
+        through one: its path is lexical, and every operation reaches it
+        from the bucket's root one folder at a time with no link followed.
+        Raises ValueError for a key that leaves the bucket (absolute, ``..``).
+        """
+        return self._bucket_path(bucket).joinpath(*_key_parts(key))
+
+    def _folder_of(self, bucket: str, key: str, *, create: bool = False) -> tuple[int, str]:
+        """A descriptor of the folder of the object *key* and the object's
+        name, reached from the bucket's root with no link followed (missing
+        folders made with *create*).  The caller closes the descriptor.
+        Raises ValueError for a key that names no object, OSError where the
+        folder cannot be reached (a link on the way: PermissionError)."""
+        parts = _key_parts(key)
+        if not parts:
+            raise ValueError(f"No object at {key!r}")
+        root = self._bucket_path(bucket)
+        if create:
+            root.mkdir(parents=True, exist_ok=True)  # as a write by path made it
+        return _walk()._open_folder(str(root), parts[:-1], create=create), parts[-1]
+
+    def _plain_file(self, bucket: str, key: str) -> os.stat_result | None:
+        """The object *key*'s own stat, where it is a plain file reached with
+        no link followed; None for no object (missing, a folder, a link, or a
+        link on the way)."""
+        try:
+            folder, name = self._folder_of(bucket, key)
+        except (OSError, ValueError):
+            return None
+        try:
+            st = os.stat(name, dir_fd=folder, follow_symlinks=False)
+        except OSError:
+            return None
+        finally:
+            os.close(folder)
+        return st if stat.S_ISREG(st.st_mode) else None
 
     def _bucket_path(self, bucket: str) -> Path:
         return (self._base / bucket).resolve()
@@ -256,9 +292,9 @@ class LocalBackend:
         followed: a folder swapped for a link after the check (a bucket that
         holds workspaces commands write to) reads nothing outside it.
         KeyError where no regular file is."""
-        from surogates.tools.workspace_io.local import _BY_FOLDER, _open_to_read
+        from surogates.tools.workspace_io.local import _open_to_read
 
-        if not _BY_FOLDER:
+        if not _walk()._BY_FOLDER:
             if not path.is_file():
                 raise KeyError(f"{bucket}/{key}")
             return path.read_bytes()
@@ -268,21 +304,30 @@ class LocalBackend:
         except (FileNotFoundError, NotADirectoryError, IsADirectoryError):
             raise KeyError(f"{bucket}/{key}") from None
         except OSError as exc:
-            if exc.errno == errno.EINVAL:  # not a regular file
+            # Not a regular file, or a link at the key or on the way to it:
+            # no object (a bucket has no links).
+            if exc.errno in (errno.EINVAL, errno.EACCES) and _is_link_refusal(exc):
+                raise KeyError(f"{bucket}/{key}") from None
+            if exc.errno == errno.EINVAL:
                 raise KeyError(f"{bucket}/{key}") from None
             raise
 
     async def write(self, bucket: str, key: str, data: bytes) -> None:
         path = self._resolve(bucket, key)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        _atomic_write_bytes(path, data)
+        if not _walk()._BY_FOLDER:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            _atomic_write_bytes(path, data)
+            return
+        folder, name = self._folder_of(bucket, key, create=True)
+        try:
+            _replace_in(folder, name, io.BytesIO(data), None, False)
+        finally:
+            os.close(folder)
 
     async def write_text(
         self, bucket: str, key: str, text: str, encoding: str = "utf-8",
     ) -> None:
-        path = self._resolve(bucket, key)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        _atomic_write_text(path, text, encoding)
+        await self.write(bucket, key, text.encode(encoding))
 
     async def mark(self, bucket: str, key: str) -> float:
         # A bucket has no links; a folder on a disk can hold one, put there by whoever writes
@@ -321,50 +366,145 @@ class LocalBackend:
 
     async def download(self, bucket: str, key: str, target: Path, *, limit: int | None = None) -> int:
         path = self._resolve(bucket, key)
-        if not path.is_file():
+        if not _walk()._BY_FOLDER:
+            if not path.is_file():
+                raise KeyError(f"{bucket}/{key}")
+            return await asyncio.to_thread(_copy, path, target, limit, f"{bucket}/{key}")
+        if self._plain_file(bucket, key) is None:
             raise KeyError(f"{bucket}/{key}")
-        return await asyncio.to_thread(_copy, path, target, limit, f"{bucket}/{key}")
+        return await asyncio.to_thread(
+            _copy_from, lambda: self._read_resolved_open(bucket, key, path), target, limit, f"{bucket}/{key}",
+        )
+
+    def _read_resolved_open(self, bucket: str, key: str, path: Path):
+        """The object at *path* open to read, reached as :meth:`_read_resolved` reaches it."""
+        from surogates.tools.workspace_io.local import _open_to_read
+
+        try:
+            return _open_to_read(str(self._bucket_path(bucket)), str(path))
+        except (FileNotFoundError, NotADirectoryError, IsADirectoryError):
+            raise KeyError(f"{bucket}/{key}") from None
+        except OSError as exc:
+            if exc.errno == errno.EINVAL or _is_link_refusal(exc):
+                raise KeyError(f"{bucket}/{key}") from None
+            raise
 
     async def upload(
         self, bucket: str, key: str, source: Path, *, if_tag: str | None = None, if_absent: bool = False,
     ) -> None:
-        await asyncio.to_thread(_atomic_copy, source, self._resolve(bucket, key), if_tag, if_absent)
+        path = self._resolve(bucket, key)
+        if not _walk()._BY_FOLDER:
+            await asyncio.to_thread(_atomic_copy, source, path, if_tag, if_absent)
+            return
+
+        def put() -> None:
+            with open(source, "rb") as src:
+                folder, name = self._folder_of(bucket, key, create=True)
+                try:
+                    _replace_in(folder, name, src, if_tag, if_absent)
+                finally:
+                    os.close(folder)
+
+        await asyncio.to_thread(put)
 
     async def exists(self, bucket: str, key: str) -> bool:
-        return self._resolve(bucket, key).is_file()
+        path = self._resolve(bucket, key)
+        if not _walk()._BY_FOLDER:
+            return path.is_file()
+        return self._plain_file(bucket, key) is not None
 
     async def delete(self, bucket: str, key: str, *, if_tag: str | None = None) -> None:
         path = self._resolve(bucket, key)
-        if if_tag is not None:
-            # Looked at right before it is removed: a save since is not taken away.
-            await asyncio.to_thread(_unlink_if, path, if_tag)
-        elif path.is_file():
-            path.unlink()
-        else:
+        if not _walk()._BY_FOLDER:
+            if if_tag is not None:
+                await asyncio.to_thread(_unlink_if, path, if_tag)
+            elif path.is_file():
+                path.unlink()
+            else:
+                return
+            _remove_empty_parents_by_path(self._bucket_path(bucket), path)
             return
+        try:
+            folder, name = self._folder_of(bucket, key)
+        except (OSError, ValueError):
+            if if_tag is not None:
+                raise Changed(f"{bucket}/{key}") from None
+            return
+        try:
+            try:
+                st = os.stat(name, dir_fd=folder, follow_symlinks=False)
+            except FileNotFoundError:
+                st = None
+            if if_tag is not None:
+                # Looked at right before it is removed: a save since is not taken away.
+                if st is None or not stat.S_ISREG(st.st_mode) or _tag(st) != if_tag:
+                    raise Changed(f"{bucket}/{key}")
+            elif st is None or not stat.S_ISREG(st.st_mode):
+                return  # no object: a bucket has no links, and a folder is no object
+            os.unlink(name, dir_fd=folder)
+        finally:
+            os.close(folder)
         # Clean up empty parent directories up to the bucket root.
-        bucket_root = self._bucket_path(bucket)
-        parent = path.parent
-        while parent != bucket_root and parent.exists() and not any(parent.iterdir()):
-            parent.rmdir()
-            parent = parent.parent
+        self._remove_empty_folders(bucket, _key_parts(key)[:-1])
+
+    def _remove_empty_folders(self, bucket: str, folders: list[str]) -> None:
+        """Remove the folders *folders* (a path below the bucket's root),
+        deepest first, while each is empty; each reached with no link
+        followed, and a link is never removed in a folder's place."""
+        root = str(self._bucket_path(bucket))
+        for depth in range(len(folders), 0, -1):
+            try:
+                parent = _walk()._open_folder(root, folders[:depth - 1], create=False)
+            except OSError:
+                return
+            try:
+                os.rmdir(folders[depth - 1], dir_fd=parent)
+            except OSError:
+                return  # not empty, gone, or not a folder: stop here
+            finally:
+                os.close(parent)
 
     async def delete_prefix(self, bucket: str, prefix: str) -> int:
         if not prefix:
             raise ValueError("delete_prefix requires a non-empty prefix")
         bucket_root = self._bucket_path(bucket)
-        target = (bucket_root / prefix).resolve()
-        if not target.is_relative_to(bucket_root):
-            raise ValueError(f"Path traversal denied: {prefix}")
-        if not target.is_dir():
+        if not _walk()._BY_FOLDER:
+            target = (bucket_root / prefix).resolve()
+            if not target.is_relative_to(bucket_root):
+                raise ValueError(f"Path traversal denied: {prefix}")
+            if not target.is_dir():
+                return 0
+            deleted = sum(1 for p in target.rglob("*") if p.is_file())
+            shutil.rmtree(target)
+            _remove_empty_parents_by_path(bucket_root, target)
+            return deleted
+        parts = _key_parts(prefix)
+        if not parts:
+            raise ValueError("delete_prefix requires a non-empty prefix")
+        # The prefix's folder, reached with no link followed: a link there (a
+        # session's own folder swapped for one to another's) deletes nothing.
+        try:
+            parent = _walk()._open_folder(str(bucket_root), parts[:-1], create=False)
+        except OSError:
             return 0
-        deleted = sum(1 for p in target.rglob("*") if p.is_file())
-        shutil.rmtree(target)
+        try:
+            try:
+                if not stat.S_ISDIR(os.stat(parts[-1], dir_fd=parent, follow_symlinks=False).st_mode):
+                    return 0
+            except FileNotFoundError:
+                return 0
+            deleted = 0
+            for _folder, _dirs, files, folder_fd in os.fwalk(parts[-1], dir_fd=parent, follow_symlinks=False):
+                deleted += sum(
+                    1 for f in files
+                    if stat.S_ISREG(os.stat(f, dir_fd=folder_fd, follow_symlinks=False).st_mode)
+                )
+            # By descriptor: a link met inside is removed, never followed.
+            shutil.rmtree(parts[-1], dir_fd=parent)
+        finally:
+            os.close(parent)
         # Match ``delete``: walk up empty parents to the bucket root.
-        parent = target.parent
-        while parent != bucket_root and parent.exists() and not any(parent.iterdir()):
-            parent.rmdir()
-            parent = parent.parent
+        self._remove_empty_folders(bucket, parts[:-1])
         return deleted
 
     async def list_keys(self, bucket: str, prefix: str = "") -> list[str]:
@@ -372,6 +512,8 @@ class LocalBackend:
 
     async def list_entries(self, bucket: str, prefix: str = "", limit: int | None = None) -> list[dict[str, Any]]:
         bucket_root = self._bucket_path(bucket)
+        if _walk()._BY_FOLDER:
+            return self._list_entries_by_folder(bucket, prefix, limit)
         search_root = bucket_root / prefix if prefix else bucket_root
         if not search_root.is_dir():
             return []
@@ -393,11 +535,83 @@ class LocalBackend:
         entries.sort(key=lambda e: e["key"])
         return entries
 
+    def _list_entries_by_folder(self, bucket: str, prefix: str, limit: int | None) -> list[dict[str, Any]]:
+        """:meth:`list_entries`, walked from the bucket's root with no link
+        followed: a link is no entry, and a folder link is not walked into.
+        Folders are walked in the order ``rglob`` walked them."""
+        parts = _key_parts(prefix)
+        root = str(self._bucket_path(bucket))
+        try:
+            start = _walk()._open_folder(root, parts, create=False)
+        except OSError:
+            return []
+        base = "/".join(parts)
+        entries: list[dict[str, Any]] = []
+
+        def walk(folder_fd: int, rel: str) -> bool:
+            """List the folder's entries, then each subfolder's, depth first;
+            False once *limit* entries are listed."""
+            with os.scandir(folder_fd) as listing:
+                found = list(listing)
+            folders: list[str] = []
+            for entry in found:
+                if limit is not None and len(entries) >= limit:
+                    return False
+                try:
+                    st = entry.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                is_dir = stat.S_ISDIR(st.st_mode)
+                if is_dir:
+                    folders.append(entry.name)
+                if not stat.S_ISREG(st.st_mode) and not (is_dir and limit is not None):
+                    continue  # a link, or a folder where no limit asks for folders
+                key = f"{rel}{entry.name}"
+                entries.append({
+                    # Bounded, a folder is an entry too, named as a bucket names a folder's marker: a
+                    # folder of folders is not walked whole, and the caller learns there is more.
+                    "key": key + ("/" if is_dir else ""),
+                    "modified": st.st_mtime,
+                    "size": 0 if is_dir else st.st_size,
+                })
+            for name in folders:
+                try:
+                    child = os.open(
+                        name, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+                        dir_fd=folder_fd,
+                    )
+                except OSError:
+                    continue
+                try:
+                    if not walk(child, f"{rel}{name}/"):
+                        return False
+                finally:
+                    os.close(child)
+            return True
+
+        try:
+            listing_fd = os.open(".", os.O_RDONLY | getattr(os, "O_DIRECTORY", 0), dir_fd=start)
+        except OSError:
+            os.close(start)
+            return []
+        os.close(start)
+        try:
+            walk(listing_fd, f"{base}/" if base else "")
+        finally:
+            os.close(listing_fd)
+        entries.sort(key=lambda e: e["key"])
+        return entries
+
     async def stat(self, bucket: str, key: str) -> dict[str, Any]:
         path = self._resolve(bucket, key)
-        if not path.is_file():
-            raise KeyError(f"{bucket}/{key}")
-        st = path.stat()
+        if not _walk()._BY_FOLDER:
+            if not path.is_file():
+                raise KeyError(f"{bucket}/{key}")
+            st = path.stat()
+        else:
+            st = self._plain_file(bucket, key)
+            if st is None:
+                raise KeyError(f"{bucket}/{key}")
         return {"size": st.st_size, "modified": st.st_mtime, "etag": _tag(st)}
 
     async def list_buckets(self, prefix: str = "") -> list[str]:
@@ -705,6 +919,86 @@ def create_backend(settings: Any) -> StorageBackend:
 # ---------------------------------------------------------------------------
 # Atomic write helpers
 # ---------------------------------------------------------------------------
+
+
+def _walk() -> Any:
+    """The no-follow walk of ``surogates.tools.workspace_io.local`` (imported
+    when first used: the tools package imports storage)."""
+    from surogates.tools.workspace_io import local
+
+    return local
+
+
+def _key_parts(key: str) -> list[str]:
+    """A key's names below the bucket's root (empty for the root itself).
+    ValueError for one that leaves it: absolute, or through ``..``."""
+    if key.startswith("/") or "\x00" in key:
+        raise ValueError(f"Path traversal denied: {key}")
+    parts = [part for part in key.split("/") if part not in ("", ".")]
+    if ".." in parts:
+        raise ValueError(f"Path traversal denied: {key}")
+    return parts
+
+
+def _is_link_refusal(exc: OSError) -> bool:
+    """Whether *exc* is the walk's refusal of a link at a key or on the way to it."""
+    return isinstance(exc, PermissionError) and str(exc.strerror or "").startswith("Refused:")
+
+
+def _replace_in(folder: int, name: str, src: Any, if_tag: str | None, if_absent: bool) -> None:
+    """Make *name* in the folder *folder* a copy of the stream *src*: a new
+    temporary file beside it (O_EXCL | O_NOFOLLOW, mode 0600), synced, then
+    renamed over it; a link at the name is replaced, never followed.  With
+    *if_tag* or *if_absent*, only where *name* is still the plain file of
+    that tag, or still none, as it is looked at right before the rename:
+    :class:`Changed` otherwise, and nothing written."""
+    tmp = f".{name}.tmp.{os.urandom(6).hex()}"
+    fd = os.open(
+        tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0), 0o600,
+        dir_fd=folder,
+    )
+    try:
+        with os.fdopen(fd, "wb") as out:
+            shutil.copyfileobj(src, out, _CHUNK)
+            out.flush()
+            os.fsync(out.fileno())
+        if if_tag is not None or if_absent:
+            try:
+                st = os.stat(name, dir_fd=folder, follow_symlinks=False)
+                now: str | None = _tag(st) if stat.S_ISREG(st.st_mode) else "not a file"
+            except FileNotFoundError:
+                now = None
+            if now != if_tag:
+                raise Changed(name)
+        os.replace(tmp, name, src_dir_fd=folder, dst_dir_fd=folder)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp, dir_fd=folder)
+        raise
+
+
+def _copy_from(opener: Any, target: Path, limit: int | None, name: str) -> int:
+    """:func:`_copy` from the file *opener* opens."""
+    written = 0
+    try:
+        with opener() as src, open(target, "wb") as out:
+            while chunk := src.read(_CHUNK):
+                written += len(chunk)
+                if limit is not None and written > limit:
+                    raise TooLarge(name)
+                out.write(chunk)
+    except BaseException:
+        Path(target).unlink(missing_ok=True)
+        raise
+    return written
+
+
+def _remove_empty_parents_by_path(bucket_root: Path, path: Path) -> None:
+    """Remove *path*'s empty parent folders up to *bucket_root*, by path (where no descriptor calls exist)."""
+    parent = path.parent
+    while parent != bucket_root and parent.exists() and not any(parent.iterdir()):
+        parent.rmdir()
+        parent = parent.parent
 
 
 def _atomic_write_bytes(path: Path, data: bytes) -> None:
