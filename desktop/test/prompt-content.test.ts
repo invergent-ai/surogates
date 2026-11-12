@@ -6,7 +6,7 @@ import { segments } from "../src/shell/text.js";
 import { approval, folderSheet, freeMode, handBack, sizeOf } from "../src/shell/prompt-content.js";
 
 const SHEET: FolderSheet = {
-  agent: "acme.surogate.ai", folder: "/home/me/notes", mode: "free", links: null, refusal: null, thread: null, project: null, busy: false,
+  agent: "acme.surogate.ai", folder: "/home/me/notes", mode: "free", links: null, refusal: null, project: null, busy: false,
 };
 const CHAT: ChatLabel = { agent: "acme.surogate.ai", root: "r", calling: "r", folder: "/home/me/notes" };
 const ids = (content: { buttons: Array<{ id: string }> }) => content.buttons.map((button) => button.id);
@@ -41,21 +41,6 @@ describe("the folder sheet", () => {
     expect(content.notes).toEqual([]);
     expect(ids(content)).toEqual(["cancel", "change", "accept"]);
     expect(content.buttons[1]?.label).toBe("Change…");
-  });
-
-  it("names the project's thread the folder is for, each name in a field of its own, and makes room for them", () => {
-    const thread = { project: "Q3 report", thread: "Check the totals" };
-    const content = folderSheet({ ...SHEET, thread });
-    expect(content.details).toEqual([
-      { label: "Folder", value: "/home/me/notes", code: true, keep: "" },
-      { label: "Project", value: "Q3 report", code: false, keep: "" },
-      { label: "Thread", value: "Check the totals", code: false, keep: "" },
-    ]);
-    expect(content.height).toBeGreaterThan(folderSheet(SHEET).height);
-    // A long name takes more lines.
-    expect(folderSheet({ ...SHEET, thread: { ...thread, thread: "x".repeat(256) } }).height).toBeGreaterThan(content.height);
-    expect(folderSheet({ ...SHEET, thread, refusal: "the folder holds the app's own data" }).details.map((d) => d.label))
-      .toEqual(["Folder", "Project", "Thread"]);
   });
 
   it("names the new project the folder is for, says its threads work in copies of it, and makes room for both", () => {

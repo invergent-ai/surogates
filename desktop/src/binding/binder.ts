@@ -65,12 +65,6 @@ const CHOOSE_AGAIN = "choose Use this computer for this project in its Overview,
 // A bind that recorded *thread*'s copy says so: the server counts a thread bound on no other answer (surogates/devices/binding.py).
 const boundTo = (thread: string | undefined): Outcome => (thread === undefined ? BOUND : { ok: { history: { thread } } });
 
-// The project's thread a folder is asked for: its names, as the page sent them.
-export interface ThreadLabel {
-  project: string;
-  thread: string;
-}
-
 // What the sheet shows. Accepting binds *folder* with the mode chosen there.
 export interface FolderSheet {
   agent: string; // the agent the chat is with
@@ -78,8 +72,7 @@ export interface FolderSheet {
   mode: Mode; // as the sheet opens
   links: LinkSummary | null; // null: no file in the folder is linked from elsewhere
   refusal: string | null; // why no chat may work on this folder: the sheet offers Change and Cancel only
-  thread: ThreadLabel | null; // a project's thread the folder is for; null for a new chat
-  project: string | null; // a new project the folder is for, by the name it has so far ("" before it has one); null for a chat or a thread
+  project: string | null; // a new project the folder is for, by the name it has so far ("" before it has one); null for a chat
   busy: boolean; // another chat on this computer works in the folder: the sheet warns, and offers New folder beside Browse
 }
 
@@ -146,7 +139,6 @@ interface Preparation {
   window: string;
   project?: true; // a project's own folder, which its coordinator binds and its threads' copies are made of
   master?: string; // that project's coordinator, where its folder is chosen again: it binds that chat alone, afresh
-  thread?: true; // a copy of a project's folder for one of its threads, which no sheet asked: it binds no chat to the folder itself
   root?: string; // the chat its bind operation bound
   settled: Promise<Binding>;
   resolve: (binding: Binding) => void;
@@ -154,8 +146,8 @@ interface Preparation {
 }
 
 // What a confirmation is for, beyond a chat's folder: a project's own folder, and its coordinator where it is chosen
-// again; or a thread's copy of a project's folder.
-type Marks = Pick<Preparation, "project" | "master" | "thread">;
+// again.
+type Marks = Pick<Preparation, "project" | "master">;
 
 const token = () => randomBytes(32).toString("base64url");
 
@@ -241,7 +233,7 @@ export class Binder implements Executor {
    * the user did not see.
    */
   async prepareFolder(
-    choice: "new" | "last" | "pick", window: string, signal: AbortSignal, thread: ThreadLabel | null = null,
+    choice: "new" | "last" | "pick", window: string, signal: AbortSignal,
   ): Promise<Prepared | null> {
     const { guards } = this.options;
     const last = this.options.bindings.last()?.folder;
@@ -253,7 +245,7 @@ export class Binder implements Executor {
     if (first !== null) made.push(first);
     let prepared: Prepared | null = null;
     try {
-      prepared = await this.confirm(usable ?? first, last ?? guestPathOf(guards.home), window, signal, thread, null, {}, made);
+      prepared = await this.confirm(usable ?? first, last ?? guestPathOf(guards.home), window, signal, null, {}, made);
       return prepared;
     } finally {
       const preparation = prepared !== null && made.includes(prepared.folder) ? this.byToken.get(prepared.token) : undefined;
@@ -277,7 +269,7 @@ export class Binder implements Executor {
   ): Promise<Prepared | null> {
     const last = this.options.bindings.last()?.folder;
     const offered = again?.folder ?? null;
-    return this.confirm(offered, last ?? guestPathOf(this.options.guards.home), window, signal, null, project.trim(), { project: true, ...(again ? { master: again.master } : {}) });
+    return this.confirm(offered, last ?? guestPathOf(this.options.guards.home), window, signal, project.trim(), { project: true, ...(again ? { master: again.master } : {}) });
   }
 
   /**
@@ -389,9 +381,9 @@ export class Binder implements Executor {
   }
 
   // The sheet for *offered*, or for the folder the dialog picks from *startIn*, until the user accepts one or cancels:
-  // for a chat, a project's thread, or a *project*'s own folder (*marks*).
+  // for a chat, or a *project*'s own folder (*marks*).
   private async confirm(
-    offered: string | null, startIn: string, window: string, signal: AbortSignal, thread: ThreadLabel | null,
+    offered: string | null, startIn: string, window: string, signal: AbortSignal,
     project: string | null, marks: Marks = {}, made: string[] = [],
   ): Promise<Prepared | null> {
     const { prompts, guards } = this.options;
@@ -411,10 +403,9 @@ export class Binder implements Executor {
         mode: "free",
         links,
         refusal: checked.ok ? null : checked.message,
-        thread,
         project,
-        // A chat's own sheet alone: a project's and a thread's folder are meant to be shared.
-        busy: thread === null && project === null && checked.ok && this.options.inUse?.(checked.dev, checked.ino) === true,
+        // A chat's own sheet alone: a project's folder is meant to be shared.
+        busy: project === null && checked.ok && this.options.inUse?.(checked.dev, checked.ino) === true,
       };
       const answer = await prompts.confirmFolder(sheet, signal);
       if (answer === null || signal.aborted) return null;
@@ -474,14 +465,17 @@ export class Binder implements Executor {
     if (copy === null || (copy !== undefined && copy !== root)) return NOT_BOUND;
     const known = this.options.bindings.get(root);
     if (known?.nonce === nonce && known.folder === folder && known.history === copy) return boundTo(known.history);
+    // A thread's copy is asked for in the name of its project's coordinator, never by a confirmation of the page's.
+    if (copy !== undefined) {
+      if (known) return ALREADY_BOUND;
+      const master = operation.args.master;
+      return typeof master === "string" ? this.threadOf(master, root, copy, folder, nonce) : NOT_BOUND;
+    }
     const preparation = this.byNonce.get(nonce);
     // A project's coordinator whose folder its user chose again is bound afresh, its binding here replaced; no other
     // chat that has one is bound again.
     const again = known?.project === true && preparation?.master === root;
     if (known && !again) return ALREADY_BOUND;
-    // A project's thread the server starts itself names its coordinator, not a confirmation of the page's.
-    const master = operation.args.master;
-    if (!preparation && typeof master === "string") return this.threadOf(master, root, copy, folder, nonce);
     if (!preparation) return NOT_BOUND;
     // One use, whatever the answer.
     this.byNonce.delete(nonce);
@@ -494,33 +488,10 @@ export class Binder implements Executor {
       preparation.reject(new Error("The server named another chat for this project's folder"));
       return NOT_BOUND;
     }
-    // A project's own folder is its coordinator's, never a thread's copy.
-    if (copy !== undefined && preparation.project) {
-      preparation.reject(new Error("The server asked for a copy of a project's own folder"));
-      return NOT_BOUND;
-    }
-    // And a thread's copy of it, which no sheet asked, is never the folder itself.
-    if (copy === undefined && preparation.thread) {
-      preparation.reject(new Error("The server asked for a project's folder itself for a thread"));
-      return NOT_BOUND;
-    }
-    // Nothing here would make the thread's copy: it is bound to nothing, so that it works nowhere.
-    if (copy !== undefined && this.options.keepsCopies !== true) {
-      preparation.reject(new Error(NO_COPY_HERE));
-      return KEEPS_NO_COPY;
-    }
-    // Nor where no host on its copy could stand for the folder by its path, as each one's start would refuse it.
-    const alone = copy === undefined ? null : noCopyAt(folder, this.options.guards);
-    if (alone !== null) {
-      const message = noCopyOf(folder, alone);
-      preparation.reject(new Error(message));
-      return { error: { type: "binding", message } };
-    }
     const { dev, ino, mode } = preparation;
     try {
       const binding: Binding = {
-        root, nonce, folder, dev, ino, boot: BOOT_ID, mode, boundAt: Date.now(),
-        ...(copy === undefined ? {} : { history: copy }), ...(preparation.project ? { project: true } : {}),
+        root, nonce, folder, dev, ino, boot: BOOT_ID, mode, boundAt: Date.now(), ...(preparation.project ? { project: true } : {}),
       };
       if (again) this.options.bindings.replace(binding);
       else this.options.bindings.add(binding);
@@ -531,7 +502,7 @@ export class Binder implements Executor {
     }
     preparation.root = root;
     this.answered.set(operation.id, preparation);
-    return boundTo(copy);
+    return BOUND;
   }
 
   /**
@@ -541,8 +512,8 @@ export class Binder implements Executor {
    * *master*'s folder here is no project's or no longer the one its user chose; where no copy of it can be made; and,
    * recording nothing, where the server names another folder or no copy at all.
    */
-  private async threadOf(master: string, root: string, copy: string | undefined, folder: string, nonce: string): Promise<Outcome> {
-    if (copy === undefined || master === root) return NOT_BOUND;
+  private async threadOf(master: string, root: string, copy: string, folder: string, nonce: string): Promise<Outcome> {
+    if (master === root) return NOT_BOUND;
     const found = await this.projectFolder(master);
     if (typeof found === "string") return { error: { type: "binding", message: `${found}: ${CHOOSE_AGAIN}` } };
     if (this.options.keepsCopies !== true) return KEEPS_NO_COPY;
