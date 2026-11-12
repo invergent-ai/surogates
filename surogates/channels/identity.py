@@ -96,10 +96,10 @@ def readable_phone(wa_id: str) -> str:
        joining the group before it.
 
     No group is longer than six digits: WhatsApp links the result as a
-    number to call, and event redaction masks seven or more digits after a
-    ``+``.  Only for text the platform delivers to a team member; the model
-    and the event log get :func:`masked_phone`, see
-    :func:`mask_readable_phones`.
+    number to call, and log redaction masks seven or more digits after a
+    ``+`` (session events keep phone numbers as written).  Only for text the
+    platform delivers to a team member; the model and the event log get
+    :func:`masked_phone`, see :func:`mask_readable_phones`.
     """
     digits = "".join(c for c in str(wa_id or "") if c.isdigit())
     if digits[:1] in _ONE_DIGIT_CC:
