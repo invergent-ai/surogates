@@ -39,21 +39,69 @@ async def test_a_folder_swapped_after_the_check_does_not_carry_the_write_out(pla
     wio = LocalWorkspaceIO(str(ws))
     key = await wio.resolve("a/b/report.txt")
     _swap_for_link(ws / swapped, out)
+    with pytest.raises(PermissionError, match="replaced after the path was checked") as refused:
+        await wio.write(key, b"secret")
+    assert list(out.iterdir()) == []
+    assert str(ws.parent) not in str(refused.value)  # names no host path
+
+
+@pytest.mark.parametrize("swapped", ["a", "a/b"])
+async def test_a_folder_swapped_after_the_check_does_not_carry_a_delete_out(places, swapped):
+    ws, out = places
+    (ws / "a" / "b" / "victim.txt").write_text("mine")
+    (out / "b").mkdir()
+    (out / "victim.txt").write_text("not the workspace's")
+    (out / "b" / "victim.txt").write_text("not the workspace's")
+    wio = LocalWorkspaceIO(str(ws))
+    key = await wio.resolve("a/b/victim.txt")
+    _swap_for_link(ws / swapped, out)
+    with pytest.raises(PermissionError, match="replaced after the path was checked"):
+        await wio.delete(key)
+    assert (out / "victim.txt").read_text() == (out / "b" / "victim.txt").read_text() == "not the workspace's"
+
+
+async def test_a_link_planted_right_after_its_folder_is_made_is_not_followed(places, monkeypatch):
+    """The folder the write makes is swapped for a link before it is opened."""
+    ws, out = places
+    wio = LocalWorkspaceIO(str(ws))
+    key = await wio.resolve("new/report.txt")
+    real_mkdir = os.mkdir
+
+    def mkdir_then_swap(path, mode=0o777, *, dir_fd=None):
+        real_mkdir(path, mode, dir_fd=dir_fd)
+        if dir_fd is not None and path == "new":
+            os.rmdir(path, dir_fd=dir_fd)
+            os.symlink(str(out), path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "mkdir", mkdir_then_swap)
     with pytest.raises(PermissionError, match="replaced after the path was checked"):
         await wio.write(key, b"secret")
     assert list(out.iterdir()) == []
 
 
-async def test_a_folder_swapped_after_the_check_does_not_carry_a_delete_out(places):
-    ws, out = places
-    (ws / "a" / "b" / "victim.txt").write_text("mine")
-    (out / "victim.txt").write_text("not the workspace's")
+async def test_a_file_where_a_folder_should_be_is_named_as_such(places):
+    ws, _ = places
+    (ws / "notes.txt").write_text("a file")
     wio = LocalWorkspaceIO(str(ws))
-    key = await wio.resolve("a/b/victim.txt")
-    _swap_for_link(ws / "a" / "b", out)
-    with pytest.raises(PermissionError, match="replaced after the path was checked"):
+    key = await wio.resolve("notes.txt/inside.md")
+    with pytest.raises(NotADirectoryError, match="'notes.txt' on the file's path is not a folder") as refused:
+        await wio.write(key, b"x")
+    assert str(ws) not in str(refused.value)
+    with pytest.raises(NotADirectoryError):
         await wio.delete(key)
-    assert (out / "victim.txt").read_text() == "not the workspace's"
+
+
+async def test_a_file_name_swapped_for_a_link_is_replaced_not_followed(places):
+    ws, out = places
+    (out / "target.txt").write_text("outside")
+    os.chmod(out / "target.txt", 0o600)
+    wio = LocalWorkspaceIO(str(ws))
+    key = await wio.resolve("a/b/target.txt")
+    (ws / "a" / "b" / "target.txt").symlink_to(out / "target.txt")
+    await wio.write(key, b"inside")
+    assert (out / "target.txt").read_text() == "outside"
+    assert not (ws / "a" / "b" / "target.txt").is_symlink()
+    assert (ws / "a" / "b" / "target.txt").read_bytes() == b"inside"
 
 
 async def test_a_write_still_makes_its_folders_keeps_the_mode_and_replaces(places):

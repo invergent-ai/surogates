@@ -585,7 +585,9 @@ def _page(fh: BinaryIO, encoding: str, offset: int, limit: int, max_bytes: int) 
 
 _O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
-_FOLDER_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | _O_NOFOLLOW | _O_CLOEXEC
+# O_PATH where there is one: a folder on the way needs no read permission
+# (as with a path), only search.  A link opened so is ENOTDIR with O_DIRECTORY.
+_FOLDER_FLAGS = getattr(os, "O_PATH", os.O_RDONLY) | getattr(os, "O_DIRECTORY", 0) | _O_NOFOLLOW | _O_CLOEXEC
 #: Whether this system opens, makes, removes, renames and stats by folder
 #: descriptor (POSIX does; os.replace shares os.rename's).  Without it a
 #: write goes by path, as before.
@@ -593,23 +595,25 @@ _BY_FOLDER = bool(_O_NOFOLLOW) and {os.open, os.mkdir, os.unlink, os.rename, os.
 _SWAPPED = "a folder on the file's path was replaced after the path was checked; nothing outside the workspace was touched"
 
 
-def _contained_parts(root: str, key: str) -> tuple[list[str], str]:
-    """*key*'s folders below *root* and its own name.  Raises PermissionError
-    for a key that is not inside *root* (resolve() gives none)."""
-    rel = os.path.relpath(os.path.abspath(key), os.path.realpath(root))
+def _contained_parts(real_root: str, key: str) -> tuple[list[str], str]:
+    """*key*'s folders below *real_root* (a resolved path) and its own name.
+    Raises PermissionError for a key that is not inside it (resolve() gives
+    none)."""
+    rel = os.path.relpath(os.path.abspath(key), real_root)
     parts = rel.split(os.sep)
     if rel in (".", "") or os.path.isabs(rel) or any(p in ("", ".", "..") for p in parts):
         raise PermissionError("Refused: the file is not inside the workspace.")
     return parts[:-1], parts[-1]
 
 
-def _open_folder(root: str, folders: list[str], *, create: bool) -> int:
-    """A descriptor of the folder *folders* under *root*, opened one folder at a
-    time from the workspace's own, with no link followed; with *create*, a
-    missing folder is made.  Raises PermissionError (an OSError, as the file
-    tools expect) when a folder on the way is a link or not a folder: one was
-    swapped after resolve() checked the path."""
-    fd = os.open(os.path.realpath(root), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | _O_CLOEXEC)
+def _open_folder(real_root: str, folders: list[str], *, create: bool) -> int:
+    """A descriptor of the folder *folders* under *real_root*, opened one
+    folder at a time from the workspace's own, with no link followed; with
+    *create*, a missing folder is made.  A folder on the way that is a link
+    (swapped in after resolve() checked the path) raises PermissionError; one
+    that is a file raises NotADirectoryError, naming only that folder.  Both
+    are OSErrors, as the file tools expect."""
+    fd = os.open(real_root, _FOLDER_FLAGS & ~_O_NOFOLLOW)
     try:
         for part in folders:
             try:
@@ -622,11 +626,17 @@ def _open_folder(root: str, folders: list[str], *, create: bool) -> int:
                         os.mkdir(part, 0o777, dir_fd=fd)
                     child = os.open(part, _FOLDER_FLAGS, dir_fd=fd)
             except OSError as exc:
-                if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                if exc.errno not in (errno.ELOOP, errno.ENOTDIR):
+                    raise
+                try:
+                    is_link = stat_module.S_ISLNK(os.stat(part, dir_fd=fd, follow_symlinks=False).st_mode)
+                except OSError:
+                    is_link = True  # gone again: it was being swapped
+                if is_link:
                     raise PermissionError(f"Refused: {_SWAPPED}.") from None
-                raise
-            os.close(fd)
-            fd = child
+                raise NotADirectoryError(f"'{part}' on the file's path is not a folder.") from None
+            fd, parent = child, fd
+            os.close(parent)
         return fd
     except BaseException:
         os.close(fd)
@@ -652,9 +662,12 @@ def _replace_file(dir_fd: int | None, name: str, data: bytes) -> None:
         with os.fdopen(fd, "wb") as fh:
             fh.write(data)
             # Through the open file, not its name: the name could be
-            # swapped for a link before a chmod by name reached it.
+            # swapped for a link before a chmod by name reached it.  Only a
+            # file's own mode is kept: a link at the name is not followed.
             with contextlib.suppress(OSError):
-                os.fchmod(fh.fileno(), stat_module.S_IMODE(os.stat(name, dir_fd=dir_fd).st_mode))
+                st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+                if stat_module.S_ISREG(st.st_mode):
+                    os.fchmod(fh.fileno(), stat_module.S_IMODE(st.st_mode))
         os.replace(tmp, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
     except Exception:
         with contextlib.suppress(OSError):
@@ -733,8 +746,9 @@ class LocalWorkspaceIO:
         # renamed in that folder.  resolve() checked the path, but a folder
         # on it swapped for a link meanwhile (by a command still running in
         # the workspace) would otherwise carry the write outside it.
-        folder, name = _contained_parts(self.root, key)
-        dir_fd = _open_folder(self.root, folder, create=True)
+        real_root = os.path.realpath(self.root)
+        folder, name = _contained_parts(real_root, key)
+        dir_fd = _open_folder(real_root, folder, create=True)
         try:
             _replace_file(dir_fd, name, data)
         finally:
@@ -746,8 +760,9 @@ class LocalWorkspaceIO:
             os.unlink(key)
             return
         # As write(): only a file in the workspace's own folder is removed.
-        folder, name = _contained_parts(self.root, key)
-        dir_fd = _open_folder(self.root, folder, create=False)
+        real_root = os.path.realpath(self.root)
+        folder, name = _contained_parts(real_root, key)
+        dir_fd = _open_folder(real_root, folder, create=False)
         try:
             os.unlink(name, dir_fd=dir_fd)
         finally:
