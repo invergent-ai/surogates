@@ -158,9 +158,7 @@ async def test_a_command_that_ends_after_its_turn_wakes_the_chat_with_its_end(wa
     await chats.wake(chat)
     request = chats.requests[before]
     assert request[-1] == notification_note(ended)
-    assert request[-1]["content"].startswith(
-        f"[Background process {ended['agent_id']} finished with exit code 2: {command}]\nIts last output:\n```\n",
-    )
+    assert f"<summary>Background process {ended['agent_id']} finished with exit code 2: {command}</summary>" in request[-1]["content"]
     log = json.loads(next(m for m in chats.requests[-1] if m.get("tool_call_id") == "call_log")["content"])
     assert "compiling" in log["output"] and "built" in log["output"]
     # Once that turn has ended and nothing of the chat runs, the sandbox goes.
@@ -268,9 +266,9 @@ async def test_a_command_whose_sandbox_is_gone_or_cannot_tell_is_reported_so(api
         [ended] = await until(lambda: notifications(store, chat))
         assert ended == {
             "agent_id": "proc_gone", "kind": "process", "status": status, "summary": "make serve",
-            "result": "", "reason": reason,
+            "result": "", "reason": reason, "format": "task-notification",
         }
-        assert notification_note(ended)["content"] == f"[Background process proc_gone {said}]"
+        assert f"<summary>Background process proc_gone {said}</summary>" in notification_note(ended)["content"]
         # Nothing of it is kept: no sandbox is mapped to it.
         await until(lambda: asyncio.sleep(0, result=not watch.holds(str(chat))))
     finally:
