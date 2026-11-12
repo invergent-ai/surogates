@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import math
 import os
 import time
 from typing import TYPE_CHECKING, Any, Callable
@@ -103,11 +104,13 @@ MAX_LLM_RETRIES: int = 3
 
 #: Extra attempts for an engine whose queue is full (``is_engine_full``):
 #: they do not use up the call's ``MAX_LLM_RETRIES``.  An engine with no
-#: room for the request makes it wait for admission, then answers 503
-#: ("expired while waiting for admission"); a few seconds later it has
-#: room again more often than not.  Waits: the engine's Retry-After, else
-#: ``ENGINE_FULL_BACKOFF_BASE`` doubling up to ``ENGINE_FULL_BACKOFF_MAX``
-#: (5 + 10 + 20 + 40 + 60 + 60 s, plus jitter, at most).
+#: room for the request makes it wait for admission, then expires it ("expired
+#: while waiting for admission": an error event in the stream it opened with
+#: HTTP 200, or an HTTP 503 for a request that does not stream); a few seconds
+#: later it has room again more often than not.  Waits: the engine's
+#: Retry-After, else ``ENGINE_FULL_BACKOFF_BASE`` doubling up to
+#: ``ENGINE_FULL_BACKOFF_MAX`` (5 + 10 + 20 + 40 + 60 + 60 s, plus up to half
+#: again of jitter).
 MAX_ENGINE_FULL_RETRIES: int = 6
 ENGINE_FULL_BACKOFF_BASE: float = 5.0
 ENGINE_FULL_BACKOFF_MAX: float = 60.0
@@ -487,9 +490,13 @@ def extract_retry_after(exc: Exception) -> float | None:
         ra = headers.get("retry-after") or headers.get("Retry-After")
         if ra:
             try:
-                return min(float(ra), 120.0)  # Cap at 2 minutes
+                seconds = float(ra)
             except (TypeError, ValueError):
-                pass
+                seconds = None
+            # A wait that is no number of seconds (negative, NaN, infinite)
+            # is no Retry-After: the caller's backoff applies.
+            if seconds is not None and math.isfinite(seconds) and seconds > 0:
+                return min(seconds, 120.0)  # Cap at 2 minutes
     # From error body
     body = getattr(exc, "body", None)
     if isinstance(body, dict):
@@ -498,9 +505,11 @@ def extract_retry_after(exc: Exception) -> float | None:
             ra = error.get("retry_after")
             if ra is not None:
                 try:
-                    return min(float(ra), 120.0)
+                    seconds = float(ra)
                 except (TypeError, ValueError):
-                    pass
+                    seconds = None
+                if seconds is not None and math.isfinite(seconds) and seconds > 0:
+                    return min(seconds, 120.0)
     return None
 
 
@@ -639,6 +648,8 @@ async def call_llm_with_retry(
     Production-hardening features:
 
     - Jittered exponential backoff on transient errors (429, 500, 502, 503, 529)
+    - An engine with no room (``is_engine_full``) waited out as a stream, in
+      up to ``MAX_ENGINE_FULL_RETRIES`` attempts of its own
     - Fallback provider chain on 402 and repeated 429 via *activate_fallback*
     - Context-length error detection (400/413 with context-related phrases) --
       triggers context compression via *compress_context* callback

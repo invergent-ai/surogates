@@ -10,6 +10,7 @@ the session to non-streaming for good, waited in the queue a second time, and af
 
 from __future__ import annotations
 
+import asyncio
 import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -108,6 +109,48 @@ async def test_the_wait_is_bounded(monkeypatch):
     assert inner.await_count == attempts
 
 
+async def test_a_provider_503_with_a_retry_after_gets_the_engine_full_budget(monkeypatch):
+    full = _status_error(503, headers={"retry-after": "2"})
+    (msg, _), inner, waits, _ = await _call([full] * (MAX_LLM_RETRIES + 1) + [GOOD], monkeypatch)
+    assert msg["content"] == "gata"
+    assert waits == [2.0] * (MAX_LLM_RETRIES + 1)
+
+
+@pytest.mark.parametrize("value", ["-3", "nan", "inf", "0", "soon"])
+def test_a_retry_after_that_is_no_wait_is_ignored(value):
+    assert llm_call.extract_retry_after(_status_error(503, headers={"retry-after": value})) is None
+    assert not is_engine_full(_status_error(503, headers={"retry-after": value}))
+
+
+async def test_a_stop_during_the_wait_ends_it(monkeypatch):
+    """With the real sleep: a stop while waiting for the engine ends the call, not the wait's end."""
+    monkeypatch.setattr(llm_call, "ENGINE_FULL_BACKOFF_BASE", 30.0)
+    inner = AsyncMock(side_effect=[_stream_error(), GOOD])
+    monkeypatch.setattr(llm_call, "call_llm_streaming_inner", inner)
+    stop_at = asyncio.get_running_loop().time() + 0.3
+    msg, usage = await asyncio.wait_for(call_llm_with_retry(
+        session=_session(), create_kwargs={"model": "m", "messages": []}, iteration=1,
+        llm_client=MagicMock(), store=AsyncMock(), streaming_enabled=True,
+        interrupt_check=lambda: asyncio.get_running_loop().time() > stop_at,
+        activate_fallback=lambda: False, get_current_model=lambda: None, set_streaming_enabled=lambda _on: None,
+    ), timeout=10)
+    assert inner.await_count == 1
+    assert usage["finish_reason"] == "interrupted"
+
+
+async def test_past_the_bound_a_fallback_provider_is_still_tried(monkeypatch):
+    switched = []
+
+    def fallback():
+        switched.append(True)
+        return len(switched) == 1
+
+    with pytest.raises(Exception):
+        await _call([_stream_error()] * (MAX_ENGINE_FULL_RETRIES + MAX_LLM_RETRIES), monkeypatch, fallback=fallback)
+    # The usual last resort is reached once the engine-full budget and the call's attempts are spent, as before.
+    assert switched == [True]
+
+
 async def test_a_stop_ends_the_wait(monkeypatch):
     checks = iter([False])  # running at the first attempt, stopped by the next
     (_msg, usage), inner, _, _ = await _call([_stream_error(), GOOD], monkeypatch, interrupt_check=lambda: next(checks, True))
@@ -151,6 +194,26 @@ class _FullEngine:
             "id": "c1", "object": "chat.completion", "created": 0, "model": "m",
             "choices": [{"index": 0, "message": {"role": "assistant", "content": "gata"}, "finish_reason": "stop"}],
         })
+
+
+async def test_a_session_that_does_not_stream_waits_out_the_engines_503(monkeypatch):
+    engine = _FullEngine(5)
+    client = AsyncOpenAI(
+        base_url="http://engine.test/v1", api_key="x", max_retries=0,
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(engine.handle)),
+    )
+
+    async def no_wait(_seconds, _interrupt_check):
+        return None
+
+    monkeypatch.setattr(llm_call, "interruptible_sleep", no_wait)
+    msg, _usage = await call_llm_with_retry(
+        session=_session(), create_kwargs={"model": "m", "messages": [{"role": "user", "content": "hi"}]},
+        iteration=1, llm_client=client, store=AsyncMock(), streaming_enabled=False, interrupt_check=lambda: False,
+        activate_fallback=lambda: False, get_current_model=lambda: None, set_streaming_enabled=lambda _on: None,
+    )
+    assert msg["content"] == "gata"
+    assert engine.requests == [False] * 6
 
 
 @pytest.mark.parametrize("full", [1, 4])
