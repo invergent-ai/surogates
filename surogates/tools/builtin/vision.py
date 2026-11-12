@@ -8,7 +8,7 @@ import binascii
 import json
 import logging
 import mimetypes
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
@@ -229,25 +229,7 @@ async def _image_ref_to_data_url(
         return _to_data_url(data, mime_type), "url"
 
     if workspace_io is not None:
-        try:
-            key = await workspace_io.resolve(image_ref)
-            found = await workspace_io.stat(key)
-            if found is None or found.is_dir:
-                raise ValueError(f"Image file not found: {image_ref}")
-            if found.size > _MAX_IMAGE_BYTES:
-                raise ValueError(
-                    f"Image file is too large: {found.size} bytes exceeds {_MAX_IMAGE_BYTES}"
-                )
-            # No further than the cap: the file may have grown since its stat.
-            data = await workspace_io.read(key, max_bytes=_MAX_IMAGE_BYTES + 1)
-        except (OSError, DeviceOperationError) as exc:
-            raise ValueError(f"Could not read image {image_ref}: {said(exc)}") from None
-        if len(data) > _MAX_IMAGE_BYTES:
-            raise ValueError(f"Image file is too large: over {_MAX_IMAGE_BYTES} bytes")
-        mime_type = _detect_mime_type(data, fallback=mimetypes.guess_type(key)[0] or "")
-        if mime_type not in _SUPPORTED_MIME_TYPES:
-            raise ValueError(f"Unsupported image MIME type: {mime_type or 'unknown'}")
-        return _to_data_url(data, mime_type), "workspace_file"
+        return await _image_from_workspace_io(workspace_io, image_ref)
 
     if storage is not None and session_id is not None:
         storage_bucket = (session_config or {}).get("storage_bucket")
@@ -282,16 +264,34 @@ async def _image_ref_to_data_url(
                 raise ValueError(f"Unsupported image MIME type: {mime_type or 'unknown'}")
             return _to_data_url(data, mime_type), "workspace_file"
 
-    path = Path(validate_path(workspace_path, image_ref))
-    if not path.is_file():
-        raise ValueError(f"Image file not found: {image_ref}")
-    size = path.stat().st_size
-    if size > _MAX_IMAGE_BYTES:
-        raise ValueError(
-            f"Image file is too large: {size} bytes exceeds {_MAX_IMAGE_BYTES}"
-        )
-    data = path.read_bytes()
-    mime_type = _detect_mime_type(data, fallback=mimetypes.guess_type(path.name)[0] or "")
+    # A file of this host's workspace, read as its own WorkspaceIO reads it:
+    # reached from the workspace one folder at a time with no link followed
+    # (#655), so a folder swapped for a link after the path check can neither
+    # make it read a file outside the workspace nor tell that file's size.
+    from surogates.tools.workspace_io.local import LocalWorkspaceIO
+
+    validate_path(workspace_path, image_ref)  # refused as before: no workspace, or out of it
+    return await _image_from_workspace_io(LocalWorkspaceIO(workspace_path), image_ref)
+
+
+async def _image_from_workspace_io(workspace_io: Any, image_ref: str) -> tuple[str, str]:
+    """*image_ref*, a file of the workspace *workspace_io* reaches, as a data URL."""
+    try:
+        key = await workspace_io.resolve(image_ref)
+        found = await workspace_io.stat(key)
+        if found is None or found.is_dir:
+            raise ValueError(f"Image file not found: {image_ref}")
+        if found.size > _MAX_IMAGE_BYTES:
+            raise ValueError(
+                f"Image file is too large: {found.size} bytes exceeds {_MAX_IMAGE_BYTES}"
+            )
+        # No further than the cap: the file may have grown since its stat.
+        data = await workspace_io.read(key, max_bytes=_MAX_IMAGE_BYTES + 1)
+    except (OSError, DeviceOperationError) as exc:
+        raise ValueError(f"Could not read image {image_ref}: {said(exc)}") from None
+    if len(data) > _MAX_IMAGE_BYTES:
+        raise ValueError(f"Image file is too large: over {_MAX_IMAGE_BYTES} bytes")
+    mime_type = _detect_mime_type(data, fallback=mimetypes.guess_type(key)[0] or "")
     if mime_type not in _SUPPORTED_MIME_TYPES:
         raise ValueError(f"Unsupported image MIME type: {mime_type or 'unknown'}")
     return _to_data_url(data, mime_type), "workspace_file"
