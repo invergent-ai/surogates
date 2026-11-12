@@ -71,12 +71,9 @@ async def _start_thread_handler(arguments: dict[str, Any], **kwargs: Any) -> str
     master = await session_store.get_session(UUID(str(kwargs["session_id"])))
     if not is_project_master(master.config):
         return _error("Only a project's coordinator starts threads.")
-    # Not offered in a project on a computer: refused all the same, should its model name it.
-    if device_of(master.config) is not None:
-        return _error(
-            "This project works in a folder on the user's computer, so its threads start there: propose this one "
-            'with agent, propose=true and where: "device", and the user starts it from its card.'
-        )
+    device_id = device_of(master.config)
+    if device_id is not None:
+        return await _start_on_computer(master, device_id, texts, **kwargs)
     thread = await start_thread(
         session_store=session_store,
         session_factory=kwargs["session_factory"],
@@ -88,6 +85,38 @@ async def _start_thread_handler(arguments: dict[str, Any], **kwargs: Any) -> str
     if thread is None:
         return _error("This project is archived.")
     return json.dumps({"thread_id": str(thread.id), "title": texts["title"], "status": "started"})
+
+
+async def _start_on_computer(master: Any, device_id: UUID, texts: dict[str, str], **kwargs: Any) -> str:
+    """Make a thread of *master*'s project, which works on the user's computer *device_id*, and ask that computer to
+    set up the thread's copy of the project's folder: the thread begins once it answers (``thread_bound``)."""
+    import secrets
+
+    from surogates.devices.operations import DeviceOperations
+    from surogates.workstreams.store import WorkstreamStore
+    from surogates.workstreams.threads import make_thread
+
+    session_factory = kwargs["session_factory"]
+    name = master.config["execution"].get("device_name")
+    computer = name or "the user's computer"
+    if await WorkstreamStore(session_factory).lost({master.id: device_id}):
+        return _error(
+            f"This project's folder can no longer be reached on {computer}: tell the user to open the project in "
+            "Surogate Desktop on the computer it should work on and choose Use this computer for this project."
+        )
+    folder = master.config["workspace_path"]
+    thread = await make_thread(
+        session_store=kwargs["session_store"], session_factory=session_factory, master=master,
+        live_config=kwargs.get("session_config"), title=texts["title"], device_id=device_id, device_name=name,
+        folder=folder, start=texts["goal"],
+    )
+    if thread is None:
+        return _error("This project is archived.")
+    await DeviceOperations(session_factory, kwargs["redis"]).bind(
+        session_id=thread.id, device_id=device_id, folder=folder, nonce=secrets.token_urlsafe(32),
+        history=thread.id, master=master.id,
+    )
+    return json.dumps({"thread_id": str(thread.id), "title": texts["title"], "status": "waiting", "computer": computer})
 
 
 async def _own_thread(thread_id: str, **kwargs: Any) -> Any:

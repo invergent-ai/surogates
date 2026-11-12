@@ -251,7 +251,7 @@ async def made_before_copies(api, device_id: str) -> tuple[dict, object, object]
     store = api.app.state.session_store
     thread = await make_thread(
         session_store=store, session_factory=api.app.state.session_factory, master=master, live_config=None,
-        title="Check the totals", device=SimpleNamespace(id=UUID(device_id), name="Flavius's ThinkPad"), folder=FOLDER,
+        title="Check the totals", device_id=UUID(device_id), device_name="Flavius's ThinkPad", folder=FOLDER,
         card={"proposal_id": proposal_id, "key": "1"},
     )
     await store.update_session_config_key(

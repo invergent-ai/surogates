@@ -912,7 +912,8 @@ async def start_proposed_thread(
         else:
             thread = await make_thread(
                 session_store=state.session_store, session_factory=state.session_factory, master=master,
-                live_config=None, title=card["title"], device=device, folder=body.execution.folder, card=proposal,
+                live_config=None, title=card["title"], device_id=device.id, device_name=device.name,
+                folder=body.execution.folder, card=proposal,
             )
             if thread is not None:
                 await DeviceOperations(state.session_factory, redis).bind(

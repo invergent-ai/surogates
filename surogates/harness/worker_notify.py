@@ -265,6 +265,7 @@ async def notify_parent_on_failure(
     not_taken: list[str] | None = None,
     set_aside: dict[str, Any] | None = None,
     delegated: bool = False,
+    title: str | None = None,
 ) -> None:
     """Emit a ``WORKER_FAILED`` event into the parent session and re-enqueue it.
 
@@ -275,6 +276,7 @@ async def notify_parent_on_failure(
     *not_taken*, the helpers' files its copy did not take up, as a landing
     reports them; and a thread on the user's computer what its computer set
     aside of its work since its last report, as a completed turn reports it.
+    A thread that never began has no row to read its *title* from: it is given.
     """
     try:
         payload: dict[str, Any] = {
@@ -285,7 +287,7 @@ async def notify_parent_on_failure(
         }
         if delegated:
             payload["delegated"] = True
-        title = await _thread_title(session_factory, worker_session_id)
+        title = title or await _thread_title(session_factory, worker_session_id)
         if title is not None:
             payload["title"] = title
             if not_taken:

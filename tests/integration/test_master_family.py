@@ -24,7 +24,6 @@ from surogates.session.events import EventType
 from surogates.workstreams.threads import begin_thread, make_thread
 
 from .test_devices import api  # noqa: F401  (a fixture)
-from .test_projects_on_a_computer import held, on_computer
 from .test_workstream_threads import call_tool, children_of, events_of
 from .test_workstreams import create, master_of
 
@@ -85,17 +84,6 @@ async def test_a_master_lists_and_reads_its_threads(api):
     read = await call_tool(api, master, "list_agents", agent_id=str(thread.id))
     assert read["agent_id"] == str(thread.id) and read["description"] == "Draft A"
     assert {"report", "question"} <= set(read)
-
-
-async def test_a_master_on_a_computer_must_propose(api):
-    project, _ = await on_computer(api)
-    master = await master_of(api, project)
-    refused = await held(api, master, "agent", description="Draft A", prompt="Draft the A memo as A.docx.")
-    assert "propose" in refused["error"] and 'where: "device"' in refused["error"], refused
-    assert await children_of(api, master) == []
-    proposed = await held(api, master, "agent", description="Draft A", prompt="Draft the A memo.", propose=True,
-                          where="device")
-    assert proposed["status"] == "proposed", proposed
 
 
 async def test_a_masters_thread_takes_no_fork_type_or_name(api):

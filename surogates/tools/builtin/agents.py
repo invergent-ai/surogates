@@ -844,10 +844,8 @@ async def fork_seed(session_store: Any, parent: Any, tool_call_id: str | None) -
 
 
 #: What a thread's start returns after its id.
-THREAD_STARTED_NOTE = (
-    "It works as a thread of this project. Its report reaches you when its turn ends; until then, do not do its "
-    "work yourself."
-)
+_ITS_REPORT = "Its report reaches you when its turn ends; until then, do not do its work yourself."
+THREAD_STARTED_NOTE = f"It works as a thread of this project. {_ITS_REPORT}"
 #: What a project-only argument answers outside a project's master.
 #: What a session that is no project's master is told of a thread's arguments, and what to do instead.
 _NOT_A_MASTER_PROPOSES = "only a project's master proposes threads: leave out propose and where to start a sub-agent"
@@ -889,6 +887,14 @@ async def _master_agent(arguments: dict[str, Any], **kwargs: Any) -> str:
     answer = _thread_answer(await threads._start_thread_handler({"title": title, "goal": goal}, **kwargs))
     if "error" in answer:
         return _error(_in_the_familys_words(answer["error"]))
+    if answer.get("status") == "waiting":
+        # A thread on the user's computer begins once that computer sets up its copy of the project's folder.
+        computer = answer.pop("computer")
+        note = (
+            f"It starts once {computer} sets up its copy of the project's folder, as soon as that computer is "
+            f"online; you hear when it starts, or why it could not. {_ITS_REPORT}"
+        )
+        return json.dumps({**answer, "note": note}, ensure_ascii=False)
     return json.dumps({**answer, "status": "running", "note": THREAD_STARTED_NOTE}, ensure_ascii=False)
 
 

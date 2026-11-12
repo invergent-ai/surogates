@@ -17,6 +17,8 @@ from surogates.devices.binding import Binding
 from surogates.devices.store import DeviceStore
 from surogates.workstreams.store import WorkstreamStore
 from surogates.session.events import EventType
+from surogates.harness.agent_news import NEW_FORMAT
+from surogates.harness.loop_context_replay import worker_news
 
 from .test_devices import (  # noqa: F401  (api is a fixture)
     AGENT_ID,
@@ -28,7 +30,7 @@ from .test_devices import (  # noqa: F401  (api is a fixture)
     register,
 )
 from .test_local_threads import begin, confirmed, journal, make_local
-from .test_workstream_threads import PROPOSED, call_tool, children_of, events_of, proposing
+from .test_workstream_threads import PROPOSED, call_tool, children_of, events_of, proposing, queued
 from .test_workstreams import create, master_of, system_prompt, turn_calling
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -133,16 +135,83 @@ async def test_a_computer_projects_coordinator_has_a_chats_tools_on_its_folder_a
     assert not sent & {"web_search", "browser_navigate", "create_artifact", "run_coding_agent"}
 
 
-async def test_a_computer_projects_coordinator_starts_no_thread_itself(api):
-    project, _ = await on_computer(api)
+async def a_waiting_thread(api) -> tuple[dict, dict, object, object]:
+    """A computer project whose master, bound to its folder there, has just started a thread: the project, its
+    computer, its master and the thread, which waits for that computer."""
+    project, device = await on_computer(api)
+    await answer_bind(api, device)
     master = await master_of(api, project)
-    result = await held(api, master, "agent", description="Draft A", prompt="Draft the A memo as A.docx.")
-    assert result == {"error": (
-        "This project works in a folder on the user's computer, so its threads start there: propose this one "
-        'with agent, propose=true and where: "device", and the user starts it from its card.'
-    )}
-    assert await children_of(api, master) == []
+    answer = await held(api, master, "agent", description="Draft A", prompt="Draft the A memo as A.docx.")
+    assert (answer["status"], answer["description"]) == ("waiting", "Draft A"), answer
+    assert COMPUTER in answer["note"], answer
+    return project, device, master, await api.app.state.session_store.get_session(UUID(answer["agent_id"]))
+
+
+async def test_a_master_starts_a_thread_on_the_projects_computer(api):
+    project, device, master, thread = await a_waiting_thread(api)
+    # In a copy of its own of the project's folder, as every computer thread works.
+    assert (thread.parent_id, thread.config["execution"]["history"], thread.config["workspace_path"]) == (
+        master.id, {"thread": str(thread.id)}, FOLDER,
+    )
+    # The computer is asked to set that copy up for the thread, in the master's name: no page confirmed it.
+    [bind] = await journal(api).pending(UUID(device["id"]), 1)
+    nonce = bind.args.pop("nonce")
+    assert isinstance(nonce, str) and len(nonce) >= 32
+    assert (bind.kind, bind.root_session_id, bind.args) == (
+        "bind", thread.id, {"folder": FOLDER, "history": {"thread": str(thread.id)}, "master": str(master.id)},
+    )
+    # Not begun: no goal, no news for the master, nothing runs it, and no row lists it.
+    assert await events_of(api, thread.id) == []
     assert await events_of(api, master.id, EventType.WORKER_SPAWNED) == []
+    assert not await queued(api, thread)
+    assert (await api.client.get(f"/v1/workstreams/{project['id']}/threads", headers=api.auth())).json() == []
+
+
+async def test_the_thread_begins_once_its_computer_binds_it(api):
+    project, device, master, thread = await a_waiting_thread(api)
+    ops = journal(api)
+    [bind] = await ops.pending(UUID(device["id"]), 1)
+    bound = {"ok": {"history": {"thread": str(thread.id)}}}
+    # A reconnect sends the answer again: the thread begins once.
+    assert [await ops.complete(UUID(device["id"]), 1, bind.id, bind.digest, bound) for _ in range(2)] == [
+        "completed", "duplicate",
+    ]
+    [goal] = await events_of(api, thread.id, EventType.USER_MESSAGE)
+    assert goal.data == {"content": "Draft the A memo as A.docx."}
+    [spawned] = await events_of(api, master.id, EventType.WORKER_SPAWNED)
+    assert spawned.data == {
+        "worker_id": str(thread.id), "title": "Draft A", "goal": "Draft the A memo as A.docx.", "bound": True,
+        "format": NEW_FORMAT,
+    }
+    # The master hears it started, at its next model request.
+    heard = worker_news(spawned.type, spawned.data)["content"]
+    assert '<status>started</status>' in heard and '"Draft A"' in heard, heard
+    assert await queued(api, thread)
+    listed = (await api.client.get(f"/v1/workstreams/{project['id']}/threads", headers=api.auth())).json()
+    assert [row["id"] for row in listed] == [str(thread.id)]
+
+
+async def test_a_refused_bind_tells_the_master_the_thread_failed(api):
+    _, device, master, thread = await a_waiting_thread(api)
+    refusal = "This folder was not confirmed on this computer"
+    await answer_bind(api, device, {"error": {"type": "binding", "message": refusal}})
+    [failed] = await events_of(api, master.id, EventType.WORKER_FAILED)
+    assert (failed.data["worker_id"], failed.data["title"], failed.data["format"]) == (str(thread.id), "Draft A", NEW_FORMAT)
+    assert COMPUTER in failed.data["error"] and refusal in failed.data["error"], failed.data
+    assert "update Surogate Desktop" in failed.data["error"], failed.data
+    # Nothing begins, and the master is woken to hear it.
+    assert (await api.app.state.session_store.get_session(thread.id)).status == "archived"
+    assert await events_of(api, thread.id) == []
+    assert not await queued(api, thread) and await queued(api, master)
+
+
+async def test_a_master_whose_projects_folder_is_lost_starts_no_thread(api):
+    project, device = await on_computer(api)
+    await answer_bind(api, device, {"error": {"type": "binding", "message": "The folder is gone"}})
+    master = await master_of(api, project)
+    refused = await held(api, master, "agent", description="Draft A", prompt="Draft the A memo as A.docx.")
+    assert "Use this computer for this project" in refused["error"], refused
+    assert await children_of(api, master) == []
 
 
 async def test_a_computer_projects_coordinator_proposes_every_thread_for_its_folder(api):

@@ -66,7 +66,7 @@ async def made_with_copy(api, device_id: str) -> tuple[dict, object, object]:
     project, master, proposal_id = await device_card(api)
     thread = await make_thread(
         session_store=api.app.state.session_store, session_factory=api.app.state.session_factory, master=master,
-        live_config=None, title="Check the totals", device=SimpleNamespace(id=UUID(device_id), name="Flavius's ThinkPad"),
+        live_config=None, title="Check the totals", device_id=UUID(device_id), device_name="Flavius's ThinkPad",
         folder=FOLDER, card={"proposal_id": proposal_id, "key": "1"},
     )
     return project, master, thread

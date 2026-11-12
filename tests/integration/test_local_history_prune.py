@@ -14,7 +14,6 @@ from __future__ import annotations
 import asyncio
 import time
 from datetime import UTC, datetime, timedelta
-from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
@@ -105,7 +104,7 @@ async def begun_on(api, device_id: str, folder: str = FOLDER):
     project, master, proposal = await device_card(api)
     thread = await make_thread(
         session_store=api.app.state.session_store, session_factory=api.app.state.session_factory, master=master, live_config=None,
-        title="Check the totals", device=SimpleNamespace(id=UUID(device_id), name="Flavius's ThinkPad"), folder=folder,
+        title="Check the totals", device_id=UUID(device_id), device_name="Flavius's ThinkPad", folder=folder,
         card={"proposal_id": proposal, "key": "1"},
     )
     async with api.app.state.session_factory() as db:

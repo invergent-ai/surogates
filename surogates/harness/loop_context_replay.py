@@ -521,6 +521,8 @@ def _framed_worker_note(event_type: str, data: dict) -> dict:
     error = data.get("error") or "unknown error"
     failed = event_type == EventType.WORKER_FAILED.value
     named = f"Thread {json.dumps(title, ensure_ascii=False)}"
+    if event_type == EventType.WORKER_SPAWNED.value and data.get("bound"):
+        return frame(task_id=worker_id, status="started", summary=f"{named} started, in its copy of the project's folder")
     if event_type == EventType.WORKER_SPAWNED.value:
         return frame(task_id=worker_id, status="started", summary=f"{named} was started by the user from its card")
     if title is None:
@@ -617,7 +619,7 @@ def worker_news(event_type: str, data: dict, answered: frozenset[str] = frozense
         return None
     if event_type != EventType.WORKER_SPAWNED.value:
         return worker_note(event_type, data)
-    if data.get("started_by") != "user":
+    if data.get("started_by") != "user" and not data.get("bound"):
         return None
     if data.get("format") == NEW_FORMAT:
         return _framed_worker_note(event_type, data)
