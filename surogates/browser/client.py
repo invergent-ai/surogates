@@ -25,27 +25,46 @@ _UPLOAD_DIR = "/tmp/surogates-uploads"
 _UPLOAD_MAX_BYTES = 2 * 1024**3
 _UPLOAD_SECONDS = 900
 
-# A page that opens a file picker gets no desktop dialog: Playwright holds the picker for the
-# next upload to answer. Armed once per page, on every navigation.
-_ARM_FILE_PICKER = (
-    "if (!page.__sgPickerArmed) { page.__sgPickerArmed = true;"
-    " page.on('filechooser', (fc) => { page.__sgPicker = fc; }); }\n"
-)
+# A page that opens a file picker gets no desktop dialog: the picker's input is kept for the next
+# upload to fill. This lives in the page's own JavaScript, not in a Playwright listener, because the
+# kernel attaches Playwright only for the length of one call. Armed again after every navigation
+# and before every click, since a full page load starts a fresh window.
+_ARM_FILE_PICKER = """
+for (const f of page.frames()) await f.evaluate(() => {
+  if (window.__sgPickArmed) return;
+  window.__sgPickArmed = true;
+  const hold = (el) => { if (!el.isConnected) { el.hidden = true; document.documentElement.append(el); } window.__sgFileInput = el; };
+  document.addEventListener("click", (e) => {
+    const t = e.composedPath()[0];
+    if (t instanceof HTMLInputElement && t.type === "file") { e.preventDefault(); hold(t); }
+  }, true);
+  const click = HTMLInputElement.prototype.click, show = HTMLInputElement.prototype.showPicker;
+  // A detached input's click never reaches the document, so it is caught here.
+  HTMLInputElement.prototype.click = function () { return this.type === "file" && !this.isConnected ? hold(this) : click.call(this); };
+  if (show) HTMLInputElement.prototype.showPicker = function () { return this.type === "file" ? hold(this) : show.call(this); };
+}, undefined, false).catch(() => null);   // false: the page's own world (Patchright isolates evaluate by default)
+"""
 
-_SET_FILES_SCRIPT = _ARM_FILE_PICKER + """
+_SET_FILES_SCRIPT = """
 const paths = __PATHS__;
-const picker = page.__sgPicker;
-page.__sgPicker = null;
-let target = picker ? picker.element() : null, to = "the file picker the page opened";
-if (!target) {
-  const inputs = [];
-  for (const f of page.frames()) {
-    try { inputs.push(...(await f.$$('input[type=file]'))); } catch (e) {}
-  }
-  if (!inputs.length) return {error: "no_file_input"};
-  target = inputs[inputs.length - 1];
-  to = "the page's file input";
+const frames = page.frames();   // the main frame first
+let target = null, to = "the file picker the page opened";
+for (const f of frames) {
+  const h = await f.evaluateHandle(() => { const e = window.__sgFileInput; window.__sgFileInput = null; return e && e.isConnected ? e : null; }, undefined, false).catch(() => null);
+  if (h && h.asElement()) { target = h.asElement(); break; }
 }
+// No picker opened: the page's own file input, in the main frame before any embedded frame
+// (a chat widget's input must not take the post's video), preferring one that takes images or video.
+for (const f of target ? [] : frames) {
+  const inputs = await f.$$('input[type=file]').catch(() => []);
+  if (!inputs.length) continue;
+  const media = [];
+  for (const i of inputs) if (await i.evaluate((e) => !e.accept || /image|video|\\*/.test(e.accept))) media.push(i);
+  target = (media.length ? media : inputs).at(-1);
+  to = "the page's file input";
+  break;
+}
+if (!target) return {error: "no_file_input"};
 // Playwright will not hand a browser it calls remote more than 50 MB, though the files are on the
 // browser's own disk: the DevTools protocol gives it their paths, and the browser reads them itself.
 const mark = "sg" + Math.random().toString(36).slice(2);
@@ -117,6 +136,7 @@ let __timer = null;
 try {{
   await Promise.race([
     (async () => {{
+{_ARM_FILE_PICKER}
 {body}
     }})(),
     new Promise((_, reject) => {{
@@ -515,10 +535,9 @@ return {
     async def navigate(self, url: str, *, wait_until: str = "load") -> dict[str, Any]:
         """Navigate to a URL and return the final URL and title."""
 
-        code = _ARM_FILE_PICKER + (
+        code = (
             "await page.goto({url!r}, {{waitUntil: {wait_until!r}}});\n"
-            "return {{ url: page.url(), title: await page.title() }};"
-        ).format(url=url, wait_until=wait_until)
+        ).format(url=url, wait_until=wait_until) + _ARM_FILE_PICKER + "return { url: page.url(), title: await page.title() };"
         result = await self._playwright_execute(code)
         self._invalidate_snapshot_cache()
         return result
@@ -530,21 +549,22 @@ return {
         so a video of a gigabyte costs the worker nothing. The files go to the file picker the
         page last opened, else to the page's last file input.
         """
-        paths = []
-        for at, url in enumerate(urls):
+        async def fetch(at: int, url: str) -> str:
             # Its own folder, so the page sees the file's own name.
             folder = f"{_UPLOAD_DIR}/{uuid4().hex[:12]}"
             dest = f"{folder}/{_upload_name(url, at)}"
             # The browser runs as its own user: the folder and the file must be readable by it.
+            # Uploads older than a day are cleared first; the page has long since read them.
             response = await self._http.post(
                 "/process/exec",
                 json={
                     "command": "sh",
                     "args": [
                         "-c",
+                        'find "$6" -mindepth 1 -maxdepth 1 -mmin +1440 -exec rm -rf {} + 2>/dev/null; '
                         'mkdir -p -m 1777 "$1" && curl -fsSL --proto =http,https --max-time "$4" '
                         '--max-filesize "$5" -o "$2" "$3" && chmod 0644 "$2"',
-                        "sh", folder, dest, url, str(_UPLOAD_SECONDS), str(_UPLOAD_MAX_BYTES),
+                        "sh", folder, dest, url, str(_UPLOAD_SECONDS), str(_UPLOAD_MAX_BYTES), _UPLOAD_DIR,
                     ],
                     "timeout_sec": _UPLOAD_SECONDS + 30,
                 },
@@ -555,9 +575,11 @@ return {
             if body.get("exit_code") != 0:
                 why = base64.b64decode(body.get("stderr_b64") or b"").decode(errors="replace").strip()
                 raise RuntimeError(f"Could not download {url}: {why[:300] or 'curl exit ' + str(body.get('exit_code'))}")
-            paths.append(dest)
+            return dest
+
+        paths = await asyncio.gather(*(fetch(at, url) for at, url in enumerate(urls)))
         result = await self._playwright_execute(
-            _SET_FILES_SCRIPT.replace("__PATHS__", json.dumps(paths)), timeout_sec=120,
+            _SET_FILES_SCRIPT.replace("__PATHS__", json.dumps(list(paths))), timeout_sec=120,
         )
         self._invalidate_snapshot_cache()
         if not isinstance(result, dict) or result.get("error"):

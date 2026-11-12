@@ -111,7 +111,9 @@ async def test_the_browser_downloads_each_link_then_the_page_gets_them() -> None
         assert url not in script and link == url and "--proto =http,https" in script and "chmod 0644" in script
         assert folder.startswith("/tmp/surogates-uploads/") and dest == f"{folder}/{name}"
     [script] = [json.loads(r.content)["code"] for r in seen if r.url.path == "/playwright/execute"]
-    assert "page.on('filechooser'" in script and "/tmp/surogates-uploads/" in script and "DOM.setFileInputFiles" in script
+    assert "window.__sgFileInput" in script and "/tmp/surogates-uploads/" in script and "DOM.setFileInputFiles" in script
+    # Old uploads are cleared from the browser's disk on the way in.
+    assert all(d["args"][-1] == "/tmp/surogates-uploads" and "-mmin +1440" in d["args"][1] for d in downloads)
 
 
 async def test_a_link_that_cannot_be_downloaded_stops_before_the_page() -> None:
@@ -129,8 +131,17 @@ async def test_a_page_with_no_file_input_says_to_open_its_upload_control() -> No
             await client.set_input_files_from_urls(["https://h/a.png"])
 
 
-async def test_every_navigation_holds_the_pages_file_picker() -> None:
+async def test_every_navigation_holds_the_pages_file_picker_in_the_page_itself() -> None:
     client, seen = rig(result={"url": "https://x.com/compose/post", "title": "X"})
     async with client:
         await client.navigate("https://x.com/compose/post")
-    assert "page.on('filechooser'" in json.loads(seen[0].content)["code"]
+    code = json.loads(seen[0].content)["code"]
+    # Kept by the page's JavaScript, since Playwright is attached for one call only; armed after the load.
+    assert "page.on('filechooser'" not in code and code.index("page.goto") < code.index("__sgPickArmed")
+
+
+def test_every_click_arms_the_file_picker_first() -> None:
+    from surogates.browser.client import _bounded_click
+
+    code = _bounded_click("await page.mouse.click(1, 2);")
+    assert code.index("__sgPickArmed") < code.index("page.mouse.click")
