@@ -602,6 +602,10 @@ _BY_FOLDER = (
 _SWAPPED = "a folder on the file's path was replaced after the path was checked; nothing outside the workspace was touched"
 
 
+class LinkOnPath(PermissionError):
+    """The walk met a link at a name or on the way to it: refused, never followed."""
+
+
 def _contained_parts(real_root: str, key: str) -> tuple[list[str], str]:
     """*key*'s folders below *real_root* (a resolved path) and its own name.
     Raises PermissionError for a key that is not inside it (resolve() gives
@@ -645,7 +649,7 @@ def _open_folder(real_root: str, folders: list[str], *, create: bool) -> int:
                 except OSError:
                     is_link = True  # gone again: it was being swapped
                 if is_link:
-                    raise PermissionError(errno.EACCES, f"Refused: {_SWAPPED}.") from None
+                    raise LinkOnPath(errno.EACCES, f"Refused: {_SWAPPED}.") from None
                 # As a path gave it: a write that would make the folder finds a
                 # file there (EEXIST), any other call a path through a file.
                 said = f"'{part}' on the file's path is not a folder."
@@ -742,12 +746,12 @@ def _open_in(real_root: str, key: str, flags: int) -> int:
                 raise
             if is_link:
                 os.close(fd)
-                raise PermissionError(errno.EACCES, f"Refused: {_SWAPPED}.")
+                raise LinkOnPath(errno.EACCES, f"Refused: {_SWAPPED}.")
             return fd
         except OSError as exc:
             if name is not None and exc.errno == errno.ELOOP:
                 # O_NOFOLLOW met a link at the name itself.
-                raise PermissionError(errno.EACCES, f"Refused: {_SWAPPED}.") from None
+                raise LinkOnPath(errno.EACCES, f"Refused: {_SWAPPED}.") from None
             if name is not None and exc.errno == errno.ENOTDIR:
                 try:
                     mode = os.stat(name, dir_fd=dir_fd, follow_symlinks=False).st_mode
@@ -758,7 +762,7 @@ def _open_in(real_root: str, key: str, flags: int) -> int:
                 except OSError:
                     is_link = True  # gone again: it was being swapped
                 if is_link:
-                    raise PermissionError(errno.EACCES, f"Refused: {_SWAPPED}.") from None
+                    raise LinkOnPath(errno.EACCES, f"Refused: {_SWAPPED}.") from None
             raise
     finally:
         os.close(dir_fd)
