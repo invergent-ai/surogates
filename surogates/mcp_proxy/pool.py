@@ -97,14 +97,50 @@ def _note_failed_attempt(entry: "PoolEntry", failed: dict[str, str]) -> None:
 _RELIST_MIN_INTERVAL = 5.0
 
 
-def _definition_digest(tool: Any) -> str:
-    """A registered MCP tool's definition as the proxy scans it (description,
-    parameters, annotations), as a digest: equal while it is unchanged."""
-    schema = tool.schema
+def _flat_schemas(registry: Any) -> list[dict[str, Any]]:
+    """The tools of *registry* in the proxy's flat shape (``name``,
+    ``description``, ``parameters``, and ``annotations`` when set)."""
+    # ``ToolRegistry.get_schemas`` emits OpenAI's nested
+    # ``{"type":"function","function":{"name",...}}`` shape; the
+    # rest of this method (and the ``/mcp/v1/tools/list`` route
+    # contract) work on a flat ``{name,description,parameters}``
+    # shape, so unwrap once here. Skipping this step is what
+    # makes the proxy advertise empty-named tools and the worker
+    # silently register zero MCP tools.
+    schemas = [_flatten_openai_schema(s) for s in registry.get_schemas(names=set(registry.tool_names))]
+    for s in schemas:
+        tool = registry.get(s["name"])
+        if tool is not None and tool.schema.annotations:
+            s["annotations"] = tool.schema.annotations
+    return schemas
+
+
+def _schema_digest(schema: dict[str, Any]) -> str:
+    """A flat tool schema's definition (description, parameters,
+    annotations) as a digest: equal while it is unchanged."""
     canonical = json.dumps(
-        [schema.description, schema.parameters, schema.annotations], sort_keys=True, separators=(",", ":"), default=str,
+        [schema.get("description"), schema.get("parameters"), schema.get("annotations")],
+        sort_keys=True, separators=(",", ":"), default=str,
     )
     return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def _tools_snapshot(servers: dict[str, Any], configs: dict[str, dict[str, Any]]) -> tuple[Any, dict[str, Any]]:
+    """What *servers* (tenant-scoped key -> live server) list now, frozen for
+    a scan: a registry of their tools and a copy of each server they were
+    registered from (key -> copy), with *configs* by the same keys.  The scan
+    reads only these: the live connections' tool lists and name maps, and the
+    registry discovery used, belong to the MCP client, which lists them anew
+    on its own loop when a server says its tools changed."""
+    from surogates.tools.registry import ToolRegistry
+
+    registry = ToolRegistry()
+    copies: dict[str, Any] = {}
+    for pname, server in servers.items():
+        listed = copy.copy(server)
+        listed._registered_tool_names = _register_server_tools(pname, listed, configs[pname], registry)
+        copies[pname] = listed
+    return registry, copies
 
 
 def _retry_cooldown(failures: int) -> float:
@@ -235,12 +271,12 @@ class PoolEntry:
     failures: dict[str, int] = field(default_factory=dict)
     # ``user_id`` is a service account's id (audit rows of a retry's scans).
     is_service_account: bool = False
-    # Each listed tool's definition as it was scanned (``_definition_digest``),
+    # Each listed tool's definition as it was scanned (``_schema_digest``),
     # by its listed name: a server that says its tools changed loses at once
     # the ones whose definition is no longer that (``_block_changed_tools``).
     digests: dict[str, str] = field(default_factory=dict)
     # Per server, the definitions its last scan was given, listed or not:
-    # original tool name -> ``_definition_digest``.
+    # original tool name -> ``_schema_digest``.
     scanned: dict[str, dict[str, str]] = field(default_factory=dict)
     # When each server's tools were last listed anew (``time.monotonic``).
     relisted_at: dict[str, float] = field(default_factory=dict)
@@ -557,11 +593,13 @@ class ConnectionPool:
 
             clean_schemas, tool_index, utility_index = [], {}, {}
             digests: dict[str, str] = {}
+            given: dict[str, dict[str, str]] = {}
             if self.agent_epoch(agent_id) == epoch:
+                scan_registry, scanned = _tools_snapshot(owners, prefixed)
                 clean_schemas, tool_index, utility_index = await self._clean_schemas(
-                    key, temp_registry, owners, configs,
+                    key, scan_registry, scanned, configs,
                     governance=tenant_governance, approval_room=approval_room,
-                    is_service_account=is_service_account, taken=set(), digests=digests,
+                    is_service_account=is_service_account, taken=set(), digests=digests, given=given,
                 )
             if self.agent_epoch(agent_id) != epoch:
                 # The agent was invalidated while this connected: its entry
@@ -596,6 +634,7 @@ class ConnectionPool:
                 failures={name: 1 for name in unavailable},
                 is_service_account=is_service_account,
                 digests=digests,
+                scanned={name: given.get(pname, {}) for pname, name in zip(prefixed, original_names) if pname in owners},
             )
             self._entries[key] = entry
             self._follow_tool_changes(key, {
@@ -630,6 +669,7 @@ class ConnectionPool:
         is_service_account: bool,
         taken: set[str],
         digests: dict[str, str] | None = None,
+        given: dict[str, dict[str, str]] | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, tuple[str, str]], dict[str, str]]:
         """The advertised schemas of the tools in *temp_registry* that the
         connected servers *owners* (tenant-scoped key -> server) registered,
@@ -637,26 +677,16 @@ class ConnectionPool:
 
         A tool no server in *owners* owns is never listed: its name is the
         tenant-scoped key, with the org / user / agent ids.  Names in *taken*
-        are already advertised.
+        are already advertised.  *digests* gets each listed tool's definition
+        digest by its listed name; *given*, every definition the scan was
+        given, listed or not, per server key and original tool name.
         """
         org_id, user_id, agent_id = key
         tenant_key = f"{_tenant_prefix(org_id, user_id, agent_id)}__"
 
-        # ``ToolRegistry.get_schemas`` emits OpenAI's nested
-        # ``{"type":"function","function":{"name",...}}`` shape; the
-        # rest of this method (and the ``/mcp/v1/tools/list`` route
-        # contract) work on a flat ``{name,description,parameters}``
-        # shape, so unwrap once here. Skipping this step is what
-        # makes the proxy advertise empty-named tools and the worker
-        # silently register zero MCP tools.
-        schemas = [
-            _flatten_openai_schema(s)
-            for s in temp_registry.get_schemas(names=set(temp_registry.tool_names))
-        ]
-        for s in schemas:
-            tool = temp_registry.get(s["name"])
-            if tool is not None and tool.schema.annotations:
-                s["annotations"] = tool.schema.annotations
+        schemas = _flat_schemas(temp_registry)
+        # Each definition as it is scanned, taken before any scan awaits.
+        scanned_digest = {s["name"]: _schema_digest(s) for s in schemas}
 
         clean_schemas: list[dict[str, Any]] = []
         seen_names: set[str] = set(taken)
@@ -686,6 +716,8 @@ class ConnectionPool:
             if owning_server_key is None:
                 logger.warning("MCP tool %s of no connected server left out of the tool list", raw_name)
                 continue
+            if given is not None:
+                given.setdefault(owning_server_key, {})[original_tool] = scanned_digest[raw_name]
             plain = owning_server_key[len(tenant_key):] if owning_server_key.startswith(tenant_key) else owning_server_key
             # The name the agent knows: ``mcp__{server}__{tool}``,
             # shortened when an engine would refuse it.
@@ -759,7 +791,7 @@ class ConnectionPool:
             if utility is not None:
                 utility_index[clean_name] = utility
             if digests is not None:
-                digests[clean_name] = _definition_digest(temp_registry.get(raw_name))
+                digests[clean_name] = scanned_digest[raw_name]
         return clean_schemas, tool_index, utility_index
 
     # ------------------------------------------------------------------
@@ -831,17 +863,20 @@ class ConnectionPool:
 
         clean_schemas, tool_index, utility_index = [], {}, {}
         digests: dict[str, str] = {}
+        given: dict[str, dict[str, str]] = {}
         if owners and self._entries.get(key) is entry:
             # Only the due servers' tools are scanned: the live ones keep the
             # schemas they were approved with.
             try:
+                scan_registry, scanned = _tools_snapshot(owners, prefixed)
                 clean_schemas, tool_index, utility_index = await self._clean_schemas(
-                    key, temp_registry, owners, entry.server_configs,
+                    key, scan_registry, scanned, entry.server_configs,
                     governance=entry.governance,
                     approval_room=_ApprovalRoom(self._tenant_approvals(key)) if entry.governance is not None else None,
                     is_service_account=entry.is_service_account,
                     taken={s.get("name", "") for s in entry.tool_schemas},
                     digests=digests,
+                    given=given,
                 )
             except Exception:
                 # The scan raised (a scanner or audit-emitter error, which a
@@ -875,6 +910,8 @@ class ConnectionPool:
         entry.tool_index = {**entry.tool_index, **{n: r for n, r in tool_index.items() if n not in taken}}
         entry.utility_index = {**entry.utility_index, **{n: u for n, u in utility_index.items() if n not in taken}}
         entry.digests = {**entry.digests, **{n: d for n, d in digests.items() if n not in taken}}
+        for pname in owners:
+            entry.scanned[names_by_key[pname]] = given.get(pname, {})
         self._follow_tool_changes(key, {names_by_key[pname]: server for pname, server in owners.items()})
         for pname in owners:
             name = names_by_key[pname]
@@ -905,23 +942,16 @@ class ConnectionPool:
         loop (:meth:`_tools_changed`).  A change that came before this wiring
         (while the tools were scanned) is followed at once."""
         loop = asyncio.get_running_loop()
-        entry = self._entries.get(key)
         for name, server in servers.items():
             def changed(_server_name: str, _tool_names: list[str], name: str = name, server: Any = server) -> None:
                 # A pool whose loop has closed lists nothing any more.
                 with contextlib.suppress(RuntimeError):
                     loop.call_soon_threadsafe(self._tools_changed, key, name, server)
             server._on_tools_changed = changed
-            if entry is None:
-                continue
-            # What its scan was given.  A listed tool changed meanwhile is
-            # taken off and listed anew; a tool added meanwhile waits for the
-            # server's next notification.
-            current = self._block_changed_tools(key, entry, name, server)
-            if current is None:
-                self._tools_changed(key, name, server)
-            else:
-                entry.scanned[name] = current
+            # A change while its tools were scanned (nothing heard it): a
+            # listed tool changed meanwhile is taken off, and its tools are
+            # listed anew.
+            self._tools_changed(key, name, server)
 
     def _tools_changed(self, key: tuple[UUID, UUID, str], name: str, server: Any) -> None:
         """*server* (configured *name*) of tenant *key* may list other tools now.
@@ -968,16 +998,17 @@ class ConnectionPool:
 
     def _current_tools(self, key: tuple[UUID, UUID, str], name: str, server: Any, config: dict[str, Any]) -> tuple[Any, Any]:
         """*server*'s tools as listed now: a registry of them and the copy of
-        the server they were registered from.  Read from a copy: the
-        connection's own name maps are the MCP client's, on its own loop."""
-        from surogates.tools.registry import ToolRegistry
+        the server they were registered from (``_tools_snapshot``)."""
+        pname = _prefixed_name(*key, name)
+        registry, copies = _tools_snapshot({pname: server}, {pname: _discovery_config(config)})
+        return registry, copies[pname]
 
-        listed = copy.copy(server)
-        registry = ToolRegistry()
-        listed._registered_tool_names = _register_server_tools(
-            _prefixed_name(*key, name), listed, _discovery_config(config), registry,
-        )
-        return registry, listed
+    @staticmethod
+    def _definitions(registry: Any, listed: Any) -> dict[str, str]:
+        """The definition digest of each tool in *registry* (one server's), by
+        its original name (``listed``'s name map), as ``_clean_schemas``
+        records them."""
+        return {listed._tool_names.get(s["name"], s["name"]): _schema_digest(s) for s in _flat_schemas(registry)}
 
     def _block_changed_tools(
         self, key: tuple[UUID, UUID, str], entry: PoolEntry, name: str, server: Any,
@@ -993,10 +1024,7 @@ class ConnectionPool:
         if config is None or not live:
             return None
         registry, listed = self._current_tools(key, name, server, config)
-        now = {
-            listed._tool_names.get(raw, raw): _definition_digest(registry.get(raw))
-            for raw in listed._registered_tool_names
-        }
+        now = self._definitions(registry, listed)
         theirs = {n: original for n, (owner, original) in entry.tool_index.items() if owner == pname}
         changed = {n for n, original in theirs.items() if now.get(original) != entry.digests.get(n)}
         if changed:
@@ -1027,10 +1055,7 @@ class ConnectionPool:
             return
         entry.relisted_at[name] = time.monotonic()
         registry, listed = self._current_tools(key, name, server, config)
-        given = {
-            listed._tool_names.get(raw, raw): _definition_digest(registry.get(raw))
-            for raw in listed._registered_tool_names
-        }
+        given: dict[str, dict[str, str]] = {}
 
         def theirs() -> set[str]:
             return {n for n, (owner, _tool) in entry.tool_index.items() if owner == pname}
@@ -1043,6 +1068,7 @@ class ConnectionPool:
             is_service_account=entry.is_service_account,
             taken={s.get("name", "") for s in entry.tool_schemas} - theirs(),
             digests=digests,
+            given=given,
         )
         with _lock:
             live = _servers.get(pname) is server
@@ -1069,7 +1095,11 @@ class ConnectionPool:
             **{n: d for n, d in entry.digests.items() if n not in old},
             **{n: d for n, d in digests.items() if n in listed_now},
         }
-        entry.scanned[name] = given
+        entry.scanned[name] = given.get(pname, {})
+        # It may have changed again while this scanned: what changed comes
+        # off now, and it is listed anew once more.
+        if self._block_changed_tools(key, entry, name, server) != entry.scanned[name]:
+            self._relist_again.add((key, name))
         added, removed = listed_now - old, old - listed_now
         logger.log(
             logging.INFO if added or removed else logging.DEBUG,
