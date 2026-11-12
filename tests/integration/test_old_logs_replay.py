@@ -52,6 +52,32 @@ async def test_a_log_with_the_old_tools_and_their_events_replays():
     assert messages[-1] == {"role": "user", "content": "And now?"}
 
 
+async def test_a_masters_log_with_a_proposal_and_a_thread_started_from_its_card_replays():
+    call = {"id": "call_p", "type": "function", "function": {"name": "agent", "arguments": json.dumps(
+        {"description": "Draft A", "prompt": "Draft A.", "propose": True, "where": "cloud"},
+    )}}
+    proposed = {"status": "proposed", "proposal_id": "p1", "threads": [{"key": "1", "title": "Draft A"}]}
+    events = [
+        _event(1, "user.message", {"content": "Plan the report."}),
+        _event(2, "llm.response", {"message": {"role": "assistant", "content": "", "tool_calls": [call]}}),
+        _event(3, "tool.result", {"tool_call_id": "call_p", "name": "agent", "content": json.dumps(proposed)}),
+        _event(4, "thread.proposed", {"proposal_id": "p1", "threads": [
+            {"key": "1", "title": "Draft A", "goal": "Draft A.", "where": "cloud"},
+        ]}),
+        _event(5, "llm.response", {"message": {"role": "assistant", "content": "Start it from its card."}}),
+        _event(6, "worker.spawned", {
+            "worker_id": "t1", "title": "Draft A", "goal": "Draft A.", "started_by": "user", "proposal_id": "p1", "key": "1",
+            "format": "task-notification",
+        }),
+        _event(7, "user.message", {"content": "And now?"}),
+    ]
+    messages = replayed_messages(events, None)
+    # The old call stays an ordinary call; the proposal and the start from its card read as nothing.
+    assert [m["role"] for m in messages] == ["user", "assistant", "tool", "assistant", "user"]
+    assert not any("Draft A" in str(m.get("content", "")) for m in messages if m["role"] == "user")
+    assert messages[-1] == {"role": "user", "content": "And now?"}
+
+
 async def _exists(engine, query: str) -> bool:
     async with engine.connect() as conn:
         return bool((await conn.execute(text(query))).scalar())

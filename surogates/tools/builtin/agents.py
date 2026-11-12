@@ -123,15 +123,6 @@ _AGENT_SCHEMA = ToolSchema(
                 "type": "string",
                 "description": "Optional short name to address the agent by in send_message and stop_agent (letters, digits, - and _).",
             },
-            "propose": {
-                "type": "boolean",
-                "description": "In a project: offer the user a card that starts this thread, instead of starting it.",
-            },
-            "where": {
-                "type": "string",
-                "enum": ["cloud", "device"],
-                "description": "With propose: cloud for a thread of its own; device for work in a folder on the user's computer.",
-            },
         },
         "required": ["description", "prompt"],
         "additionalProperties": False,
@@ -846,9 +837,7 @@ async def fork_seed(session_store: Any, parent: Any, tool_call_id: str | None) -
 #: What a thread's start returns after its id.
 _ITS_REPORT = "Its report reaches you when its turn ends; until then, do not do its work yourself."
 THREAD_STARTED_NOTE = f"It works as a thread of this project. {_ITS_REPORT}"
-#: What a project-only argument answers outside a project's master.
-#: What a session that is no project's master is told of a thread's arguments, and what to do instead.
-_NOT_A_MASTER_PROPOSES = "only a project's master proposes threads: leave out propose and where to start a sub-agent"
+#: What a session that is no project's master is told of a thread's argument, and what to do instead.
 _NOT_A_MASTER_RESOLVES = "only a project's master resolves threads: leave out resolve to stop an agent"
 
 
@@ -870,20 +859,13 @@ def _in_the_familys_words(error: str) -> str:
 
 
 async def _master_agent(arguments: dict[str, Any], **kwargs: Any) -> str:
-    """A project master's ``agent``: start a thread, or propose one for the user to start."""
+    """A project master's ``agent``: start a thread, in the cloud or on the project's computer."""
     from surogates.tools.builtin import threads
 
     if arguments.get("fork") is True or arguments.get("agent_type") or arguments.get("name"):
-        return _error("a thread starts from its brief alone: give its description, its prompt, and propose and where")
+        return _error("a thread starts from its brief alone: give its description and its prompt")
     # As given: the thread handlers refuse what is not text.
     title, goal = arguments.get("description"), arguments.get("prompt")
-    if arguments.get("propose") is True:
-        answer = json.loads(await threads._propose_threads_handler(
-            {"threads": [{"title": title, "goal": goal, "where": arguments.get("where") or "cloud"}]}, **kwargs,
-        ))
-        if "error" in answer:
-            return _error(_in_the_familys_words(str(answer["error"]).removeprefix("threads[1]: ")))
-        return json.dumps(answer, ensure_ascii=False)
     answer = _thread_answer(await threads._start_thread_handler({"title": title, "goal": goal}, **kwargs))
     if "error" in answer:
         return _error(_in_the_familys_words(answer["error"]))
@@ -914,8 +896,6 @@ async def _agent_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
     if is_project_master(parent.config):
         # A project's master gives out threads.
         return await _master_agent(arguments, **kwargs)
-    if arguments.get("propose") is not None or arguments.get("where") is not None:
-        return _error(_NOT_A_MASTER_PROPOSES)
 
     prompt = str(arguments.get("prompt") or "").strip()
     if not prompt:

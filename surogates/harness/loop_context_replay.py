@@ -133,8 +133,9 @@ def build_user_message_dict(
 #: The events that carry a worker's report to the session that started it.
 WORKER_REPORT_TYPES = frozenset({EventType.WORKER_COMPLETE.value, EventType.WORKER_FAILED.value})
 #: What a coordinator hears of its workers between its own requests: their
-#: reports, and the threads the user started (``worker.spawned`` with
-#: ``started_by``).  A spawn of its own is its own tool call's result.
+#: reports, and the threads its computer began after the turn that started
+#: them (``worker.spawned`` with ``bound``).  A spawn of its own is its own
+#: tool call's result.
 WORKER_NEWS_TYPES = WORKER_REPORT_TYPES | {EventType.WORKER_SPAWNED.value}
 
 
@@ -521,10 +522,8 @@ def _framed_worker_note(event_type: str, data: dict) -> dict:
     error = data.get("error") or "unknown error"
     failed = event_type == EventType.WORKER_FAILED.value
     named = f"Thread {json.dumps(title, ensure_ascii=False)}"
-    if event_type == EventType.WORKER_SPAWNED.value and data.get("bound"):
-        return frame(task_id=worker_id, status="started", summary=f"{named} started, in its copy of the project's folder")
     if event_type == EventType.WORKER_SPAWNED.value:
-        return frame(task_id=worker_id, status="started", summary=f"{named} was started by the user from its card")
+        return frame(task_id=worker_id, status="started", summary=f"{named} started, in its copy of the project's folder")
     if title is None:
         summary = f"Agent {worker_id} failed: {error}" if failed else f"Agent {worker_id} finished"
         return frame(
@@ -611,7 +610,7 @@ def wait_note(data: dict) -> dict | None:
 
 def worker_news(event_type: str, data: dict, answered: frozenset[str] = frozenset()) -> dict | None:
     """The message a coordinator reads a worker's news as: its report, or a
-    thread the user started; None for a spawn the coordinator made, and for
+    thread its computer began; None for a spawn the coordinator made, and for
     the report of a foreground agent whose call got its result
     (*answered*, ``loop_pending.answered_helpers``): its parent has it as
     that call's result (``worker_notify.is_delegated``)."""
@@ -619,12 +618,10 @@ def worker_news(event_type: str, data: dict, answered: frozenset[str] = frozense
         return None
     if event_type != EventType.WORKER_SPAWNED.value:
         return worker_note(event_type, data)
-    if data.get("started_by") != "user" and not data.get("bound"):
+    # An old log's thread started from a card is no news: no card is left.
+    if not data.get("bound"):
         return None
-    if data.get("format") == NEW_FORMAT:
-        return _framed_worker_note(event_type, data)
-    title = json.dumps(data.get("title"), ensure_ascii=False)
-    return {"role": "user", "content": f"[Thread {title} ({data.get('worker_id', '?')}) started by the user]"}
+    return _framed_worker_note(event_type, data)
 
 
 def news(event, answered: frozenset[str] = frozenset()) -> dict | None:

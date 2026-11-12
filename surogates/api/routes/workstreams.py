@@ -25,7 +25,6 @@ from starlette.types import Receive, Scope, Send
 
 from surogates.api.routes.sessions import DeviceExecution, _require_local_device, archive_session_tree
 from surogates.api.routes.workspace import _should_skip_dir
-from surogates.api.session_guards import require_device_access
 from surogates.db.models import Device, Workstream
 from surogates.devices.operations import DeviceOperations
 from surogates.devices.presence import DevicePresence
@@ -35,7 +34,6 @@ from surogates.runtime import AgentRuntimeContext, agent_runtime_context_dep, ra
 from surogates.sandbox.history import HistoryError
 from surogates.session.models import Session
 from surogates.session.provisioning import create_agent_session
-from surogates.session.store import SessionNotFoundError
 from surogates.storage.tenant import boundary_workspace_prefix
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.context import TenantContext
@@ -53,7 +51,7 @@ from surogates.workstreams.history import (
     versions,
 )
 from surogates.workstreams.store import WorkstreamStore
-from surogates.workstreams.threads import begin_thread, make_thread, start_thread, stop_thread
+from surogates.workstreams.threads import stop_thread
 from surogates.workstreams.undo import NO_CHANGE, UNLANDED, Refused, restore, undo
 
 logger = logging.getLogger(__name__)
@@ -105,10 +103,6 @@ Icon = _blank_is_none(64)
 Tier = Literal["basic", "pro"] | None
 # What a thread the user resolves while it works is stopped with.
 _RESOLVED_BY_USER = "resolved by the user"
-# How long a card's start holds its claim at most: a start takes about a second.
-_CARD_CLAIM_SECONDS = 60
-# Releases a card's claim only while it is still the releasing start's.
-_RELEASE_CLAIM = "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) end return 0"
 
 
 class ProjectCreate(BaseModel):
@@ -141,15 +135,6 @@ class ProjectMove(BaseModel):
     """The caller's own computer, and a folder its user confirmed there, for a project whose computer lost its folder."""
 
     execution: DeviceExecution
-
-
-class ProposedThreadStart(BaseModel):
-    """A card of a proposal: the thread is read from its ``thread.proposed`` event."""
-
-    proposal_id: UUID
-    key: Annotated[str, StringConstraints(pattern=r"^[1-9][0-9]{0,3}$")]
-    #: A folder its user confirmed on their computer: the thread works there.
-    execution: DeviceExecution | None = None
 
 
 class ProjectSummaryOut(BaseModel):
@@ -804,156 +789,4 @@ async def reopen_thread(
     thread = await _thread(request, project, thread_id)
     await _store(request).reopen_thread(thread.id)
     await project_stream.publish(request.app.state.redis, project.id, thread.id, project_stream.REOPENED)
-    return await _row(request, project, thread.id)
-
-
-@contextlib.asynccontextmanager
-async def _card_held(request: Request, project: Workstream, proposal_id: UUID, key: str):
-    """The card *key* of *proposal_id*, held for one start; Redis, for the start.
-
-    A card started twice at once, by a double click or from two devices:
-    the second does not wait for the first, it is refused.  The claim is in
-    Redis, so no start holds a database connection while it waits for more
-    of the pool, as Start all's every card at once would; the thread's
-    ``worker.spawned`` refuses a later start.
-    """
-    redis = getattr(request.app.state, "redis", None)
-    if redis is None:
-        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Redis is required to start a thread.")
-    claim, token = f"surogates:workstream:card:{project.id}:{proposal_id}:{key}", uuid4().hex
-    if not await redis.set(claim, token, nx=True, ex=_CARD_CLAIM_SECONDS):
-        raise HTTPException(status.HTTP_409_CONFLICT, "This thread was already started.")
-    try:
-        if await _store(request).started_from(project.master_session_id, proposal_id, key):
-            raise HTTPException(status.HTTP_409_CONFLICT, "This thread was already started.")
-        yield redis
-    finally:
-        # Released however the start ends, so one that failed can be tried
-        # again; but only its own, so a start that ran past its claim's
-        # expiry leaves the claim of the start that took it over.
-        await redis.eval(_RELEASE_CLAIM, 1, claim, token)
-
-
-async def _card(request: Request, project: Workstream, proposal_id: UUID, key: str) -> dict[str, Any]:
-    """The card *key* of the master's proposal *proposal_id*; 404 when there is none."""
-    proposed = await _store(request).proposal(project.master_session_id, proposal_id)
-    card = next((t for t in (proposed or {}).get("threads", []) if t.get("key") == key), None)
-    if card is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such proposed thread.")
-    return card
-
-
-def _on_the_projects_folder(
-    project: Workstream, master: Session, execution: DeviceExecution | None, *, lost: bool,
-) -> None:
-    """Refuse a thread of *project*, which works on a computer, anywhere but in the project's folder there.
-
-    Every thread of such a project works there, in a copy of its own, and
-    none in the cloud: its user starts it in Surogate Desktop on that computer.
-    Where the folder can no longer be reached there (*lost*), none starts
-    until its user uses another computer for the project.
-    """
-    computer = master.config["execution"]["device_name"]
-    if lost:
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            f"This project's folder can no longer be reached on {computer}. Open the project in Surogate Desktop "
-            "and choose Use this computer for this project.",
-        )
-    if execution is None:
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            f"This project works in a folder on {computer}, so its threads start there, in Surogate Desktop.",
-        )
-    if execution.device_id != project.device_id or execution.folder != project.folder:
-        raise HTTPException(
-            status.HTTP_409_CONFLICT, f"A thread of this project works in the project's folder on {computer}.",
-        )
-
-
-@router.post("/{workstream_id}/threads", status_code=status.HTTP_201_CREATED)
-async def start_proposed_thread(
-    workstream_id: UUID, body: ProposedThreadStart, request: Request, ctx: AgentRuntime, tenant: Tenant,
-    _rate: None = Depends(rate_limit_dep),
-) -> dict[str, Any]:
-    """Start a thread the master proposed, from its card.  Its title and goal
-    are the proposal's, read from the master's log, never the request's; it
-    is news to the master, and wakes nobody but itself.
-
-    With *execution*, a folder its user confirmed on their computer, the
-    thread is made there and its computer asked to bind it to a copy of the
-    folder of its own, never to the folder itself.  It begins once bound,
-    from ``…/threads/{thread_id}/start``, and this answers its id.  Every
-    thread of a project made on a computer works in the project's folder
-    there, each in a copy of its own.
-    """
-    project = await _project(request, workstream_id, tenant, ctx)
-    # In a project in the cloud, a card proposed for the user's computer runs
-    # in the cloud without one: the user chose it there, as a browser's card offers.
-    card = await _card(request, project, body.proposal_id, body.key)
-    # Checked before anything is made, as a new local-folder chat's is.
-    device = None if body.execution is None else await _require_local_device(
-        request, tenant, ctx.agent_id, body.execution, channel="web", user_id=tenant.user_id,
-    )
-    state = request.app.state
-    if project.device_id is not None:
-        master = await state.session_store.get_session(project.master_session_id)
-        lost = await _store(request).lost({master.id: project.device_id})
-        _on_the_projects_folder(project, master, body.execution, lost=master.id in lost)
-    proposal = {"proposal_id": str(body.proposal_id), "key": body.key}
-    async with _card_held(request, project, body.proposal_id, body.key) as redis:
-        master = await state.session_store.get_session(project.master_session_id)
-        if body.execution is None:
-            thread = await start_thread(
-                session_store=state.session_store, session_factory=state.session_factory, redis=redis,
-                master=master, live_config=None, title=card["title"], goal=card["goal"], context="",
-                proposal=proposal,
-            )
-        else:
-            thread = await make_thread(
-                session_store=state.session_store, session_factory=state.session_factory, master=master,
-                live_config=None, title=card["title"], device_id=device.id, device_name=device.name,
-                folder=body.execution.folder, card=proposal,
-            )
-            if thread is not None:
-                await DeviceOperations(state.session_factory, redis).bind(
-                    session_id=thread.id, device_id=device.id,
-                    folder=body.execution.folder, nonce=body.execution.nonce, history=thread.id,
-                )
-    if thread is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such project.")
-    if body.execution is not None:
-        return {"thread_id": str(thread.id)}
-    return await _row(request, project, thread.id)
-
-
-@router.post("/{workstream_id}/threads/{thread_id}/start", status_code=status.HTTP_201_CREATED)
-async def begin_local_thread(
-    workstream_id: UUID, thread_id: UUID, request: Request, ctx: AgentRuntime, tenant: Tenant,
-    _rate: None = Depends(rate_limit_dep),
-) -> dict[str, Any]:
-    """Begin a thread made from a card on the user's computer, once that
-    computer has bound it: its row, its goal, the master's news, its queue.
-    409 until bound, and for a card started meanwhile."""
-    project = await _project(request, workstream_id, tenant, ctx)
-    state = request.app.state
-    try:
-        thread = await state.session_store.get_session(thread_id)
-    except SessionNotFoundError:
-        thread = None
-    made_for = (thread.config or {}).get("workstream_card") if thread is not None else None
-    if made_for is None or thread.parent_id != project.master_session_id or thread.status == "archived":
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such thread.")
-    # 409 until its computer has bound the folder: it has nowhere to work yet.
-    await require_device_access(request, thread, tenant)
-    proposal_id = UUID(made_for["proposal_id"])
-    card = await _card(request, project, proposal_id, made_for["key"])
-    async with _card_held(request, project, proposal_id, made_for["key"]) as redis:
-        begun = await begin_thread(
-            session_store=state.session_store, session_factory=state.session_factory, redis=redis,
-            master=await state.session_store.get_session(project.master_session_id), thread=thread,
-            title=card["title"], goal=card["goal"], context="", proposal=made_for,
-        )
-    if begun is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such project.")
     return await _row(request, project, thread.id)

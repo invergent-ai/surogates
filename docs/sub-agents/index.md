@@ -211,7 +211,7 @@ agent(
 
 A main session's agent runs in the background by default: the call returns `{"agent_id", "status": "running"}` at once, and the report arrives later as a notification. To wait for the report in the call, pass `run_in_background=false`; an agent started by a sub-agent always runs this way.
 
-For parallel work, call `agent` several times in one response (at most 5 calls a response; any more are dropped, except in a project's master, whose every call starts or proposes one thread). Each call starts one agent; background agents run side by side, at most 5 of a session's at a time, and each report arrives on its own.
+For parallel work, call `agent` several times in one response (at most 5 calls a response; any more are dropped, except in a project's master, whose every call starts one thread). Each call starts one agent; background agents run side by side, at most 5 of a session's at a time, and each report arrives on its own.
 
 See [the `agent` tool family](#13-the-agent-tool-family) below for the full reference: depth, tool inheritance, notifications, messages and observability.
 
@@ -502,10 +502,10 @@ A project master hears of its threads by `worker.spawned`, `worker.complete` and
 | `worker.complete` with `stopped` | `killed` | `Thread "{title}" was stopped` | what the stop did not take back, if anything | none |
 | `worker.complete` with `recovered` | `completed` | `Thread "{title}": a landing its worker left unfinished was settled` | none | the landing lines, and that nothing could be put back when the history is gone |
 | `worker.failed`, a thread | `failed` | `Thread "{title}" failed: {error}` | none | the not-taken-up and set-aside lines |
-| `worker.spawned` with `started_by: "user"` | `started` | `Thread "{title}" was started by the user from its card` | none | none |
+| `worker.spawned` with `bound` | `started` | `Thread "{title}" started, in its copy of the project's folder` | none | none |
 | `worker.complete` / `worker.failed` of a helper (no title) | `completed` / `failed` | `Agent {id} finished` / `Agent {id} failed: {error}` | its words | that its work could not be handed back, when so |
 
-`<task-id>` is the thread's id. `<result>` and `<files>` are neutralised as a notification's result is (a file's name is the user's or the thread's text), and so is the title in `<summary>`. `list_agents` with a thread's `agent_id` gives the master its last report as it read it. An unmarked `worker.*` event, written before the mark, reads as it always has: `[Thread "{title}" ({id}) reported]`, then the thread's words between `<<thread report>>` and `<<end of thread report>>`, then `Files: …`.
+`<task-id>` is the thread's id. `<result>` and `<files>` are neutralised as a notification's result is (a file's name is the user's or the thread's text), and so is the title in `<summary>`. `list_agents` with a thread's `agent_id` gives the master its last report as it read it. A `worker.spawned` with `bound` is a thread of a project on the user's computer that began once that computer set up its copy, after the master's turn that started it; one whose computer refused is a `worker.failed` with the computer's words. An older `worker.spawned` with `started_by: "user"`, of a thread started from a proposal's card, reads as nothing. An unmarked `worker.*` event, written before the mark, reads as it always has: `[Thread "{title}" ({id}) reported]`, then the thread's words between `<<thread report>>` and `<<end of thread report>>`, then `Files: …`.
 
 ### Budget
 

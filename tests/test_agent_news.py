@@ -169,13 +169,13 @@ def test_a_titles_quote_cannot_open_a_tag():
      "failed", 'Thread "X" failed: boom', None,
      "Not taken up from a helper, because the file changed after the helper started (the helper's version is kept "
      "in the project's history): b.md"),
-    (SPAWNED, {"title": "X", "started_by": "user", "goal": "Do X.", "proposal_id": "p1", "key": "1"},
-     "started", 'Thread "X" was started by the user from its card', None, None),
+    (SPAWNED, {"title": "X", "bound": True, "goal": "Do X."},
+     "started", 'Thread "X" started, in its copy of the project\'s folder', None, None),
     (COMPLETE, {"result": "12.", "kept": False, "left": ["c.md"]},
      "completed", "Agent t1 finished", "12.",
      "Its work could not be handed back: its changes to c.md were kept apart, not brought into the thread's copy"),
     (FAILED, {"error": "boom"}, "failed", "Agent t1 failed: boom", None, None),
-], ids=["stopped", "recovered", "failed", "user-started", "untitled", "untitled-failed"])
+], ids=["stopped", "recovered", "failed", "bound", "untitled", "untitled-failed"])
 def test_each_marked_worker_payload_reads_as_the_table_says(event_type, data, status, summary, result, files):
     text = worker_news(event_type, {"worker_id": "t1", "format": NEW_FORMAT, **data})["content"]
     assert text.startswith(NOTIFICATION_HEADER) and _block(text, "task-id") == "t1"
@@ -183,14 +183,21 @@ def test_each_marked_worker_payload_reads_as_the_table_says(event_type, data, st
     assert (_block(text, "result"), _block(text, "files")) == (result, files)
 
 
+def test_old_logs_replay_proposals_and_threads_started_from_cards_as_nothing():
+    from surogates.harness.loop_context_replay import news
+
+    from_card = {"worker_id": "t1", "title": "X", "goal": "Do X.", "started_by": "user", "proposal_id": "p1", "key": "1"}
+    assert worker_news(SPAWNED, from_card) is None
+    assert worker_news(SPAWNED, {**from_card, "format": NEW_FORMAT}) is None
+    proposed = {"proposal_id": "p1", "threads": [{"key": "1", "title": "X", "goal": "Do X.", "where": "cloud"}]}
+    assert news(SimpleNamespace(type="thread.proposed", data=proposed)) is None
+
+
 def test_an_unmarked_worker_payload_reads_as_today():
     assert worker_note(COMPLETE, {"worker_id": "t1", "title": "Pricing", "result": "Done.", "files": PRICING}) == {
         "role": "user",
         "content": '[Thread "Pricing" (t1) reported]\n<<thread report>>\nDone.\n<<end of thread report>>\n'
                    "Files: threads/Pricing/a.md",
-    }
-    assert worker_news(SPAWNED, {"worker_id": "t1", "title": "X", "started_by": "user"}) == {
-        "role": "user", "content": '[Thread "X" (t1) started by the user]',
     }
     assert worker_note(FAILED, {"worker_id": "w1", "error": "boom"}) == {"role": "user", "content": "[Worker w1 failed: boom]"}
     assert worker_note(COMPLETE, {"worker_id": "w1", "result": "12.", "kept": False, "left": ["c.md"]}) == {

@@ -3,7 +3,7 @@
 A thread is a worker session of the master that does one piece of the work
 in a sandbox of its own and reports back at the end of every turn, as
 ``worker.complete``.  The master reaches these through the ``agent`` family
-(``tools.builtin.agents``): ``agent`` starts or proposes a thread,
+(``tools.builtin.agents``): ``agent`` starts a thread,
 ``send_message`` follows one up, ``stop_agent`` stops or resolves one, and
 ``list_agents`` lists them or reads one.
 """
@@ -14,7 +14,7 @@ import json
 import unicodedata
 from datetime import datetime, timezone
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from surogates.channels.constants import session_queue_priority
 from surogates.config import enqueue_session
@@ -251,39 +251,3 @@ async def _resolve_thread_handler(arguments: dict[str, Any], **kwargs: Any) -> s
     # After it is written, so whoever hears it reads the thread resolved.
     await project_stream.publish_session(kwargs.get("redis"), thread, project_stream.RESOLVED)
     return json.dumps({"status": "resolved", "thread_id": str(thread.id)})
-
-
-async def _propose_threads_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
-    proposed = arguments.get("threads")
-    if not isinstance(proposed, list) or not proposed:
-        return _error("threads is required")
-    # A project made on a computer has every thread on its folder there.
-    on_computer = device_of(kwargs.get("session_config")) is not None
-    threads = []
-    for key, thread in enumerate(proposed, 1):
-        thread = thread if isinstance(thread, dict) else {}
-        texts = {name: _text(thread, name) for name in ("title", "goal")}
-        if (malformed := _malformed(texts)) is not None:
-            return _error(f"threads[{key}]: {malformed}")
-        if thread.get("where") not in ("cloud", "device"):
-            return _error(f"threads[{key}]: where must be cloud or device")
-        if on_computer and thread["where"] != "device":
-            return _error(
-                f"threads[{key}]: this project works in a folder on the user's computer, "
-                "and every thread works there: where must be device"
-            )
-        threads.append({"key": str(key), **texts, "where": thread["where"]})
-    if not is_project_master(kwargs.get("session_config")):
-        return _error("Only a project's coordinator proposes threads.")
-    # The cards are drawn from this event, and a thread is started from it
-    # by its proposal and key, so the request that starts it names nothing else.
-    proposal_id = str(uuid4())
-    await kwargs["session_store"].emit_event(
-        UUID(str(kwargs["session_id"])), EventType.THREAD_PROPOSED,
-        {"proposal_id": proposal_id, "threads": threads},
-    )
-    return json.dumps({
-        "status": "proposed",
-        "proposal_id": proposal_id,
-        "threads": [{"key": t["key"], "title": t["title"]} for t in threads],
-    }, ensure_ascii=False)

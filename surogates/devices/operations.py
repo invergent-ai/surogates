@@ -38,6 +38,7 @@ from surogates.devices.binding import (
     RETIRE,
     THREAD_ACTIONS,
     THREAD_KINDS,
+    binding_from,
     binding_of,
     copy_of,
     device_of,
@@ -1327,7 +1328,7 @@ class DeviceOperations:
             # ponytail: a crash between the record and this leaves the thread made and never begun; a sweep of
             # threads with a recorded bind and no row would begin them.
             try:
-                await thread_bound(self._sf, self._redis, completed.root_session_id, outcome)
+                await thread_bound(self._sf, self._redis, completed.root_session_id, binding_from(completed.args, outcome))
             except Exception:
                 logger.exception("Could not begin or fail thread %s after its bind", completed.root_session_id)
         # Announced for a duplicate too: its worker may have missed the first.

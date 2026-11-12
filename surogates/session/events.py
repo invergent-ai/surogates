@@ -195,8 +195,6 @@ class EventType(str, Enum):
     WORKER_SPAWNED = "worker.spawned"
     WORKER_COMPLETE = "worker.complete"
     WORKER_FAILED = "worker.failed"
-    # Threads a project's master proposes for the user to start (``agent`` with ``propose``).
-    THREAD_PROPOSED = "thread.proposed"
     # A project's thread is told to redo its change to files its landing left out.
     HISTORY_REDO = "history.redo"
     # A thread's redo whose wake was held back, by its user's limit or with ops unreachable:

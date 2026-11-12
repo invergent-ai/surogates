@@ -64,7 +64,7 @@ TENANT = TenantContext(
 def refusal(name: str) -> str:
     return (
         f"The {name} skill makes a document, and in a project a document is a thread's work. "
-        "Propose a thread for it with agent and propose=true, or start one with agent where this project allows."
+        "Give it to a thread with agent."
     )
 
 

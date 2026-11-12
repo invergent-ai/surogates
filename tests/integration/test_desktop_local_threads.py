@@ -32,11 +32,10 @@ from .test_device_sessions import is_bound
 from .test_devices import api, eventually, link_url, register  # noqa: F401  (api and link_url are fixtures)
 from .test_local_history_landing import said
 from .test_local_history_open import woken
-from .test_local_threads import begin, device_card, make_local
-from .test_projects_on_a_computer import held
+from .test_local_threads import has_begun, held
 from .test_turn_sagas import calling
 from .test_workstream_overview import rows
-from .test_workstream_threads import PROPOSED, call_tool, events_of, proposing
+from .test_workstream_threads import events_of
 from .test_workstreams import create, master_of
 
 pytestmark = [
@@ -73,7 +72,7 @@ def apart(monkeypatch):
 
 
 async def confirmed_on(app, times: int = 1) -> list[dict]:
-    """The folder and nonce the app's user confirmed, as the page would send them, once for each thread to make there."""
+    """The folder and nonce the app's user confirmed, as the page would send them, once for each project or chat."""
     await app.until(lambda events: sum(e["event"] in ("prepared", "error") for e in events) >= times, timeout=60.0)
     prepared = [e for e in app.events if e["event"] in ("prepared", "error")]
     assert all(e["event"] == "prepared" for e in prepared), prepared
@@ -81,20 +80,17 @@ async def confirmed_on(app, times: int = 1) -> list[dict]:
     return prepared
 
 
-async def a_thread_on_the_app(api, device: dict, prepared: dict, project=None, master=None):
-    """A project's thread the routes make on the app's computer, bound there by the app's own binder, and begun."""
+async def a_thread_on_the_app(api, device: dict, chosen: dict | None = None, project=None, master=None):
+    """A project's thread its master starts on the app's computer, bound there by the app's own binder in the master's
+    name, and so begun; in a new project made with the folder its user *chosen* there, unless *project* is given."""
     if project is None:
-        project, master, proposal_id = await device_card(api)
-    else:
-        proposal_id = (await call_tool(api, master, "agent", **proposing(PROPOSED[1])))["proposal_id"]
-    made = await make_local(api, project, proposal_id, {
-        "kind": "device", "device_id": device["id"], "folder": prepared["folder"], "nonce": prepared["nonce"],
-    })
-    assert made.status_code == 201, made.text
-    thread_id = made.json()["thread_id"]
-    await eventually(lambda: is_bound(api, thread_id), timeout=60.0)
-    assert (await begin(api, project, thread_id)).status_code == 201
-    return project, master, await api.app.state.session_store.get_session(UUID(thread_id))
+        execution = {"kind": "device", "device_id": device["id"], "folder": chosen["folder"], "nonce": chosen["nonce"]}
+        project = await create(api, execution=execution)
+        master = await master_of(api, project)
+        await eventually(lambda: is_bound(api, project["master_session_id"]), timeout=60.0)
+    started = await held(api, master, "agent", description="Check the totals", prompt="Check the totals in Budget.xlsx.")
+    await eventually(lambda: has_begun(api, started["agent_id"]), timeout=60.0)
+    return project, master, await api.app.state.session_store.get_session(UUID(started["agent_id"]))
 
 
 async def bound_as(api, thread) -> dict:
@@ -126,10 +122,10 @@ async def test_a_thread_works_in_its_copy_on_the_app_and_its_turns_land_in_the_f
     folder.mkdir()
     (folder / "Report.docx").write_bytes(b"PK report v1")
     device = await register(api)
-    app = await client(built_client, link_url, device["token"], journal_dir / "journal.sqlite", confirm=folder)
+    app = await client(built_client, link_url, device["token"], journal_dir / "journal.sqlite", confirm=folder, project=True)
     try:
-        [prepared] = await confirmed_on(app)
-        _, master, thread = await a_thread_on_the_app(api, device, prepared)
+        [chosen] = await confirmed_on(app)
+        _, master, thread = await a_thread_on_the_app(api, device, chosen)
         # The app's binder bound it to a copy of the folder of its own, and said so.
         assert await bound_as(api, thread) == {"ok": {"history": {"thread": str(thread.id)}}}
 
@@ -150,7 +146,7 @@ async def test_a_thread_works_in_its_copy_on_the_app_and_its_turns_land_in_the_f
         # Its chat said, while the guest made its first copy, that it was being made: nothing else was waited for.
         waits = await events_of(api, thread.id, EventType.DEVICE_WAITING, EventType.DEVICE_RESUMED)
         assert [(e.type, e.data.get("reason"), e.data.get("folder")) for e in waits] == [
-            (EventType.DEVICE_WAITING.value, "copying", prepared["folder"]), (EventType.DEVICE_RESUMED.value, None, None),
+            (EventType.DEVICE_WAITING.value, "copying", chosen["folder"]), (EventType.DEVICE_RESUMED.value, None, None),
         ]
         assert entries(folder) == {**before, "Budget.xlsx": b"Total,42\n", "Notes.md": b"Checked.\n"}
         [landed] = await events_of(api, master.id, EventType.WORKER_COMPLETE)
@@ -190,11 +186,11 @@ async def test_two_threads_on_one_folder_each_land_and_each_names_the_file_the_o
     folder.mkdir()
     (folder / "Report.docx").write_bytes(b"PK report v1")
     device = await register(api)
-    app = await client(built_client, link_url, device["token"], journal_dir / "journal.sqlite", confirm=folder, times=2)
+    app = await client(built_client, link_url, device["token"], journal_dir / "journal.sqlite", confirm=folder, project=True)
     try:
-        first, second = await confirmed_on(app, times=2)
-        project, master, one = await a_thread_on_the_app(api, device, first)
-        _, _, two = await a_thread_on_the_app(api, device, second, project, master)
+        [chosen] = await confirmed_on(app)
+        project, master, one = await a_thread_on_the_app(api, device, chosen)
+        _, _, two = await a_thread_on_the_app(api, device, project=project, master=master)
         assert [await bound_as(api, thread) for thread in (one, two)] == [
             {"ok": {"history": {"thread": str(thread.id)}}} for thread in (one, two)
         ]
@@ -263,24 +259,25 @@ async def test_a_place_the_app_set_aside_for_another_folder_at_the_path_reaches_
     (folder / "Report.docx").write_bytes(b"PK report v1")
     device = await register(api)
     journal = journal_dir / "journal.sqlite"
-    app = await client(built_client, link_url, device["token"], journal, confirm=folder)
+    app = await client(built_client, link_url, device["token"], journal, confirm=folder, project=True)
     try:
-        [prepared] = await confirmed_on(app)
-        project, master, one = await a_thread_on_the_app(api, device, prepared)
+        [chosen] = await confirmed_on(app)
+        first_project, _, one = await a_thread_on_the_app(api, device, chosen)
         await asyncio.wait_for(woken(api, monkeypatch, one, [
             calling(("write_file", {"path": "Notes.md", "content": "notes\n"})), _final_response("Noted."),
         ]), TURN_S)
     finally:
         await app.close()
-    # Another folder at the path, as its user moves the first away and makes a new one; and a thread on it, from an app
-    # started again, whose turn's open sets the old folder's place aside, its history and the first thread's copy in it.
+    # Another folder at the path, as its user moves the first away and makes a new one; and a thread of a project made
+    # on it, from an app started again, whose turn's open sets the old folder's place aside, its history and the first
+    # thread's copy in it.
     folder.rename(tmp_path / "Reports.old")
     folder.mkdir()
     (folder / "Other.md").write_text("the new folder's\n")
-    app = await client(built_client, link_url, device["token"], journal, confirm=folder)
+    app = await client(built_client, link_url, device["token"], journal, confirm=folder, project=True)
     try:
-        [prepared] = await confirmed_on(app)
-        _, _, two = await a_thread_on_the_app(api, device, prepared, project, master)
+        [chosen] = await confirmed_on(app)
+        project, master, two = await a_thread_on_the_app(api, device, chosen)
         await asyncio.wait_for(woken(api, monkeypatch, two, [_final_response("Done.")]), TURN_S)
         [aside] = [p.name for p in (journal_dir / "data" / "history").iterdir() if ".was-" in p.name and not p.name.endswith(".json")]
         assert all((journal_dir / "data" / "history" / aside / kept).is_dir() for kept in ("history.git", f"clones/{one.id}"))
@@ -299,8 +296,9 @@ async def test_a_place_the_app_set_aside_for_another_folder_at_the_path_reaches_
         waits = await events_of(api, two.id, EventType.DEVICE_WAITING, EventType.DEVICE_RESUMED)
         assert [(e.type, e.data.get("reason")) for e in waits] == [(EventType.DEVICE_WAITING.value, "copying"), (EventType.DEVICE_RESUMED.value, None)]
         # Its row says what is kept, and the first thread's says nothing of it.
-        found = {row["id"]: row["set_aside"] for row in await rows(api, project)}
-        assert (found[str(two.id)], found[str(one.id)]) == ({"kept": [place], "snapshots": 0, "gone": []}, None)
+        [found] = [row["set_aside"] for row in await rows(api, project) if row["id"] == str(two.id)]
+        [first_found] = [row["set_aside"] for row in await rows(api, first_project) if row["id"] == str(one.id)]
+        assert (found, first_found) == ({"kept": [place], "snapshots": 0, "gone": []}, None)
     finally:
         await app.close()
 
@@ -328,18 +326,11 @@ async def test_a_project_made_on_the_app_works_in_its_folder_itself_and_starts_e
         ], said="Write the plan down."), TURN_S)
         assert (folder / "Plan.md").read_text() == "Check the totals.\n"
 
-        # Its thread's card starts the thread in a copy of the project's folder, which the app prepared with no sheet:
-        # its user was asked once, for the project.
-        await app.until(lambda events: any(e.get("thread") for e in events), timeout=60.0)
-        [copy] = [e for e in app.events if e["event"] == "prepared" and e.get("thread")]
-        assert (copy["folder"], [e["event"] for e in app.events].count("sheet")) == (chosen["folder"], 1)
-        proposal_id = (await held(api, master, "agent", **proposing(PROPOSED[1])))["proposal_id"]
-        made = await make_local(api, project, proposal_id, {**execution, "nonce": copy["nonce"]}, key="1")
-        assert made.status_code == 201, made.text
-        thread = await api.app.state.session_store.get_session(UUID(made.json()["thread_id"]))
-        await eventually(lambda: is_bound(api, made.json()["thread_id"]), timeout=60.0)
+        # Its master starts a thread in a copy of the project's folder, which the app sets up in the master's name with
+        # no sheet: its user was asked once, for the project.
+        _, _, thread = await a_thread_on_the_app(api, device, project=project, master=master)
         assert await bound_as(api, thread) == {"ok": {"history": {"thread": str(thread.id)}}}
-        assert (await begin(api, project, str(thread.id))).status_code == 201
+        assert [e["event"] for e in app.events].count("sheet") == 1
         await asyncio.wait_for(woken(api, monkeypatch, thread, [
             calling(("write_file", {"path": "Notes.md", "content": "Checked.\n"})),
             _final_response("Notes.md has the check."),

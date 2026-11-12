@@ -121,11 +121,15 @@ async def binding_of(db: AsyncSession, root_session_id: UUID) -> Binding:
         # computer will ever answer it.  A client only sends once creation
         # returned, by which time a successful create has recorded it.
         return Binding("failed", "The computer was never asked to set it up")
-    outcome = row.outcome
+    return binding_from(row.args, row.outcome)
+
+
+def binding_from(args: dict[str, Any], outcome: dict[str, Any] | None) -> Binding:
+    """What the computer's *outcome* of a bind asked with *args* says of the folder."""
     if outcome is None:
         return Binding("pending")
     if "ok" in outcome:
-        copy = row.args.get("history")
+        copy = args.get("history")
         if copy is not None and outcome["ok"] != {"history": copy}:
             return Binding("failed", KEEPS_NO_COPY)
         return Binding("bound")

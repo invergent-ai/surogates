@@ -14,10 +14,9 @@ from uuid import UUID
 
 from surogates.channels.memory_boundary import PROJECT_BOUNDARY_PREFIX
 
-#: Config keys only the server may write.  ``workstream_card`` names the
-#: proposal's card a thread on the user's computer begins with once bound;
-#: ``workstream_start``, the title and goal of one its master started there.
-SERVER_OWNED_KEYS = ("workstream_id", "workstream_role", "workstream_tier", "workstream_card", "workstream_start")
+#: Config keys only the server may write.  ``workstream_start`` is the title
+#: and goal a thread on the user's computer begins with once bound.
+SERVER_OWNED_KEYS = ("workstream_id", "workstream_role", "workstream_tier", "workstream_start")
 
 #: ``workstream_role`` of a project's master session.
 COORDINATOR = "coordinator"
@@ -90,7 +89,7 @@ def master_skill_refusal(name: str) -> str:
     """What a master's ``skill_view`` answers for a skill that makes a document."""
     return (
         f"The {name} skill makes a document, and in a project a document is a thread's work. "
-        "Propose a thread for it with agent and propose=true, or start one with agent where this project allows."
+        "Give it to a thread with agent."
     )
 
 

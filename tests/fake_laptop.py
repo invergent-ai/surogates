@@ -614,14 +614,20 @@ class FakeLaptop:
         args, root = frame["args"], frame["session_id"]
         refused = {"error": {"type": "binding", "message": "This folder was not confirmed on this computer"}}
         # As the app's binder: a copy is the chat's own root's, or the bind is refused, never bound to the folder itself.
-        # An app older than copies reads no history: it binds the folder itself.
+        # An app older than copies reads no history, and binds only what its user confirmed.
         copy = self.places is not None and "history" in args
         if copy and args["history"] != {"thread": root}:
             return refused
-        # One use, like the app's preparation token.
-        folder = self.prepared.pop(args["nonce"], None)
-        if folder is None or folder != args["folder"]:
-            return refused
+        if copy:
+            # A thread's copy is asked for in its coordinator's name: of the folder that coordinator is bound to here.
+            folder = args["folder"]
+            if root in self.bindings or self.bindings.get(args.get("master")) != folder:
+                return refused
+        else:
+            # One use, like the app's preparation token.
+            folder = self.prepared.pop(args["nonce"], None)
+            if folder is None or folder != args["folder"]:
+                return refused
         self.bindings[root] = folder
         if not copy:
             return {"ok": None}

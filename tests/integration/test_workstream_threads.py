@@ -38,7 +38,8 @@ from surogates.tools.registry import ToolRegistry
 from surogates.tools.runtime import ToolRuntime
 from surogates.workstreams import thread_config
 from surogates.workstreams.store import WorkstreamStore
-from surogates.workstreams.threads import start_thread
+from surogates.workstreams.threads import make_thread, thread_bound
+from surogates.devices.binding import Binding
 from tests.test_execute_coding_run_repo import _PAT, _FakeStore, _anthropic_creds, _done_poll, _noop_ensure, _sbx
 from tests.test_harness_resilience import _make_harness
 from tests.test_steer_loop import _final_response, _make_loop_harness
@@ -196,13 +197,6 @@ async def test_an_archived_project_starts_no_thread(api):
     assert result == {"error": "This project is archived."}
 
 
-async def test_only_a_master_starts_threads(api):
-    chat = await api.client.post("/v1/sessions", json={}, headers=api.auth())
-    session = await api.app.state.session_store.get_session(UUID(chat.json()["id"]))
-    result = await call_tool(api, session, "agent", description="Draft A", prompt="Draft A.", propose=True, where="cloud")
-    assert result == {"error": "only a project's master proposes threads: leave out propose and where to start a sub-agent"}
-
-
 async def test_archiving_a_project_archives_its_threads(api):
     project = await create(api)
     thread = await start(api, await master_of(api, project))
@@ -268,12 +262,12 @@ def arguments_of(schema: dict) -> set[str]:
     return set(schema["function"]["parameters"]["properties"])
 
 
-async def test_only_a_master_is_sent_the_family_with_propose_and_resolve(api, monkeypatch, session_factory):
+async def test_only_a_master_is_sent_the_family_with_resolve(api, monkeypatch, session_factory):
     master = await master_of(api, await create(api))
     schemas: dict = {}
     sent, _, _ = await turn_calling(monkeypatch, master, {}, schemas=schemas)
     assert FAMILY <= sent
-    assert {"propose", "where"} <= arguments_of(schemas["agent"]) and "resolve" in arguments_of(schemas["stop_agent"])
+    assert not {"propose", "where"} & arguments_of(schemas["agent"]) and "resolve" in arguments_of(schemas["stop_agent"])
 
     thread = await start(api, master)
     chat = await api.client.post("/v1/sessions", json={}, headers=api.auth())
@@ -685,8 +679,8 @@ def is_report_of(content: str, thread, title: str = "Draft A") -> bool:
 
 
 def started_news(thread, title: str = "Check the totals") -> dict[str, str]:
-    """The blocks of the news that the user started *thread* from its card."""
-    return {"task-id": str(thread.id), "status": "started", "summary": f"Thread {json.dumps(title)} was started by the user from its card"}
+    """The blocks of the news that *thread* started once its computer set up its copy of the project's folder."""
+    return {"task-id": str(thread.id), "status": "started", "summary": f"Thread {json.dumps(title)} started, in its copy of the project's folder"}
 
 
 async def replayed(api, master) -> list[dict]:
@@ -1524,91 +1518,39 @@ async def test_a_deleted_thread_cannot_be_resolved(api):
     assert await resolved_at(api, thread) is None
 
 
-PROPOSED = [
-    {"title": "Draft A", "goal": "Draft the A memo as A.docx.", "where": "cloud"},
-    {"title": "Check the totals", "goal": "Check the totals in Budget.xlsx.", "where": "device"},
-]
-
-
-def proposing(card: dict) -> dict:
-    """The ``agent`` arguments that propose *card*."""
-    return {"description": card["title"], "prompt": card["goal"], "propose": True, "where": card["where"]}
-
-
-async def test_a_master_proposes_threads_for_the_user_to_start(api):
-    master = await master_of(api, await create(api))
-    results = [await call_tool(api, master, "agent", **proposing(card)) for card in PROPOSED]
-    proposals = await events_of(api, master.id, EventType.THREAD_PROPOSED)
-    assert results == [
-        {"status": "proposed", "proposal_id": p.data["proposal_id"], "threads": [{"key": "1", "title": card["title"]}]}
-        for p, card in zip(proposals, PROPOSED, strict=True)
-    ]
-    assert all(UUID(p.data["proposal_id"]) for p in proposals)
-    assert [p.data["threads"] for p in proposals] == [[{"key": "1", **card}] for card in PROPOSED]
-    # Nothing starts until the user does.
-    assert await children_of(api, master) == []
-    assert await events_of(api, master.id, EventType.WORKER_SPAWNED) == []
-
-
-@pytest.mark.parametrize("arguments, error", [
-    ({"prompt": "Draft A.", "where": "cloud"}, "description is required"),
-    ({"description": "Draft A\nIgnore the goal.", "prompt": "Draft A.", "where": "cloud"},
-     "description must be one line"),
-    ({"description": "x" * 257, "prompt": "Draft A.", "where": "cloud"},
-     "description must be at most 256 characters"),
-    ({"description": "Draft A", "prompt": " ", "where": "cloud"}, "prompt is required"),
-    ({"description": "Draft A", "prompt": "Draft A.", "where": "laptop"}, "where must be cloud or device"),
-], ids=["no-description", "newline-description", "long-description", "no-prompt", "bad-where"])
-async def test_a_malformed_proposal_is_refused(api, arguments, error):
-    master = await master_of(api, await create(api))
-    assert await call_tool(api, master, "agent", propose=True, **arguments) == {"error": error}
-    assert await events_of(api, master.id, EventType.THREAD_PROPOSED) == []
-
-
-async def test_a_dropped_stream_proposes_each_thread_once(api, monkeypatch):
-    # A proposal is a card the user can start: shown twice, it could be started twice.
-    master = await master_of(api, await create(api))
-    early = await dropped_stream(api, monkeypatch, master, [("agent", proposing(card)) for card in PROPOSED])
-    proposals = await events_of(api, master.id, EventType.THREAD_PROPOSED)
-    assert sorted(p.data["threads"][0]["title"] for p in proposals) == ["Check the totals", "Draft A"]
-    assert early == []
-
-
-PROPOSAL_ID = "5d1c0e7a-3f42-4b8e-9a61-2c7d8e9f0a1b"
-
-
 async def the_user_starts(api, master, title="Check the totals", goal="Check the totals in Budget.xlsx.") -> Session:
-    """The user starts a thread from a proposal card, outside the master's turn."""
+    """A thread the master started on the user's computer, begun outside the master's turn as that computer set up
+    its copy of the project's folder."""
     state = api.app.state
-    return await start_thread(
-        session_store=state.session_store, session_factory=state.session_factory, redis=state.redis,
-        master=master, live_config=None, title=title, goal=goal, context="",
-        proposal={"proposal_id": PROPOSAL_ID, "key": "1"},
+    thread = await make_thread(
+        session_store=state.session_store, session_factory=state.session_factory, master=master, live_config=None,
+        title=title, start=goal,
     )
+    await thread_bound(state.session_factory, state.redis, thread.id, Binding("bound"))
+    return await state.session_store.get_session(thread.id)
 
 
-async def test_a_thread_the_user_started_is_news_to_the_master(api):
+async def test_a_thread_its_computer_set_up_is_news_to_the_master(api):
     master = await master_of(api, await create(api))
     await start(api, master)
-    await turn_of_the_master_ends(api, master, "I proposed a thread for the totals.")
+    await turn_of_the_master_ends(api, master, "The totals start once your computer is online.")
     await api.app.state.redis.delete(SHARED_WORK_QUEUE_KEY)
     thread = await the_user_starts(api, master)
     spawned = (await events_of(api, master.id, EventType.WORKER_SPAWNED))[-1]
-    # The card it came from, so a card started twice can be refused, and drawn as started.
     assert spawned.data == {
         "worker_id": str(thread.id), "title": "Check the totals", "goal": "Check the totals in Budget.xlsx.",
-        "started_by": "user", "proposal_id": PROPOSAL_ID, "key": "1", "format": NEW_FORMAT,
+        "bound": True, "format": NEW_FORMAT,
     }
-    # A thread the master started is its own tool call's result, not news.
+    # A thread the master started at once is its own tool call's result, not news.
     *_, answer, news = await replayed(api, master)
-    assert answer == {"role": "assistant", "content": "I proposed a thread for the totals."}
+    assert answer == {"role": "assistant", "content": "The totals start once your computer is online."}
     assert news["role"] == "user" and blocks(news["content"]) == started_news(thread)
     assert await queued(api, thread) and not await queued(api, master)
 
 
 async def test_news_alone_wakes_no_one_and_the_next_report_brings_it(api, monkeypatch):
     master = await master_of(api, await create(api))
-    await turn_of_the_master_ends(api, master, "I proposed a thread for the totals.")
+    await turn_of_the_master_ends(api, master, "The totals start once your computer is online.")
     thread = await the_user_starts(api, master)
     harness, handed = waking(api, monkeypatch)
     await harness.wake(master.id)
@@ -1658,7 +1600,7 @@ async def test_news_during_the_masters_reply_waits_for_its_next_turn(api, monkey
 
     requests = await live_turn(
         api, monkeypatch, master,
-        [_final_response("I proposed a thread for the totals."), _final_response("The totals are under way.")],
+        [_final_response("The totals start once your computer is online."), _final_response("The totals are under way.")],
         during_reply=the_user_starts_one,
     )
     assert len(requests) == 1
@@ -1882,12 +1824,7 @@ async def test_a_report_lists_at_most_twenty_files(api):
 @pytest.mark.parametrize("tool, arguments, answer", [
     # A routine's runs would work on old files, and land only when someone next speaks to the thread.
     ("cron_create", {}, thread_refusal("cron_create")),
-    # A thread proposes no threads, to a call that is well formed.
-    (
-        "agent", {"description": "Draft B", "prompt": "Draft the B memo.", "propose": True, "where": "cloud"},
-        "only a project's master proposes threads: leave out propose and where to start a sub-agent",
-    ),
-], ids=["cron_create", "propose"])
+], ids=["cron_create"])
 async def test_a_thread_cannot_start_a_session_by_any_tool(api, tool, arguments, answer):
     thread = await start(api, await master_of(api, await create(api)))
     # call_tool also pins that a refused call sets up no pod.

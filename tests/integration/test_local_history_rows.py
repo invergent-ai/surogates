@@ -131,7 +131,7 @@ async def test_a_folder_whose_history_is_off_on_its_computer_says_so_where_its_h
 
 async def test_a_folders_history_is_said_off_by_its_own_projects_threads_on_that_computer_alone(api, computer, monkeypatch):
     project, _, thread = await begun_with_copy(api, computer)
-    other_project, _, other = await begun_with_copy(api, computer, nonce="second-thread-nonce-0002")
+    other_project, _, other = await begun_with_copy(api, computer)
     # Another project's thread on the same computer finds its folder's history off, as its computer answers its open.
     computer.app.lie = lambda frame, outcome: (
         {"ok": {"history": "off", "reason": "cap"}}

@@ -296,8 +296,8 @@ def describe_for_conversation(
     return described
 
 
-#: The arguments only a project's master is given: a thread proposed, where it runs, a thread resolved.
-_PROJECT_ONLY_ARGUMENTS: dict[str, tuple[str, ...]] = {"agent": ("propose", "where"), "stop_agent": ("resolve",)}
+#: The arguments only a project's master is given: a thread resolved.
+_PROJECT_ONLY_ARGUMENTS: dict[str, tuple[str, ...]] = {"stop_agent": ("resolve",)}
 
 
 def describe_for_project(schemas: list[dict[str, Any]], config: dict[str, Any] | None) -> list[dict[str, Any]]:
