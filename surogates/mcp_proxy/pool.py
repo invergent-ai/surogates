@@ -743,9 +743,9 @@ class ConnectionPool:
             # Nothing awaits the task: what it raised is logged here, not
             # left to "Task exception was never retrieved".
             if not done.cancelled() and (error := done.exception()) is not None:
-                logger.warning(
-                    "MCP background retry for agent %s failed", key[2],
-                    exc_info=(type(error), error, error.__traceback__),
+                logger.error(
+                    "MCP background retry task for org=%s user=%s agent=%s raised",
+                    key[0], key[1], key[2], exc_info=error,
                 )
 
         task.add_done_callback(_done)
@@ -795,21 +795,22 @@ class ConnectionPool:
                     taken={s.get("name", "") for s in entry.tool_schemas},
                 )
             except Exception:
-                # The scan could not finish (an audit-store outage): the entry
-                # still names them unavailable, so what this retry connected
-                # must not stay open outside it, and the attempt counts as
-                # failed: the next one waits for its cooldown, not for the
-                # next tool list.
-                logger.warning(
-                    "MCP background retry for agent %s: scanning the reconnected servers' tools failed",
-                    key[2], exc_info=True,
+                # The scan raised (a scanner or audit-emitter error, which a
+                # tool definition can trigger every time): the entry still
+                # names them unavailable, so the attempt counts as failed and
+                # the next one waits for its cooldown, not for the next tool
+                # list; and what this retry connected must not stay open
+                # outside the entry.
+                logger.error(
+                    "MCP background retry for org=%s user=%s agent=%s: scanning the reconnected servers' tools raised",
+                    key[0], key[1], key[2], exc_info=True,
                 )
-                await self._shutdown_servers(owners)
                 if self._entries.get(key) is entry:
                     _note_failed_attempt(entry, {
                         **{names_by_key[p]: entry.unavailable.get(names_by_key[p], _LOST) for p in owners},
                         **reasons,
                     })
+                await self._shutdown_servers(owners)
                 return
             except BaseException:
                 await self._shutdown_servers(owners)
