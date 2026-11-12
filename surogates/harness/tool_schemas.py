@@ -164,8 +164,8 @@ def drop_unusable_tools(
     (*has_video_model*): whatever the session's tool list names, a media
     tool with no model behind it could only answer "not available".
 
-    Never returns an empty list: a request with no tools at all is worse
-    than an oversized one.
+    Never returns an empty list (a request with no tools at all is worse
+    than an oversized one), except where only unwired media tools were left.
     """
     drop: set[str] = set()
     if not has_kbs:
@@ -194,7 +194,15 @@ def drop_unusable_tools(
         return schemas
 
     kept = [s for s in schemas if s["function"]["name"] not in drop]
-    return kept or schemas
+    if kept:
+        return kept
+    # Never empty, but never by sending a media tool with no model behind it:
+    # it could only answer "not available" (an empty list sends no tools).
+    unwired = {
+        name for name, wired in (("generate_image", has_image_model), ("generate_video", has_video_model))
+        if not wired
+    }
+    return [s for s in schemas if s["function"]["name"] not in unwired]
 
 
 # What only a session on a folder of the user's computer can use: a cloud session is not offered it.

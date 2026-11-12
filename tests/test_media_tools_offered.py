@@ -104,6 +104,15 @@ def test_the_schema_filter_drops_an_unwired_media_tool():
     assert drop_unusable_tools(schemas, **flags) == schemas
 
 
+def test_the_never_empty_fallback_does_not_bring_back_an_unwired_media_tool():
+    flags = dict(has_kbs=True, has_channel=False, makes_routines=False)
+    only_media = [_schema("generate_image"), _schema("generate_video")]
+
+    assert drop_unusable_tools(only_media, **flags, has_image_model=False, has_video_model=False) == []
+    kept = drop_unusable_tools(only_media, **flags, has_image_model=True, has_video_model=False)
+    assert [s["function"]["name"] for s in kept] == ["generate_image"]
+
+
 async def test_every_kind_of_session_is_sent_a_media_tool_only_with_its_model(monkeypatch, tmp_path):
     sessions = {
         "a web chat": _session("web"),
