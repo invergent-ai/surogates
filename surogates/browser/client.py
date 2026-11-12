@@ -30,7 +30,7 @@ _UPLOAD_SECONDS = 900
 # kernel attaches Playwright only for the length of one call. Armed again after every navigation
 # and before every click, since a full page load starts a fresh window.
 _ARM_FILE_PICKER = """
-for (const f of page.frames()) await f.evaluate(() => {
+await Promise.all(page.frames().map((f) => f.evaluate(() => {
   if (window.__sgPickArmed) return;
   window.__sgPickArmed = true;
   const hold = (el) => { if (!el.isConnected) { el.hidden = true; document.documentElement.append(el); } window.__sgFileInput = el; };
@@ -42,7 +42,7 @@ for (const f of page.frames()) await f.evaluate(() => {
   // A detached input's click never reaches the document, so it is caught here.
   HTMLInputElement.prototype.click = function () { return this.type === "file" && !this.isConnected ? hold(this) : click.call(this); };
   if (show) HTMLInputElement.prototype.showPicker = function () { return this.type === "file" ? hold(this) : show.call(this); };
-}, undefined, false).catch(() => null);   // false: the page's own world (Patchright isolates evaluate by default)
+}, undefined, false).catch(() => null)));   // false: the page's own world (Patchright isolates evaluate by default)
 """
 
 _SET_FILES_SCRIPT = """
@@ -554,17 +554,15 @@ return {
             folder = f"{_UPLOAD_DIR}/{uuid4().hex[:12]}"
             dest = f"{folder}/{_upload_name(url, at)}"
             # The browser runs as its own user: the folder and the file must be readable by it.
-            # Uploads older than a day are cleared first; the page has long since read them.
             response = await self._http.post(
                 "/process/exec",
                 json={
                     "command": "sh",
                     "args": [
                         "-c",
-                        'find "$6" -mindepth 1 -maxdepth 1 -mmin +1440 -exec rm -rf {} + 2>/dev/null; '
                         'mkdir -p -m 1777 "$1" && curl -fsSL --proto =http,https --max-time "$4" '
                         '--max-filesize "$5" -o "$2" "$3" && chmod 0644 "$2"',
-                        "sh", folder, dest, url, str(_UPLOAD_SECONDS), str(_UPLOAD_MAX_BYTES), _UPLOAD_DIR,
+                        "sh", folder, dest, url, str(_UPLOAD_SECONDS), str(_UPLOAD_MAX_BYTES),
                     ],
                     "timeout_sec": _UPLOAD_SECONDS + 30,
                 },
@@ -577,6 +575,10 @@ return {
                 raise RuntimeError(f"Could not download {url}: {why[:300] or 'curl exit ' + str(body.get('exit_code'))}")
             return dest
 
+        # Uploads older than a day are cleared first; the page has long since read them.
+        await self._http.post("/process/exec", json={"command": "sh", "args": [
+            "-c", 'find "$1" -mindepth 1 -maxdepth 1 -mmin +1440 -exec rm -rf {} + 2>/dev/null; true', "sh", _UPLOAD_DIR,
+        ], "timeout_sec": 60})
         paths = await asyncio.gather(*(fetch(at, url) for at, url in enumerate(urls)))
         result = await self._playwright_execute(
             _SET_FILES_SCRIPT.replace("__PATHS__", json.dumps(list(paths))), timeout_sec=120,

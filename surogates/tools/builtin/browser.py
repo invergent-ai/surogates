@@ -12,6 +12,7 @@ from uuid import UUID, uuid4
 
 import httpx
 
+from surogates.tools.utils.url_safety import is_always_blocked_url
 from surogates.browser.base import (
     BrowserBudgetExhaustedError,
     BrowserCreditsExhaustedError,
@@ -1517,8 +1518,11 @@ def _wrong_upload_urls(urls: Any) -> str | None:
     if not isinstance(urls, list) or not 1 <= len(urls) <= _MAX_UPLOAD_FILES:
         return f"'urls' must be a list of 1 to {_MAX_UPLOAD_FILES} web links"
     for at, url in enumerate(urls, start=1):
-        if not isinstance(url, str) or urlsplit(url).scheme not in ("http", "https") or not urlsplit(url).netloc:
+        parts = urlsplit(url) if isinstance(url, str) else None
+        if parts is None or parts.scheme not in ("http", "https") or not parts.netloc:
             return f"Each of 'urls' must be an http or https link: item {at} is not"
+        if is_always_blocked_url(url):
+            return f"Item {at} of 'urls' points at a cloud metadata address, which is never fetched"
     return None
 
 

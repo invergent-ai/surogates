@@ -104,8 +104,8 @@ async def test_the_browser_downloads_each_link_then_the_page_gets_them() -> None
         got = await client.set_input_files_from_urls(["https://h/a.png?name=a.png", "https://h/b.mp4"])
     assert got == {"files": 2, "to": "the file picker the page opened"}
     downloads = [json.loads(r.content) for r in seen if r.url.path == "/process/exec"]
-    assert [d["command"] for d in downloads] == ["sh", "sh"]
-    for d, url, name in zip(downloads, ["https://h/a.png?name=a.png", "https://h/b.mp4"], ["a.png", "b.mp4"]):
+    assert [d["command"] for d in downloads] == ["sh", "sh", "sh"]   # one cleanup, then one download per link
+    for d, url, name in zip(downloads[1:], ["https://h/a.png?name=a.png", "https://h/b.mp4"], ["a.png", "b.mp4"]):
         _c, script, _argv0, folder, dest, link = d["args"][:6]
         # The link is an argument, never part of the shell text.
         assert url not in script and link == url and "--proto =http,https" in script and "chmod 0644" in script
@@ -113,7 +113,8 @@ async def test_the_browser_downloads_each_link_then_the_page_gets_them() -> None
     [script] = [json.loads(r.content)["code"] for r in seen if r.url.path == "/playwright/execute"]
     assert "window.__sgFileInput" in script and "/tmp/surogates-uploads/" in script and "DOM.setFileInputFiles" in script
     # Old uploads are cleared from the browser's disk on the way in.
-    assert all(d["args"][-1] == "/tmp/surogates-uploads" and "-mmin +1440" in d["args"][1] for d in downloads)
+    [cleanup] = [d for d in downloads if "-mmin +1440" in d["args"][1]]
+    assert cleanup["args"][-1] == "/tmp/surogates-uploads"
 
 
 async def test_a_link_that_cannot_be_downloaded_stops_before_the_page() -> None:
@@ -145,3 +146,10 @@ def test_every_click_arms_the_file_picker_first() -> None:
 
     code = _bounded_click("await page.mouse.click(1, 2);")
     assert code.index("__sgPickArmed") < code.index("page.mouse.click")
+
+
+def test_a_cloud_metadata_link_is_never_fetched() -> None:
+    from surogates.tools.builtin.browser import _wrong_upload_urls
+
+    assert "metadata" in _wrong_upload_urls(["http://169.254.169.254/latest/meta-data/"])
+    assert _wrong_upload_urls(["http://host.docker.internal:8820/api/files/x?name=a.png"]) is None
