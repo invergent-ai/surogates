@@ -28,6 +28,7 @@ from surogates.mcp_proxy.sandbox import MCPCallSandbox
 from surogates.runtime import (
     AgentRuntimeContext,
     agent_runtime_context_dep,
+    build_agent_runtime_context,
     rate_limit_dep,
 )
 from surogates.simulation.side_effects import decide, fake_result, would_have
@@ -127,8 +128,8 @@ async def _ensure_tenant_connected(
     passes ``None``.
 
     An agent invalidated while it connected is connected once more, with
-    its configs loaded anew; a second invalidation meanwhile leaves the
-    request without MCP tools.
+    its attached servers and configs read anew; a second invalidation
+    meanwhile leaves the request without MCP tools.
     """
     try:
         return await _connect_tenant(
@@ -139,12 +140,28 @@ async def _ensure_tenant_connected(
         pass
     try:
         return await _connect_tenant(
-            pool, auth, request, agent_id=agent_id, allowed_ids=allowed_ids,
+            pool, auth, request, agent_id=agent_id,
+            allowed_ids=await _attached_server_ids(request, agent_id),
             retry_unavailable=retry_unavailable,
         )
     except AgentChangedDuringConnect:
         logger.warning("MCP connect for agent %s dropped twice: the agent kept changing", agent_id)
         return []
+
+
+async def _attached_server_ids(request: Request, agent_id: str) -> frozenset[str]:
+    """The agent's attached MCP server ids as its runtime config says now
+    (every invalidation clears the cached copy): none when it cannot be
+    read, or when the agent is gone or stopped."""
+    cache = getattr(request.app.state, "runtime_config_cache", None)
+    if cache is None:
+        return frozenset()
+    try:
+        ctx = build_agent_runtime_context(await cache.get(agent_id))
+    except Exception:
+        logger.warning("Runtime config of agent %s unreadable after it changed", agent_id, exc_info=True)
+        return frozenset()
+    return frozenset(ctx.mcp_server_ids) if ctx.enabled else frozenset()
 
 
 async def _connect_tenant(

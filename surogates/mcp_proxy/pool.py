@@ -747,6 +747,12 @@ class ConnectionPool:
             pname: _discovery_config(entry.server_configs[name]) for pname, name in names_by_key.items()
         }
         temp_registry = ToolRegistry()
+        # A due server already connected (discovery skips it) is listed
+        # from its live connection, as at the first connect.
+        with _lock:
+            adopted = {pname: _servers[pname] for pname in prefixed if pname in _servers}
+        for pname, server in adopted.items():
+            _register_server_tools(pname, server, prefixed[pname], temp_registry)
         try:
             await asyncio.to_thread(
                 discover_mcp_tools, servers=prefixed, registry=temp_registry, retry=False,
@@ -762,15 +768,21 @@ class ConnectionPool:
 
         clean_schemas, tool_index, utility_index = [], {}, {}
         if owners and self._entries.get(key) is entry:
-            # Only the newly connected servers' tools are scanned: the live
-            # ones keep the schemas they were approved with.
-            clean_schemas, tool_index, utility_index = await self._clean_schemas(
-                key, temp_registry, owners, entry.server_configs,
-                governance=entry.governance,
-                approval_room=_ApprovalRoom(self._tenant_approvals(key)) if entry.governance is not None else None,
-                is_service_account=entry.is_service_account,
-                taken={s.get("name", "") for s in entry.tool_schemas},
-            )
+            # Only the due servers' tools are scanned: the live ones keep the
+            # schemas they were approved with.
+            try:
+                clean_schemas, tool_index, utility_index = await self._clean_schemas(
+                    key, temp_registry, owners, entry.server_configs,
+                    governance=entry.governance,
+                    approval_room=_ApprovalRoom(self._tenant_approvals(key)) if entry.governance is not None else None,
+                    is_service_account=entry.is_service_account,
+                    taken={s.get("name", "") for s in entry.tool_schemas},
+                )
+            except BaseException:
+                # The entry still names them unavailable: what this retry
+                # connected must not stay open outside it.
+                await self._shutdown_servers(owners)
+                raise
         if self._entries.get(key) is not entry:
             await self._shutdown_servers(owners)
             return

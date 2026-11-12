@@ -235,6 +235,44 @@ async def test_a_server_that_comes_back_is_listed_after_a_background_retry(upstr
     assert new_scans and all("crm" in str(r["data"]) and "files" not in str(r["data"]) for r in new_scans)
 
 
+async def test_a_background_retry_lists_a_due_server_that_is_already_connected(upstream, monkeypatch):
+    upstream.fails["crm"] = 3
+    pool, tenant = ConnectionPool(), _tenant()
+    await _list(pool, tenant)
+    # crm got connected outside the entry meanwhile: discovery skips it.
+    crm_key = _prefixed_name(*tenant, "crm")
+    live = MCPServerTask(crm_key)
+    live.session = SimpleNamespace()
+    live._tools = [SimpleNamespace(name="lookup", description="Look up a crm record.", inputSchema={})]
+    live._registered_tool_names = _register_server_tools(
+        crm_key, live, pool_module._discovery_config(CONFIGS["crm"]), ToolRegistry(),
+    )
+    with mcp_client._lock:
+        mcp_client._servers[crm_key] = live
+    _later(monkeypatch, _UNAVAILABLE_RETRY_COOLDOWN + 1)
+    await _retried(pool, tenant)
+    assert "mcp__crm__lookup" in {s["name"] for s in pool.get_cached_schemas(*tenant)}
+    assert pool.unavailable_servers(*tenant) == {}
+    assert upstream.connects["crm"] == 3 and mcp_client._servers[crm_key] is live
+
+
+async def test_a_background_retry_whose_scan_fails_leaves_nothing_connected(upstream, monkeypatch):
+    upstream.fails["crm"] = 3
+    pool, tenant = ConnectionPool(), _tenant()
+    await _list(pool, tenant)
+
+    async def scan_fails(*_args, **_kwargs):
+        raise RuntimeError("audit store down")
+
+    monkeypatch.setattr(pool, "_clean_schemas", scan_fails)
+    _later(monkeypatch, _UNAVAILABLE_RETRY_COOLDOWN + 1)
+    with pytest.raises(RuntimeError):
+        await _retried(pool, tenant)
+    assert upstream.connects["crm"] == 4
+    assert _prefixed_name(*tenant, "crm") not in mcp_client._servers
+    assert pool.unavailable_servers(*tenant) == {"crm": "timeout"}
+
+
 async def test_each_failed_retry_doubles_the_cooldown(upstream, monkeypatch):
     upstream.fails["crm"] = math.inf
     pool, tenant = ConnectionPool(), _tenant()
@@ -376,6 +414,19 @@ async def test_a_connect_that_times_out_leaves_no_task_running(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+class _RuntimeConfigs:
+    """The runtime-config cache: the agent's attached servers as ops says them now."""
+
+    def __init__(self, org, server_ids: list[str]) -> None:
+        self.org, self.server_ids = org, list(server_ids)
+
+    async def get(self, agent_id: str) -> dict:
+        return {
+            "agent_id": agent_id, "org_id": str(self.org), "project_id": str(self.org), "enabled": True,
+            "version": 1, "storage_key_prefix": "", "mcp_server_ids": list(self.server_ids),
+        }
+
+
 def _app(pool: ConnectionPool, tenant: tuple, monkeypatch, loads: list | None = None):
     from fastapi import FastAPI
 
@@ -385,10 +436,12 @@ def _app(pool: ConnectionPool, tenant: tuple, monkeypatch, loads: list | None = 
 
     org, user, agent = tenant
 
-    async def load_mcp_configs(**_kwargs):
+    async def load_mcp_configs(**kwargs):
+        # The agent's attached servers, by id.
+        allowed = kwargs["allowed_ids"]
         if loads is not None:
-            loads.append(1)
-        return dict(CONFIGS)
+            loads.append(sorted(allowed))
+        return {name: dict(cfg) for name, cfg in CONFIGS.items() if f"{name}-id" in allowed}
 
     monkeypatch.setattr("surogates.mcp_proxy.routes.load_mcp_configs", load_mcp_configs)
     app = FastAPI()
@@ -396,6 +449,7 @@ def _app(pool: ConnectionPool, tenant: tuple, monkeypatch, loads: list | None = 
     app.state.pool = pool
     app.state.session_factory = None
     app.state.vault = None
+    app.state.runtime_config_cache = _RuntimeConfigs(org, ["crm-id", "files-id"])
     app.dependency_overrides[get_proxy_auth] = lambda: ProxyAuthContext(org_id=org, user_id=user, session_id=uuid4())
     app.dependency_overrides[agent_runtime_context_dep] = lambda: AgentRuntimeContext(
         agent_id=agent, org_id=str(org), enabled=True, config_version=1, storage_key_prefix="",
@@ -504,6 +558,21 @@ async def test_a_list_whose_connect_was_invalidated_connects_again_with_configs_
     assert {"mcp__crm__lookup", "mcp__files__lookup"} <= {t["name"] for t in body["tools"]}
     assert "unavailable" not in body
     assert len(loads) == 2
+
+
+async def test_a_connect_invalidated_by_a_detach_connects_again_without_the_detached_server(upstream, monkeypatch):
+    upstream.delay["crm"] = 0.3
+    pool, tenant, loads = ConnectionPool(), _tenant(), []
+    app = _app(pool, tenant, monkeypatch, loads)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://proxy") as proxy:
+        listing = asyncio.create_task(proxy.post("/mcp/v1/tools/list", params={"agent_id": "agent"}, json={}))
+        await asyncio.sleep(0.1)
+        app.state.runtime_config_cache.server_ids = ["files-id"]  # crm detached
+        pool.invalidate_agent("agent")
+        body = (await listing).json()
+    assert {t["name"] for t in body["tools"]} == {"mcp__files__lookup"}
+    assert "unavailable" not in body
+    assert loads == [["crm-id", "files-id"], ["files-id"]]
 
 
 def test_the_prompt_names_only_servers_the_session_is_offered(monkeypatch):
