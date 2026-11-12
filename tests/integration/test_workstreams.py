@@ -457,14 +457,13 @@ async def test_a_master_does_a_simple_thing_itself_and_gives_out_the_rest(api, m
         "read_file", "search_files", "list_files", "write_file", "patch", "terminal", "process",
         "kb_list_pages", "kb_read_page", "kb_search_pages",
         "memory", "todo", "ask_user_question", "session_search", "skills_list", "skill_view",
-        "start_thread", "propose_threads", "message_thread",
+        "agent", "send_message", "list_agents", "stop_agent",
     } <= sent
     # With /loop off its routines stay readable, and nothing makes or ends one.
     assert ROUTINE_TOOLS & sent == (ROUTINE_TOOLS if loop else {"cron_list"})
     # Research, a site's study and every other piece of work are a thread's.
     assert not sent & {
-        "web_search", "web_extract", "browser_navigate", "create_artifact", "vision_analyze",
-        "agent", "run_coding_agent",
+        "web_search", "web_extract", "browser_navigate", "create_artifact", "vision_analyze", "run_coding_agent",
     }
 
 
@@ -536,12 +535,13 @@ async def test_a_master_refuses_a_goal_the_web_client_sends_as_an_event(api):
 
 
 async def turn_calling(
-    monkeypatch, session, calls: dict[str, dict], *, streamed=False, loop=True, session_factory=None,
+    monkeypatch, session, calls: dict[str, dict], *, streamed=False, loop=True, session_factory=None, schemas=None,
 ):
     """One turn of *session* whose model makes *calls* (name: arguments).
 
     Returns the tools the model was sent, the dispatch, and each call's
-    answer.  The dispatch is a stub unless *session_factory* is given.
+    answer.  The dispatch is a stub unless *session_factory* is given.  A
+    *schemas* dict is filled with each sent tool's schema, by name.
     """
     registry = ToolRegistry()
     ToolRuntime(registry).register_builtins()
@@ -575,6 +575,8 @@ async def turn_calling(
 
     async def llm(**kwargs):
         sent.append({schema["function"]["name"] for schema in kwargs["create_kwargs"]["tools"]})
+        if schemas is not None and not schemas:
+            schemas.update({schema["function"]["name"]: schema for schema in kwargs["create_kwargs"]["tools"]})
         message, usage = next(responses)
         if kwargs["on_tool_call_complete"] is not None:
             for call in message["tool_calls"] or []:
@@ -595,7 +597,7 @@ def unknown(name: str, sent: set[str]) -> str:
 @pytest.mark.parametrize("streamed", [False, True], ids=["sequential", "streamed"])
 async def test_a_masters_model_cannot_call_a_tool_it_was_not_offered(api, monkeypatch, streamed):
     master = await master_of(api, await create(api))
-    refused = {"agent": {}, "run_coding_agent": {}}
+    refused = {"web_search": {}, "run_coding_agent": {}}
     sent, ran, answered = await turn_calling(monkeypatch, master, refused, streamed=streamed)
     ran.assert_not_awaited()
     assert answered == {f"call_{name}": unknown(name, sent) for name in refused}
@@ -658,7 +660,10 @@ async def test_a_masters_prompt_runs_the_project(api):
     ) in said
     assert "Never do complex work yourself." in said
     assert "Never do the work and then give it to a thread" in said
-    assert "## Starting threads - Give it to a new thread with `start_thread`." in said
+    assert (
+        "## Starting threads - Give it to a new thread with `agent`: the `description` is the thread's title, "
+        "the `prompt` its goal."
+    ) in said
     assert "## The project's folder" not in said
     # A thread is named by its title, not linked: the chat opens no link to a thread, and its card is where it opens.
     assert "Name a thread by its title and never write a link to it" in prompt

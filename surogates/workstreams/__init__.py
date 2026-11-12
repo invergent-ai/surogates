@@ -89,7 +89,7 @@ def master_skill_refusal(name: str) -> str:
     """What a master's ``skill_view`` answers for a skill that makes a document."""
     return (
         f"The {name} skill makes a document, and in a project a document is a thread's work. "
-        "Propose a thread for it with propose_threads, or start one with start_thread where this project allows."
+        "Propose a thread for it with agent and propose=true, or start one with agent where this project allows."
     )
 
 

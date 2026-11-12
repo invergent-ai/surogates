@@ -106,7 +106,7 @@ async def begun_on(api, device_id: str, folder: str = FOLDER):
     thread = await make_thread(
         session_store=api.app.state.session_store, session_factory=api.app.state.session_factory, master=master, live_config=None,
         title="Check the totals", device=SimpleNamespace(id=UUID(device_id), name="Flavius's ThinkPad"), folder=folder,
-        card={"proposal_id": proposal, "key": "2"},
+        card={"proposal_id": proposal, "key": "1"},
     )
     async with api.app.state.session_factory() as db:
         await db.execute(insert(WorkstreamThread).values(session_id=thread.id, workstream_id=UUID(project["id"]), title="Check the totals"))

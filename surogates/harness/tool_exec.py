@@ -631,9 +631,6 @@ BATCH_PARALLEL_TOOLS: frozenset[str] = PARALLEL_TOOLS | DELEGATION_TOOLS
 SESSION_STARTING_TOOLS: frozenset[str] = DELEGATION_TOOLS | frozenset({
     "send_message",
     "cron_create",
-    "start_thread",
-    "message_thread",
-    "propose_threads",
 })
 
 #: Tools whose call must not start before the response that makes it is saved: a stream discarded and retried
@@ -645,12 +642,9 @@ AFTER_THE_RESPONSE_TOOLS: frozenset[str] = frozenset({"office_edit"})
 # what helpers kept comes into the copy after.
 HELPER_STARTING_TOOLS: frozenset[str] = frozenset({"agent"})
 
-# The session-starting tools the thread's rule leaves alone: two only reach
-# a session that exists, and two answer a thread themselves.
-_NOT_THE_THREADS_TO_REFUSE: frozenset[str] = frozenset({
-    "message_thread", "start_thread", "propose_threads",
-    "send_message",
-})
+# The session-starting tool the thread's rule leaves alone: it only reaches a
+# session that exists.
+_NOT_THE_THREADS_TO_REFUSE: frozenset[str] = frozenset({"send_message"})
 
 
 def refused_in_a_thread(session_starting: frozenset[str]) -> frozenset[str]:

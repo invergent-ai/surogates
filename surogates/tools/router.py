@@ -132,13 +132,6 @@ TOOL_LOCATIONS: dict[str, ToolLocation] = {
     "kb_search_pages": ToolLocation.HARNESS,
     # Coordinator tools (session management, no isolation needed)
     # A project's thread tools: sessions, rows and the queue.
-    "start_thread": ToolLocation.HARNESS,
-    "message_thread": ToolLocation.HARNESS,
-    "stop_thread": ToolLocation.HARNESS,
-    "list_threads": ToolLocation.HARNESS,
-    "read_thread": ToolLocation.HARNESS,
-    "resolve_thread": ToolLocation.HARNESS,
-    "propose_threads": ToolLocation.HARNESS,
     # Coordination board — handlers need the worker's DB session factory,
     # session store, and the LLM verifier client; none of that exists in a
     # sandbox pod, whose ``SANDBOX`` fallback would answer ``Unknown tool``.

@@ -163,6 +163,7 @@ from surogates.harness.tool_schemas import (
     channel_tool_flags,
     describe_for_conversation,
     describe_for_device,
+    describe_for_project,
     drop_unusable_tools,
     filter_schemas_for_tenant,
     has_file_pane,
@@ -3258,6 +3259,7 @@ class AgentHarness(
         # and the policy took away.
         self._withhold_from_experts(usable, tool_filter)
         tool_schemas = describe_for_device(tool_schemas, session.config)
+        tool_schemas = describe_for_project(tool_schemas, session.config)
         tool_schemas = describe_for_conversation(
             tool_schemas, channel=session.channel, forms=whatsapp_forms,
             contract=step_contract_of(session) if is_case_step(session) else None,
@@ -5931,10 +5933,7 @@ class AgentHarness(
         ``None`` means "every registered tool"; it is materialised here
         because the gates have to subtract from it.
         """
-        from surogates.runtime.governance import (
-            BOARD_SELF_TOOLS,
-            PROJECT_THREAD_TOOLS,
-        )
+        from surogates.runtime.governance import BOARD_SELF_TOOLS
 
         config = session.config or {}
         result = (
@@ -5947,9 +5946,6 @@ class AgentHarness(
         else:
             result -= BOARD_SELF_TOOLS
 
-        # Only a project's master starts and follows up its threads.
-        if not is_project_master(config):
-            result -= PROJECT_THREAD_TOOLS
 
         return result
 

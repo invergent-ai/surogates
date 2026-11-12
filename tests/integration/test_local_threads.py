@@ -52,7 +52,7 @@ from .test_thread_copies import pods  # noqa: F401  (a fixture)
 from .test_turn_sagas import a_turn, calling
 from .test_workstream_library import library, upload
 from .test_workstream_overview import rows
-from .test_workstream_threads import PROPOSED, call_tool, children_of, events_of, queued, start, turn_ends
+from .test_workstream_threads import PROPOSED, call_tool, proposing, children_of, events_of, queued, start, turn_ends
 from .test_workstreams import create, master_of
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -102,10 +102,10 @@ async def test_deleting_a_session_that_is_its_own_sandbox_root_has_its_computer_
 
 
 async def device_card(api) -> tuple[dict, object, str]:
-    """A project whose master proposed ``PROPOSED``: card "2" is a thread on the user's computer."""
+    """A project whose master proposed ``PROPOSED``'s thread on the user's computer: its card is keyed "1"."""
     project = await create(api)
     master = await master_of(api, project)
-    return project, master, (await call_tool(api, master, "propose_threads", threads=PROPOSED))["proposal_id"]
+    return project, master, (await call_tool(api, master, "agent", **proposing(PROPOSED[1])))["proposal_id"]
 
 
 def confirmed(device_id: str, **changes) -> dict:
@@ -113,7 +113,7 @@ def confirmed(device_id: str, **changes) -> dict:
     return {"kind": "device", "device_id": device_id, "folder": FOLDER, "nonce": NONCE, **changes}
 
 
-async def make_local(api, project: dict, proposal_id: str, execution: dict, *, key: str = "2", token: str | None = None):
+async def make_local(api, project: dict, proposal_id: str, execution: dict, *, key: str = "1", token: str | None = None):
     return await api.client.post(
         f"/v1/workstreams/{project['id']}/threads",
         json={"proposal_id": proposal_id, "key": key, "execution": execution}, headers=api.auth(token),
@@ -135,7 +135,7 @@ async def test_a_card_makes_its_thread_in_a_copy_of_the_folder_the_user_confirme
     }
     assert (config["workspace_path"], config["sandbox_root_session_id"]) == (FOLDER, str(thread.id))
     assert (config["workstream_role"], config["memory_boundary"]) == ("thread", master.config["memory_boundary"])
-    assert config["workstream_card"] == {"proposal_id": proposal_id, "key": "2"}
+    assert config["workstream_card"] == {"proposal_id": proposal_id, "key": "1"}
     assert await binding(api, thread.id) == Binding("pending")
     [bind] = await journal(api).pending(UUID(device["id"]), 1)
     assert (bind.kind, bind.root_session_id, bind.args) == (
@@ -176,7 +176,7 @@ async def test_a_thread_works_only_on_the_users_own_live_computer(api, session_f
     }.items():
         response = await make_local(api, project, proposal_id, execution)
         assert response.status_code == status, case
-    assert (await make_local(api, project, proposal_id, confirmed(mine["id"]), key="3")).status_code == 404
+    assert (await make_local(api, project, proposal_id, confirmed(mine["id"]), key="2")).status_code == 404
     # Nor does another user make a card's thread on my project, on my computer or on theirs.
     for device_id in (mine["id"], theirs["id"]):
         refused = await make_local(api, project, proposal_id, confirmed(device_id), token=their_token)
@@ -204,7 +204,10 @@ async def test_a_chat_on_the_users_computer_cannot_pass_for_a_thread(api):
 async def test_the_coordinator_cannot_make_a_thread_on_the_users_computer(api):
     device = await register(api)
     master = await master_of(api, await create(api))
-    thread = await start(api, master, execution=confirmed(device["id"]))
+    started = await call_tool(
+        api, master, "agent", description="Draft A", prompt="Draft the A memo.", execution=confirmed(device["id"]),
+    )
+    thread = await api.app.state.session_store.get_session(UUID(started["agent_id"]))
     assert "execution" not in thread.config
     assert await journal(api).pending(UUID(device["id"]), 1) == []
 
@@ -248,7 +251,7 @@ async def made_before_copies(api, device_id: str) -> tuple[dict, object, object]
     thread = await make_thread(
         session_store=store, session_factory=api.app.state.session_factory, master=master, live_config=None,
         title="Check the totals", device=SimpleNamespace(id=UUID(device_id), name="Flavius's ThinkPad"), folder=FOLDER,
-        card={"proposal_id": proposal_id, "key": "2"},
+        card={"proposal_id": proposal_id, "key": "1"},
     )
     await store.update_session_config_key(
         thread.id, "execution", {key: value for key, value in thread.config["execution"].items() if key != "history"},
@@ -264,7 +267,7 @@ async def begin(api, project: dict, thread_id: str, token: str | None = None):
 
 
 async def made_local(api, laptop) -> tuple[dict, object, str, str]:
-    """A project, its master, the proposal and the thread made from its card "2" on *laptop*'s computer."""
+    """A project, its master, the proposal and the thread made from its card on *laptop*'s computer."""
     project, master, proposal_id = await device_card(api)
     made = await make_local(api, project, proposal_id, confirmed(laptop.device_id))
     assert made.status_code == 201, made.text
@@ -299,7 +302,7 @@ async def test_a_thread_on_the_users_computer_begins_once_its_computer_has_bound
     [spawned] = await events_of(api, master.id, EventType.WORKER_SPAWNED)
     assert spawned.data == {
         "worker_id": thread_id, "title": "Check the totals", "goal": "Check the totals in Budget.xlsx.",
-        "started_by": "user", "proposal_id": proposal_id, "key": "2",
+        "started_by": "user", "proposal_id": proposal_id, "key": "1",
     }
     assert await queued(api, thread)
 
@@ -350,7 +353,7 @@ async def test_only_the_projects_own_threads_made_on_a_computer_begin(api, lapto
 async def test_a_thread_proposed_for_the_users_computer_runs_in_the_cloud_when_the_user_says_so(api, laptop):
     project, master, proposal_id = await device_card(api)
     response = await api.client.post(
-        f"/v1/workstreams/{project['id']}/threads", json={"proposal_id": proposal_id, "key": "2"}, headers=api.auth(),
+        f"/v1/workstreams/{project['id']}/threads", json={"proposal_id": proposal_id, "key": "1"}, headers=api.auth(),
     )
     assert response.status_code == 201, response.text
     thread = await api.app.state.session_store.get_session(UUID(response.json()["id"]))
@@ -430,7 +433,7 @@ async def test_the_library_lists_a_local_threads_files_on_its_computer_and_the_c
 async def answered_by_the_journal(api, project: dict, master) -> object:
     """A thread begun from a new card of *master* on a new computer of the user's, its binding answered as its app answers."""
     device = await register(api)
-    proposal_id = (await call_tool(api, master, "propose_threads", threads=PROPOSED))["proposal_id"]
+    proposal_id = (await call_tool(api, master, "agent", **proposing(PROPOSED[1])))["proposal_id"]
     thread_id = (await make_local(api, project, proposal_id, confirmed(device["id"]))).json()["thread_id"]
     ops = journal(api)
     [bind] = await ops.pending(UUID(device["id"]), 1)

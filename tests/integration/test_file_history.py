@@ -340,7 +340,7 @@ async def test_a_file_that_clashed_again_is_not_merged_and_is_landed_once_its_th
     assert (found["reason"], [(f["ref"], f["landing"]) for f in found["files"]]) == (
         "files", [("Report.docx", "not_merged"), ("a.md", "landed")],
     )
-    await call_tool(api, master, "message_thread", thread_id=str(thread.id), message="Put your change in again.")
+    await call_tool(api, master, "send_message", to=str(thread.id), message="Put your change in again.", summary="Follow-up")
     await a_turn(api, monkeypatch, thread, [
         calling(("terminal", {"command": "printf ' by A' >> Report.docx"})), _final_response("Put it in again."),
     ], pool=pool)

@@ -271,9 +271,11 @@ class Placement:
             self.store.command = (await self.workers.store.get_events(self.chat, types=[EventType.USER_MESSAGE]))[-1].id
 
     async def is_followed_up(self) -> None:
-        """The thread's coordinator sends it a follow-up, as its ``message_thread`` does."""
-        sent = await call_tool(self.workers.api, self.master, "message_thread", thread_id=str(self.chat), message=FOLLOW_UP)
-        assert sent == {"status": "sent", "thread_id": str(self.chat)}
+        """The thread's coordinator sends it a follow-up, as its ``send_message`` does."""
+        sent = await call_tool(
+            self.workers.api, self.master, "send_message", to=str(self.chat), message=FOLLOW_UP, summary="Follow-up",
+        )
+        assert sent["status"] == "delivered", sent
         self.typed.append(FOLLOWED_UP)
 
     async def wake(self) -> None:

@@ -72,7 +72,7 @@ KB_TOOLS = {"kb_list_pages", "kb_read_page", "kb_search_pages"}
 # Chat, scheduling, starting other work and editing the agent: none is a case's.
 NEVER_IN_A_CASE = {
     "session_search", "ask_user_question", "cron_create", "start_case",
-    "skill_manage", "escalate", "start_thread",
+    "skill_manage", "escalate",
 }
 # What a step keeps however narrowly its scope names its work tools.
 KEPT_UNDER_ANY_SCOPE = {

@@ -11,7 +11,6 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from surogates.devices.binding import device_of
 from surogates.workstreams import is_project_master
 
 logger = logging.getLogger(__name__)
@@ -71,7 +70,7 @@ COORDINATOR_IMPLEMENTATION_TOOLS: frozenset[str] = frozenset({
 # A project's master is a strict coordinator that does a simple thing in
 # place: it reads the project's files and knowledge bases, makes a file or a
 # small edit, and runs a quick command.  Anything more it gives out only
-# through the thread tools: workers, tasks and delegation are taken away, and
+# as threads, which it starts with the agent family, and the coding tool is taken away, which
 # so is the coding tool, which like a waiting ``agent`` call holds the turn.  The web,
 # the browser and images stay a thread's.
 PROJECT_MASTER_OWN_TOOLS: frozenset[str] = frozenset({
@@ -87,13 +86,8 @@ PROJECT_MASTER_OWN_TOOLS: frozenset[str] = frozenset({
     "kb_search_pages",
 })
 PROJECT_MASTER_EXCLUDED_TOOLS: frozenset[str] = frozenset({
-    "agent",
     "run_coding_agent",
 })
-# What the master of a project made on a computer is not sent besides: every
-# thread of such a project works in a copy of the project's folder there, and
-# only its user starts one, from its card.
-PROJECT_ON_COMPUTER_EXCLUDED_TOOLS: frozenset[str] = frozenset({"start_thread"})
 
 
 def strict_coordinator_excluded(config: dict[str, Any]) -> set[str] | None:
@@ -112,7 +106,4 @@ def strict_coordinator_excluded(config: dict[str, Any]) -> set[str] | None:
     if is_project_master(config):
         excluded -= PROJECT_MASTER_OWN_TOOLS - user_excluded
         excluded |= PROJECT_MASTER_EXCLUDED_TOOLS
-        # Where the project works is the server's stamp, never the caller's.
-        if device_of(config) is not None:
-            excluded |= PROJECT_ON_COMPUTER_EXCLUDED_TOOLS
     return excluded

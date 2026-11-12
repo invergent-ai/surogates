@@ -34,6 +34,7 @@ from .conftest import issue_service_account_token, leave_mid_stream
 from .test_devices import add_user, api, next_control  # noqa: F401  (api is a fixture)
 from .test_workstream_threads import (
     PROPOSED,
+    proposing,
     TODO_CALL,
     answered,
     asks,
@@ -182,7 +183,7 @@ async def test_a_coordinators_follow_up_ends_the_wait_on_a_question_that_expired
     await gives_up_asking(api, thread)
     assert (await summary_of(api, project))["waiting"] == 1
     # Not the user's message, but the thread works on it as on one: its question waits no more.
-    await call_tool(api, master, "message_thread", thread_id=str(thread.id), message="Use the 2025 figures.")
+    await call_tool(api, master, "send_message", to=str(thread.id), message="Use the 2025 figures.", summary="Follow-up")
     [row] = await rows(api, project)
     assert (row["group"], row["reason"]) == ("working", None)
     summary = await summary_of(api, project)
@@ -751,7 +752,7 @@ async def test_a_resolve_by_the_coordinator_is_heard_once_it_is_resolved(api, mo
         await answered(api, thread, "Drafted the memo.")
         await turn_ends(api, thread)
     changes = heard(api, monkeypatch)
-    result = await call_tool(api, master, "resolve_thread", thread_id=str(thread.id))
+    result = await call_tool(api, master, "stop_agent", agent_id=str(thread.id), resolve=True)
     assert result["status"] == "resolved", result
     *_, (session_id, kind, groups) = changes
     assert (session_id, kind, groups[str(thread.id)]) == (str(thread.id), "thread.resolved", "resolved")
@@ -772,8 +773,8 @@ async def test_only_the_projects_live_threads_are_resolved_or_reopened(api, sess
 
 
 async def proposed(api, master) -> str:
-    """The master proposes ``PROPOSED``: a thread in the cloud, keyed "1", and one on the user's computer, "2"."""
-    return (await call_tool(api, master, "propose_threads", threads=PROPOSED))["proposal_id"]
+    """The master proposes ``PROPOSED``'s thread in the cloud: its proposal's one card is keyed "1"."""
+    return (await call_tool(api, master, "agent", **proposing(PROPOSED[0])))["proposal_id"]
 
 
 async def start_card(api, project: dict, proposal_id: str, key: str, token: str | None = None):
@@ -817,11 +818,11 @@ async def test_a_card_started_twice_starts_one_thread(api):
     assert len(await events_of(api, master.id, EventType.WORKER_SPAWNED)) == 2
 
 
-async def test_start_all_on_a_large_proposal_starts_every_card(api, monkeypatch):
+async def test_many_cards_started_at_once_each_start(api, monkeypatch):
     project = await create(api)
     master = await master_of(api, project)
     cards = [{"title": f"Draft {n}", "goal": f"Draft memo {n}.", "where": "cloud"} for n in range(1, 31)]
-    proposal_id = (await call_tool(api, master, "propose_threads", threads=cards))["proposal_id"]
+    proposal_ids = [(await call_tool(api, master, "agent", **proposing(card)))["proposal_id"] for card in cards]
     # Production's pool, which a start must not hold while it waits for more of it.
     production = DatabaseSettings()
     engine = create_async_engine(
@@ -833,9 +834,9 @@ async def test_start_all_on_a_large_proposal_starts_every_card(api, monkeypatch)
     monkeypatch.setattr(state, "session_factory", pooled)
     monkeypatch.setattr(state, "session_store", SessionStore(pooled, state.redis))
     try:
-        # Start all sends every card's start at once.
+        # Every card's start at once, as a user starting them all sends them.
         started = await asyncio.gather(
-            *(start_card(api, project, proposal_id, str(n)) for n in range(1, 31)), return_exceptions=True,
+            *(start_card(api, project, proposal_id, "1") for proposal_id in proposal_ids), return_exceptions=True,
         )
     finally:
         await engine.dispose()
@@ -893,7 +894,7 @@ async def test_only_a_card_of_the_projects_own_proposals_starts(api, session_fac
     _, their_token = await add_user(session_factory, api.org_id)
     for case, (proposal, key, token) in {
         "an unknown proposal": (str(uuid4()), "1", None),
-        "an unknown card": (proposal_id, "3", None),
+        "an unknown card": (proposal_id, "2", None),
         "another project's proposal": (theirs, "1", None),
         "another user": (proposal_id, "1", their_token),
     }.items():

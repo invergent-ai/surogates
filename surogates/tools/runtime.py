@@ -82,7 +82,6 @@ class ToolRuntime:
             skill_step,
             skills,
             terminal,
-            threads,
             todo,
             tool_groups,
             user_reports,
@@ -115,7 +114,6 @@ class ToolRuntime:
             tool_groups,  # load_tools (held-back tool groups of a prompt profile)
             ask_user_question,
             cron,
-            threads,  # a project's master: start, message, stop, list, read, resolve and propose threads
             artifact,
             coding_agent,  # run_coding_agent (Claude Code / Codex)
             github,  # github (scoped GitHub REST — read + writes — for the agent's repos)

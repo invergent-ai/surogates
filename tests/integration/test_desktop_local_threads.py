@@ -36,7 +36,7 @@ from .test_local_threads import begin, device_card, make_local
 from .test_projects_on_a_computer import held
 from .test_turn_sagas import calling
 from .test_workstream_overview import rows
-from .test_workstream_threads import PROPOSED, call_tool, events_of
+from .test_workstream_threads import PROPOSED, call_tool, events_of, proposing
 from .test_workstreams import create, master_of
 
 pytestmark = [
@@ -86,7 +86,7 @@ async def a_thread_on_the_app(api, device: dict, prepared: dict, project=None, m
     if project is None:
         project, master, proposal_id = await device_card(api)
     else:
-        proposal_id = (await call_tool(api, master, "propose_threads", threads=PROPOSED))["proposal_id"]
+        proposal_id = (await call_tool(api, master, "agent", **proposing(PROPOSED[1])))["proposal_id"]
     made = await make_local(api, project, proposal_id, {
         "kind": "device", "device_id": device["id"], "folder": prepared["folder"], "nonce": prepared["nonce"],
     })
@@ -333,7 +333,7 @@ async def test_a_project_made_on_the_app_works_in_its_folder_itself_and_starts_e
         await app.until(lambda events: any(e.get("thread") for e in events), timeout=60.0)
         [copy] = [e for e in app.events if e["event"] == "prepared" and e.get("thread")]
         assert (copy["folder"], [e["event"] for e in app.events].count("sheet")) == (chosen["folder"], 1)
-        proposal_id = (await held(api, master, "propose_threads", threads=[PROPOSED[1]]))["proposal_id"]
+        proposal_id = (await held(api, master, "agent", **proposing(PROPOSED[1])))["proposal_id"]
         made = await make_local(api, project, proposal_id, {**execution, "nonce": copy["nonce"]}, key="1")
         assert made.status_code == 201, made.text
         thread = await api.app.state.session_store.get_session(UUID(made.json()["thread_id"]))

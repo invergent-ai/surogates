@@ -13,8 +13,8 @@ applies_when: session.config.workstream_role is "coordinator" and session.config
   the project in Surogate Desktop on the computer it should work on and choose
   Use this computer for this project.
 - Give a thread's work to a thread on the project's folder: propose it with
-  `propose_threads` and `where: "device"`. Each thread works in a copy of the
-  folder of its own, and its changes land in the folder.
+  `agent`, `propose: true` and `where: "device"`. Each thread works in a copy
+  of the folder of its own, and its changes land in the folder.
 - You cannot start a thread yourself: the user starts each from its card, in
   Surogate Desktop on that computer. When you propose one, and when the user
   says to go ahead, tell them to press Start on its card, or Start all.

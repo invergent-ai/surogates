@@ -757,10 +757,8 @@ async def test_every_tool_that_starts_a_session_is_named_as_handing_a_threads_co
     # A thread schedules no routine: its runs would work on old files, and land only at the thread's next turn.
     assert THREAD_REFUSED_TOOLS == {"cron_create"}
     # Every other tool that starts a session is named, with why the thread's rule leaves it: it reaches a
-    # session that exists already, or it answers a thread itself.
-    assert SESSION_STARTING_TOOLS - HELPER_STARTING_TOOLS - THREAD_REFUSED_TOOLS == {
-        "message_thread", "start_thread", "propose_threads", "send_message",
-    }
+    # session that exists already.
+    assert SESSION_STARTING_TOOLS - HELPER_STARTING_TOOLS - THREAD_REFUSED_TOOLS == {"send_message"}
     assert HELPER_STARTING_TOOLS <= SESSION_STARTING_TOOLS and THREAD_REFUSED_TOOLS <= SESSION_STARTING_TOOLS
     # A new tool that starts a session is refused in a thread by the code itself, until it is placed: it never
     # runs there with no hand-off because nobody thought of threads.  Do not loosen this.

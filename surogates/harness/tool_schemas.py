@@ -294,3 +294,26 @@ def describe_for_conversation(
             schema = describe_intake(schema, intake)
         described.append(schema)
     return described
+
+
+#: The arguments only a project's master is given: a thread proposed, where it runs, a thread resolved.
+_PROJECT_ONLY_ARGUMENTS: dict[str, tuple[str, ...]] = {"agent": ("propose", "where"), "stop_agent": ("resolve",)}
+
+
+def describe_for_project(schemas: list[dict[str, Any]], config: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """*schemas* without the project-only arguments, unless *config* is a project's master's."""
+    from surogates.workstreams import is_project_master
+
+    if is_project_master(config):
+        return schemas
+    out: list[dict[str, Any]] = []
+    for schema in schemas:
+        dropped = _PROJECT_ONLY_ARGUMENTS.get(schema["function"]["name"])
+        if not dropped:
+            out.append(schema)
+            continue
+        clone = copy.deepcopy(schema)
+        for name in dropped:
+            clone["function"]["parameters"]["properties"].pop(name, None)
+        out.append(clone)
+    return out

@@ -123,6 +123,15 @@ _AGENT_SCHEMA = ToolSchema(
                 "type": "string",
                 "description": "Optional short name to address the agent by in send_message and stop_agent (letters, digits, - and _).",
             },
+            "propose": {
+                "type": "boolean",
+                "description": "In a project: offer the user a card that starts this thread, instead of starting it.",
+            },
+            "where": {
+                "type": "string",
+                "enum": ["cloud", "device"],
+                "description": "With propose: cloud for a thread of its own; device for work in a folder on the user's computer.",
+            },
         },
         "required": ["description", "prompt"],
         "additionalProperties": False,
@@ -160,9 +169,16 @@ _LIST_AGENTS_SCHEMA = ToolSchema(
     description=(
         "List the agents you can reach: the ones you started (and theirs), the agent that started you, and the "
         "other agents it started, each with its agent_id, name (when it has one), task and status (running, completed, failed, stopped); "
-        "and the background commands you started that still run."
+        "and the background commands you started that still run. With agent_id, only that agent; a project's "
+        "thread then comes with its latest report, its files and the question it waits on the user for."
     ),
-    parameters={"type": "object", "properties": {}, "additionalProperties": False},
+    parameters={
+        "type": "object",
+        "properties": {
+            "agent_id": {"type": "string", "description": "Optional: the agent_id or name of one agent to read."},
+        },
+        "additionalProperties": False,
+    },
 )
 
 _STOP_AGENT_SCHEMA = ToolSchema(
@@ -177,6 +193,10 @@ _STOP_AGENT_SCHEMA = ToolSchema(
         "properties": {
             "agent_id": {"type": "string", "description": "The agent_id or name of the agent, or the id of the background command."},
             "reason": {"type": "string", "description": "Why it is stopped (optional)."},
+            "resolve": {
+                "type": "boolean",
+                "description": "In a project: move the thread to Resolved, stopping it first if it still works.",
+            },
         },
         "required": ["agent_id"],
         "additionalProperties": False,
@@ -424,6 +444,11 @@ async def _list_agents_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
     if session_store is None or me_id is None or kwargs.get("session_factory") is None:
         return _error("list_agents needs its session; none was given")
     me = await session_store.get_session(UUID(str(me_id)))
+    wanted = str(arguments.get("agent_id") or "").strip()
+    from surogates.workstreams import is_project_master
+
+    if is_project_master(me.config):
+        return await _master_list(wanted, **kwargs)
     agents = []
     for row, relation in await reachable_agents(kwargs["session_factory"], me):
         entry = {"agent_id": str(row["id"]), "relation": relation, "status": _STATUS.get(row["status"], row["status"])}
@@ -436,7 +461,23 @@ async def _list_agents_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
             if relation == "yours" and row["parent_id"] != me.id:
                 entry["started_by"] = str(row["parent_id"])
         agents.append(entry)
+    if wanted:
+        found = next((a for a in agents if wanted in (a["agent_id"], a.get("name"))), None)
+        return json.dumps(found) if found is not None else _error(f"no agent {wanted} that you can reach")
     return json.dumps({"agents": agents, "background_commands": await background_watch.running_for(me.id)})
+
+
+async def _master_list(wanted: str, **kwargs: Any) -> str:
+    """A project master's ``list_agents``: its threads, or one thread's latest report."""
+    from surogates.tools.builtin import threads
+
+    if wanted:
+        return json.dumps(_thread_answer(await threads._read_thread_handler({"thread_id": wanted}, **kwargs)),
+                          ensure_ascii=False)
+    listed = json.loads(await threads._list_threads_handler({}, **kwargs))
+    if "error" in listed:
+        return json.dumps(listed)
+    return json.dumps({"agents": [_thread_answer(json.dumps(row)) for row in listed["threads"]]}, ensure_ascii=False)
 
 
 #: What the interrupt of an agent's stop says: a fixed word, never the model's, which the dispatcher reads.
@@ -457,6 +498,17 @@ async def _stop_agent_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
         return _error("stop_agent needs its session; none was given")
     reason = " ".join(str(arguments.get("reason") or "").split())[:200] or "stopped by the agent that started it"
     me = await session_store.get_session(UUID(str(me_id)))
+    from surogates.workstreams import is_project_master
+
+    if is_project_master(me.config):
+        from surogates.tools.builtin import threads
+
+        if arguments.get("resolve") is True:
+            return json.dumps(_thread_answer(await threads._resolve_thread_handler({"thread_id": target}, **kwargs)))
+        given = {"thread_id": target, **({"reason": arguments["reason"]} if arguments.get("reason") else {})}
+        return json.dumps(_thread_answer(await threads._stop_thread_handler(given, **kwargs)))
+    if arguments.get("resolve") is not None:
+        return _error(_NOT_A_MASTER)
     try:
         target_id = UUID(target)
     except ValueError:
@@ -584,6 +636,17 @@ async def _send_message_handler(arguments: dict[str, Any], **kwargs: Any) -> str
     if not to or not message:
         return _error("to and message are required")
     sender = await session_store.get_session(UUID(str(sender_id)))
+    from surogates.workstreams import is_project_master
+
+    if is_project_master(sender.config):
+        # A project's master follows its threads up.
+        from surogates.tools.builtin import threads
+
+        answer = _thread_answer(await threads._message_thread_handler({"thread_id": to, "message": message}, **kwargs))
+        if "error" in answer:
+            return json.dumps(answer)
+        return json.dumps({"status": "delivered", "to": answer["agent_id"],
+                           "note": "The thread reads it, and its next report reaches you."})
     if to.lower() == "parent" and sender.parent_id is None:
         return _error("you were not started by another agent: there is no parent to message")
     from surogates.harness.subagents import parent_only
@@ -777,6 +840,53 @@ async def fork_seed(session_store: Any, parent: Any, tool_call_id: str | None) -
     return None
 
 
+#: What a thread's start returns after its id.
+THREAD_STARTED_NOTE = (
+    "It works as a thread of this project. Its report reaches you when its turn ends; until then, do not do its "
+    "work yourself."
+)
+#: What a project-only argument answers outside a project's master.
+_NOT_A_MASTER = "only a project's master starts, proposes and resolves threads"
+
+
+def _thread_answer(raw: str) -> dict:
+    """A thread handler's JSON answer with the family's names: ``agent_id`` for ``thread_id``, ``description``
+    for ``title``."""
+    answer = json.loads(raw)
+    if "thread_id" in answer:
+        answer["agent_id"] = answer.pop("thread_id")
+    if "title" in answer:
+        answer["description"] = answer.pop("title")
+    return answer
+
+
+def _in_the_familys_words(error: str) -> str:
+    """A thread handler's refusal of a title or a goal, naming the ``agent`` arguments they came from."""
+    return error.replace("title is required", "description is required").replace(
+        "title must", "description must").replace("goal is required", "prompt is required")
+
+
+async def _master_agent(arguments: dict[str, Any], **kwargs: Any) -> str:
+    """A project master's ``agent``: start a thread, or propose one for the user to start."""
+    from surogates.tools.builtin import threads
+
+    if arguments.get("fork") is True or arguments.get("agent_type") or arguments.get("name"):
+        return _error("a thread starts from its brief alone: give its description, its prompt, and propose and where")
+    # As given: the thread handlers refuse what is not text.
+    title, goal = arguments.get("description"), arguments.get("prompt")
+    if arguments.get("propose") is True:
+        answer = json.loads(await threads._propose_threads_handler(
+            {"threads": [{"title": title, "goal": goal, "where": arguments.get("where") or "cloud"}]}, **kwargs,
+        ))
+        if "error" in answer:
+            return _error(_in_the_familys_words(str(answer["error"]).removeprefix("threads[1]: ")))
+        return json.dumps(answer, ensure_ascii=False)
+    answer = _thread_answer(await threads._start_thread_handler({"title": title, "goal": goal}, **kwargs))
+    if "error" in answer:
+        return _error(_in_the_familys_words(answer["error"]))
+    return json.dumps({**answer, "status": "running", "note": THREAD_STARTED_NOTE}, ensure_ascii=False)
+
+
 async def _agent_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
     """Start one sub-agent; see the module."""
     from surogates.tools.builtin import delegate
@@ -787,6 +897,14 @@ async def _agent_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
     budget = kwargs.get("budget")
     if session_store is None or tenant is None or parent_id is None:
         return _error("the agent tool needs its session; none was given")
+    from surogates.workstreams import is_project_master
+
+    parent = await session_store.get_session(UUID(str(parent_id)))
+    if is_project_master(parent.config):
+        # A project's master gives out threads.
+        return await _master_agent(arguments, **kwargs)
+    if arguments.get("propose") is not None or arguments.get("where") is not None:
+        return _error(_NOT_A_MASTER)
 
     prompt = str(arguments.get("prompt") or "").strip()
     if not prompt:
@@ -800,7 +918,6 @@ async def _agent_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
     if name is not None and not valid_name(name):
         return _error(_BAD_NAME)
 
-    parent = await session_store.get_session(UUID(str(parent_id)))
     parent_config = parent.config or {}
     # Omitted, an agent runs in the background for a main session; any other session reports its end to its
     # parent once, so work it left running would end after that report: its agents wait.

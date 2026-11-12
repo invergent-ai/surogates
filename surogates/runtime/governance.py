@@ -51,14 +51,6 @@ _FLOOR_GATE = GovernanceGate()
 BOARD_SELF_TOOLS: frozenset[str] = frozenset({
     "share_note", "read_board", "expand_note",
 })
-# A project's thread tools: only its master is sent them, so a thread or a
-# chat cannot grow the project behind its coordinator.  Protected as well:
-# Studio does not know projects, so an agent's policy never names them, and
-# an allow-list would leave a master that can start no work.
-PROJECT_THREAD_TOOLS: frozenset[str] = frozenset({
-    "start_thread", "message_thread", "stop_thread", "list_threads", "read_thread",
-    "resolve_thread", "propose_threads",
-})
 # How a Keel case's step ends: only the step's own session is offered them
 # (``surogates.keel.steps.gate_case_tools``).  Protected as well: a step
 # whose agent policy took them away could never finish nor ask for help.
@@ -99,7 +91,7 @@ KEEL_DESIGNER_TOOLS: frozenset[str] = frozenset({
 # a clear 422; this set is the runtime's own belt-and-braces for
 # hand-written or legacy blobs.
 PROTECTED_TOOLS: frozenset[str] = (
-    BOARD_SELF_TOOLS | PROJECT_THREAD_TOOLS
+    BOARD_SELF_TOOLS
     | CASE_STEP_TOOLS | CASE_ITEM_TOOLS
 )
 

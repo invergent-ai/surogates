@@ -1,9 +1,11 @@
-"""A project's thread tools: how its master gives out the project's work.
+"""How a project's master gives out the project's work: its threads.
 
 A thread is a worker session of the master that does one piece of the work
 in a sandbox of its own and reports back at the end of every turn, as
-``worker.complete``.  Only a project's master is sent these tools
-(``PROJECT_THREAD_TOOLS``).
+``worker.complete``.  The master reaches these through the ``agent`` family
+(``tools.builtin.agents``): ``agent`` starts or proposes a thread,
+``send_message`` follows one up, ``stop_agent`` stops or resolves one, and
+``list_agents`` lists them or reads one.
 """
 
 from __future__ import annotations
@@ -18,7 +20,6 @@ from surogates.channels.constants import session_queue_priority
 from surogates.config import enqueue_session
 from surogates.devices.binding import device_of
 from surogates.session.events import EventType
-from surogates.tools.registry import ToolRegistry, ToolSchema
 from surogates.workstreams import is_project_master
 from surogates.workstreams import stream as project_stream
 from surogates.workstreams.derive import GROUPS, derive_thread, question_of
@@ -34,181 +35,6 @@ _FROM_COORDINATOR = "[From the project's coordinator]"
 # What a stopped thread's interrupt says.  Never the model's words: the
 # dispatcher reads some reasons as commands (``_SESSION_GONE_REASONS``).
 _STOP_REASON = "stopped by the coordinator"
-
-_START_THREAD_SCHEMA = ToolSchema(
-    name="start_thread",
-    description=(
-        "Start a thread: a separate agent session that does one piece of the "
-        "project's work in its own workspace and reports back to you when it "
-        "has done it. Returns at once with the thread's id. Start several "
-        "threads in one response for several unrelated tasks."
-    ),
-    parameters={
-        "type": "object",
-        "properties": {
-            "title": {
-                "type": "string",
-                "description": "A short name for the work, shown to the user on the thread's card.",
-            },
-            "goal": {
-                "type": "string",
-                "description": (
-                    "What the thread must do, complete and self-contained. A thread "
-                    "cannot see this conversation: give it the facts, the files to "
-                    "use, and what done looks like."
-                ),
-            },
-            "context": {
-                "type": "string",
-                "description": "Background the thread needs beyond the goal.",
-            },
-        },
-        "required": ["title", "goal"],
-        "additionalProperties": False,
-    },
-)
-
-
-_THREAD_ID = {
-    "type": "string",
-    "description": "The thread's id, from start_thread or from its report.",
-}
-
-_MESSAGE_THREAD_SCHEMA = ToolSchema(
-    name="message_thread",
-    description=(
-        "Send a follow-up to one of this project's threads: more work in its "
-        "area, or a correction. A finished thread runs again with everything "
-        "it already knows. Its next report comes back to you."
-    ),
-    parameters={
-        "type": "object",
-        "properties": {
-            "thread_id": _THREAD_ID,
-            "message": {"type": "string", "description": "The follow-up, complete in itself."},
-        },
-        "required": ["thread_id", "message"],
-        "additionalProperties": False,
-    },
-)
-
-_STOP_THREAD_SCHEMA = ToolSchema(
-    name="stop_thread",
-    description=(
-        "Stop a working thread. It ends its turn without a report; a "
-        "follow-up with message_thread starts it again."
-    ),
-    parameters={
-        "type": "object",
-        "properties": {
-            "thread_id": _THREAD_ID,
-            "reason": {"type": "string", "description": "Why the thread is stopped."},
-        },
-        "required": ["thread_id"],
-        "additionalProperties": False,
-    },
-)
-
-
-_LIST_THREADS_SCHEMA = ToolSchema(
-    name="list_threads",
-    description=(
-        "List this project's threads: each one's id and title, where it stands "
-        "(waiting on the user, working, idle or resolved), why it waits, and its "
-        "status line, which is the thread's own words. Call it to find a "
-        "thread's id rather than guessing one."
-    ),
-    parameters={
-        "type": "object",
-        "properties": {
-            "group": {"type": "string", "enum": list(GROUPS), "description": "Only the threads in this group."},
-        },
-        "additionalProperties": False,
-    },
-)
-
-_READ_THREAD_SCHEMA = ToolSchema(
-    name="read_thread",
-    description=(
-        "Read where one of this project's threads stands: its latest report as "
-        "you received it, with its files, and the question it is waiting on the "
-        "user to answer, if any. The user answers a thread's question in the "
-        "thread; a message_thread does not answer it."
-    ),
-    parameters={
-        "type": "object",
-        "properties": {"thread_id": _THREAD_ID},
-        "required": ["thread_id"],
-        "additionalProperties": False,
-    },
-)
-
-
-_RESOLVE_THREAD_SCHEMA = ToolSchema(
-    name="resolve_thread",
-    description=(
-        "Resolve a thread whose work is done: it moves to Resolved in the "
-        "project's overview. A thread still working is stopped first. A "
-        "follow-up with message_thread reopens it."
-    ),
-    parameters={
-        "type": "object",
-        "properties": {"thread_id": _THREAD_ID},
-        "required": ["thread_id"],
-        "additionalProperties": False,
-    },
-)
-
-
-_PROPOSE_THREADS_SCHEMA = ToolSchema(
-    name="propose_threads",
-    description=(
-        "Propose threads for the user to start, instead of starting them: the "
-        "user sees a card for each and starts the ones they want. Use it when "
-        "the user wants to approve threads before they start, and for work on "
-        "the user's computer (where: \"device\"), which only the user can "
-        "start. Returns at once; you are told when the user starts one."
-    ),
-    parameters={
-        "type": "object",
-        "properties": {
-            "threads": {
-                "type": "array",
-                "minItems": 1,
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "title": _START_THREAD_SCHEMA.parameters["properties"]["title"],
-                        "goal": _START_THREAD_SCHEMA.parameters["properties"]["goal"],
-                        "where": {
-                            "type": "string",
-                            "enum": ["cloud", "device"],
-                            "description": "cloud for a thread of its own; device for work in a folder on the user's computer.",
-                        },
-                    },
-                    "required": ["title", "goal", "where"],
-                    "additionalProperties": False,
-                },
-            },
-        },
-        "required": ["threads"],
-        "additionalProperties": False,
-    },
-)
-
-
-def register(registry: ToolRegistry) -> None:
-    for name, schema, handler in (
-        ("start_thread", _START_THREAD_SCHEMA, _start_thread_handler),
-        ("message_thread", _MESSAGE_THREAD_SCHEMA, _message_thread_handler),
-        ("stop_thread", _STOP_THREAD_SCHEMA, _stop_thread_handler),
-        ("list_threads", _LIST_THREADS_SCHEMA, _list_threads_handler),
-        ("read_thread", _READ_THREAD_SCHEMA, _read_thread_handler),
-        ("resolve_thread", _RESOLVE_THREAD_SCHEMA, _resolve_thread_handler),
-        ("propose_threads", _PROPOSE_THREADS_SCHEMA, _propose_threads_handler),
-    ):
-        registry.register(name=name, schema=schema, handler=handler, toolset="core")
-
 
 def _error(message: str) -> str:
     return json.dumps({"error": message})
@@ -249,7 +75,7 @@ async def _start_thread_handler(arguments: dict[str, Any], **kwargs: Any) -> str
     if device_of(master.config) is not None:
         return _error(
             "This project works in a folder on the user's computer, so its threads start there: propose this one "
-            'with propose_threads and where: "device", and the user starts it from its card.'
+            'with agent, propose=true and where: "device", and the user starts it from its card.'
         )
     thread = await start_thread(
         session_store=session_store,

@@ -67,7 +67,7 @@ async def made_with_copy(api, device_id: str) -> tuple[dict, object, object]:
     thread = await make_thread(
         session_store=api.app.state.session_store, session_factory=api.app.state.session_factory, master=master,
         live_config=None, title="Check the totals", device=SimpleNamespace(id=UUID(device_id), name="Flavius's ThinkPad"),
-        folder=FOLDER, card={"proposal_id": proposal_id, "key": "2"},
+        folder=FOLDER, card={"proposal_id": proposal_id, "key": "1"},
     )
     return project, master, thread
 
@@ -85,7 +85,7 @@ async def test_a_thread_the_route_makes_on_a_computer_is_bound_to_a_copy_of_its_
     project, _, proposal_id = await device_card(api)
     made = await api.client.post(
         f"/v1/workstreams/{project['id']}/threads",
-        json={"proposal_id": proposal_id, "key": "2", "execution": confirmed(device["id"])}, headers=api.auth(),
+        json={"proposal_id": proposal_id, "key": "1", "execution": confirmed(device["id"])}, headers=api.auth(),
     )
     assert made.status_code == 201, made.text
     chat = await api.client.post("/v1/sessions", json={"execution": confirmed(device["id"])}, headers=api.auth())

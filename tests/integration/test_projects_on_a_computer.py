@@ -28,8 +28,8 @@ from .test_devices import (  # noqa: F401  (api is a fixture)
     register,
 )
 from .test_local_threads import begin, confirmed, journal, make_local
-from .test_workstream_threads import PROPOSED, call_tool, children_of, events_of
-from .test_workstreams import create, master_of, system_prompt, turn_calling, unknown
+from .test_workstream_threads import PROPOSED, call_tool, children_of, events_of, proposing
+from .test_workstreams import create, master_of, system_prompt, turn_calling
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -121,37 +121,25 @@ async def test_a_projects_folder_is_only_on_the_users_own_live_computer(api, ses
         assert await journal(api).pending(UUID(device_id), 1) == []
 
 
-async def test_a_computer_projects_coordinator_has_a_chats_tools_on_its_folder_and_starts_no_thread(api, monkeypatch):
+async def test_a_computer_projects_coordinator_has_a_chats_tools_on_its_folder_and_the_family(api, monkeypatch):
     project, _ = await on_computer(api)
     sent, _, _ = await turn_calling(monkeypatch, await master_of(api, project), {})
-    # It reads, writes and changes files, and runs commands, on the computer.
+    # It reads, writes and changes files, and runs commands, on the computer, and proposes its threads.
     assert {
         "read_file", "list_files", "search_files", "write_file", "patch", "terminal", "process",
-        "propose_threads", "message_thread", "list_threads", "read_thread", "stop_thread", "resolve_thread",
+        "agent", "send_message", "list_agents", "stop_agent",
     } <= sent
     # Every piece of work is a thread on the folder, which only its user starts there.
-    assert not sent & {
-        "start_thread", "web_search", "browser_navigate", "create_artifact",
-        "agent", "run_coding_agent",
-    }
+    assert not sent & {"web_search", "browser_navigate", "create_artifact", "run_coding_agent"}
 
 
-@pytest.mark.parametrize("streamed", [False, True], ids=["sequential", "streamed"])
-async def test_a_hidden_start_thread_is_refused_rather_than_repaired_into_stop_thread(api, monkeypatch, streamed):
-    project, _ = await on_computer(api)
-    call = {"start_thread": {"title": "Draft A", "goal": "Draft the A memo."}}
-    sent, ran, answered = await turn_calling(monkeypatch, await master_of(api, project), call, streamed=streamed)
-    ran.assert_not_awaited()
-    assert answered == {"call_start_thread": unknown("start_thread", sent)}
-
-
-async def test_a_computer_projects_coordinator_starts_no_thread_even_by_its_handler(api):
+async def test_a_computer_projects_coordinator_starts_no_thread_itself(api):
     project, _ = await on_computer(api)
     master = await master_of(api, project)
-    result = await held(api, master, "start_thread", title="Draft A", goal="Draft the A memo as A.docx.")
+    result = await held(api, master, "agent", description="Draft A", prompt="Draft the A memo as A.docx.")
     assert result == {"error": (
         "This project works in a folder on the user's computer, so its threads start there: propose this one "
-        'with propose_threads and where: "device", and the user starts it from its card.'
+        'with agent, propose=true and where: "device", and the user starts it from its card.'
     )}
     assert await children_of(api, master) == []
     assert await events_of(api, master.id, EventType.WORKER_SPAWNED) == []
@@ -160,19 +148,19 @@ async def test_a_computer_projects_coordinator_starts_no_thread_even_by_its_hand
 async def test_a_computer_projects_coordinator_proposes_every_thread_for_its_folder(api):
     project, _ = await on_computer(api)
     master = await master_of(api, project)
-    refused = await held(api, master, "propose_threads", threads=PROPOSED)
+    refused = await held(api, master, "agent", **proposing(PROPOSED[0]))
     assert refused == {"error": (
-        "threads[1]: this project works in a folder on the user's computer, and every thread works there: where must be device"
+        "this project works in a folder on the user's computer, and every thread works there: where must be device"
     )}
     assert await events_of(api, master.id, EventType.THREAD_PROPOSED) == []
-    proposed = await held(api, master, "propose_threads", threads=[{**PROPOSED[0], "where": "device"}])
+    proposed = await held(api, master, "agent", **proposing({**PROPOSED[0], "where": "device"}))
     assert proposed["status"] == "proposed", proposed
 
 
 async def test_a_computer_projects_card_starts_its_thread_only_in_the_projects_folder_there(api):
     project, device = await on_computer(api)
     master = await master_of(api, project)
-    proposal_id = (await held(api, master, "propose_threads", threads=[{**PROPOSED[1]}]))["proposal_id"]
+    proposal_id = (await held(api, master, "agent", **proposing(PROPOSED[1])))["proposal_id"]
     another = await register(api, name="Flavius's desktop")
     for case, execution, said in [
         ("in the cloud", None, f"This project works in a folder on {COMPUTER}, so its threads start there, in Surogate Desktop."),
@@ -212,11 +200,14 @@ async def test_a_computer_projects_prompt_has_it_work_in_its_folder_and_propose_
         "Should they say its access was revoked or the folder is no longer there, tell the user to open the project in "
         "Surogate Desktop on the computer it should work on and choose Use this computer for this project."
     ) in said
-    assert 'Give a thread\'s work to a thread on the project\'s folder: propose it with `propose_threads` and `where: "device"`.' in said
+    assert (
+        "Give a thread's work to a thread on the project's folder: propose it with `agent`, `propose: true` and "
+        '`where: "device"`.'
+    ) in said
     assert "You cannot start a thread yourself: the user starts each from its card, in Surogate Desktop on that computer." in said
     # It is never told to start a thread itself, or of a thread in the cloud.
     assert "## Starting threads" not in said
-    assert "`start_thread`" not in said
+    assert "Give it to a new thread with `agent`" not in said
     assert 'where: "cloud"' not in said
 
 
@@ -264,8 +255,8 @@ async def test_a_project_whose_computer_was_revoked_moves_to_the_users_computer_
     project, laptop = await on_computer(api)
     await answer_bind(api, laptop)
     master = await master_of(api, project)
-    threads = [{**PROPOSED[0], "where": "device"}, PROPOSED[1]]
-    proposal_id = (await held(api, master, "propose_threads", threads=threads))["proposal_id"]
+    proposal_id = (await held(api, master, "agent", **proposing({**PROPOSED[0], "where": "device"})))["proposal_id"]
+    later = (await held(api, master, "agent", **proposing(PROPOSED[1])))["proposal_id"]
     old = await make_local(api, project, proposal_id, confirmed(laptop["id"]), key="1")
     assert old.status_code == 201, old.text
     await answer_bind(api, laptop, {"ok": {"history": {"thread": old.json()["thread_id"]}}})
@@ -303,9 +294,9 @@ async def test_a_project_whose_computer_was_revoked_moves_to_the_users_computer_
     assert resolved.status_code == 200, resolved.text
     assert resolved.json()["group"] == "resolved"
     # A new one starts in the project's folder here, and nowhere else.
-    elsewhere = await make_local(api, project, proposal_id, confirmed(laptop["id"]), key="2")
+    elsewhere = await make_local(api, project, later, confirmed(laptop["id"]), key="1")
     assert elsewhere.status_code == 409
-    made = await make_local(api, project, proposal_id, confirmed(here["id"], folder=MOVED_TO), key="2")
+    made = await make_local(api, project, later, confirmed(here["id"], folder=MOVED_TO), key="1")
     assert made.status_code == 201, made.text
     thread = await api.app.state.session_store.get_session(UUID(made.json()["thread_id"]))
     assert (thread.config["execution"]["device_id"], thread.config["workspace_path"]) == (here["id"], MOVED_TO)
@@ -416,7 +407,7 @@ async def test_a_project_moved_meanwhile_is_not_moved_again(api, session_factory
 async def test_a_lost_computer_projects_card_says_where_to_use_another_computer_for_it(api):
     project, laptop = await on_computer(api)
     master = await master_of(api, project)
-    proposal_id = (await held(api, master, "propose_threads", threads=[PROPOSED[1]]))["proposal_id"]
+    proposal_id = (await held(api, master, "agent", **proposing(PROPOSED[1])))["proposal_id"]
     await revoke(api, laptop)
     here = await register(api)
     said = (

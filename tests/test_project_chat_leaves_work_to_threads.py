@@ -64,7 +64,7 @@ TENANT = TenantContext(
 def refusal(name: str) -> str:
     return (
         f"The {name} skill makes a document, and in a project a document is a thread's work. "
-        "Propose a thread for it with propose_threads, or start one with start_thread where this project allows."
+        "Propose a thread for it with agent and propose=true, or start one with agent where this project allows."
     )
 
 
@@ -239,7 +239,7 @@ ALLOWED = pytest.mark.parametrize("allowed", [None, ["memory", "todo", MINE]], i
 async def test_a_project_chat_is_sent_no_mcp_tool(monkeypatch, allowed):
     config = {**MASTER, **({"allowed_tools": allowed} if allowed else {})}
     sent = await sent_tools(monkeypatch, session_with(config))
-    assert {"propose_threads", "start_thread", "memory"} <= sent
+    assert {"agent", "send_message", "memory"} <= sent
     assert {name for name in sent if name.startswith("mcp__")} == set()
 
 
