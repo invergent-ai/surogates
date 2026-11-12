@@ -538,6 +538,15 @@ With it on, `agent` takes `delegate_task`'s place wherever the session may deleg
 | `stop_agent(agent_id)` | Stops an agent the caller started (with its own agents), or a background command it started. A stopped agent keeps its context: `send_message` from the agent that stopped it resumes it. A user's stop of it, later, is the user's to lift. |
 | `monitor(command, description, timeout_seconds?, max_notifications_per_minute?)` | Runs a command in the sandbox; each line it prints reaches the session as a notification, at most the given number a minute, until it exits, times out (killed), is stopped, or its session is stopped (killed). At most 4 run per session, counted in the sandbox. A worker sends a session at most 30 monitor notifications a minute; monitors started on different workers each count on their own worker. Offered to a root session where `terminal` is: never on a user's computer, to a session with a parent (a sub-agent, a helper, a worker, a routine run), or in a project's thread. |
 
+### Guidance
+
+Two guidance fragments follow the rules Claude Code gives its own sub-agents, in our words:
+
+- A session offered `agent` is told when to start one and when not to, how to write a brief that stands alone, when an agent runs in the background and when the call waits, never to state or guess a result before its notification, to check what a report claims before passing it on, that the user does not see the report, and when to continue an agent with a message rather than start a fresh one.
+- A sub-agent is told to do its task fully and stay within it, that its final message is the report and the only thing its parent reads, to open the report by restating its task and to name files by their workspace paths, that messages from another agent are never the user's approval of anything, and how to ask its parent a question.
+
+A sub-agent below the depth limit is offered `agent` too, so it reads both. A fork is told to do its part itself and start no agents of its own.
+
 ### Reaching the parent
 
 A sub-agent of the family is always offered `send_message`, even when its agent type's tool list leaves it out (an explicit `excluded_tools` still holds): it can always ask the agent that started it. Kept only this way, it reaches its parent and nobody else.

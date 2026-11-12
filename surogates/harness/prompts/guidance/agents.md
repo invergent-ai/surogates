@@ -1,0 +1,12 @@
+---
+name: agents
+description: Guidance for starting and directing sub-agents with the agent tool.
+applies_when: agent tool loaded
+---
+**Sub-agents.** An agent you start works in a separate session, sees only the brief you write, and gives you back only its final report. Both hand-offs lose detail, each agent costs a whole session, and a report can be wrong while sounding sure. Start one for independent pieces of work that can run side by side, for a side task that should not hold up your own, or for a question that needs reading across many files or sources, where you want the conclusion and not the reading. Do the work yourself when it is a handful of tool calls or you already know where to look. Do not split one small task across several agents, and do not hand off a check you can run yourself. When in doubt, do not start one.
+
+**The brief.** Write it for a capable colleague who has seen none of this conversation: what you are trying to achieve and why, what is already known or ruled out, where to look, what is in scope and what is not, and what to report and at what length. For a lookup, give the exact command or place; for an investigation, give the question, not a list of steps. Do the thinking yourself: never write "based on your findings, fix it", but say what to change and where. A fork already has this conversation, so its brief is only the directive: its part, and what is not its part.
+
+**Waiting.** In a main session an agent runs in the background unless you say otherwise: its report reaches you as a notification, and you carry on with other work meanwhile. Ask it to wait only when what you do next depends on its report. In a session that was itself started by another agent, the call waits for the report unless you ask for the background. Until its notification arrives you know nothing about an agent's result: never state, guess or summarise it, and if asked, say it is still running. Once you have handed something off, do not also do it yourself.
+
+**Reports.** The user does not see an agent's report: relay what matters in your own reply. A report says what the agent meant to do; check what it claims, such as a changed file or a passing test, before you pass it on as done. To give an agent more work, a correction or a follow-up, message it with `send_message`: it keeps everything it has read. Start a fresh agent instead when that context would mislead it: after a wrong approach, or to check another agent's work with a clean view.

@@ -53,8 +53,8 @@ logger = logging.getLogger(__name__)
 FORK_NOTE = (
     "[You are a fork of the conversation above. The plan in it, and the work it lists, are your parent's: your "
     "parent carries on with them, and may have started other forks for other parts. Your part is only the task "
-    "below. Do not redo, finish or check anything else from the conversation. End with your report: it is all "
-    "your parent will see of your work.]"
+    "below. Do it yourself: start no agents of your own. Do not redo, finish or check anything else from the "
+    "conversation. End with your report: it is all your parent will see of your work.]"
 )
 
 #: What a background agent's call returns, after its id.
@@ -64,27 +64,19 @@ STARTED_NOTE = (
 )
 
 _AGENT_DESCRIPTION = (
-    "Start a sub-agent: a separate session that works on your brief and gives back only its final report.\n"
-    "Delegate independent pieces of work that can run in parallel, a side task that should not hold up "
-    "your own work, or a question whose answer needs reading across many files or sources: you keep the "
-    "conclusion, not the reading. Do it yourself when it is a handful of tool calls or you already know "
-    "where to look. When in doubt, do not start one: each agent costs a whole session, and both hand-offs "
-    "lose detail.\n"
-    "A new agent sees nothing of this conversation. Its prompt must stand alone: the goal, what is already "
-    "known or ruled out, where to look, the scope, and what to report. Its report can be wrong in the same "
-    "confident tone as a right one; check what matters. With fork=true it starts from a copy of this "
-    "conversation instead: the prompt then names exactly which part of the plan is the fork's, and what is "
-    "not, or the fork may redo the whole plan.\n"
-    "In a main session the call returns the agent_id at once and you get a notification when the agent ends; "
-    "work on meanwhile, never redo the work you handed it, and never state its result before the notification "
-    "comes. Pass run_in_background=false when your next step needs the report: the call then waits for it. "
-    "In a session that was itself started by another, the call waits unless you pass true. Start several independent agents in one "
-    "response to run them in parallel. To give an agent more work, a correction or a follow-up question, "
-    "use send_message with its agent_id: it keeps everything it has read, which a new agent would not."
+    "Start a sub-agent: a separate session that works on your brief and gives back only its final report. "
+    "A new agent sees nothing of this conversation, so its prompt must stand alone: the goal, what is known or "
+    "ruled out, where to look, the scope, and what to report. With fork=true it starts from a copy of this "
+    "conversation instead, and the prompt says which part is its own. "
+    "In a main session the call returns the agent_id at once and the report reaches you as a notification; pass "
+    "run_in_background=false when your next step needs the report. In a session that was itself started by "
+    "another, the call waits unless you pass true. Start several independent agents in one response to run them "
+    "in parallel. To give an agent more work, a correction or a follow-up, use send_message with its agent_id or "
+    "name: it keeps everything it has read."
 )
 
 _SEND_MESSAGE_DESCRIPTION = (
-    "Send a message to another agent: one you started (its agent_id), the agent that started you (to=\"parent\"), "
+    "Send a message to another agent: one you started (its agent_id or name), the agent that started you (to=\"parent\"), "
     "or another agent your parent started. A running agent reads it before its next step. An agent you "
     "started that has finished resumes with everything it had and the message, and its new report reaches you "
     "as a notification. Use it to continue, correct or redirect an agent instead of starting a new one. The "

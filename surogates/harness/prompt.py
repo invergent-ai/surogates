@@ -310,6 +310,11 @@ class PromptBuilder:
             parts.append(self._prompts.get("guidance/parallel_tools"))
         if "memory" in self._available_tools:
             parts.append(self._prompts.get("guidance/memory"))
+        # The ``agent`` family: how to start and direct agents, and, for an agent started by one, how to report.
+        if "agent" in self._available_tools:
+            parts.append(self._prompts.get("guidance/agents"))
+        if isinstance((getattr(self._session, "config", None) or {}).get("agent_dispatch"), dict):
+            parts.append(self._prompts.get("guidance/sub_agent"))
         if "session_search" in self._available_tools:
             parts.append(self._prompts.get("guidance/session_search"))
         # Advisor timing is model-driven, so the only lever on when it
