@@ -66,11 +66,6 @@ COORDINATOR_IMPLEMENTATION_TOOLS: frozenset[str] = frozenset({
     "kb_search_pages",
     # Artifact materialisation (workers produce; coordinator orchestrates)
     "create_artifact",
-    # Self-tools that require Session.task_id — useless for a parent
-    # coordinator session (task_id is None).
-    "worker_block",
-    "worker_complete",
-    "worker_context",
 })
 
 # A project's master is a strict coordinator that does a simple thing in
@@ -92,7 +87,6 @@ PROJECT_MASTER_OWN_TOOLS: frozenset[str] = frozenset({
     "kb_search_pages",
 })
 PROJECT_MASTER_EXCLUDED_TOOLS: frozenset[str] = frozenset({
-    "spawn_task", "unblock_task", "cancel_task",
     "agent",
     "run_coding_agent",
 })

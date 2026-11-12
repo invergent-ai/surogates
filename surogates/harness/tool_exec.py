@@ -630,8 +630,6 @@ BATCH_PARALLEL_TOOLS: frozenset[str] = PARALLEL_TOOLS | DELEGATION_TOOLS
 # show its proposal twice.
 SESSION_STARTING_TOOLS: frozenset[str] = DELEGATION_TOOLS | frozenset({
     "send_message",
-    "spawn_task",
-    "unblock_task",
     "cron_create",
     "start_thread",
     "message_thread",
@@ -645,12 +643,12 @@ AFTER_THE_RESPONSE_TOOLS: frozenset[str] = frozenset({"office_edit"})
 # The tools whose step starts a helper.  In a project's thread the copy goes
 # on the thread's hand-off first, for the helper's own copy to start from, and
 # what helpers kept comes into the copy after.
-HELPER_STARTING_TOOLS: frozenset[str] = frozenset({"spawn_task", "agent"})
+HELPER_STARTING_TOOLS: frozenset[str] = frozenset({"agent"})
 
-# The session-starting tools the thread's rule leaves alone: three only reach
+# The session-starting tools the thread's rule leaves alone: two only reach
 # a session that exists, and two answer a thread themselves.
 _NOT_THE_THREADS_TO_REFUSE: frozenset[str] = frozenset({
-    "unblock_task", "message_thread", "start_thread", "propose_threads",
+    "message_thread", "start_thread", "propose_threads",
     "send_message",
 })
 

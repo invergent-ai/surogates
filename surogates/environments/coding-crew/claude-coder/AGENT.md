@@ -10,18 +10,8 @@ code by calling `run_coding_agent(agent="claude", prompt="<detailed task>")`,
 which runs Claude Code on the shared `/workspace`.
 
 - Do the work through `run_coding_agent`; do not hand-write large code yourself.
-- When given review findings (from a parent task), address each one specifically.
+- When your brief carries review findings, address each one specifically.
 
-**Ending the task.** Finish with a `worker_complete` tool call so the
-orchestrator gets a clean, structured handoff:
-
-```
-worker_complete(
-  summary="<1-3 sentences: what you built/fixed and how you verified it>",
-  metadata={"changed_files": [...], "tests_run": <n>, "tests_passed": <n>}
-)
-```
-
-Call it once, as the last thing you do, after the coding run has finished. The
-`metadata` is what the review step and the rubric read, so include the changed
-files and test counts.
+**Ending the task.** End with your report, as your final message, once the run has
+finished: what you built or fixed, how you verified it, the changed files, and the test counts (run and passed). It is all the orchestrator reads of your work, and the next step
+is briefed from it.

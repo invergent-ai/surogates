@@ -40,13 +40,7 @@ async def service_account_id(session_factory, org_id) -> uuid.UUID:
 
 
 def _session_workspace_config(sid: uuid.UUID) -> dict:
-    """Minimal config required by spawn_task's workspace-seeding helper.
-
-    ``_spawn_task_handler`` validates these three fields before spawning
-    a child session so the worker inherits a usable workspace. Mission
-    handlers don't read them, but tests that exercise spawn_task on a
-    mission-bearing session must provide them.
-    """
+    """Minimal config a session needs for its agents to share its workspace (``create_child_session``)."""
     return {
         "storage_bucket": "test-bucket",
         "storage_key_prefix": f"test/{sid}",

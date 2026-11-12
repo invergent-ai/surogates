@@ -8,7 +8,7 @@ warrants a proactive post, and act ONLY through mate_ambient_post.
 from __future__ import annotations
 
 
-def build_ambient_prompt(*, channel_label: str, task_changes: list[str]) -> str:
+def build_ambient_prompt(*, channel_label: str, agent_changes: list[str]) -> str:
     lines = [
         f"[Ambient review of {channel_label}] This is an automated review, "
         "not a message from a teammate. No one is waiting on you.",
@@ -17,7 +17,7 @@ def build_ambient_prompt(*, channel_label: str, task_changes: list[str]) -> str:
         "tools, decide whether anything genuinely warrants a proactive message "
         "right now — for example:",
         "- a thread you're involved in went quiet with an open question,",
-        "- a delegated task changed state (done / blocked) worth reporting,",
+        "- an agent you started finished or failed, worth reporting,",
         "- something relevant surfaced that the channel should know.",
         "",
         "Default to doing NOTHING. Only post when it clearly adds value and is "
@@ -28,7 +28,7 @@ def build_ambient_prompt(*, channel_label: str, task_changes: list[str]) -> str:
         "Low-confidence or over-budget posts are automatically suppressed, so "
         "do not pad — if nothing is worth saying, end your turn without posting.",
     ]
-    if task_changes:
-        lines += ["", "Recent delegated-task changes:"]
-        lines += [f"- {c}" for c in task_changes]
+    if agent_changes:
+        lines += ["", "Agents you started that ended recently:"]
+        lines += [f"- {c}" for c in agent_changes]
     return "\n".join(lines)

@@ -2,7 +2,7 @@
 
 On PROD a Flash coordinator called ``skill_view`` on each sub-agent, then spent
 70k tokens exploring an empty workspace for file paths, because the section named
-neither ``spawn_task`` nor what the coordinator cannot see.
+neither the tool that starts them nor what the coordinator cannot see.
 """
 from __future__ import annotations
 

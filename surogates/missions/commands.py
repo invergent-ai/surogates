@@ -637,17 +637,26 @@ async def _stop_mission_agents(
     *, mission_id: UUID, coordinator_id: UUID, session_store: Any, session_factory: Any,
     mission_store: MissionStore, redis: Any,
 ) -> None:
-    """Stop every running agent of ``mission_id``, with the agents under it, as ``stop_agent`` stops one."""
-    from surogates.tools.builtin.agents import stop_tree
+    """Stop every running agent of ``mission_id``, with the agents under it, as ``stop_agent`` stops one.
+
+    An agent already stopped is interrupted again while a worker still holds its session: a cascade cut off after
+    its stop was written never told it, and the run that takes the cascade again is the one that does.  One at rest
+    is not told again.
+    """
+    import json
+
+    from surogates.config import INTERRUPT_CHANNEL_PREFIX
+    from surogates.tools.builtin.agents import _STOP_SIGNAL, stop_tree
 
     for agent in await mission_store.agents(mission_id):
-        if agent.status not in ("active", "processing"):
-            continue
         try:
-            await stop_tree(
-                session_store=session_store, redis=redis, session_factory=session_factory,
-                top_id=agent.session_id, by=coordinator_id, reason="the mission was cancelled",
-            )
+            if agent.status in ("active", "processing"):
+                await stop_tree(
+                    session_store=session_store, redis=redis, session_factory=session_factory,
+                    top_id=agent.session_id, by=coordinator_id, reason="the mission was cancelled",
+                )
+            elif agent.status == "paused" and redis is not None and await session_store.has_live_lease(agent.session_id):
+                await redis.publish(f"{INTERRUPT_CHANNEL_PREFIX}:{agent.session_id}", json.dumps({"reason": _STOP_SIGNAL}))
         except Exception:
             # One agent that cannot be stopped does not strand the rest of the cascade.
             logger.warning(

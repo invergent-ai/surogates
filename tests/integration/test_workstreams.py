@@ -464,7 +464,7 @@ async def test_a_master_does_a_simple_thing_itself_and_gives_out_the_rest(api, m
     # Research, a site's study and every other piece of work are a thread's.
     assert not sent & {
         "web_search", "web_extract", "browser_navigate", "create_artifact", "vision_analyze",
-        "agent", "spawn_task", "unblock_task", "cancel_task", "run_coding_agent",
+        "agent", "run_coding_agent",
     }
 
 
@@ -473,7 +473,7 @@ async def test_a_mission_coordinator_keeps_its_own_tools(api):
     session = await api.app.state.session_store.get_session(UUID(chat.json()["id"]))
     session.config.update(coordinator=True, strict_coordinator=True)
     tools = harness_with_every_tool()._tool_filter_for_session(session)
-    assert {"agent", "spawn_task", "run_coding_agent"} <= tools
+    assert {"agent", "run_coding_agent"} <= tools
     assert not tools & {"read_file", "kb_read_page"}
 
 
@@ -595,7 +595,7 @@ def unknown(name: str, sent: set[str]) -> str:
 @pytest.mark.parametrize("streamed", [False, True], ids=["sequential", "streamed"])
 async def test_a_masters_model_cannot_call_a_tool_it_was_not_offered(api, monkeypatch, streamed):
     master = await master_of(api, await create(api))
-    refused = {"spawn_task": {}, "agent": {}, "run_coding_agent": {}}
+    refused = {"agent": {}, "run_coding_agent": {}}
     sent, ran, answered = await turn_calling(monkeypatch, master, refused, streamed=streamed)
     ran.assert_not_awaited()
     assert answered == {f"call_{name}": unknown(name, sent) for name in refused}

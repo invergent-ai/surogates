@@ -15,7 +15,6 @@ import logging
 import subprocess
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
-from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import text
@@ -29,11 +28,6 @@ from surogates.sandbox.pool import SandboxPool
 from surogates.session.acting_principal import ActingPrincipal
 from surogates.session.events import EventType
 from surogates.session.provisioning import create_child_session
-from surogates.db.models import Task
-from surogates.tasks import service as task_service
-from surogates.tools.registry import ToolRegistry
-from surogates.tools.runtime import ToolRuntime
-from surogates.tasks import spawn as task_spawn
 from surogates.tools.builtin import coding_agent
 from surogates.tools.builtin import delegate as delegate_module
 from surogates.workstreams import thread_refusal
@@ -42,7 +36,7 @@ from tests.test_steer_loop import _final_response
 from .test_devices import api  # noqa: F401  (api is a fixture)
 from .test_durable_landings import FENCED, a_short_fence, edited, ends, stored  # noqa: F401  (a_short_fence is a fixture)
 from .test_thread_copies import a_thread, a_waking_thread_harness, git, its_first_turn_was_taken, pods, reports  # noqa: F401  (pods is a fixture)
-from .test_turn_sagas import a_chat, a_looping_harness, a_turn, calling, stop
+from .test_turn_sagas import a_looping_harness, a_turn, calling, stop
 from .test_workstream_threads import call_tool
 from .test_workstreams import create, master_of
 
@@ -164,7 +158,7 @@ async def test_a_helper_started_by_agent_works_on_a_copy_of_its_own_and_its_work
     assert refs(pods, "handoff") == []
 
 
-@pytest.mark.parametrize("tool", ["background agent", "spawn_task"])
+@pytest.mark.parametrize("tool", ["background agent"])
 @pytest.mark.parametrize("ends_its_turn", ["while the thread's turn runs", "after the thread's turn"])
 async def test_a_helper_the_thread_does_not_wait_for_works_on_a_copy_of_its_own_and_its_work_lands_with_the_thread(
     api, monkeypatch, tmp_path, tool, ends_its_turn,
@@ -205,43 +199,6 @@ async def test_a_helper_the_thread_does_not_wait_for_works_on_a_copy_of_its_own_
         assert (pods.project / "sources.md").read_text() == "outline\nby the helper\n"
     the_helper_is_on_a_copy_of_its_own(pods, thread, helper)
     assert pods.real_names() == ["Report.docx", "notes.txt", "outline.md", "sources.md"]
-    assert refs(pods, "handoff") == []
-
-
-async def test_a_threads_mission_starts_its_tasks_on_copies_of_their_own_and_their_work_lands_with_the_thread(api, monkeypatch, tmp_path):
-    master = await master_of(api, await create(api))
-    thread = await a_thread(api, "Draft A", master)
-    pods = stored(api, thread, tmp_path)
-    store, mine, theirs = api.app.state.session_store, SandboxPool(pods), SandboxPool(pods)
-    # Typed once the thread's first turn has read its goal: before that the command waits for that turn.
-    await its_first_turn_was_taken(store, thread)
-    await store.emit_event(thread.id, EventType.USER_MESSAGE, {
-        "content": "/mission List the report's sources.\n\nRubric:\n- sources.md names every source",
-    })
-    # The command is the thread's own to run: it answers as it does in any chat, and starts no turn of its own.
-    await asyncio.wait_for(a_worker_waking(api, monkeypatch, mine, thread, AsyncMock()).wake(thread.id), 60)
-    *_, answer = [e.data["message"]["content"] for e in await store.get_events(thread.id, types=[EventType.LLM_RESPONSE])]
-    assert "can't start" not in answer and "Mission" in answer, answer
-    thread = await store.get_session(thread.id)
-    assert thread.config["strict_coordinator"] is True and thread.config["active_mission_id"]
-
-    handed_on = handed_on_to(api, monkeypatch, pods, thread)
-    # The mission's first turn: its coordinator has no tool that writes a file, and hands the work to a task.
-    await asyncio.wait_for(a_turn(api, monkeypatch, thread, [
-        calling(("spawn_task", {"goal": "List the report's sources in sources.md."})), _final_response("Started."),
-    ], pool=mine), 120)
-    [started] = [json.loads(result) for result in await results_of(api, thread, "spawn_task")]
-    assert started["status"] == "running", started
-    [helper] = await helpers_of(api, thread)
-    assert (str(helper.task_id), helper.channel) == (started["task_id"], "task")
-    # The thread's copy, the project's files as its pod has them, was handed on before the task was made.
-    assert handed_on == [["Report.docx", "notes.txt"]]
-    await a_helpers_turn(api, monkeypatch, theirs, helper, "cat notes.txt > sources.md && echo by the task >> sources.md")
-    the_helper_is_on_a_copy_of_its_own(pods, thread, helper)
-    assert not (pods.project / "sources.md").exists()
-    # The task's report wakes its thread, whose turn end lands the task's work.
-    await ends(api, mine, thread)
-    assert (pods.project / "sources.md").read_text() == "v1 notes\nby the task\n"
     assert refs(pods, "handoff") == []
 
 
@@ -520,46 +477,6 @@ async def test_a_step_that_hands_the_copy_on_waits_out_the_fence_its_harness_run
     assert fences == [903.0]
 
 
-async def test_a_task_queued_behind_another_takes_the_copy_as_it_is_when_queued_and_one_the_tool_refuses_takes_none(
-    api, monkeypatch, pods,
-):
-    thread = await a_coordinating_thread(api)
-    handed_on: list[list[str]] = []
-    keep, spawn, made = landing_module.keep_copy, task_service.create_task_and_spawn, []
-
-    async def watched(**kept):
-        answer = await keep(**kept)
-        if kept["action"] == "hand_off":
-            handed_on.append(git(pods.project / "_history", "ls-tree", "-r", "--name-only", f"refs/handoff/{thread.id}").split())
-        return answer
-
-    async def noted(**task):
-        made.append(await spawn(**task))
-        return made[-1]
-
-    monkeypatch.setattr(landing_module, "keep_copy", watched)
-    monkeypatch.setattr(task_service, "create_task_and_spawn", noted)
-
-    def replies():
-        yield calling(("terminal", {"command": "echo outline > outline.md"}))
-        yield calling(("spawn_task", {"goal": "Draft the sources."}))
-        yield calling(("terminal", {"command": "echo more > more.md"}))
-        # Behind the first, which still runs: no session is made for it now.
-        yield calling(("spawn_task", {"goal": "Check them.", "parents": [made[0]["task_id"]]}))
-        # Behind a task that does not exist: the tool refuses it.
-        yield calling(("spawn_task", {"goal": "And again.", "parents": [str(uuid4())]}))
-        yield _final_response("Done.")
-
-    await asyncio.wait_for(a_turn(api, monkeypatch, thread, replies(), pool=SandboxPool(pods)), 120)
-    first, queued, refused = [json.loads(result) for result in await results_of(api, thread, "spawn_task")]
-    assert (first["status"], queued["status"]) == ("running", "todo") and "not found" in refused["error"]
-    assert len(await helpers_of(api, thread)) == 1
-    at_first, with_more = ["Report.docx", "notes.txt", "outline.md"], ["Report.docx", "more.md", "notes.txt", "outline.md"]
-    # The first: as its task is made, and again, unchanged, as its session is.  The queued one: as it is queued,
-    # with what the thread wrote since, for the helper a later tick starts.  The refused one: never.
-    assert handed_on == [at_first, at_first, with_more]
-
-
 async def test_a_stop_of_a_turn_that_used_no_pod_opens_none(api, monkeypatch, pods):
     thread = await a_thread(api)
 
@@ -635,44 +552,6 @@ async def test_a_thread_whose_pod_goes_after_its_turn_took_a_helpers_work_up_and
     assert (pods.project / "sources.md").read_text() == "an hour of work\n"
     assert ("sources.md", "landed") in {(f["ref"], f["landing"]) for f in (await reports(api, master))[-1]["files"]}
     assert refs(pods, "handoff") == []
-
-
-@pytest.mark.slow
-@pytest.mark.parametrize("third_turn", ["loses its pod", "is stopped"])
-async def test_a_mission_in_a_thread_loses_no_finished_tasks_work_when_a_turn_that_starts_the_next(api, monkeypatch, tmp_path, third_turn):
-    master = await master_of(api, await create(api))
-    thread = await a_thread(api, "Draft A", master)
-    pods = stored(api, thread, tmp_path)
-    store, mine = api.app.state.session_store, SandboxPool(pods)
-    await its_first_turn_was_taken(store, thread)
-    await store.emit_event(thread.id, EventType.USER_MESSAGE, {"content": "/mission Write three parts.\n\nRubric:\n- a.md, b.md and c.md exist"})
-    await asyncio.wait_for(a_worker_waking(api, monkeypatch, mine, thread, AsyncMock()).wake(thread.id), 60)
-    thread = await store.get_session(thread.id)
-
-    async def the_third_turn_ends_badly(harness):
-        if third_turn == "is stopped":
-            await stop(harness)
-        else:
-            await pods.destroy(mine.sandbox_of(str(thread.id)))
-
-    # Each task's report wakes the thread, whose turn takes that task's work up and starts the next.
-    for part, during in (("a", None), ("b", None), ("c", the_third_turn_ends_badly)):
-        await asyncio.wait_for(a_turn(api, monkeypatch, thread, [
-            calling(("spawn_task", {"goal": f"Write {part}.md."})),
-            *([calling(("memory", {"action": "add", "content": "x"}))] if during else []),
-            _final_response("Started."), _final_response("Waiting for the task."),  # a coordinator is asked once more
-        ], pool=mine, during=during), 120)
-        task = (await helpers_of(api, thread))[-1]
-        await a_helpers_turn(api, monkeypatch, SandboxPool(pods), task, f"echo part {part} > {part}.md")
-        await store.emit_event(thread.id, EventType.USER_MESSAGE, {"content": f"Part {part} is done."})
-    assert len(await helpers_of(api, thread)) == 3
-    # The first task's work landed with the second turn.  The second's was taken up by the third turn, which
-    # handed the copy on and then did not land: it is not lost with that turn.
-    await ends(api, SandboxPool(pods), thread)
-    assert pods.real_names() == ["Report.docx", "a.md", "b.md", "c.md", "notes.txt"]
-    assert [(pods.project / f"{part}.md").read_text() for part in "abc"] == ["part a\n", "part b\n", "part c\n"]
-    landed = {f["ref"] for report in await reports(api, master) for f in report.get("files", []) if f.get("landing") == "landed"}
-    assert {"a.md", "b.md", "c.md"} <= landed
 
 
 COMMANDS_A_THREAD_REFUSES = {
@@ -777,7 +656,7 @@ async def test_what_a_thread_has_no_other_way_to_do_is_refused_in_words_that_sen
         assert thread_refusal(name) == f"A thread can't start {name} yet: do this step in the thread itself."
 
 
-@pytest.mark.parametrize("tool", ["agent", "background agent", "spawn_task"])
+@pytest.mark.parametrize("tool", ["agent", "background agent"])
 async def test_a_step_whose_hand_off_fails_starts_no_helper_on_old_files_and_says_so(api, monkeypatch, pods, tool):
     thread = await a_coordinating_thread(api)
     monkeypatch.setattr(delegate_module, "_poll_child_completion", AsyncMock(return_value={"status": "failed", "reason": "not run here"}))
@@ -795,33 +674,8 @@ async def test_a_step_whose_hand_off_fails_starts_no_helper_on_old_files_and_say
     [result] = await results_of(api, thread, _name(tool))
     assert "error" in json.loads(result) and "could not be handed to a helper, so none was started" in result, result
     assert await helpers_of(api, thread) == []
-    async with api.app.state.session_factory() as db:
-        assert (await db.execute(text("SELECT count(*) FROM tasks WHERE parent_session_id = :id"), {"id": thread.id})).scalar() == 0
     # The turn's own work lands as ever.
     assert pods.real_names() == ["Report.docx", "notes.txt", "outline.md"]
-
-
-async def test_a_task_for_a_sub_agent_the_agent_does_not_have_is_refused_before_the_copy_is_handed_on(api, monkeypatch, pods):
-    thread = await a_coordinating_thread(api)
-    handed: list = []
-
-    async def after_it(harness):
-        handed.append((landing_module.handed_on(thread), list(locks)))
-
-    looping = a_looping_harness(api, monkeypatch, thread, [
-        calling(("terminal", {"command": "echo outline > outline.md"})),
-        calling(("spawn_task", {"goal": "Draft the sources.", "agent_type": "no-such-agent"})),
-        calling(("memory", {"action": "add", "content": "x"})),
-        _final_response("Done."),
-    ], pool=SandboxPool(pods), during=after_it)
-    locks = await project_locks_taken(monkeypatch)
-    await asyncio.wait_for(the_loop_runs(api, looping, thread), 60)
-    [refusal] = await results_of(api, thread, "spawn_task")
-    assert "no-such-agent" in json.loads(refusal)["error"], refusal
-    # Refused before anything: no lock asked for a hand-off, nothing a stop would take back, no task left queued.
-    assert (handed, await helpers_of(api, thread)) == ([(False, [])], [])
-    async with api.app.state.session_factory() as db:
-        assert (await db.execute(text("SELECT count(*) FROM tasks WHERE parent_session_id = :id"), {"id": thread.id})).scalar() == 0
 
 
 async def a_thread_whose_worker_outlives_its_turn(api, monkeypatch, tmp_path):
@@ -867,17 +721,6 @@ async def test_a_stop_of_a_turn_during_which_an_earlier_turns_worker_handed_back
     await one_more_turn(api, monkeypatch, pods, thread, "ls > seen-later.txt")
     # The worker's file lands with the next turn; the stopped turn's does not.
     assert pods.real_names() == ["Report.docx", "notes.txt", "outline.md", "seen-later.txt", "started.md"]
-
-
-async def test_a_task_for_a_sub_agent_the_agent_does_not_have_is_refused_with_no_task_left_in_any_chat(api):
-    chat = await a_chat(api)  # no thread: the same answer as in a step that hands a copy on
-    store = api.app.state.session_store
-    await store.update_session_config_key(chat.id, "coordinator", True)
-    chat = await store.get_session(chat.id)
-    answer = await call_tool(api, chat, "spawn_task", goal="Draft the sources.", agent_type="no-such-agent")
-    assert "no-such-agent" in answer["error"] and "no task was made" in answer["error"], answer
-    async with api.app.state.session_factory() as db:
-        assert (await db.execute(text("SELECT count(*) FROM tasks WHERE parent_session_id = :id"), {"id": chat.id})).scalar() == 0
 
 
 #: The ways a stop of a turn that handed on is not carried out on the hand-off, or only by a pod that did not
@@ -1006,78 +849,6 @@ async def test_a_thread_whose_copy_was_made_again_after_it_handed_on_is_told_wha
         "turn is in it, with what helpers kept since. Changes it made after that are not in it. "
         "Check the files before making any of those changes again.]\n\n"
     )
-
-
-@pytest.mark.slow
-@pytest.mark.parametrize("stop_is", ["carried out", "not carried out"])
-async def test_a_stopped_turns_file_never_lands_when_its_tasks_queued_in_order_hand_back_one_after_the_other(
-    api, monkeypatch, tmp_path, stop_is,
-):
-    master = await master_of(api, await create(api))
-    thread = await a_coordinating_thread(api, master)
-    pods = stored(api, thread, tmp_path)
-    store, mine, theirs = api.app.state.session_store, SandboxPool(pods), SandboxPool(pods)
-    spawn, made = task_service.create_task_and_spawn, []
-
-    async def noted(**task):
-        made.append(await spawn(**task))
-        return made[-1]
-
-    monkeypatch.setattr(task_service, "create_task_and_spawn", noted)
-
-    async def stopped(harness):
-        if stop_is == "not carried out":
-            landing_module.turn_ended(thread)  # the worker that stops it is not the one that handed on
-        await stop(harness)
-
-    def replies():
-        yield calling(("terminal", {"command": "echo the stopped turn > stopped.md"}))
-        yield calling(("spawn_task", {"goal": "Write part one."}))
-        yield calling(("spawn_task", {"goal": "Write part two.", "parents": [made[0]["task_id"]]}))
-        yield calling(("memory", {"action": "add", "content": "x"}))
-        yield _final_response("Done.")
-
-    await asyncio.wait_for(a_turn(api, monkeypatch, thread, replies(), pool=mine, during=stopped), 120)
-    [first] = await helpers_of(api, thread)
-    await a_helpers_turn(api, monkeypatch, theirs, first, "echo part one > one.md")
-    # The tick starts the task queued behind it: no step of the thread hands a copy on for it, and it starts
-    # from the hand-off as the first task left it.
-    async with api.app.state.session_factory() as db:
-        queued = await db.get(Task, UUID(made[1]["task_id"]))
-    second = await task_spawn._create_session_for_task(
-        queued, session_store=store, session_factory=api.app.state.session_factory,
-        tenant=SimpleNamespace(org_id=thread.org_id, user_id=thread.user_id),
-    )
-    await a_helpers_turn(api, monkeypatch, theirs, second, "cat one.md > two.md && echo part two >> two.md")
-    await one_more_turn(api, monkeypatch, pods, thread, "ls > seen-later.txt")
-    assert pods.real_names() == ["Report.docx", "notes.txt", "one.md", "seen-later.txt", "two.md"]
-    assert (pods.project / "two.md").read_text() == "part one\npart two\n"
-
-
-async def test_a_task_for_a_sub_agent_the_agents_bundle_delivers_is_started(api, monkeypatch):
-    seen = []
-
-    async def only_with_the_bundle(name, tenant, *, session_factory=None, loader=None, bundle=None):
-        seen.append(bundle)
-        return an_agent("terminal") if bundle is not None else None
-
-    monkeypatch.setattr(task_spawn, "resolve_agent_by_name", only_with_the_bundle)
-    chat = await a_chat(api)
-    store = api.app.state.session_store
-    await store.update_session_config_key(chat.id, "coordinator", True)
-    chat = await store.get_session(chat.id)
-    registry = ToolRegistry()
-    ToolRuntime(registry).register_builtins()
-    state = api.app.state
-    message = await tool_exec.execute_single_tool(
-        {"id": "call_1", "function": {"name": "spawn_task", "arguments": json.dumps({"goal": "Draft the sources.", "agent_type": "in-the-bundle"})}},
-        session=chat, lease=SimpleNamespace(lease_token=uuid4()), store=store, tools=registry,
-        tenant=SimpleNamespace(org_id=chat.org_id, user_id=chat.user_id, asset_root="/tmp/test"),
-        redis=state.redis, storage=state.storage, session_factory=state.session_factory, bundle="the agent's bundle",
-    )
-    answer = json.loads(message["content"])
-    # The tool looks the sub-agent up where the agent's wake has it, as the task's start does.
-    assert answer.get("status") == "running" and set(seen) == {"the agent's bundle"}, (answer, seen)
 
 
 async def paused_as_the_route_pauses(api, thread) -> None:

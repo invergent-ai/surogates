@@ -311,7 +311,7 @@ async def tell_parent(
     becomes of this.
     """
     from surogates.harness.agent_news import MAX_RESULT_CHARS, NEW_FORMAT
-    from surogates.harness.worker_notify import notify_parent_of_task_event
+    from surogates.harness.worker_notify import emit_and_wake
 
     dispatch = dispatch_of(session) or {}
     payload: dict[str, Any] = {
@@ -367,7 +367,7 @@ async def tell_parent(
     except Exception:
         logger.warning("Could not close the run of agent %s in its parent's log", session.id, exc_info=True)
     try:
-        await notify_parent_of_task_event(
+        await emit_and_wake(
             session_store=store, parent_session_id=session.parent_id,
             event_type=EventType.AGENT_NOTIFICATION, payload=payload, redis=redis,
         )

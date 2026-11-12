@@ -94,12 +94,12 @@ def test_restricting_renders_the_agents_section_again():
 
     session = _chat({"coordinator": True, "excluded_tools": ["agent"]})
     builder = PromptBuilder(
-        _tenant(session), session=session, available_tools={"spawn_task", "agent"},
+        _tenant(session), session=session, available_tools={"agent"},
         available_agents=[AgentDef(name="analyst", description="Reads the numbers", system_prompt="",
                                    source="platform")],
     )
     assert "analyst" in builder._available_agents_section()
-    builder.restrict_tools({"spawn_task"})
+    builder.restrict_tools({"read_file"})
     assert builder._available_agents_section() == ""
 
 
@@ -216,11 +216,11 @@ def test_a_coordinator_keeps_its_knowledge_base_roster():
     kbs = [{"id": "kb-1", "name": "handbook", "display_name": "Handbook", "mode": "grounding"}]
     strict = _chat({"coordinator": True, "strict_coordinator": True})
     builder = PromptBuilder(_tenant(strict), session=strict, available_kbs=kbs,
-                            available_tools={"kb_list_pages", "kb_read_page", "kb_search_pages", "spawn_task"})
-    builder.restrict_tools({"spawn_task"})
+                            available_tools={"kb_list_pages", "kb_read_page", "kb_search_pages", "agent"})
+    builder.restrict_tools({"agent"})
     assert "kb-1" in builder._kb_section()
     named = _chat({"coordinator": True, "strict_coordinator": True, "excluded_tools": ["terminal"]})
     builder = PromptBuilder(_tenant(named), session=named, available_kbs=kbs,
-                            available_tools={"kb_list_pages", "kb_read_page", "kb_search_pages", "spawn_task"})
-    builder.restrict_tools({"spawn_task"})
+                            available_tools={"kb_list_pages", "kb_read_page", "kb_search_pages", "agent"})
+    builder.restrict_tools({"agent"})
     assert builder._kb_section() == ""  # it names its tools: narrowed as under #632

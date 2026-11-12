@@ -111,7 +111,6 @@ from surogates.harness.todo_reminder import (
 )
 from surogates.harness.tool_exec import (
     _open_local_copy,
-    _parse_tool_args_for_guardrail,
     _turn_now,
     cancelled_result,
     execute_single_tool,
@@ -4696,25 +4695,6 @@ class AgentHarness(
                     )
                     return
                 logger.info("Session %s: a question timed out; ending turn", session.id)
-                # A task's worker blocks instead, as ``worker_block`` does: its
-                # parent is told what it asked, and the task waits for the
-                # answer rather than being retried to ask it again.  One that
-                # cannot block fails its attempt, for the dispatcher to retry:
-                # a reply to nobody would finish the task with it.
-                if session.task_id is not None:
-                    if await self._block_task_on_question(session, unanswered_call):
-                        await self._complete_session(
-                            session, messages, lease,
-                            reason="question_timed_out",
-                            cost_tracker=cost_tracker,
-                            turn_id=turn_id,
-                            notify_parent=False,
-                        )
-                    else:
-                        await self._fail_session(
-                            session, messages, lease, reason="question_block_failed", cost_tracker=cost_tracker,
-                        )
-                    return
                 await self._request_final_summary(
                     session, messages, system_prompt, lease,
                     request=request, cost_tracker=cost_tracker, turn_id=turn_id,
@@ -5938,23 +5918,15 @@ class AgentHarness(
         """Gate self-tools on the execution context that makes them work.
 
         Mirror of ``worker._filter_effective_tools``, which applies these
-        exact three conditions to the PROMPT surface.  Its output feeds
+        conditions to the PROMPT surface.  Its output feeds
         ``PromptBuilder(available_tools=...)`` only -- the LLM-visible
         schemas come from here -- so the two must agree.  They did not:
         the prompt already dropped these groups for sessions lacking the
         gate, while the schema kept advertising them, and every handler
         behind them fails closed on the same condition
         (``board/tools.py`` returns "(no context_group_id on this
-        session)", the ``worker_*`` tools need ``Session.task_id``).  So the model was
-        paying context for tools it was never told about and could not
-        have used.
-
-        The force-add half matters as much as the subtract: a task worker
-        under a restrictive AgentDef allowlist still needs its
-        ``worker_*`` tools.  Observed in the wild before that rule
-        existed -- a ``claude-coder`` worker could not signal failure, so
-        its refusal was filed as a successful result and the parent
-        mission stalled.
+        session)").  So the model was paying context for tools it was
+        never told about and could not have used.
 
         ``None`` means "every registered tool"; it is materialised here
         because the gates have to subtract from it.
@@ -5962,7 +5934,6 @@ class AgentHarness(
         from surogates.runtime.governance import (
             BOARD_SELF_TOOLS,
             PROJECT_THREAD_TOOLS,
-            WORKER_SELF_TOOLS,
         )
 
         config = session.config or {}
@@ -5970,12 +5941,6 @@ class AgentHarness(
             set(self._tools.tool_names) if tool_filter is None
             else set(tool_filter)
         )
-
-        is_task_worker = session.task_id is not None
-        if is_task_worker:
-            result |= WORKER_SELF_TOOLS
-        else:
-            result -= WORKER_SELF_TOOLS
 
         if config.get("context_group_id"):
             result |= BOARD_SELF_TOOLS
@@ -6025,9 +5990,7 @@ class AgentHarness(
         elif explicit_allowed:
             tool_filter = set(config["allowed_tools"])
         else:
-            # The task tools are a coordinator's only.
-            excluded = set(config.get("excluded_tools") or []) | {"spawn_task", "unblock_task", "cancel_task"}
-            tool_filter = set(self._tools.tool_names) - excluded
+            tool_filter = set(self._tools.tool_names) - set(config.get("excluded_tools") or [])
 
         tool_filter = self._apply_execution_context_gates(session, tool_filter)
 
@@ -6240,25 +6203,6 @@ class AgentHarness(
     # ------------------------------------------------------------------
     # /compress command handler
     # ------------------------------------------------------------------
-
-    async def _block_task_on_question(self, session: Session, call: dict) -> bool:
-        """Block *session*'s task on its unanswered question *call*, through ``worker_block``: whether it blocked."""
-        from surogates.tasks.tools import _worker_block_handler
-
-        prompts = "; ".join(_question_prompts(call)) or "(no prompt)"
-        try:
-            got = await _worker_block_handler(
-                {"reason": f"Blocked: no answer to the question: {prompts}"},
-                session_store=self._store, redis=self._redis,
-                session_id=str(session.id), session_factory=self._session_factory,
-            )
-            blocked = json.loads(got).get("ok") is True
-        except Exception:
-            logger.warning("Session %s: its task could not block on the question", session.id, exc_info=True)
-            return False
-        if not blocked:
-            logger.warning("Session %s: its task could not block on the question: %s", session.id, got)
-        return blocked
 
     async def _request_final_summary(
         self,
@@ -6606,7 +6550,7 @@ class AgentHarness(
             await notify_parent_on_completion(
                 session_store=self._store, worker_session_id=session.id, parent_session_id=session.parent_id,
                 org_id=str(session.org_id), agent_id=session.agent_id, redis=self._redis,
-                task_id=getattr(session, "task_id", None), session_factory=self._session_factory,
+                session_factory=self._session_factory,
                 delegated=is_delegated(session),
             )
 
@@ -7060,14 +7004,6 @@ def _unanswered_question(tool_calls_raw: list[dict], tool_results: list[dict]) -
         if result.get("tool_call_id") in asked and (got := cancelled_result(result.get("content"))) is not None:
             return got.get("reason"), asked[result.get("tool_call_id")]
     return None, None
-
-
-def _question_prompts(call: dict) -> list[str]:
-    """The prompts of the questions *call* asked."""
-    questions = _parse_tool_args_for_guardrail(call).get("questions")
-    if not isinstance(questions, list):
-        return []
-    return [q["prompt"].strip() for q in questions if isinstance(q, dict) and isinstance(q.get("prompt"), str)]
 
 
 def _whiteboard_sketch_turn_done(

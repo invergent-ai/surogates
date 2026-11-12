@@ -35,7 +35,6 @@ from surogates.runtime.entitlements import (
 from surogates.runtime.governance import (
     BOARD_SELF_TOOLS,
     KEEL_DESIGNER_TOOLS,
-    WORKER_SELF_TOOLS,
     build_governance_gate,
 )
 from surogates.tools.builtin.team import team_tool_exclusions
@@ -303,27 +302,6 @@ def _filter_effective_tools(
     # rather than as a tool that could never have been answered.
     if is_eval_session(session) or is_unattended(session):
         result.discard("ask_user_question")
-
-    # worker_block / worker_complete / worker_context are only meaningful
-    # when this session is executing a subagent task (the dispatcher set
-    # ``Session.task_id``). Plain chat and spawn_worker children never
-    # have a task to operate on, so we strip them from the schema so
-    # the LLM is not tempted to call them. The ``worker_*`` prefix is
-    # deliberate: these are *self*-tools that act on the calling
-    # worker's task row, NOT user-task-completion signals — earlier
-    # ``task_*`` names confused LLMs into calling them at the end of
-    # plain chat turns.
-    if getattr(session, "task_id", None) is None:
-        result -= WORKER_SELF_TOOLS
-    else:
-        # Task workers always get their self-tools, even under a
-        # restrictive AgentDef allowlist (e.g. a specialist whose ``tools``
-        # list is just its domain tools).  ``worker_complete`` /
-        # ``worker_context`` / ``worker_block`` are execution-context
-        # self-tools, not work tools subject to the allowlist — without
-        # them a task worker can't hand off a structured result or read
-        # its parents' output.
-        result |= WORKER_SELF_TOOLS
 
     # share_note / read_board / expand_note are coordination self-tools,
     # meaningful only inside a coordination group (the spawn paths stamp
@@ -2428,24 +2406,6 @@ async def run_worker(settings: Settings) -> None:
     # Per-tenant isolation is enforced by the ``turn_gate`` built above;
     # the dispatcher acquires on dequeue and owns each turn's slots
     # through ``TurnSlots``.
-
-    # Build the tenant-for-task callable used by ``tasks_tick`` to spawn
-    # child sessions on behalf of subagent tasks. The tick runs as a
-    # system actor (no specific user), so user_id stays None and the
-    # other tenant fields use minimal defaults — the spawn path reads
-    # only ``org_id`` (for AgentDef catalog scoping).
-    from surogates.tenant.context import TenantContext
-
-    def _tenant_for_task(task: Any) -> TenantContext:
-        return TenantContext(
-            org_id=task.org_id,
-            user_id=None,
-            org_config={},
-            user_preferences={},
-            permissions=frozenset(),
-            asset_root="",
-        )
-
     orchestrator = Orchestrator(
         redis_client=redis_client,
         session_store=session_store,
@@ -2456,9 +2416,7 @@ async def run_worker(settings: Settings) -> None:
         poll_timeout=settings.worker.poll_timeout,
         browser_pool=browser_pool,
         session_factory=session_factory,
-        tenant_for_task=_tenant_for_task,
         turn_gate=turn_gate,
-        file_bundle_cache=worker_state.get("file_bundle_cache"),
     )
 
     # Scheduled-work polling is owned by the platform ticker

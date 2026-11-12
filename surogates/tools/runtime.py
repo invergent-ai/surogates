@@ -91,7 +91,6 @@ class ToolRuntime:
             whiteboard,
         )
         from surogates.board import tools as board_tools
-        from surogates.tasks import tools as task_tools
         from surogates.tools import mate_ambient
 
         modules = [
@@ -120,7 +119,6 @@ class ToolRuntime:
             artifact,
             coding_agent,  # run_coding_agent (Claude Code / Codex)
             github,  # github (scoped GitHub REST — read + writes — for the agent's repos)
-            task_tools,  # spawn_task, unblock_task, cancel_task, worker_block/complete/context
             board_tools,  # share_note, read_board, expand_note (coordination board)
             mate_ambient,  # mate_ambient_post (gated ambient channel post)
             channel_files,  # fetch_channel_file (pull a shared channel file)

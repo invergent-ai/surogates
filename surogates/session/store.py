@@ -50,8 +50,6 @@ from surogates.db.models import (
     Session as SessionRow,
     SessionCursor,
     SessionLease as LeaseRow,
-    Task as TaskRow,
-    TaskLink,
     Workstream as WorkstreamRow,
 )
 from surogates.harness.next_action import strip_next_action_blocks
@@ -572,7 +570,6 @@ class SessionStore:
         parent_id: UUID | None = None,
         service_account_id: UUID | None = None,
         idempotency_key: str | None = None,
-        task_id: UUID | None = None,
     ) -> Session:
         """Create a new session and return its Pydantic representation.
 
@@ -589,11 +586,6 @@ class SessionStore:
         *idempotency_key* is optional; when supplied, a unique-constraint
         violation on ``(org_id, idempotency_key)`` lets callers detect
         retries of the same logical request.
-
-        *task_id* links this session to a row in ``tasks`` when the
-        session is one execution attempt of a subagent task (created via
-        the ``spawn_task`` tool).  Left as ``None`` for plain chat and
-        ``spawn_worker`` sessions.
         """
         row = SessionRow(
             id=session_id or uuid.uuid4(),
@@ -607,7 +599,6 @@ class SessionStore:
             parent_id=parent_id,
             service_account_id=service_account_id,
             idempotency_key=idempotency_key,
-            task_id=task_id,
         )
         async with self._sf() as db:
             db.add(row)
@@ -989,10 +980,7 @@ class SessionStore:
           ``created_from_session_id`` or ``last_session_id`` is in the tree
           are cancelled, keeping their history.
         * **Missions** (``missions``) — orchestrated objectives whose
-          ``session_id`` is in the tree.  Mission tasks (``tasks``) and the
-          DAG edges (``task_links``) cascade with them; any
-          ``sessions.task_id`` pointing at a deleted task is NULL'd so the
-          archive update doesn't violate the FK.
+          ``session_id`` is in the tree.
 
         Running worker / delegation children are interrupted by the route
         layer (``api/routes/sessions.delete_session`` publishes on
@@ -3646,36 +3634,7 @@ def _build_counter_update_clause(event_type: EventType, data: dict) -> str:
 
 
 async def delete_missions(db: AsyncSession, mission_ids: Sequence[UUID]) -> None:
-    """Delete missions with their tasks and task edges."""
-    task_ids = (await db.execute(
-        select(TaskRow.id).where(
-            TaskRow.mission_id.in_(mission_ids),
-        )
-    )).scalars().all()
-    if task_ids:
-        # task_links has composite-PK FKs to tasks(id) without
-        # cascade; clear edges where either end is in the
-        # deleted task set so the task DELETE doesn't reject.
-        await db.execute(
-            delete(TaskLink).where(
-                or_(
-                    TaskLink.parent_id.in_(task_ids),
-                    TaskLink.child_id.in_(task_ids),
-                ),
-            )
-        )
-        # ``sessions.task_id`` may still point at one of the
-        # tasks we're about to delete (a worker session
-        # running a mission task).  NULL it out before the
-        # task DELETE so the FK doesn't reject.
-        await db.execute(
-            update(SessionRow)
-            .where(SessionRow.task_id.in_(task_ids))
-            .values(task_id=None)
-        )
-        await db.execute(
-            delete(TaskRow).where(TaskRow.id.in_(task_ids))
-        )
+    """Delete missions."""
     await db.execute(
         delete(MissionRow).where(MissionRow.id.in_(mission_ids))
     )
@@ -3687,13 +3646,6 @@ async def delete_session_rows(db: AsyncSession, tree: Sequence[UUID]) -> int:
     Missions, research runs and workstreams are not looked for: one under a
     session makes the delete fail on its foreign key.
     """
-    tasks = (await db.execute(
-        select(TaskRow.id).where(or_(TaskRow.parent_session_id.in_(tree), TaskRow.current_session_id.in_(tree)))
-    )).scalars().all()
-    if tasks:
-        await db.execute(update(SessionRow).where(SessionRow.task_id.in_(tasks)).values(task_id=None))
-        await db.execute(delete(TaskLink).where(or_(TaskLink.parent_id.in_(tasks), TaskLink.child_id.in_(tasks))))
-        await db.execute(delete(TaskRow).where(TaskRow.id.in_(tasks)))
     await db.execute(delete(InboxItem).where(InboxItem.session_id.in_(tree)))
     await db.execute(delete(DeliveryOutbox).where(DeliveryOutbox.session_id.in_(tree)))
     await db.execute(delete(LeaseRow).where(LeaseRow.session_id.in_(tree)))

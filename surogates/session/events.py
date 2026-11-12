@@ -206,14 +206,6 @@ class EventType(str, Enum):
     # reads it as a message typed into it, but it is never the user's.
     COORDINATOR_MESSAGE = "coordinator.message"
 
-    # Subagent task layer (spawn_task tool / tasks_tick dispatcher).
-    # Emitted to the parent (spawning) session so the coordinator agent
-    # observes task state transitions on its next wake. ``WORKER_COMPLETE``
-    # is reused for successful task completion; the payload carries the
-    # ``task_id`` so the parent can correlate.
-    TASK_BLOCKED = "task.blocked"
-    TASK_FAILED = "task.failed"
-
     # Coordination board (shared verified context).
     # ``BOARD_NOTE`` is emitted on the WRITER session when notes pass
     # admission (transcript audit).  ``BOARD_UPDATE`` is emitted on each

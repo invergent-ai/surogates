@@ -28,7 +28,7 @@ from surogates.keel.case_files import (
     record_case_org,
     write_case_file,
 )
-from surogates.db.models import BoardNote, DeliveryOutbox, InboxItem, OfficeSession, Task
+from surogates.db.models import BoardNote, DeliveryOutbox, InboxItem, OfficeSession
 from surogates.keel.files import case_file_value
 from surogates.keel.reruns import CaseRecord, read_case_record, rerun_memory_keys
 from surogates.keel.steps import step_contract_of
@@ -553,10 +553,6 @@ async def rows_naming(session_factory, *session_ids) -> dict[str, int]:
         "delivery_outbox": "SELECT count(*) FROM delivery_outbox WHERE session_id = ANY(CAST(:ids AS uuid[]))",
         "session_cursors": "SELECT count(*) FROM session_cursors WHERE session_id = ANY(CAST(:ids AS uuid[]))",
         "board_notes": "SELECT count(*) FROM board_notes WHERE writer_session_id = ANY(CAST(:ids AS uuid[]))",
-        "tasks": (
-            "SELECT count(*) FROM tasks WHERE parent_session_id = ANY(CAST(:ids AS uuid[])) "
-            "OR current_session_id = ANY(CAST(:ids AS uuid[]))"
-        ),
     }
     async with session_factory() as db:
         return {
@@ -583,7 +579,7 @@ class _Memory:
 
 async def a_worked_rerun(link, link_app, org, session_store, session_factory, original, *, key: str):
     """A rerun seeded with one file of *original*, that has worked: an output file, a helper, events, an inbox
-    item, an outbox row, a board note, a task, and memory.  Answers its session, the helper and its memory."""
+    item, an outbox row, a board note, and memory.  Answers its session, the helper and its memory."""
     state = link_app.state
     request = rerun_body(org, key=key, files=[file_of("in/payslip.pdf", OLD)], of_case_id=original)
     assert (await create_rerun(link, request)).status_code == 201
@@ -596,7 +592,6 @@ async def a_worked_rerun(link, link_app, org, session_store, session_factory, or
     event = await session_store.emit_event(rid, EventType.LLM_REQUEST, {"model": "m", "iteration": 1})
     await session_store.emit_event(helper.id, EventType.LLM_REQUEST, {"model": "m", "iteration": 1})
     async with session_factory() as db, db.begin():
-        task = Task(org_id=org, parent_session_id=rid, current_session_id=helper.id, goal="Check the payslip")
         db.add_all([
             InboxItem(
                 org_id=org, service_account_id=rerun.service_account_id, session_id=rid, source_event_id=event,
@@ -607,10 +602,7 @@ async def a_worked_rerun(link, link_app, org, session_store, session_factory, or
                 org_id=org, group_id=rid, writer_session_id=helper.id, writer_label="helper", type="result",
                 content="The payslip is fine",
             ),
-            task,
         ])
-        await db.flush()
-        await db.execute(text("UPDATE sessions SET task_id = :task WHERE id = :id"), {"task": task.id, "id": helper.id})
     memory = _Memory(link_app, rid)
     await memory.write()
     return rid, helper, memory

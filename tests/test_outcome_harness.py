@@ -221,7 +221,7 @@ async def test_handle_mission_create_propagates_config_to_in_memory_session(
     """Regression: after /mission create, the in-memory ``session.config``
     must reflect ``coordinator=True``, ``active_mission_id``, and the
     orchestrator preload — otherwise the rest of the wake processes the
-    kickoff message with stale config and ``spawn_task`` gets filtered
+    kickoff message with stale config and the coordinator's tools get filtered
     out as a WORKER_EXCLUDED_TOOL."""
     from uuid import uuid4
 

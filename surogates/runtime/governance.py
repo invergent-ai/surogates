@@ -41,27 +41,15 @@ logger = logging.getLogger(__name__)
 # state (``add_allowed``/``add_denied`` have no production callers).
 _FLOOR_GATE = GovernanceGate()
 
-# Execution-context self-tools: how a session reports its own state and
-# how a stuck one gets unstuck, as opposed to work tools.
+# Coordination-board self-tools: how a session of a coordination group shares
+# what it found, as opposed to work tools.
 #
-# These are the single declaration for both layers that care.
-# ``worker._filter_effective_tools`` strips them from sessions that
-# cannot use them and force-adds them for sessions that can, even under
-# a restrictive AgentDef allowlist; the governance gate refuses to let
-# an agent policy deny them. Keeping one set means adding a fourth
-# group cannot leave the two layers disagreeing.
-WORKER_SELF_TOOLS: frozenset[str] = frozenset({
-    "worker_block", "worker_complete", "worker_context",
-})
+# The single declaration for both layers that care.
+# ``worker._filter_effective_tools`` strips them from sessions outside a group
+# and force-adds them for sessions in one, even under a restrictive AgentDef
+# allowlist; the governance gate refuses to let an agent policy deny them.
 BOARD_SELF_TOOLS: frozenset[str] = frozenset({
     "share_note", "read_board", "expand_note",
-})
-# The coordinator's only levers to resume or abandon a blocked task: a
-# child that called ``worker_block`` stays blocked forever without them,
-# so a policy that denied them would strand work with a single
-# ``policy.denied`` event as the trace.
-TASK_LIFECYCLE_TOOLS: frozenset[str] = frozenset({
-    "unblock_task", "cancel_task",
 })
 # A project's thread tools: only its master is sent them, so a thread or a
 # chat cannot grow the project behind its coordinator.  Protected as well:
@@ -111,7 +99,7 @@ KEEL_DESIGNER_TOOLS: frozenset[str] = frozenset({
 # a clear 422; this set is the runtime's own belt-and-braces for
 # hand-written or legacy blobs.
 PROTECTED_TOOLS: frozenset[str] = (
-    WORKER_SELF_TOOLS | BOARD_SELF_TOOLS | TASK_LIFECYCLE_TOOLS | PROJECT_THREAD_TOOLS
+    BOARD_SELF_TOOLS | PROJECT_THREAD_TOOLS
     | CASE_STEP_TOOLS | CASE_ITEM_TOOLS
 )
 

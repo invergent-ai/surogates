@@ -277,9 +277,7 @@ class Orchestrator:
         poll_timeout: int = 5,
         browser_pool: BrowserPool | None = None,
         session_factory: Any | None = None,
-        tenant_for_task: Callable[[Any], Any] | None = None,
         turn_gate: Any | None = None,
-        file_bundle_cache: Any | None = None,
     ) -> None:
         self.redis = redis_client
         self.session_store = session_store
@@ -289,15 +287,8 @@ class Orchestrator:
         self._queue_key = queue_key
         self._poll_timeout = poll_timeout
         self._browser_pool = browser_pool
-        # Subagent task layer plumbing — both must be set for tasks_tick
-        # to run. When either is None the loop logs a warning at startup
-        # and stays disabled (the orchestrator still serves direct
-        # spawn_worker / chat sessions normally).
+        # The database, for the idle-mission nudge (``_missions_tick_forever``).
         self._session_factory = session_factory
-        self._tenant_for_task = tenant_for_task
-        # Per-agent Hub bundle cache so the tick's task-spawn path can
-        # resolve bundle-delivered sub-agents.
-        self._file_bundle_cache = file_bundle_cache
         # per-tenant TurnConcurrencyGate.  ``None`` in tests →
         # dequeue skips the gate.
         self._turn_gate = turn_gate
@@ -955,7 +946,6 @@ class Orchestrator:
                 agent_id=session.agent_id,
                 error=error,
                 redis=self.redis,
-                task_id=getattr(session, "task_id", None),
                 session_factory=self._session_factory,
                 delegated=is_delegated(session),
             )

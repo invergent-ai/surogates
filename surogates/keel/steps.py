@@ -44,7 +44,6 @@ from surogates.runtime.governance import (
     CASE_STEP_TOOLS,
     KEEL_CASE_TOOLS,
     KEEL_PROCESS_TOOLS,
-    WORKER_SELF_TOOLS,
 )
 
 __all__ = [
@@ -401,7 +400,7 @@ def gate_case_tools(tools: set[str], session: object) -> set[str]:
         return set(tools) - CASE_STEP_TOOLS - CASE_ITEM_TOOLS - KEEL_CASE_TOOLS - KEEL_PROCESS_TOOLS
 
     def platform(name: str) -> bool:
-        return name.startswith("mcp__") or name in WORKER_SELF_TOOLS or name in BOARD_SELF_TOOLS
+        return name.startswith("mcp__") or name in BOARD_SELF_TOOLS
 
     kept = {name for name in tools if name in CASE_ALLOWED_TOOLS or platform(name)}
     scope = case_scope_of(session)

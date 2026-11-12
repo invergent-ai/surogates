@@ -77,7 +77,7 @@ async def _parent_priority(session_store: SessionStore, parent_session_id: UUID)
         return 0.0
 
 
-async def notify_parent_of_task_event(
+async def emit_and_wake(
     *,
     session_store: SessionStore,
     parent_session_id: UUID,
@@ -87,19 +87,14 @@ async def notify_parent_of_task_event(
 ) -> None:
     """Emit *event_type* into the parent's log and re-enqueue the parent.
 
-    The task layer's terminal signals (``TASK_BLOCKED``, ``TASK_FAILED``)
-    are emitted from the dispatcher tick or from ``worker_block``, neither
-    of which runs inside the parent's wake.  Emitting alone is not enough:
-    a coordinator that is not already queued has nothing to re-read the
-    event, so the fan-out stalls until an idle nudge fires — or forever,
-    for a plain ``spawn_task`` coordinator that has no nudge path.
+    For news written outside the parent's own wake (a background agent's
+    end, a thread's redo): emitting alone is not enough, since a parent that
+    is not already queued has nothing to re-read the event.
 
-    The parent's own ``org_id``/``agent_id`` select the work queue, not
-    the worker's: a task worker frequently runs a different agent_def
-    than the coordinator that spawned it.  Failing to resolve the parent
-    is logged and swallowed — the event write is the durable part, and
-    the caller is mid-teardown.
-    """
+    The parent's own ``org_id``/``agent_id`` select the work queue, not the
+    child's.  Failing to resolve the parent is logged and swallowed — the
+    event write is the durable part, and the caller is mid-teardown.
+    """"""
     try:
         await session_store.emit_event(parent_session_id, event_type, payload)
     except Exception:
@@ -136,7 +131,6 @@ async def notify_parent_on_completion(
     org_id: str,
     agent_id: str,
     redis: Redis | None = None,
-    task_id: UUID | None = None,
     session_factory: Any | None = None,
     files: list[dict[str, Any]] | None = None,
     landing: dict[str, Any] | None = None,
@@ -151,22 +145,6 @@ async def notify_parent_on_completion(
     can see what the worker produced.  ``agent_id`` is the parent's agent id
     (the child inherits it, so either value works) and selects the
     per-agent work queue.
-
-    ``task_id`` is included in the event payload when this worker session
-    was running for a subagent task (set by the ``spawn_task`` tool or
-    the dispatcher tick).  The coordinator agent uses it to correlate
-    the completion with the ``spawn_task`` call it made earlier; plain
-    ``spawn_worker`` sessions pass ``None`` and the key is omitted.
-
-    When ``task_id`` is set AND ``session_factory`` is provided, the
-    function reads the Task row and overrides the auto-extracted result
-    with ``task.result`` / ``task.result_metadata`` if the worker called
-    the ``worker_complete`` self-tool explicitly.  This keeps the
-    parent's view of "what did the worker produce" consistent with what
-    the worker chose to hand off (rather than the LLM's last response
-    text, which may differ from the explicit summary).  When the worker
-    completed naturally without ``worker_complete``, ``task.result`` is
-    typically ``None`` and we fall back to the extracted LLM response.
 
     A project's thread also reports its ``title``, and the *files* its
     turn's summary named.  A turn that ended early, or whose summary was
@@ -200,34 +178,6 @@ async def notify_parent_on_completion(
         }
         if delegated:
             payload["delegated"] = True
-        if task_id is not None:
-            payload["task_id"] = str(task_id)
-            # Override result/metadata with explicit handoff from
-            # worker_complete when the worker called it. Defensive: any
-            # error reading the Task falls through to the LLM-response
-            # default so we never lose the notification.
-            if session_factory is not None:
-                try:
-                    from sqlalchemy import select as _sel
-                    from surogates.db.models import Task as _Task
-
-                    async with session_factory() as _db:
-                        explicit = await _db.scalar(
-                            _sel(_Task).where(_Task.id == task_id)
-                        )
-                        if explicit is not None and explicit.result is not None:
-                            payload["result"] = (
-                                explicit.result[:_MAX_RESULT_CHARS]
-                            )
-                        if explicit is not None and explicit.result_metadata is not None:
-                            payload["metadata"] = explicit.result_metadata
-                except Exception:
-                    logger.warning(
-                        "Failed to read task %s for completion override; "
-                        "falling back to LLM-extracted result",
-                        task_id, exc_info=True,
-                    )
-
         title = await _thread_title(session_factory, worker_session_id)
         if title is not None:
             payload["title"] = title
@@ -291,7 +241,6 @@ async def notify_parent_on_failure(
     agent_id: str,
     error: str,
     redis: Redis | None = None,
-    task_id: UUID | None = None,
     session_factory: Any | None = None,
     not_taken: list[str] | None = None,
     set_aside: dict[str, Any] | None = None,
@@ -301,9 +250,6 @@ async def notify_parent_on_failure(
 
     ``agent_id`` selects the per-agent work queue so the parent wakes on the
     same worker that owns its agent.
-
-    ``task_id`` is included in the event payload when this worker session
-    was running for a subagent task; ``None`` for plain spawn_worker.
 
     A project's thread whose failed turn was kept also reports
     *not_taken*, the helpers' files its copy did not take up, as a landing
@@ -317,8 +263,6 @@ async def notify_parent_on_failure(
         }
         if delegated:
             payload["delegated"] = True
-        if task_id is not None:
-            payload["task_id"] = str(task_id)
         title = await _thread_title(session_factory, worker_session_id)
         if title is not None:
             payload["title"] = title

@@ -322,21 +322,19 @@ _CONTINUATION_TEMPLATE = dedent("""\
     Evaluator feedback: {feedback}
 
     Current mission state:
-    - {n_done} task(s) completed
-    - {n_in_flight} task(s) in flight (running/ready/todo/blocked)
+    - {n_done} agent(s) completed
+    - {n_in_flight} agent(s) still working
     - Iteration {iteration}/{max_iterations}
 
-    Inspect the mission task tree via ``worker_context`` on a recent
-    child if you need detail. Then either:
-      (a) spawn one or more corrective tasks (via ``spawn_task``) to
-          address the evaluator's feedback, OR
-      (b) call ``worker_block`` on your own session with a question if
-          you need human input, OR
-      (c) call ``worker_complete`` on your own session with a failure
-          summary if you believe the rubric cannot be satisfied.
+    Then either:
+      (a) start one or more agents with ``agent`` to address the
+          evaluator's feedback, or continue an agent that has the
+          context with ``send_message``, OR
+      (b) ask the user, if you need their input, OR
+      (c) say why, if you believe the rubric cannot be satisfied.
 
     Do NOT claim completion in prose alone. The evaluator only honours a
-    completion claim when a verifier task's result_metadata supports it,
+    completion claim backed by an agent's report that verified the work,
     or when you explicitly mark completion with ``[[mission-complete]]``
     on its own line.
 """).strip()
@@ -527,23 +525,10 @@ async def apply_verdict(
         )
         return
 
-    # Re-fetch counts to render an up-to-date continuation prompt.
-    from sqlalchemy import func as _func
-
-    from surogates.db.models import Task
-
-    async with mission_store._sf() as db:
-        n_done = int(await db.scalar(
-            select(_func.count(Task.id)).where(
-                Task.mission_id == mission_id, Task.status == "done",
-            )
-        ) or 0)
-        n_in_flight = int(await db.scalar(
-            select(_func.count(Task.id)).where(
-                Task.mission_id == mission_id,
-                Task.status.in_(("todo", "ready", "running", "blocked")),
-            )
-        ) or 0)
+    # Re-read the agents to render an up-to-date continuation prompt.
+    agents = await mission_store.agents(mission_id)
+    n_done = sum(agent.status == "completed" for agent in agents)
+    n_in_flight = sum(agent.status in ("active", "processing") for agent in agents)
 
     continuation = _CONTINUATION_TEMPLATE.format(
         description=mission.description,

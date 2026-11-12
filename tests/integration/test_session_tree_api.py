@@ -15,8 +15,6 @@ from sqlalchemy import select
 from surogates.db.models import Mission as MissionRow
 from surogates.db.models import ScheduledSession as ScheduledSessionRow
 from surogates.db.models import Session as SessionRow
-from surogates.db.models import Task as TaskRow
-from surogates.db.models import TaskLink
 from surogates.session.store import SessionStore
 from surogates.scheduled.schedule import parse_dynamic_loop_schedule
 from surogates.scheduled.store import ScheduledSessionStore
@@ -522,35 +520,13 @@ async def test_delete_parent_session_also_deletes_owned_mission(
         ))
         await db.commit()
 
-    # Two mission-owned tasks with a parent → child DAG edge, plus a
-    # worker session linked back to one of them via ``sessions.task_id``.
-    parent_task_id = uuid.uuid4()
-    child_task_id = uuid.uuid4()
-    async with session_factory() as db:
-        db.add_all([
-            TaskRow(
-                id=parent_task_id, org_id=org_id,
-                parent_session_id=coordinator.id,
-                goal="parent task", status="done",
-                mission_id=mission_id,
-            ),
-            TaskRow(
-                id=child_task_id, org_id=org_id,
-                parent_session_id=coordinator.id,
-                goal="child task", status="running",
-                mission_id=mission_id,
-            ),
-            TaskLink(parent_id=parent_task_id, child_id=child_task_id),
-        ])
-        await db.commit()
-
+    # A worker session under the coordinator.
     worker = await session_store.create_session(
         user_id=user_id,
         org_id=org_id,
         agent_id=_AGENT_ID,
         parent_id=coordinator.id,
         channel="worker",
-        task_id=child_task_id,
         config={"storage_bucket": bucket},
     )
 
@@ -576,28 +552,11 @@ async def test_delete_parent_session_also_deletes_owned_mission(
         missions = (await db.execute(
             select(MissionRow).where(MissionRow.id == mission_id)
         )).scalars().all()
-        tasks = (await db.execute(
-            select(TaskRow).where(
-                TaskRow.id.in_([parent_task_id, child_task_id])
-            )
-        )).scalars().all()
-        links = (await db.execute(
-            select(TaskLink).where(
-                TaskLink.parent_id == parent_task_id
-            )
-        )).scalars().all()
 
     # Sessions archived (soft-delete keeps the row).
     assert all(s.status == "archived" for s in sessions)
-    # ``sessions.task_id`` on the worker is NULL'd before the Task
-    # DELETE so the FK doesn't reject.
-    worker_after = next(s for s in sessions if s.id == worker.id)
-    assert worker_after.task_id is None
-
-    # Mission + tasks + edges are physically gone.
+    # The mission is physically gone.
     assert missions == []
-    assert tasks == []
-    assert links == []
 
 
 async def test_delete_session_without_mission_is_a_noop_for_mission_table(

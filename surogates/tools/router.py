@@ -139,20 +139,9 @@ TOOL_LOCATIONS: dict[str, ToolLocation] = {
     "read_thread": ToolLocation.HARNESS,
     "resolve_thread": ToolLocation.HARNESS,
     "propose_threads": ToolLocation.HARNESS,
-    # Subagent task layer — handlers need the worker's DB session
-    # factory, redis client, and session store. They cannot run in a
-    # sandbox pod (no DB connectivity); the default ``SANDBOX`` fallback
-    # would route them there and surface as ``Unknown tool`` from the
-    # sandbox executor.
-    "spawn_task": ToolLocation.HARNESS,
-    "worker_block": ToolLocation.HARNESS,
-    "worker_complete": ToolLocation.HARNESS,
-    "worker_context": ToolLocation.HARNESS,
-    "cancel_task": ToolLocation.HARNESS,
-    "unblock_task": ToolLocation.HARNESS,
-    # Coordination board — same constraint as the task layer: handlers
-    # need the worker's DB session factory, session store, and the LLM
-    # verifier client; none of that exists in a sandbox pod.
+    # Coordination board — handlers need the worker's DB session factory,
+    # session store, and the LLM verifier client; none of that exists in a
+    # sandbox pod, whose ``SANDBOX`` fallback would answer ``Unknown tool``.
     "share_note": ToolLocation.HARNESS,
     "read_board": ToolLocation.HARNESS,
     "expand_note": ToolLocation.HARNESS,

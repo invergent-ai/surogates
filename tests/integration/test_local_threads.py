@@ -515,7 +515,7 @@ async def test_a_helper_of_a_thread_on_the_users_computer_works_in_the_threads_c
         await journal(api).bind(session_id=helper.id, device_id=UUID(laptop.device_id), folder=FOLDER, nonce=NONCE)
 
 
-@pytest.mark.parametrize("tool", ["agent", "background agent", "spawn_task"])
+@pytest.mark.parametrize("tool", ["agent", "background agent"])
 async def test_a_thread_on_the_users_computer_starts_a_helper_in_its_copy_and_hands_no_copy_on(api, laptop, monkeypatch, tmp_path, tool):
     _, _, thread = await begun_local(api, laptop)
     store = api.app.state.session_store

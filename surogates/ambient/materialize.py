@@ -6,7 +6,7 @@ from uuid import UUID, uuid4
 
 from surogates.ambient.prompt import build_ambient_prompt
 from surogates.ambient.store import AmbientSchedule
-from surogates.ambient.tasks_probe import recent_task_changes
+from surogates.ambient.agents_probe import recent_agent_changes
 from surogates.config import enqueue_session
 from surogates.session.store import SessionNotFoundError
 
@@ -62,9 +62,9 @@ async def materialize_ambient_tick(
             },
         )
 
-    task_changes: list[str] = []
+    agent_changes: list[str] = []
     if schedule.source_session_id is not None and session_factory is not None:
-        task_changes = await recent_task_changes(
+        agent_changes = await recent_agent_changes(
             session_factory,
             org_id=schedule.org_id,
             source_session_id=schedule.source_session_id,
@@ -72,7 +72,7 @@ async def materialize_ambient_tick(
 
     prompt = build_ambient_prompt(
         channel_label=f"#{schedule.channel_id}",
-        task_changes=task_changes,
+        agent_changes=agent_changes,
     )
     await session_store.emit_synthetic_user_message(
         ambient_session_id,

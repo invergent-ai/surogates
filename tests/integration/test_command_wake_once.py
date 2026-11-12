@@ -23,7 +23,6 @@ from surogates.coding_agents.run_core import CodingRunOutcome
 from surogates.config import INTERRUPT_CHANNEL_PREFIX, SHARED_WORK_QUEUE_KEY, encode_queue_member
 from surogates.db.models import Mission as MissionRow
 from surogates.db.models import Session as SessionRow
-from surogates.db.models import Task
 from surogates.devices.browser import BROWSER_HAND_BACK
 from surogates.harness.budget import IterationBudget
 from surogates.harness.cost_tracker import SessionCostTracker
@@ -46,7 +45,6 @@ from surogates.session.events import MESSAGE_TYPES, EventType
 from surogates.session.interactive_input import pending_input_for_session
 from surogates.session.provisioning import create_child_session
 from surogates.session.store import SessionStore
-from surogates.tasks.dispatcher import _finalize_ended_sessions
 from surogates.tenant.auth.service_account import KIND_API_KEY, ServiceAccountStore
 from surogates.tenant.context import TenantContext
 import surogates.tools.builtin.ask_user_question as ask_user_question_module
@@ -1695,15 +1693,13 @@ async def test_an_amendment_whose_write_failed_after_its_record_is_applied_by_th
     assert [e.data.get("synthetic") for e in await workers.store.get_events(chat, types=[EventType.USER_MESSAGE])].count("mission_amended") == 1
 
 
-async def a_task_at_work(workers: Workers, chat: UUID, mission_id: UUID) -> UUID:
-    """A task of the chat's mission whose helper is at work, a worker holding its session: the helper's session."""
-    helper = await create_child_session(store=workers.store, parent=await workers.session(chat), channel="task")
-    async with workers.api.app.state.session_factory() as db:
-        db.add(Task(
-            org_id=workers.api.org_id, parent_session_id=chat, goal="Source the totals.", status="running",
-            mission_id=mission_id, current_session_id=helper.id, attempt_count=1,
-        ))
-        await db.commit()
+async def an_agent_at_work(workers: Workers, chat: UUID, mission_id: UUID) -> UUID:
+    """An agent of the chat's mission at work, a worker holding its session: the agent's session."""
+    helper = await create_child_session(
+        store=workers.store, parent=await workers.session(chat), channel="delegation",
+        config={"agent_dispatch": {"mode": "background", "description": "Source the totals.", "parent": str(chat),
+                                   "mission_id": str(mission_id)}},
+    )
     assert await workers.store.try_acquire_lease(helper.id, "the helper's worker", ttl_seconds=60) is not None
     return helper.id
 
@@ -1714,7 +1710,7 @@ async def test_a_mission_cancelled_with_its_helpers_whose_worker_died_has_its_he
 ):
     chat = await a_coordinator(workers)
     [mission] = await workers.missions(chat)
-    helper = await a_task_at_work(workers, chat, mission.id)
+    helper = await an_agent_at_work(workers, chat, mission.id)
     redis = workers.api.app.state.redis
     publish, stopped = redis.publish, []
 
@@ -1743,13 +1739,11 @@ async def test_a_mission_cancelled_with_its_helpers_whose_worker_died_has_its_he
 
     await workers.wake(chat)
 
-    # Run again, it finishes the cancel: the helper is told to stop, its task and the mission are cancelled,
+    # Run again, it finishes the cancel: the helper is told to stop and is stopped, the mission is cancelled,
     # and the chat has no mission in flight.
-    assert stopped and set(stopped) == {"mission_cancel_cascade"}
-    async with workers.api.app.state.session_factory() as db:
-        [task] = (await db.execute(select(Task).where(Task.mission_id == mission.id))).scalars().all()
+    assert stopped and set(stopped) == {json.dumps({"reason": "stopped by agent"})}
     [mission] = await workers.missions(chat, mission.id)
-    assert (task.status, mission.status) == ("cancelled", "cancelled")
+    assert ((await workers.store.get_session(helper)).status, mission.status) == ("paused", "cancelled")
     assert "active_mission_id" not in (await workers.session(chat)).config
     answers = [
         e.data["message"]["content"] for e in await workers.store.get_events(chat, after=typed, types=[EventType.LLM_RESPONSE])
@@ -2707,124 +2701,6 @@ async def test_a_channel_question_that_times_out_ends_its_turn_with_one_reply_in
     assert (await workers.said(chat))[-1] == "I'll wait for your answer."
     assert await workers.status(chat) == "completed"
     assert (await finish_reasons(workers, chat))[-1] == "question_timed_out"
-
-
-@pytest.mark.slow
-async def test_a_task_whose_question_times_out_blocks_on_it_instead_of_being_retried(workers, monkeypatch):
-    monkeypatch.setattr(ask_user_question_module, "_MAX_WAIT_SECONDS", 0.5)
-    chat = await workers.chat()
-    helper = await create_child_session(store=workers.store, parent=await workers.session(chat), channel="task")
-    async with workers.api.app.state.session_factory() as db:
-        task = Task(
-            org_id=workers.api.org_id, parent_session_id=chat, goal="Draft the report.", status="running",
-            current_session_id=helper.id, attempt_count=1,
-        )
-        db.add(task)
-        await db.flush()
-        await db.execute(text("UPDATE sessions SET task_id = :task WHERE id = :helper"), {"task": task.id, "helper": helper.id})
-        await db.commit()
-    workers.replies.append(ASKS)
-    await workers.store.emit_event(helper.id, EventType.USER_MESSAGE, {"content": "Draft the report."})
-    asking = workers.worker()
-    del asking._tools.dispatch  # the real tools: the question waits for its user
-    await asyncio.wait_for(asking.wake(helper.id), 10)
-
-    # Nobody is there to wait with: the task blocks on its question, for its parent to answer, and is not retried.
-    assert (await what_the_question_got(workers, helper.id))["reason"] == "timeout"
-    async with workers.api.app.state.session_factory() as db:
-        task = await db.get(Task, task.id)
-    assert (task.status, task.blocked_reason, task.attempt_count) == (
-        "blocked", "Blocked: no answer to the question: Which quarter?", 0,
-    )
-    assert len(workers.requests) == 1  # no tools-off reply to nobody
-    assert await workers.status(helper.id) == "completed"
-    [told] = await workers.store.get_events(chat, types=[EventType.TASK_BLOCKED])
-    assert told.data["reason"] == task.blocked_reason
-    # Blocked is its parent's whole news: no report that the task finished as well.
-    assert await workers.store.get_events(chat, types=[EventType.WORKER_COMPLETE]) == []
-
-
-TWO_ASKS = (
-    {"role": "assistant", "content": "", "tool_calls": [
-        ASKS[0]["tool_calls"][0],
-        {"id": "call_ask_2", "type": "function", "function": {
-            "name": "ask_user_question", "arguments": json.dumps({"questions": [{"prompt": "Which region?"}]}),
-        }},
-    ]},
-    ASKS[1],
-)
-
-
-@pytest.mark.slow
-async def test_a_task_blocks_only_on_the_question_that_went_unanswered(workers, monkeypatch):
-    monkeypatch.setattr(ask_user_question_module, "_MAX_WAIT_SECONDS", 0.5)
-    chat = await workers.chat()
-    helper = await create_child_session(store=workers.store, parent=await workers.session(chat), channel="task")
-    async with workers.api.app.state.session_factory() as db:
-        task = Task(
-            org_id=workers.api.org_id, parent_session_id=chat, goal="Draft the report.", status="running",
-            current_session_id=helper.id, attempt_count=1,
-        )
-        db.add(task)
-        await db.flush()
-        await db.execute(text("UPDATE sessions SET task_id = :task WHERE id = :helper"), {"task": task.id, "helper": helper.id})
-        await db.commit()
-    workers.replies.append(TWO_ASKS)
-    await workers.store.emit_event(helper.id, EventType.USER_MESSAGE, {"content": "Draft the report."})
-    # The first question is answered; the second gets no answer in time.
-    await workers.store.emit_event(
-        helper.id, EventType.ASK_USER_QUESTION_RESPONSE,
-        {"tool_call_id": "call_ask", "responses": [{"question": "Which quarter?", "answer": "Q3"}]},
-    )
-    asking = workers.worker()
-    del asking._tools.dispatch  # the real tools: the question waits for its user
-    await asyncio.wait_for(asking.wake(helper.id), 10)
-
-    assert json.loads(await what_a_call_got(workers, helper.id, "call_ask_2"))["reason"] == "timeout"
-    async with workers.api.app.state.session_factory() as db:
-        task = await db.get(Task, task.id)
-    # Its parent is asked only what went unanswered, not the question already answered.
-    assert (task.status, task.blocked_reason) == ("blocked", "Blocked: no answer to the question: Which region?")
-    [told] = await workers.store.get_events(chat, types=[EventType.TASK_BLOCKED])
-    assert told.data["reason"] == task.blocked_reason
-
-
-@pytest.mark.slow
-async def test_a_task_that_cannot_block_on_its_timed_out_question_still_ends_its_turn(workers, monkeypatch):
-    monkeypatch.setattr(ask_user_question_module, "_MAX_WAIT_SECONDS", 0.5)
-
-    async def broken(*args, **kwargs):
-        raise RuntimeError("the database went away")
-
-    monkeypatch.setattr("surogates.tasks.tools._worker_block_handler", broken)
-    chat = await workers.chat()
-    helper = await create_child_session(store=workers.store, parent=await workers.session(chat), channel="task")
-    async with workers.api.app.state.session_factory() as db:
-        task = Task(
-            org_id=workers.api.org_id, parent_session_id=chat, goal="Draft the report.", status="running",
-            current_session_id=helper.id, attempt_count=1,
-        )
-        db.add(task)
-        await db.flush()
-        await db.execute(text("UPDATE sessions SET task_id = :task WHERE id = :helper"), {"task": task.id, "helper": helper.id})
-        await db.commit()
-    workers.replies.append(ASKS)
-    await workers.store.emit_event(helper.id, EventType.USER_MESSAGE, {"content": "Draft the report."})
-    asking = workers.worker()
-    del asking._tools.dispatch  # the real tools: the question waits for its user
-    await asyncio.wait_for(asking.wake(helper.id), 10)
-
-    # The block failed: the attempt fails, with nothing raised, no reply to nobody and no report that it finished.
-    assert len(workers.requests) == 1
-    assert await workers.status(helper.id) == "failed"
-    assert await workers.store.get_events(chat, types=[EventType.WORKER_COMPLETE]) == []
-    # So the dispatcher retries the task, rather than finishing it with a reply to nobody.
-    async with workers.api.app.state.session_factory() as db:
-        await _finalize_ended_sessions(db, session_store=workers.store)
-        await db.commit()
-    async with workers.api.app.state.session_factory() as db:
-        task = await db.get(Task, task.id)
-    assert (task.status, task.result) == ("ready", None)
 
 
 @pytest.mark.slow

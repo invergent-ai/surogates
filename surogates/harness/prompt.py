@@ -555,10 +555,9 @@ class PromptBuilder:
 
         Injected only for coordination-group members (sessions whose
         config carries ``context_group_id`` — every fan-out parent and
-        child).  Task workers additionally get the deeper protocol from
-        the ``subagent-task-worker`` skill; this block is the baseline
-        so delegate/spawn_worker children and coordinators use the
-        board without being told to in their goals.
+        child).  This block is the baseline so sub-agents and
+        coordinators use the board without being told to in their
+        briefs.
 
         Returns "" for solo sessions so the section is omitted.
         """
@@ -774,8 +773,7 @@ class PromptBuilder:
         description), this section emits the entire skill content so
         the agent has the playbook in its system prompt without having
         to call ``skill_view``. Used to auto-enforce role-specific
-        playbooks like ``subagent-task-worker`` for sessions running a
-        Task — set by ``surogates.tasks.spawn._build_task_worker_config``.
+        playbooks a session's config names.
 
         Returns an empty string when ``preloaded_skills`` is unset or
         empty, or when no listed name resolves against the tenant skill

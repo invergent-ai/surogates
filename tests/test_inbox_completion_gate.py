@@ -18,7 +18,7 @@ from surogates.harness.loop_artifact_completion import ArtifactCompletionMixin
 from surogates.session.events import EventType
 
 
-def _session(*, channel: str, parent_id=None, config=None, task_id=None):
+def _session(*, channel: str, parent_id=None, config=None):
     now = datetime.now(timezone.utc)
     return SimpleNamespace(
         id=uuid4(),
@@ -32,7 +32,6 @@ def _session(*, channel: str, parent_id=None, config=None, task_id=None):
         config=config or {},
         created_at=now,
         updated_at=now,
-        task_id=task_id,
     )
 
 
@@ -102,7 +101,7 @@ async def test_web_root_session_emits_the_inbox_item():
     "session",
     [
         _session(channel="worker", parent_id=uuid4()),
-        _session(channel="task", parent_id=uuid4(), task_id=uuid4()),
+        _session(channel="task", parent_id=uuid4()),
         _session(channel="delegation", parent_id=uuid4()),
         _session(channel="api"),
         _session(channel="slack"),

@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from surogates.board.groups import ensure_group_and_inherit
-from surogates.db.models import Session as ORMSession, Task
+from surogates.db.models import Session as ORMSession
 from surogates.session.store import SessionStore
 
 
@@ -79,47 +79,6 @@ async def test_a_background_agent_stamps_group(
     refreshed = await store.get_session(parent_session.id)
     assert refreshed.config["context_group_id"] == str(parent_session.id)
     assert live_config["context_group_id"] == str(parent_session.id)
-
-
-@pytest.mark.asyncio(loop_scope="session")
-async def test_task_path_stamps_group_and_retry_rejoins(
-    session_factory, org_id, parent_session,
-):
-    from surogates.tasks.spawn import _create_session_for_task
-
-    store = SessionStore(session_factory)
-    tenant = MagicMock(org_id=org_id, user_id=None)
-
-    async with session_factory() as db:
-        task = Task(
-            org_id=org_id,
-            parent_session_id=parent_session.id,
-            goal="audit the slack adapter",
-            status="running",
-            attempt_count=1,
-        )
-        db.add(task)
-        await db.commit()
-        await db.refresh(task)
-
-    child1 = await _create_session_for_task(
-        task, session_store=store,
-        session_factory=session_factory, tenant=tenant,
-    )
-    assert child1.config["context_group_id"] == str(parent_session.id)
-
-    # Retry attempt flows through the same function and rejoins.
-    async with session_factory() as db:
-        row = await db.get(Task, task.id)
-        row.attempt_count = 2
-        await db.commit()
-        await db.refresh(row)
-    child2 = await _create_session_for_task(
-        row, session_store=store,
-        session_factory=session_factory, tenant=tenant,
-    )
-    assert child2.config["context_group_id"] == str(parent_session.id)
-    assert child2.id != child1.id
 
 
 @pytest.mark.asyncio(loop_scope="session")

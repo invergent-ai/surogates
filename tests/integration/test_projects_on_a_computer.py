@@ -132,7 +132,7 @@ async def test_a_computer_projects_coordinator_has_a_chats_tools_on_its_folder_a
     # Every piece of work is a thread on the folder, which only its user starts there.
     assert not sent & {
         "start_thread", "web_search", "browser_navigate", "create_artifact",
-        "agent", "spawn_task", "run_coding_agent",
+        "agent", "run_coding_agent",
     }
 
 

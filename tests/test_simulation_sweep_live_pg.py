@@ -35,7 +35,6 @@ from surogates.db.models import (
     SimulationMessage,
     SimulationPerson,
     SimulationRun,
-    Task,
     User,
 )
 from surogates.simulation import store
@@ -84,14 +83,11 @@ async def _run(sf, vault, org_id, *, created, status="ended"):
         db.add(Session(id=session_id, org_id=org_id, agent_id="a1", channel="whatsapp",
                        user_id=person.user_id, config={"simulation_run_id": str(run.id)}))
         await db.flush()
-        # A sub-agent's session, its task, and a mission: none cascade.
+        # A sub-agent's session and a mission: none cascade.
         child_id = uuid.uuid4()
         db.add(Session(id=child_id, org_id=org_id, agent_id="a1", channel="whatsapp",
                        parent_id=session_id, user_id=person.user_id, config={}))
         await db.flush()
-        task = Task(org_id=org_id, parent_session_id=session_id, current_session_id=child_id,
-                    goal="g", status="done")
-        db.add(task)
         db.add(Mission(org_id=org_id, session_id=session_id, user_id=person.user_id,
                        agent_id="a1", description="d", rubric="r"))
         db.add(ScheduledSession(org_id=org_id, agent_id="a1", user_id=person.user_id, name="n",
@@ -113,7 +109,6 @@ async def _run(sf, vault, org_id, *, created, status="ended"):
                                     platform_user_id=person.address, delivery_state="queued",
                                     response_state="not_started", escalation_state="none"))
         await db.flush()
-        await db.execute(sa.update(Session).where(Session.id == child_id).values(task_id=task.id))
         db.add(Event(session_id=session_id, type="user.message", data={}))
         db.add(SessionLease(session_id=session_id, owner_id="w", lease_token=uuid.uuid4(),
                             expires_at=datetime.now(timezone.utc).replace(tzinfo=None)))
