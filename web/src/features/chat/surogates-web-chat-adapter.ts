@@ -24,7 +24,6 @@ import { FetchSseEventStream } from "@invergent/agent-chat-react";
 import type {
   AgentChatAdapter,
   AgentChatMissionSummary,
-  AgentChatMissionTask,
   AgentChatMissionWorker,
   AgentChatScheduledWorkItem,
   AgentChatSession,
@@ -452,11 +451,6 @@ export const surogatesWebChatAdapter: AgentChatAdapter = {
     return toAgentChatMission(await missionsApi.getMission(input.missionId));
   },
 
-  async getMissionTasks(input) {
-    const response = await missionsApi.getMissionTasks(input.missionId);
-    return { tasks: response.tasks.map(toAgentChatMissionTask) };
-  },
-
   async getMissionWorkers(input) {
     const response = await missionsApi.getMissionWorkers(input.missionId);
     return { workers: response.workers.map(toAgentChatMissionWorker) };
@@ -479,7 +473,6 @@ export const surogatesWebChatAdapter: AgentChatAdapter = {
         Object.entries(page.sessions).map(([sid, meta]) => [
           sid,
           {
-            taskId: meta.task_id,
             agentDefName: meta.agent_def_name,
             kind: meta.kind,
           },
@@ -577,38 +570,13 @@ function toAgentChatMission(
   };
 }
 
-function toAgentChatMissionTask(
-  row: missionsApi.MissionTaskRow,
-): AgentChatMissionTask {
-  return {
-    id: row.id,
-    goal: row.goal,
-    status: row.status,
-    attemptCount: row.attempt_count,
-    maxAttempts: row.max_attempts,
-    agentDefName: row.agent_def_name,
-    result: row.result,
-    resultMetadata: row.result_metadata,
-    parentIds: row.parent_ids,
-    currentSessionId: row.current_session_id,
-    createdAt: row.created_at,
-    startedAt: row.started_at,
-    completedAt: row.completed_at,
-  };
-}
-
 function toAgentChatMissionWorker(
   row: missionsApi.MissionWorkerRow,
 ): AgentChatMissionWorker {
-  // The web missions API only returns durable Task-backed workers, so
-  // every row here is `kind: "task"`. Workers spawned via `spawn_worker`
-  // or `delegate_task` are not surfaced through this endpoint.
   return {
-    kind: "task",
-    taskId: row.task_id,
     workerSessionId: row.worker_session_id,
     agentDefName: row.agent_def_name,
-    taskStatus: row.task_status,
+    description: row.description,
     sessionStatus: row.session_status,
     latestEventId: row.latest_event_id,
     latestEventKind: row.latest_event_kind,
