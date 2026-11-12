@@ -340,32 +340,35 @@ def _connect_failure_kind(exc: BaseException) -> str:
     ``timeout``, ``refused`` or ``error``.
 
     Never the error's text, which can carry a URL, a command or a credential.
-    A ``CancelledError`` counts as a timeout: it is what a transport's own
-    connect timeout surfaces as (seen at exactly the connect timeout).
+    The error nearest the top that says which wins.  A ``CancelledError``
+    counts as a timeout only when nothing says otherwise: it is what a
+    transport's own connect timeout surfaces as (seen at exactly the connect
+    timeout).
     """
-    refused = False
+    cancelled = False
     seen: set[int] = set()
-    stack: List[BaseException] = [exc]
-    while stack:
-        current = stack.pop()
+    queue: List[BaseException] = [exc]
+    while queue:
+        current = queue.pop(0)
         if id(current) in seen:
             continue
         seen.add(id(current))
         text = str(current).lower()
         if (
-            isinstance(current, (TimeoutError, asyncio.TimeoutError, asyncio.CancelledError))
+            isinstance(current, (TimeoutError, asyncio.TimeoutError))
             or "Timeout" in type(current).__name__
             or "timed out" in text
         ):
             return "timeout"
         if isinstance(current, ConnectionRefusedError) or "connection refused" in text:
-            refused = True
-        stack.extend(getattr(current, "exceptions", None) or ())
+            return "refused"
+        cancelled = cancelled or isinstance(current, asyncio.CancelledError)
+        queue.extend(getattr(current, "exceptions", None) or ())
         for attr in ("__cause__", "__context__"):
             nested = getattr(current, attr, None)
             if isinstance(nested, BaseException):
-                stack.append(nested)
-    return "refused" if refused else "error"
+                queue.append(nested)
+    return "timeout" if cancelled else "error"
 
 
 # ---------------------------------------------------------------------------
@@ -1950,10 +1953,17 @@ async def _discover_and_register_server(
         _connect_server(name, config),
         timeout=connect_timeout,
     )
-    server._registry = registry
     with _lock:
-        _servers[name] = server
+        first = _servers.get(name)
+        if first is None:
+            server._registry = registry
+            _servers[name] = server
         _connect_failures.pop(name, None)
+    if first is not None:
+        # Another discovery connected it meanwhile: that connection stays
+        # (it may already be listed), this one is closed, not leaked.
+        await server.shutdown()
+        return _register_server_tools(name, first, config, registry)
 
     registered_names = _register_server_tools(name, server, config, registry)
     server._registered_tool_names = list(registered_names)

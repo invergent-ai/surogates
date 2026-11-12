@@ -63,9 +63,22 @@ _MAX_APPROVALS_PER_SERVER = 1_000
 _MAX_APPROVALS_PER_TENANT = 20_000
 #: Seconds after a server's first failed connect before it is tried again,
 #: in the background (a tool list never waits for it).  Each further failure
-#: doubles it, up to _MAX_UNAVAILABLE_RETRY_COOLDOWN.
+#: doubles it, up to _MAX_UNAVAILABLE_RETRY_COOLDOWN.  A server that failed
+#: otherwise than on a timeout or a refusal (a config, auth or policy error,
+#: or a server restarting) is tried again only every
+#: _MAX_UNAVAILABLE_RETRY_COOLDOWN.
 _UNAVAILABLE_RETRY_COOLDOWN = 120.0
 _MAX_UNAVAILABLE_RETRY_COOLDOWN = 1800.0
+#: The reason of a server left without a connection and with no failure on
+#: record (connected, then shut down meanwhile): tried again as soon as a
+#: timeout is, and told to the agent as ``error``.
+_LOST = "lost"
+_RETRIED_SOON = TRANSIENT_CONNECT_FAILURES | {_LOST}
+
+
+class AgentChangedDuringConnect(Exception):
+    """The agent was invalidated while its MCP servers were connecting: what
+    that connect found is dropped, and its configs must be read anew."""
 
 
 def _retry_cooldown(failures: int) -> float:
@@ -185,10 +198,10 @@ class PoolEntry:
     # ``get_prompt``), called as that MCP method, never as ``tools/call``.
     utility_index: dict[str, str] = field(default_factory=dict)
     # Configured servers that could not be connected: original name -> why
-    # (``timeout``, ``refused`` or ``error``).  Their tools are missing from
-    # ``tool_schemas``; a tool list names them, and those that failed on a
-    # timeout or a refusal are tried again in the background once their
-    # cooldown is over (``due_for_retry``).
+    # (``timeout``, ``refused``, ``error`` or ``lost``).  Their tools are
+    # missing from ``tool_schemas``; a tool list names them, and they are
+    # tried again in the background once their cooldown is over
+    # (``due_for_retry``).
     unavailable: dict[str, str] = field(default_factory=dict)
     # When each unavailable server's last connect attempt failed
     # (``time.monotonic``), and how many attempts in a row have failed.
@@ -198,13 +211,16 @@ class PoolEntry:
     is_service_account: bool = False
 
     def due_for_retry(self, now: float) -> list[str]:
-        """The unavailable servers to try again at *now*: those that failed
-        on a timeout or a refusal (a config, auth or policy error fails the
-        same way again) and whose cooldown is over."""
+        """The unavailable servers whose cooldown is over at *now*: after a
+        timeout, a refusal or a lost connection 120 s doubling with each
+        failure, after any other error the longest cooldown (it most likely
+        fails the same way again)."""
         return sorted(
             name for name, why in self.unavailable.items()
-            if why in TRANSIENT_CONNECT_FAILURES
-            and now - self.failed_at.get(name, float("-inf")) >= _retry_cooldown(self.failures.get(name, 1))
+            if now - self.failed_at.get(name, float("-inf")) >= (
+                _retry_cooldown(self.failures.get(name, 1)) if why in _RETRIED_SOON
+                else _MAX_UNAVAILABLE_RETRY_COOLDOWN
+            )
         )
 
 
@@ -260,6 +276,9 @@ class ConnectionPool:
         # The background retry of each tenant's unavailable servers, one at
         # a time per tenant (``retry_unavailable_servers``).
         self._retry_tasks: dict[tuple[UUID, UUID, str], asyncio.Task] = {}
+        # Per agent, how many times it was invalidated: a connect that sees
+        # the count change while it runs keeps nothing (``ensure_connected``).
+        self._agent_epochs: dict[str, int] = {}
         self._eviction_task: asyncio.Task | None = None
         self._governance_enabled = governance_enabled
         self._audit_store = audit_store
@@ -327,7 +346,14 @@ class ConnectionPool:
         """The agent's configured servers that could not be connected at its
         last attempt: original name -> ``timeout`` / ``refused`` / ``error``."""
         entry = self._entries.get((org_id, user_id, agent_id))
-        return dict(entry.unavailable) if entry is not None else {}
+        if entry is None:
+            return {}
+        return {name: "error" if why == _LOST else why for name, why in entry.unavailable.items()}
+
+    def agent_epoch(self, agent_id: str) -> int:
+        """How many times *agent_id* was invalidated: read before its configs
+        are loaded, and passed to :meth:`ensure_connected`."""
+        return self._agent_epochs.get(agent_id, 0)
 
     def visible_schemas(
         self, org_id: UUID, user_id: UUID, agent_id: str, schemas: list[dict[str, Any]],
@@ -404,9 +430,15 @@ class ConnectionPool:
         configs: dict[str, dict[str, Any]],
         *,
         is_service_account: bool = False,
+        epoch: int | None = None,
     ) -> list[dict[str, Any]]:
         """Ensure MCP servers for this tenant are connected and return
         their tool schemas.
+
+        *epoch* is :meth:`agent_epoch` as it was when *configs* were loaded
+        (default: now).  If the agent is invalidated before or while this
+        connects, it keeps nothing and raises
+        :class:`AgentChangedDuringConnect`: the caller loads the configs anew.
 
         Idempotent — if already connected, returns cached schemas.  A
         configured server that could not be connected is left out (named in
@@ -419,6 +451,8 @@ class ConnectionPool:
         """
         key = (org_id, user_id, agent_id)
         lock = self._locks.setdefault(key, asyncio.Lock())
+        if epoch is None:
+            epoch = self.agent_epoch(agent_id)
 
         async with lock:
             entry = self._entries.get(key)
@@ -426,6 +460,8 @@ class ConnectionPool:
                 entry.last_used = time.monotonic()
                 self._touch_approvals(key)
                 return entry.tool_schemas
+            if self.agent_epoch(agent_id) != epoch:
+                raise AgentChangedDuringConnect(agent_id)
 
             # Prefix each server name for tenant isolation.
             prefixed: dict[str, dict[str, Any]] = {}
@@ -455,7 +491,7 @@ class ConnectionPool:
             with _lock:
                 owners = {pname: _servers[pname] for pname in prefixed if pname in _servers}
                 unavailable = {
-                    name: _connect_failures.pop(pname, "error")
+                    name: _connect_failures.pop(pname, _LOST)
                     for pname, name in zip(prefixed, original_names)
                     if pname not in _servers
                     and _parse_boolish(configs[name].get("enabled", True), default=True)
@@ -472,22 +508,23 @@ class ConnectionPool:
                 approval_room = _ApprovalRoom(approvals)
 
             clean_schemas, tool_index, utility_index = [], {}, {}
-            if self._locks.get(key) is lock:
+            if self.agent_epoch(agent_id) == epoch:
                 clean_schemas, tool_index, utility_index = await self._clean_schemas(
                     key, temp_registry, owners, configs,
                     governance=tenant_governance, approval_room=approval_room,
                     is_service_account=is_service_account, taken=set(),
                 )
-            if self._locks.get(key) is not lock:
-                # The agent was invalidated (or evicted) while this connected:
-                # its entry must not come back, and what this call connected
-                # or adopted belongs to no entry.
+            if self.agent_epoch(agent_id) != epoch:
+                # The agent was invalidated while this connected: its entry
+                # must not come back, and what this call connected or adopted
+                # belongs to no entry.  Shut down before the lock is let go,
+                # so the next connect starts clean.
                 await self._shutdown_servers(owners)
                 logger.info(
                     "MCP connect for org=%s user=%s agent=%s dropped: the agent changed meanwhile",
                     org_id, user_id, agent_id,
                 )
-                return []
+                raise AgentChangedDuringConnect(agent_id)
 
             failed_at = time.monotonic()
             entry = PoolEntry(
@@ -521,7 +558,7 @@ class ConnectionPool:
             if unavailable:
                 logger.warning(
                     "MCP server(s) unavailable for org=%s user=%s agent=%s: %s "
-                    "-- tried again in the background after %.0fs",
+                    "-- tried again in the background (after %.0fs on a timeout or refusal)",
                     org_id, user_id, agent_id,
                     ", ".join(f"{name} ({why})" for name, why in sorted(unavailable.items())),
                     _UNAVAILABLE_RETRY_COOLDOWN,
@@ -719,7 +756,7 @@ class ConnectionPool:
         with _lock:
             owners = {pname: _servers[pname] for pname in prefixed if pname in _servers}
             reasons = {
-                name: _connect_failures.pop(pname, "error")
+                name: _connect_failures.pop(pname, _LOST)
                 for pname, name in names_by_key.items() if pname not in _servers
             }
 
@@ -756,7 +793,8 @@ class ConnectionPool:
             key[0], key[1], key[2],
             ", ".join(sorted(names_by_key[p] for p in owners)) or "none",
             ", ".join(
-                f"{name} ({why}, next try in {_retry_cooldown(entry.failures[name]):.0f}s)"
+                f"{name} ({why}, next try in "
+                f"{_retry_cooldown(entry.failures[name]) if why in _RETRIED_SOON else _MAX_UNAVAILABLE_RETRY_COOLDOWN:.0f}s)"
                 for name, why in sorted(reasons.items())
             ) or "none",
         )
@@ -1136,10 +1174,10 @@ class ConnectionPool:
         scheduled on the running loop.
         """
         keys = [k for k in self._entries if k[2] == agent_id]
-        # A connect in progress (its lock taken, no entry yet) sees its lock
-        # gone and keeps nothing (``ensure_connected``).
-        for key in [k for k in self._locks if k[2] == agent_id]:
-            self._locks.pop(key, None)
+        # A connect in progress sees the count change and keeps nothing
+        # (``ensure_connected``); its lock stays, so the next connect waits
+        # for it to clean up.
+        self._agent_epochs[agent_id] = self.agent_epoch(agent_id) + 1
         # The approvals stay: an invalidation follows any edit of the agent,
         # and the next connection is held against them like any other.  A
         # server an admin repoints has a new identity (``_server_identity``)

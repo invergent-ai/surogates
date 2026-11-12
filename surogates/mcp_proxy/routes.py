@@ -23,7 +23,7 @@ from surogates.mcp_proxy.loader import (
     debrand_composio_text,
     load_mcp_configs,
 )
-from surogates.mcp_proxy.pool import ConnectionPool
+from surogates.mcp_proxy.pool import AgentChangedDuringConnect, ConnectionPool
 from surogates.mcp_proxy.sandbox import MCPCallSandbox
 from surogates.runtime import (
     AgentRuntimeContext,
@@ -125,13 +125,48 @@ async def _ensure_tenant_connected(
     credential.access audit emit carries the requesting agent's id.
     ``list_tools`` is a metadata probe with no agent in scope and
     passes ``None``.
+
+    An agent invalidated while it connected is connected once more, with
+    its configs loaded anew; a second invalidation meanwhile leaves the
+    request without MCP tools.
     """
+    try:
+        return await _connect_tenant(
+            pool, auth, request, agent_id=agent_id, allowed_ids=allowed_ids,
+            retry_unavailable=retry_unavailable,
+        )
+    except AgentChangedDuringConnect:
+        pass
+    try:
+        return await _connect_tenant(
+            pool, auth, request, agent_id=agent_id, allowed_ids=allowed_ids,
+            retry_unavailable=retry_unavailable,
+        )
+    except AgentChangedDuringConnect:
+        logger.warning("MCP connect for agent %s dropped twice: the agent kept changing", agent_id)
+        return []
+
+
+async def _connect_tenant(
+    pool: ConnectionPool,
+    auth: ProxyAuthContext,
+    request: Request,
+    *,
+    agent_id: str,
+    allowed_ids: frozenset[str],
+    retry_unavailable: bool,
+) -> list[dict[str, Any]]:
+    """One pass of :func:`_ensure_tenant_connected`: the cached schemas, or
+    the configs loaded and connected (raises
+    :class:`AgentChangedDuringConnect` if the agent changes meanwhile)."""
     cached = pool.get_cached_schemas(auth.org_id, auth.user_id, agent_id)
     if cached is not None:
         if retry_unavailable:
             pool.retry_unavailable_servers(auth.org_id, auth.user_id, agent_id)
         return cached
 
+    # Read before the configs: an invalidation after it voids them.
+    epoch = pool.agent_epoch(agent_id)
     configs = await load_mcp_configs(
         org_id=auth.org_id,
         user_id=auth.user_id,
@@ -154,6 +189,7 @@ async def _ensure_tenant_connected(
         agent_id=agent_id,
         configs=configs,
         is_service_account=auth.is_service_account,
+        epoch=epoch,
     )
 
 
