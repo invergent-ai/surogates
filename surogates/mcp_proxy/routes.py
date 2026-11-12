@@ -14,7 +14,7 @@ import time
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from surogates.audit import AuditStore, AuditType
 from surogates.mcp_proxy.auth import ProxyAuthContext, get_proxy_auth
@@ -32,6 +32,7 @@ from surogates.runtime import (
 )
 from surogates.simulation.side_effects import decide, fake_result, would_have
 from surogates.tools.mcp.client import _sanitize_error, call_utility
+from surogates.tools.mcp.names import sanitize_mcp_name_component
 
 logger = logging.getLogger(__name__)
 
@@ -73,10 +74,25 @@ class ToolSchema(BaseModel):
     server: str | None = None
 
 
+class UnavailableServer(BaseModel):
+    """An attached MCP server that could not be connected for this list."""
+
+    # As the agent knows it: the ``{server}`` of its ``mcp__{server}__{tool}``
+    # names.  Never the tenant-scoped key or anything from its config.
+    name: str
+    # ``timeout``, ``refused`` or ``error``.
+    reason: str
+
+
 class ToolListResponse(BaseModel):
     """Response body for ``POST /mcp/v1/tools/list``."""
 
     tools: list[ToolSchema]
+    # The attached servers whose tools are missing from ``tools`` because
+    # they could not be connected; the next list tries them again.  Sent only
+    # when there are any (the route excludes unset fields), so the body is
+    # unchanged otherwise and an older worker ignores it.
+    unavailable: list[UnavailableServer] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -91,11 +107,15 @@ async def _ensure_tenant_connected(
     *,
     agent_id: str,
     allowed_ids: frozenset[str],
+    retry_unavailable: bool = False,
 ) -> list[dict[str, Any]]:
     """Load MCP configs and ensure the tenant is connected.
 
     Returns cached schemas if the tenant is already connected, otherwise
-    loads configs from DB + platform and connects.
+    loads configs from DB + platform and connects.  With
+    *retry_unavailable* (a tool list), a server that could not be
+    connected is tried again; a tool call goes on with the servers that are
+    connected.
 
     ``agent_id`` flows from the proxy route (where
     ``agent_runtime_context_dep`` resolves the per-request
@@ -104,7 +124,9 @@ async def _ensure_tenant_connected(
     ``list_tools`` is a metadata probe with no agent in scope and
     passes ``None``.
     """
-    cached = pool.get_cached_schemas(auth.org_id, auth.user_id, agent_id)
+    cached = pool.get_cached_schemas(
+        auth.org_id, auth.user_id, agent_id, complete_only=retry_unavailable,
+    )
     if cached is not None:
         return cached
 
@@ -154,7 +176,11 @@ def _bind_agent(auth: ProxyAuthContext, ctx: AgentRuntimeContext) -> None:
 # ---------------------------------------------------------------------------
 
 
-@router.post("/mcp/v1/tools/list", response_model=ToolListResponse)
+@router.post(
+    "/mcp/v1/tools/list",
+    response_model=ToolListResponse,
+    response_model_exclude_unset=True,
+)
 async def list_tools(
     request: Request,
     auth: ProxyAuthContext = Depends(get_proxy_auth),
@@ -163,7 +189,9 @@ async def list_tools(
     """Discover the MCP tools available to the requesting agent.
 
     A server's resource / prompt tools are listed only when it has
-    resources / prompts (:meth:`ConnectionPool.visible_schemas`).
+    resources / prompts (:meth:`ConnectionPool.visible_schemas`).  An
+    attached server that could not be connected is tried again, and named
+    in ``unavailable`` if it still cannot be.
     """
     _bind_agent(auth, ctx)
     pool: ConnectionPool = request.app.state.pool
@@ -171,8 +199,19 @@ async def list_tools(
         pool, auth, request,
         agent_id=ctx.agent_id,
         allowed_ids=frozenset(ctx.mcp_server_ids),
+        retry_unavailable=True,
     )
     schemas = pool.visible_schemas(auth.org_id, auth.user_id, ctx.agent_id, schemas)
+    # Named as in the agent's tool names (debranded, as those are).
+    unavailable = [
+        UnavailableServer(
+            name=debrand_composio_text(sanitize_mcp_name_component(name)),
+            reason=reason,
+        )
+        for name, reason in sorted(
+            pool.unavailable_servers(auth.org_id, auth.user_id, ctx.agent_id).items()
+        )
+    ]
 
     return ToolListResponse(
         tools=[
@@ -184,7 +223,8 @@ async def list_tools(
                 server=s.get("server"),
             )
             for s in schemas
-        ]
+        ],
+        **({"unavailable": unavailable} if unavailable else {}),
     )
 
 

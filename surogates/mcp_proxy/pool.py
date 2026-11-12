@@ -35,7 +35,10 @@ from surogates.mcp_proxy.loader import (
 from surogates.tools.mcp.client import (
     _MCP_AVAILABLE,
     _UTILITY_OFFER,
+    _connect_failures,
     _lock,
+    _parse_boolish,
+    _register_server_tools,
     _servers,
     _sanitize_error,
     call_utility,
@@ -163,6 +166,14 @@ class PoolEntry:
     # (``list_resources``, ``read_resource``, ``list_prompts``,
     # ``get_prompt``), called as that MCP method, never as ``tools/call``.
     utility_index: dict[str, str] = field(default_factory=dict)
+    # Configured servers that could not be connected: original name -> why
+    # (``timeout``, ``refused`` or ``error``).  An entry with any is kept for
+    # the servers that did connect (their calls, eviction, invalidation) but
+    # is never a cached tool list: the next ``ensure_connected`` tries those
+    # servers again.
+    unavailable: dict[str, str] = field(default_factory=dict)
+    # When the connect attempt that built this entry ended.
+    attempted_at: float = field(default_factory=time.monotonic)
 
 
 class ConnectionPool:
@@ -262,15 +273,28 @@ class ConnectionPool:
     # ------------------------------------------------------------------
 
     def get_cached_schemas(
-        self, org_id: UUID, user_id: UUID, agent_id: str,
+        self, org_id: UUID, user_id: UUID, agent_id: str, *, complete_only: bool = False,
     ) -> list[dict[str, Any]] | None:
-        """Return cached tool schemas if the agent is connected, else None."""
+        """Return cached tool schemas if the agent is connected, else None.
+
+        With *complete_only*, None too while a configured server is
+        unavailable (``PoolEntry.unavailable``): a tool list tries it again,
+        while a tool call goes on with the servers that are connected.
+        """
         entry = self._entries.get((org_id, user_id, agent_id))
-        if entry is None:
+        if entry is None or (complete_only and entry.unavailable):
             return None
         entry.last_used = time.monotonic()
         self._touch_approvals((org_id, user_id, agent_id))
         return entry.tool_schemas
+
+    def unavailable_servers(
+        self, org_id: UUID, user_id: UUID, agent_id: str,
+    ) -> dict[str, str]:
+        """The agent's configured servers that could not be connected at its
+        last attempt: original name -> ``timeout`` / ``refused`` / ``error``."""
+        entry = self._entries.get((org_id, user_id, agent_id))
+        return dict(entry.unavailable) if entry is not None else {}
 
     def visible_schemas(
         self, org_id: UUID, user_id: UUID, agent_id: str, schemas: list[dict[str, Any]],
@@ -351,7 +375,11 @@ class ConnectionPool:
         """Ensure MCP servers for this tenant are connected and return
         their tool schemas.
 
-        Idempotent — if already connected, returns cached schemas.
+        Idempotent — if already connected, returns cached schemas.  While a
+        configured server is unavailable (it could not be connected), each
+        call tries it again; the servers that are connected stay connected
+        and their tools stay listed.  A call that waited for another's
+        attempt takes that attempt's result.
 
         ``is_service_account`` marks ``user_id`` as a service-account id
         rather than a real ``users.id``; downstream audit writes use
@@ -359,13 +387,17 @@ class ConnectionPool:
         """
         key = (org_id, user_id, agent_id)
         lock = self._locks.setdefault(key, asyncio.Lock())
+        asked_at = time.monotonic()
 
         async with lock:
             entry = self._entries.get(key)
-            if entry is not None:
+            if entry is not None and (not entry.unavailable or entry.attempted_at >= asked_at):
                 entry.last_used = time.monotonic()
                 self._touch_approvals(key)
                 return entry.tool_schemas
+            if entry is not None:
+                # Its connected servers are reused below: not idle meanwhile.
+                entry.last_used = time.monotonic()
 
             # Prefix each server name for tenant isolation.  The resource /
             # prompt utility tools are registered for every server here; a
@@ -381,11 +413,26 @@ class ConnectionPool:
             from surogates.tools.registry import ToolRegistry
 
             temp_registry = ToolRegistry()
+            # Servers an earlier attempt connected are not connected again
+            # (discovery skips them): their tools are listed from the live
+            # connection.
+            with _lock:
+                live = {pname: _servers[pname] for pname in prefixed if pname in _servers}
+            for pname, server in live.items():
+                _register_server_tools(pname, server, prefixed[pname], temp_registry)
             registered = await asyncio.to_thread(
                 discover_mcp_tools,
                 servers=prefixed,
                 registry=temp_registry,
             )
+            # The enabled servers left without a connection, and why.
+            with _lock:
+                unavailable = {
+                    name: _connect_failures.pop(pname, "error")
+                    for pname, name in zip(prefixed, original_names)
+                    if pname not in _servers
+                    and _parse_boolish(configs[name].get("enabled", True), default=True)
+                }
 
             # ``ToolRegistry.get_schemas`` emits OpenAI's nested
             # ``{"type":"function","function":{"name",...}}`` shape; the
@@ -539,7 +586,11 @@ class ConnectionPool:
                 sanitized_prefix=tenant_pfx,
                 governance=tenant_governance,
                 utility_index=utility_index,
+                unavailable=unavailable,
             )
+            # Kept even with a server unavailable, so the connected ones are
+            # evicted and invalidated with it; ``unavailable`` makes the next
+            # tool list try again rather than take this one.
             self._entries[key] = entry
 
             logger.info(
@@ -548,6 +599,13 @@ class ConnectionPool:
                 len(original_names), org_id, user_id, agent_id,
                 len(clean_schemas),
             )
+            if unavailable:
+                logger.warning(
+                    "MCP server(s) unavailable for org=%s user=%s agent=%s: %s "
+                    "-- not cached, the next tool list tries again",
+                    org_id, user_id, agent_id,
+                    ", ".join(f"{name} ({why})" for name, why in sorted(unavailable.items())),
+                )
             return clean_schemas
 
     # ------------------------------------------------------------------

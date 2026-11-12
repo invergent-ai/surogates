@@ -1769,6 +1769,9 @@ async def run_worker(settings: Settings) -> None:
         # platform/copilot MCP tools go missing in that case.
         discovered_mcp_tools: set[str] = set()
         composio_mcp_tools: frozenset[str] = frozenset()
+        # Attached MCP servers the proxy could not connect: the prompt says
+        # so, instead of the agent meeting a toolset without them.
+        mcp_unavailable: list[tuple[str, str]] = []
         if mcp_proxy_client is not None:
             try:
                 principal_user_id, is_service_account = principal_subject(credential)
@@ -1787,6 +1790,7 @@ async def run_worker(settings: Settings) -> None:
                     composio_mcp_tools = mcp_proxy_client.composio_tool_names_for_agent(
                         ctx.agent_id
                     )
+                    mcp_unavailable = mcp_proxy_client.take_unavailable_servers(session.id)
             except Exception:
                 logger.warning(
                     "MCP proxy tool discovery failed for session %s; "
@@ -2234,6 +2238,7 @@ async def run_worker(settings: Settings) -> None:
             speaker=await _resolve_speaker(
                 session, acting, session_store, session_factory,
             ),
+            mcp_unavailable=mcp_unavailable,
             # The gate is agent-level AND package-level: a plan without
             # the brainstorming capability turns the guidance off for
             # this sender even when the agent has it on.

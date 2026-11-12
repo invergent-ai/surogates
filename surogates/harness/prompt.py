@@ -118,6 +118,7 @@ class PromptBuilder:
         brainstorming_gate: bool = True,
         speaker: tuple[str, str] | None = None,
         model_id: str | None = None,
+        mcp_unavailable: list[tuple[str, str]] | None = None,
     ) -> None:
         self.tenant = tenant
         # The model this wake runs on, as the worker resolved it.  A new
@@ -128,6 +129,10 @@ class PromptBuilder:
         # (display name, email) of the signed-in person on the other side of
         # a one-to-one session, so the agent never asks who it is talking to.
         self._speaker: tuple[str, str] | None = speaker
+        # (server, reason) of each attached MCP server the proxy could not
+        # connect this wake: names cut to tool-name characters, reasons
+        # ``timeout`` / ``refused`` / ``error`` (``McpProxyClient``).
+        self._mcp_unavailable: list[tuple[str, str]] = list(mcp_unavailable or [])
         self.skills: list = skills or []
         self._available_tools: set[str] = available_tools or set()
         # Whether the caller said which tools the session has (an empty set
@@ -913,6 +918,13 @@ class PromptBuilder:
         speaker = self._speaker_line()
         if speaker:
             parts.append(speaker)
+        # Without it the agent met a toolset short of a server's tools and
+        # searched for them, or worked on as if they were there.
+        for server, reason in self._mcp_unavailable:
+            parts.append(
+                f"- MCP server `{server}` could not be reached this session "
+                f"({reason}); its tools are missing."
+            )
 
         model_info = get_model_info(self._get_model_id())
         if model_info is not None and model_info.supports_vision:
