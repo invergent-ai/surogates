@@ -81,8 +81,8 @@ _INJECTION_PATTERNS: list[re.Pattern[str]] = [
 #
 # A tool whose description shows exactly ONE of these kinds is kept, and the
 # hit is reported as an advisory (audit row + log line):
-#   role         a second-person rule (only the four phrases above; "your task
-#                is" / "your role is" have no use in tool documentation and drop)
+#   role         a second-person rule or "mandatory" (_ADVISORY_ROLE_PATTERNS; "your task
+#                is" / "your role is" / "must be called" / "always call" drop)
 #   url          a URL
 #   send         a send / post verb
 # Two more kinds never drop a tool alone but count: two kinds together are the
@@ -101,7 +101,13 @@ _INJECTION_PATTERNS: list[re.Pattern[str]] = [
 _ROLE_OVERRIDE_MESSAGE = "Role override pattern in description:"
 _EXFILTRATION_MESSAGE = "Data exfiltration pattern in description:"
 _ENCODED_PAYLOAD_MESSAGE = "Encoded payload detected in tool description"
-_ADVISORY_ROLE_PATTERNS = frozenset({r"you\s+are\b", r"you\s+must\b", r"respond\s+with\b", r"always\s+return\b"})
+# agent-governance-toolkit-core 5.0 added "mandatory", "must be called" and "always call".  "mandatory" is API
+# documentation wording ("Only the body property is mandatory", "with mandatory time zone offset") and counts as the
+# role kind; "must be called" / "always call" are the wording of tool-ordering hijacks and drop the tool, as does
+# any phrase this list does not name.
+_ADVISORY_ROLE_PATTERNS = frozenset({
+    r"you\s+are\b", r"you\s+must\b", r"respond\s+with\b", r"always\s+return\b", r"\bmandatory\b",
+})
 _URL_PATTERN = r"https?://"
 _SEND_PATTERNS = frozenset({r"\bsend\s+email\b", r"\bsend\s+to\b", r"\bpost\s+to\b"})
 _SENSITIVE_DATA = re.compile(
