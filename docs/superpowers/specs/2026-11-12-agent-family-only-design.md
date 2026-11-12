@@ -13,7 +13,9 @@ The harness has four separate ways for an agent to start a child session, each w
 
 A fifth, the `agent` family (`agent`, `send_message`, `list_agents`, `stop_agent`, `monitor`; `surogates/tools/builtin/agents.py`, `surogates/harness/subagents.py`, `docs/sub-agents/index.md` section 13), was added behind `agents.subagent_parity` and is off by default. It starts a sub-agent in the foreground, in the background or as a fork, lets the parent message, stop and resume it, and gives each sub-agent a token budget.
 
-Flavius wants the `agent` family to be the only way, always on, and the other four removed. Research missions (Arbor) were the task layer's largest consumer and have already been removed (surogates #647, surogate-ops #641, ui-kit #18).
+Flavius wants the `agent` family to be the only way, always on, and the other four removed.
+
+**Starting point.** Research missions (Arbor) were the task layer's largest consumer and are removed by surogates #647, surogate-ops #641 and ui-kit #18. This work starts on `master` / `main` after those three are merged. The file counts below were taken on those branches.
 
 ## Who uses the old mechanisms today
 
@@ -25,14 +27,14 @@ PROD, last 90 days (2026-11-12):
 - Project threads: 2 threads, 1 `start_thread` call.
 - `agent` family: none, the flag is off.
 
-Inside the harness the old tools are named by: missions (`surogates/missions/`, the `subagent-task-orchestrator` and `subagent-task-worker` skills under `skills/kanban/`), deep research (`surogates/harness/loop_deep_research.py` looks for a `delegate_task` call), Keel case steps (`surogates/keel/steps.py`), the coordinator tool stripping (`coordinator.py`), governance tool sets (`surogates/runtime/governance.py`), thread refusals (`surogates/workstreams/__init__.py`, `surogates/harness/tool_exec.py`), 15 skills, 44 test files and 29 doc files.
+Inside the harness the old tools are named in 56 source files, 11 skills, 43 test files and 25 doc files. The main places: missions (`surogates/missions/`, the `subagent-task-orchestrator` and `subagent-task-worker` skills under `skills/kanban/`), deep research (`surogates/harness/loop_deep_research.py` looks for a `delegate_task` call), Keel case steps (`surogates/keel/steps.py`), the coordinator tool stripping (`coordinator.py`), governance tool sets (`surogates/runtime/governance.py`) and thread refusals (`surogates/workstreams/__init__.py`, `surogates/harness/tool_exec.py`).
 
 ## Goals
 
 1. Every session that may start sub-agents is offered the `agent` family and nothing else for that purpose. `agents.subagent_parity` and the per-session `subagent_parity` key are removed.
 2. The `agent` family can do everything the four old mechanisms are used for today: Bid's background research workers, deep research's planner-to-writer handoff, missions with dependencies and retries, and a project master's threads.
 3. The old tools, their handlers and the code only they need are deleted: `delegate_task`, `spawn_worker`, `send_worker_message`, `stop_worker`, `spawn_task`, `unblock_task`, `cancel_task`, `worker_block`, `worker_complete`, `worker_context`, and the seven thread tools.
-4. Everything that names an old tool moves to the new names in the same release: harness prompts and skills, Keel step lists, governance sets, surogate-ops (tool lists, skill templates, agent templates, the deep-research feature pack, Copilot docs), Surogate Bid (its skill and the code that reads session events), ui-kit (`agent-chat-react` labels and cards) and surogate-docs.
+4. Everything that names an old tool moves to the new names in the same release: harness prompts and skills, Keel step lists, governance sets, surogate-ops (tool lists, skill templates, agent templates, the deep-research feature pack, Copilot docs), Surogate Bid (its skill and the code that reads session events), Surogate Keel (its watch labels), ui-kit (`agent-chat-react` labels and cards) and surogate-docs.
 
 ## Non-goals
 
@@ -44,9 +46,9 @@ Inside the harness the old tools are named by: missions (`surogates/missions/`, 
 
 ## Anti-goals
 
-- No aliases. An old tool name must not stay callable, offered or hidden, after the change (standing rule: no legacy fallbacks). `subagents.STANDS_IN_FOR` and `REPLACED_TOOL` go.
+- No aliases. An old tool name must not stay callable, offered or hidden, after the change (standing rule: no legacy fallbacks). `subagents.REPLACED_TOOL` and the `delegate_task` entry of `subagents.STANDS_IN_FOR` go, and so does the `delegate_task` to `agent` mapping in `keel/steps.py` (`gate_case_tools`).
 - No session is ever offered both an old tool and the `agent` family on PROD.
-- A dependent agent must never start after one of its dependencies failed or was stopped.
+- A dependent agent must never start while one of its dependencies is failed, stopped or waiting for an answer.
 - The mission judge must never take the coordinator's prose as evidence that work was done. It reads statuses the harness wrote and results the sub-agents recorded.
 - A Bid research run must not break: Bid is the one production consumer.
 
@@ -104,7 +106,16 @@ Continuing a failed agent with its conversation stays possible by hand: the agen
 
 - A sub-agent's final message is its report, as in the family today.
 - A sub-agent can record structured data with its result (for example a verifier's counts). It reaches the parent in the notification and is stored where the mission judge reads it. The parent cannot write it.
-- A sub-agent that needs an answer from its parent says so explicitly and ends its turn. Its status is then "waiting": it is not completed (its dependents stay waiting), not failed (no retry), and the mission judge counts it as work in flight. The parent's `send_message` resumes it with the answer.
+- A sub-agent that needs an answer from its parent says so explicitly and ends its turn. Its status is then "waiting": it is not completed (its dependents stay waiting) and not failed (no retry). The parent's `send_message` resumes it with the answer.
+
+### An agent that runs again
+
+The family already lets the agent that started a sub-agent resume it with a message once it has completed, failed or been stopped, and its guidance tells the model to do so for follow-up work. With a record in `tasks`, that has to be defined. My call: **the record is re-opened.**
+
+- The record goes back to running. When the new run ends, its report and recorded result replace the earlier ones. A verifier asked to verify again must not leave its old counts for the judge.
+- Dependents wait while a dependency is anything but completed, and start once all of them are completed, including one that completed after being resumed. Dependents that had already started are not touched by a later resume.
+- For a mission, a resumed agent is work in flight again, and its end is an end state like any other: the judge runs again.
+- A run resumed by a message is not retried automatically. A fresh start from the original brief would drop the follow-up that resumed it, so its failure is reported to the parent, who decides.
 
 ### Storage
 
@@ -119,7 +130,7 @@ Child sessions started by the family keep one channel. Sessions that exist today
 - The coordinator stays strict: its implementation tools are stripped (`COORDINATOR_IMPLEMENTATION_TOOLS`), and what remains for dispatch is the `agent` family.
 - The kickoff text (`surogates/missions/commands.py`) and the `subagent-task-orchestrator` skill describe the work in the family's terms: background agents, dependencies, retries, a verifier agent whose recorded result carries the measurable signal. `subagent-task-worker` becomes the guidance for an agent started inside a mission, or is folded into the family's own sub-agent guidance.
 - An agent started while its starter has `active_mission_id` is linked to the mission, as `spawn_task` does today, and so are agents those agents start.
-- The judge's triggers and gates do not change in meaning: it runs when a mission's agent reaches an end state or the coordinator writes `[[mission-complete]]`; it waits while any is running or waiting; `adjust_mission_verdict` still demotes "satisfied" when nothing completed.
+- The judge's triggers and gates keep today's behaviour exactly. It runs when a mission's agent reaches an end state or the coordinator writes `[[mission-complete]]`. It is held back only by work that will finish with no one acting (`any_task_in_flight` in `surogates/missions/store.py`): agents that are running or about to start. An agent waiting for an answer, and an agent stuck behind a dependency that failed, was stopped or is waiting, do not hold it back, as `blocked` tasks and their children do not today. The judge's prompt lists them, so its verdict can send the coordinator back to them, and `nudge_idle_missions` keeps nudging a mission with nothing moving. `adjust_mission_verdict` still demotes "satisfied" when nothing completed.
 - `/mission cancel --cascade` stops the mission's agents.
 
 ### Deep research
@@ -147,18 +158,24 @@ The threads that exist (2 on PROD) must stay reachable: the family's tools addre
 ### Keel, governance, refusals
 
 - Keel's step tool lists (`surogates/keel/steps.py`) name the family where they name old tools, with the same meaning (a case agent starts no helper; a step may).
-- `surogates/runtime/governance.py`: the protected self-tools and lifecycle sets are rebuilt from the family's tools. A policy that denies starting sub-agents must still deny all of it.
+- `surogates/runtime/governance.py`, my call, keeping what each old tool had:
+  - An agent's policy governs `agent`, as it governs `delegate_task` today: denying it denies starting sub-agents.
+  - In a project master's session the family is protected, as the thread tools are today (`PROJECT_THREAD_TOOLS` in `PROTECTED_TOOLS`): Studio's policy editor does not know projects, and an allow-list must not leave a master that can start no work. This needs the gate to know the session, where today it is built once per agent.
+  - What a sub-agent needs to report its own state (recording its result, saying it is waiting, messaging its parent) is protected, as `WORKER_SELF_TOOLS` are. A session that has agents keeps `send_message`, `stop_agent` and `list_agents` whatever its policy, as `unblock_task` and `cancel_task` are protected today, so a policy cannot strand work that is waiting.
+  - The `terminal` to `monitor` entry of `STANDS_IN_FOR` stays. It is not an alias for an old tool: a policy that denies or gates `terminal` must cover `monitor`, which runs commands.
 - `HELPER_STARTING_TOOLS`, `SESSION_STARTING_TOOLS` and `THREAD_REFUSED_TOOLS` in `surogates/harness/tool_exec.py` shrink to the family's names. The rule that a tool which starts a session is refused in a thread until someone places it stays.
 
 ### Names stored outside the code
 
 - **Agent policies in surogate-ops** (`agents.policy`): an ops migration rewrites old tool names to the family's, so no runtime alias is needed. On PROD none of the 15 stored policies names an old tool; other installs may. (My call.)
 - **`AGENT.md` tool lists and skills in agents' Hub bundles** cannot be rewritten: bundles are versioned snapshots. The loader already warns on unknown frontmatter keys; it also warns on a tool name it does not know in `tools` / `disallowed_tools`. Before the PROD rollout, scan the published bundles for old names and fix those agents by hand. (My call.)
+- **Keel process definitions** can list `delegate_task` in a step's `keel:agent tools`. The PROD Keel database holds no old tool name (checked 2026-11-12). Definition files kept outside it are scanned with the bundles, and fixed by hand.
 
 ### Other repositories
 
 - **surogate-ops**: `server/constants/builtin_tools.py` and `frontend/src/features/agents/builtin-tools.ts` (the tool lists the policy editor shows), the deep-research feature pack, agent templates (2 files), skill templates (71 files mention an old tool, mostly `delegate_task` in passing), the Copilot's docs and tools, and the policy migration above.
 - **Surogate Bid** (`/work/surogate-bid`): `agent/skills/product-research.md` (calls `spawn_worker` with a tool list, stops with `stop_worker`), `sbid/jobs.py` (`WORKER_TOOLS`, and code that reads `worker.spawned` events and `send_worker_message` results), `sbid/mcp_server.py`, tests.
+- **Surogate Keel** (`/work/surogate-keel`): `keel/service/watch.py` labels `delegate_task`, `spawn_worker`, `send_worker_message` and `stop_worker` calls as "handed-off"; it labels the family's calls instead. Its tests follow.
 - **ui-kit** (`packages/agent-chat-react`): 17 files name old tools (labels, worker and task rows). They move to the family's names and events. Old sessions' transcripts show an old tool call as any tool call without a special card. (My call.)
 - **surogate-docs** and `docs/` here: `docs/sub-agents/`, `docs/tasks/`, and the pages that name old tools.
 
