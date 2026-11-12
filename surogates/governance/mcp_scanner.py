@@ -8,12 +8,14 @@ server reconnections.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 import logging
 import re
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +66,51 @@ _INJECTION_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"\bsystem\s*:\s*", re.IGNORECASE),
 ]
 
+# ---------------------------------------------------------------------------
+# AGT wording heuristics that ordinary tool documentation trips.
+#
+# AGT's scanner flags any URL ("Data exfiltration pattern: https?://"), the
+# verbs of every messaging tool ("send email", "send to", "post to"), any
+# second-person rule ("you must", "you are", "respond with" ... = "Role
+# override") and any 40-character run of base64 letters ("Encoded payload"),
+# which long ids and URL paths are.  Dropping on these silently removed real
+# tools: Google Calendar's ``add_calendar_to_list`` ("you must set
+# colorRgbFormat"), the Teams webinar tools (a doc URL), Gmail's
+# ``gmail_send_message`` ("send email").  One kind alone is an advisory: the
+# tool is kept, and the hit is audited and logged.  Two kinds together (a rule
+# aimed at the model and a destination, or a send / post verb and a URL) are
+# the shape of an exfiltration instruction and still drop the tool, as does an
+# encoded run that decodes to readable text.
+# ---------------------------------------------------------------------------
+_ROLE_OVERRIDE_MESSAGE = "Role override pattern in description:"
+_EXFILTRATION_MESSAGE = "Data exfiltration pattern in description:"
+_ENCODED_PAYLOAD_MESSAGE = "Encoded payload detected in tool description"
+_URL_PATTERN = r"https?://"
+_SEND_PATTERNS = frozenset({r"\bsend\s+email\b", r"\bsend\s+to\b", r"\bpost\s+to\b"})
+_BASE64_RUN = re.compile(r"[A-Za-z0-9+/]{40,}={0,2}")
+_HEX_ESCAPES = re.compile(r"(?:\\x[0-9a-fA-F]{2}){4,}")
+
+
+# ---------------------------------------------------------------------------
+# The shapes of published tool-poisoning attacks (Invariant Labs' ``add`` /
+# shadowing / WhatsApp examples), which the wording heuristics never caught: a
+# tag block addressed to the model, an instruction to keep something from the
+# user, and secret files a tool description has no reason to name.
+# ---------------------------------------------------------------------------
+_SECRET_FILE = re.compile(
+    r"(\.ssh/|\bid_(rsa|dsa|ecdsa|ed25519)\b|\.aws/credentials|\.netrc\b|\.git-credentials\b"
+    r"|\.kube/config|/etc/(passwd|shadow)\b|\bmcp\.json\b|\.cursor/|\.gnupg/)", re.IGNORECASE)
+_HAND_OVER = re.compile(r"\b(pass|include|send|attach|upload|copy|append|forward)\b", re.IGNORECASE)
+# (label, pattern, companion): a hit needs the companion in the same text too, when one is given.
+_POISONING_PATTERNS: list[tuple[str, re.Pattern[str], re.Pattern[str] | None]] = [
+    ("Instruction block addressed to the model", re.compile(
+        r"<\s*/?\s*(important|system|instructions?|hidden)\s*>", re.IGNORECASE), None),
+    ("Instruction to keep something from the user", re.compile(
+        r"\b(do\s+not|don'?t|never)\s+(tell|mention|inform|notify|reveal|alert)\b[^.\n]{0,60}"
+        r"\b(user|human|owner|operator)s?\b", re.IGNORECASE), None),
+    ("Secret file handed over by a tool definition", _SECRET_FILE, _HAND_OVER),
+]
+
 
 @dataclass(frozen=True, slots=True)
 class ScanResult:
@@ -72,6 +119,9 @@ class ScanResult:
     safe: bool
     threats: list[str]
     severity: str  # "info", "warning", "critical"
+    # Wording-heuristic hits that do not make the tool unsafe (see
+    # ``_wording_advisories``); audited and logged, the tool is kept.
+    advisories: list[str] = field(default_factory=list)
 
 
 class MCPGovernance:
@@ -81,9 +131,13 @@ class MCPGovernance:
     1. AGT ``MCPSecurityScanner`` — detects prompt injection, hidden
        instructions, cross-server attacks, rug-pulls.
     2. Our own pattern checks — invisible Unicode, HTML comments,
-       injection regex, schema abuse.
+       injection regex, the shapes of published poisoning attacks
+       (``_POISONING_PATTERNS``), schema abuse.
 
-    A tool must pass **both** layers to be considered safe.
+    A tool must pass **both** layers to be considered safe.  AGT's wording
+    heuristics (a URL, a send / post verb, a second-person rule, an id that
+    looks like base64) are advisories when one kind appears alone: the tool
+    stays, and the hit is reported in ``ScanResult.advisories``.
     """
 
     def __init__(self, fingerprints: dict[str, str] | None = None) -> None:
@@ -125,10 +179,14 @@ class MCPGovernance:
         agt_threats = self._agt_scanner.scan_tool(
             tool_name, description, schema, server_name
         )
+        advisory = _wording_advisories(agt_threats, description)
+        advisories: list[str] = []
         for threat in agt_threats:
-            threats.append(
-                f"[AGT] {threat.threat_type.value}: {threat.message}"
-            )
+            text = f"[AGT] {threat.threat_type.value}: {threat.message}"
+            if id(threat) in advisory:
+                advisories.append(text)
+                continue
+            threats.append(text)
             agt_sev = threat.severity.value if hasattr(threat.severity, "value") else str(threat.severity)
             severity = _escalate(severity, agt_sev)
 
@@ -151,7 +209,13 @@ class MCPGovernance:
                 threats.append(f"HTML comment detected in {field_path}")
                 severity = _escalate(severity, "warning")
 
-        # 3. Prompt injection
+        # 3. Prompt injection, and the shapes of published poisoning attacks
+        for field_path, value in text_fields:
+            for label, pattern, companion in _POISONING_PATTERNS:
+                match = pattern.search(value)
+                if match and (companion is None or companion.search(value)):
+                    threats.append(f"{label} ({match.group()!r}) in {field_path}")
+                    severity = _escalate(severity, "critical")
         for field_path, value in text_fields:
             for pattern in _INJECTION_PATTERNS:
                 match = pattern.search(value)
@@ -174,7 +238,7 @@ class MCPGovernance:
                 severity = _escalate(severity, "warning")
 
         safe = len(threats) == 0
-        return ScanResult(safe=safe, threats=threats, severity=severity)
+        return ScanResult(safe=safe, threats=threats, severity=severity, advisories=advisories)
 
     # ------------------------------------------------------------------
     # Fingerprinting
@@ -251,6 +315,12 @@ class MCPGovernance:
 
             result = self.scan_tool(tool_def)
 
+            if result.safe and result.advisories:
+                logger.warning(
+                    "MCP tool %s from server %s kept with scan advisories (wording heuristics, not dropped): %s",
+                    tool_name, server_name, "; ".join(result.advisories),
+                )
+
             if not result.safe:
                 logger.warning(
                     "Unsafe MCP tool %s from server %s [%s]: %s",
@@ -282,6 +352,47 @@ _SEVERITY_ORDER: dict[str, int] = {
     "warning": 1,
     "critical": 2,
 }
+
+
+def _wording_advisories(agt_threats: list, description: str) -> set[int]:
+    """The ids of the AGT hits that are only wording heuristics (see the
+    constants above).  Of the three kinds (a role-override phrase, a URL, a
+    send / post verb) one alone is advisory, two or more drop the tool.  An
+    encoded run is advisory unless it is a hex-escape run or decodes to
+    readable text (``_hides_text``)."""
+    role = [t for t in agt_threats if _message(t).startswith(_ROLE_OVERRIDE_MESSAGE)]
+    exfil = [t for t in agt_threats if _message(t).startswith(_EXFILTRATION_MESSAGE)]
+    url = [t for t in exfil if getattr(t, "matched_pattern", None) == _URL_PATTERN]
+    send = [t for t in exfil if getattr(t, "matched_pattern", None) in _SEND_PATTERNS]
+    kinds = [group for group in (role, url, send) if group]
+    advisory: set[int] = set()
+    if len(kinds) == 1:
+        advisory |= {id(t) for t in kinds[0]}
+    if not _hides_text(description):
+        advisory |= {id(t) for t in agt_threats if _message(t) == _ENCODED_PAYLOAD_MESSAGE}
+    return advisory
+
+
+def _message(threat) -> str:
+    return str(getattr(threat, "message", "") or "")
+
+
+def _hides_text(description: str) -> bool:
+    """True when *description* carries hex escapes, or a base64 run that
+    decodes to readable text (an instruction hidden from a reader), rather
+    than an id or a URL path that only looks like base64."""
+    if _HEX_ESCAPES.search(description):
+        return True
+    for match in _BASE64_RUN.finditer(description):
+        run = match.group().rstrip("=")
+        try:
+            decoded = base64.b64decode(run + "=" * (-len(run) % 4), validate=True).decode("utf-8")
+        except (binascii.Error, UnicodeDecodeError, ValueError):
+            continue
+        printable = sum(ch.isprintable() or ch.isspace() for ch in decoded)
+        if decoded and printable / len(decoded) >= 0.9 and sum(ch.isalpha() for ch in decoded) >= 8:
+            return True
+    return False
 
 
 def _escalate(current: str, proposed: str) -> str:

@@ -65,12 +65,15 @@ def mcp_scan_event(
     safe: bool,
     threats: list[str],
     severity: str,
+    advisories: list[str] | None = None,
 ) -> dict[str, Any]:
     """Build the data payload for a ``policy.mcp_scan`` entry.
 
     Emitted once per MCP tool definition encountered during server
     connection.  ``safe=False`` means the tool was excluded from the
-    schema set advertised to the agent.
+    schema set advertised to the agent.  ``advisories`` are wording
+    heuristics the definition tripped that do not exclude it (the tool
+    was kept; see ``governance.mcp_scanner``).
     """
     return {
         "server": server_name,
@@ -78,6 +81,7 @@ def mcp_scan_event(
         "safe": safe,
         "threats": threats,
         "severity": severity,
+        "advisories": list(advisories or []),
         "timestamp": time.time(),
     }
 

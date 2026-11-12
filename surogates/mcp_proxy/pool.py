@@ -656,6 +656,7 @@ class ConnectionPool:
                     safe=result.safe,
                     threats=list(result.threats),
                     severity=result.severity,
+                    advisories=list(result.advisories),
                 ),
             )
 
@@ -666,6 +667,12 @@ class ConnectionPool:
                 "; ".join(result.threats),
             )
             return False
+
+        if result.advisories:
+            logger.warning(
+                "MCP tool %s from server %s kept with scan advisories (wording heuristics, not dropped): %s",
+                tool_name, server_name, "; ".join(result.advisories),
+            )
 
         if not governance.has_fingerprint(qualified_name) and not (
             approval_room.take(server_prefix) if approval_room is not None
