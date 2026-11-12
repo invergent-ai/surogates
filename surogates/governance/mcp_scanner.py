@@ -53,11 +53,6 @@ _INVISIBLE_PATTERN = re.compile(
 )
 
 # ---------------------------------------------------------------------------
-# HTML comment pattern
-# ---------------------------------------------------------------------------
-_HTML_COMMENT_PATTERN = re.compile(r"<!--.*?-->", re.DOTALL)
-
-# ---------------------------------------------------------------------------
 # Prompt-injection heuristics (case-insensitive, word-boundary aware).
 # ---------------------------------------------------------------------------
 _INJECTION_PATTERNS: list[re.Pattern[str]] = [
@@ -122,15 +117,16 @@ _SENSITIVE_DATA = re.compile(
 # ``sort_key``, ``idempotency_key`` are ordinary parameters).
 _SECRET_NAME = re.compile(
     r"\b[A-Z][A-Z0-9_]*_(KEY|TOKEN|SECRET|PASSWORD)\b"
-    r"|\b\w*(api_?key|secret_key|client_secret|password|passwd|access_token|auth_token|refresh_token)\w*\b",
+    r"|\b\w{0,40}(api_?key|secret_key|client_secret|password|passwd|access_token|auth_token|refresh_token)\w{0,40}\b",
 )
 # "the conversation" / "the messages" next to a hand-over verb.
 _CONVERSATION_HANDED_OVER = re.compile(
     r"\b(pass|include|put|send|attach|upload|copy|append|forward|insert|paste|share)\b[^.\n]{0,40}"
-    r"\b(the|this|our|whole|full|entire)\s+(conversation|chat|messages|transcript)\b",
+    r"\b(the|this|our|whole|full|entire)\s+(conversation|chat|messages|transcript)\b"
+    r"(?!\s*(id|ids|identifier|name|title|topic)\b)",
     re.IGNORECASE,
 )
-_CONTACT = re.compile(r"[\w.+-]+@[\w-]+(\.[\w-]+)+|\+\d[\d ().-]{6,}\d")
+_CONTACT = re.compile(r"[\w.+-]{1,64}@[\w-]{1,63}(\.[\w-]{1,63}){1,8}|\+\d[\d ().-]{6,20}\d")
 _COPY_CUE = re.compile(
     r"\b(bcc|cc|copy|copies|also|as\s+well|every|each|forward)\b"
     r"|\b(change|replace|redirect|reroute|route|set)\s+(the\s+)?(recipient|number|address|destination|to)\b",
@@ -151,8 +147,8 @@ _SUSPICIOUS_DECODED = ("ignore", "override", "system", "password", "secret", "ad
 # ---------------------------------------------------------------------------
 _TAG_NAMES = r"(important|system|instructions?|hidden|secret)"
 _TAG_BLOCK = re.compile(
-    r"<\s*" + _TAG_NAMES + r"\b[\w-]*[^<>]{0,80}>[\s\S]*?<\s*/\s*\1[\w-]*\s*>"   # a paired block
-    r"|^\s*<\s*" + _TAG_NAMES + r"\b[\w-]*[^<>]{0,80}>\s*$",                     # an opening tag on a line of its own
+    r"<\s*" + _TAG_NAMES + r"\b[\w-]{0,40}[^<>]{0,80}>[\s\S]{0,4000}?<\s*/\s*\1[\w-]{0,40}\s*>"   # a paired block
+    r"|^[ \t]*<\s*" + _TAG_NAMES + r"\b[\w-]{0,40}[^<>\n]{0,80}>[ \t]*$",          # an opening tag on a line of its own
     re.IGNORECASE | re.MULTILINE,
 )
 _KEEP_FROM_USER = re.compile(
@@ -161,29 +157,47 @@ _KEEP_FROM_USER = re.compile(
     r"|\b(do\s+not|don['’]?t|never)\s+(tell|inform|notify|alert)\s+(the\s+)?(users?|humans?)\s+(about\s+)?"
     r"(this|that|it|them)\b"
     r"|\bwithout\s+(telling|informing)\s+(the\s+)?(users?|humans?)\b"
-    r"|\b(do\s+not|don['’]?t|never)\s+(tell|inform|notify|alert)\s+the\s+(users?|humans?)\s*[.!;]",
-    re.IGNORECASE,
+    , re.IGNORECASE,
 )
+# "Don't tell the user." as a sentence of its own; not a condition ("If true, do not notify the user.").
+_DONT_TELL_END = re.compile(r"\b(do\s+not|don['’]?t|never)\s+(tell|inform|notify|alert)\s+the\s+(users?|humans?)\s*[.!;]",
+                            re.IGNORECASE)
+_CONDITION_BEFORE = re.compile(r"\b(if|when|whenever|unless|whether)\b[^.!;\n]{0,60}$", re.IGNORECASE)
 _SECRET_FILE = re.compile(
     r"(\.ssh/(?!authorized_keys|known_hosts)|\bid_(rsa|dsa|ecdsa|ed25519)\b(?!\.pub)|\.aws/credentials"
     r"|\.netrc\b|\.git-credentials\b|\.npmrc\b|\.pypirc\b|\.kube/config|\.docker/config\.json|/proc/self/environ"
     r"|/etc/(passwd|shadow)\b|\bmcp\.json\b|\.cursor/|\.gnupg/|(?:^|[\s`'\"(/~])\.env\b(?!\.(example|sample|template|dist)))",
     re.IGNORECASE,
 )
+_READ_BEFORE = re.compile(r"\b(read|cat|open|load|get|fetch|grab|collect)\b[^\n]{0,20}$", re.IGNORECASE)
+_HAND_VERB = re.compile(r"\b(pass|include|put|send|attach|upload|copy|append|forward|insert|paste|share)\b", re.IGNORECASE)
 _HAND_OVER = re.compile(
     r"\b(pass|include|put|send|attach|upload|copy|append|forward|insert|paste|share|add)\b[^.\n]{0,60}"
     r"\b(content|contents|text)\b|\b(its|their|the|file['’]?s)\s+contents?\b",
     re.IGNORECASE,
 )
 _IMAGE_URL = re.compile(
-    r"!\[[^\]]*\]\(\s*https?://"                                    # markdown image
-    r"|!\[[^\]]*\]\[[^\]]+\][\s\S]*?^\s*\[[^\]]+\]:\s*https?://"     # reference-style image + its definition
-    r"|<\s*img\b[^>]*\bsrc\s*=\s*['\"]?\s*https?://",                    # HTML image
+    r"!\[[^\]]{0,200}\]\(\s*https?://"                                    # markdown image
+    r"|!\[[^\]]{0,200}\]\[[^\]]{1,40}\][\s\S]{0,4000}?^[ \t]*\[[^\]]{1,40}\]:[ \t]*https?://"  # reference-style
+    r"|<\s*img\b[^>]{0,300}\bsrc\s*=\s*['\"]?\s*https?://",               # HTML image
     re.IGNORECASE | re.MULTILINE,
 )
-_URL_TEMPLATE_QUERY = re.compile(r"https?://\S*[?&][\w.-]+=(\{|<|\[|\$\{?[A-Za-z_])", re.IGNORECASE)
+# A query value the model is to fill with the user's data: the placeholder names it ({summary}, <the user's last
+# message>, $USER_DATA); REST examples such as ?state=<state> or ?q={query} do not.
+_URL_TEMPLATE_QUERY = re.compile(
+    r"https?://[^\s?]{0,300}\?[^\s]{0,300}?=[{<\[$]\{?[^}>\]&\n]{0,20}"
+    r"(user|message|conversation|chat|summary|reply|content|history|secret|key|token|password|prompt|email|data|context)",
+    re.IGNORECASE,
+)
 # A word mixing Latin with Cyrillic, or with Greek capitals (look-alikes of A, B, E, H, I, K, M, N, O, P, T, X ...).
-_MIXED_SCRIPT = re.compile(r"\b(?=\w*[A-Za-z])(?=\w*[\u0400-\u04ff\u0391-\u03a9])\w+\b")
+# Only the Greek capitals that look like Latin ones (A B E Z H I K M N O P T Y X); not Delta, Sigma, Omega (kOhm).
+_MIXED_SCRIPT = re.compile(
+    r"\b(?=\w{0,64}[A-Za-z])(?=\w{0,64}[\u0400-\u04ff\u0391\u0392\u0395\u0396\u0397\u0399\u039a\u039c\u039d"
+    r"\u039f\u03a1\u03a4\u03a5\u03a7])\w+\b"
+)
+# Longer text fields are not pattern-scanned (several patterns are quadratic in the worst case): the definition is
+# dropped as oversized.  Real tools are far below it (our benchmarks' largest field is 3.6k characters).
+_MAX_FIELD_CHARS = 16_000
 
 
 def _poisoning_shapes(value: str) -> list[str]:
@@ -194,11 +208,16 @@ def _poisoning_shapes(value: str) -> list[str]:
     if m:
         found.append(f"Instruction block addressed to the model ({(m.group(1) or m.group(2))!r})")
     m = _KEEP_FROM_USER.search(text)
+    if not m:
+        m = next((e for e in _DONT_TELL_END.finditer(text)
+                  if not _CONDITION_BEFORE.search(text[max(0, e.start() - 80):e.start()])), None)
     if m:
         found.append(f"Instruction to keep something from the user ({m.group()!r})")
     for m in _SECRET_FILE.finditer(text):
         window = text[max(0, m.start() - 200):m.end() + 200]
-        if _HAND_OVER.search(window):
+        read_then_hand = (_READ_BEFORE.search(text[max(0, m.start() - 30):m.start()])
+                          and _HAND_VERB.search(text[m.end():m.end() + 80]))
+        if read_then_hand or _HAND_OVER.search(window):
             found.append(f"Secret file handed over by a tool definition ({m.group().strip()!r})")
             break
     m = _IMAGE_URL.search(text)
@@ -289,12 +308,21 @@ class MCPGovernance:
         schema = tool_def.get("inputSchema") or tool_def.get("input_schema")
         server_name = tool_def.get("_server_name", "unknown")
 
+        # A definition with a huge text field is dropped before any pattern runs on it: several patterns (AGT's
+        # and ours) are quadratic in the worst case, and the scan runs on the proxy's event loop.
+        text_fields = _extract_text_fields(tool_def)
+        oversized = [(path, len(value)) for path, value in text_fields if len(value) > _MAX_FIELD_CHARS]
+        if oversized:
+            path, size = oversized[0]
+            return ScanResult(safe=False, severity="critical", threats=[
+                f"Oversized text field ({size} characters, limit {_MAX_FIELD_CHARS}) in {path}: not scanned"])
+
         agt_threats = self._agt_scanner.scan_tool(
             tool_name, description, schema, server_name
         )
         advisory = (
             _wording_advisories(
-                agt_threats, description, "\n".join(value for _, value in _extract_text_fields(tool_def)),
+                agt_threats, description, "\n".join(value for _, value in text_fields),
             ) if self._wording_advisory
             else [False] * len(agt_threats)
         )
@@ -309,7 +337,6 @@ class MCPGovernance:
             severity = _escalate(severity, agt_sev)
 
         # --- Layer 2: Our own checks ---
-        text_fields = _extract_text_fields(tool_def)
 
         # 1. Invisible Unicode
         for field_path, value in text_fields:
@@ -321,9 +348,10 @@ class MCPGovernance:
                 )
                 severity = _escalate(severity, "critical")
 
-        # 2. HTML comments
+        # 2. HTML comments (an opening marker with a closing one after it: linear, unlike the regex)
         for field_path, value in text_fields:
-            if _HTML_COMMENT_PATTERN.search(value):
+            opening = value.find("<!--")
+            if opening >= 0 and value.find("-->", opening + 4) >= 0:
                 threats.append(f"HTML comment detected in {field_path}")
                 severity = _escalate(severity, "warning")
 
@@ -483,7 +511,9 @@ def _wording_advisories(agt_threats: list, description: str, all_text: str) -> l
     url = [e and _pattern(t) == _URL_PATTERN for e, t in zip(exfil, agt_threats)]
     send = [e and _pattern(t) in _SEND_PATTERNS for e, t in zip(exfil, agt_threats)]
     # Credentials or a copy-to address count wherever the definition names them (a parameter's description too).
-    kinds = sum((any(role), any(url), any(send), _names_sensitive_data(all_text), _copies_to_contact(all_text)))
+    wording = any(role) or any(url) or any(send)
+    kinds = wording and sum((any(role), any(url), any(send),
+                             _names_sensitive_data(all_text), _copies_to_contact(all_text)))
     lone_kind = kinds == 1
     hides = _hides_text(description)
     return [
