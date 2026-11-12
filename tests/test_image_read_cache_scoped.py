@@ -128,13 +128,60 @@ async def test_an_unchanged_image_is_analyzed_once_whichever_way_it_is_named(tmp
     assert vision.calls == 1
 
 
-async def test_an_image_changed_while_it_was_analyzed_is_not_kept(tmp_path):
+async def test_an_image_changed_while_it_was_analyzed_is_not_kept(tmp_path, monkeypatch):
     (tmp_path / "pic.png").write_bytes(RED)
+    kept = []
+    real_put = image_read._CACHE.put
+    monkeypatch.setattr(image_read._CACHE, "put", lambda key, value: (kept.append(key), real_put(key, value)))
     vision = Vision()
     vision.during = lambda: (tmp_path / "pic.png").write_bytes(BLUE)
     assert "a red square" in (await _read(vision, "pic.png", "A", tmp_path))["content"]
+    assert kept == []  # neither under the red key nor under the blue one
     vision.during = None
     assert "a blue square" in (await _read(vision, "pic.png", "A", tmp_path))["content"]
+    assert len(kept) == 1
+
+
+async def test_a_path_is_keyed_as_vision_analyze_reads_it_stripped(tmp_path):
+    (tmp_path / "pic.png").write_bytes(RED)
+    (tmp_path / " pic.png").write_bytes(BLUE)  # what the unstripped text would name
+    vision = Vision()
+    assert "a red square" in (await _read(vision, " pic.png", "A", tmp_path))["content"]
+    assert "a red square" in (await _read(vision, "pic.png", "A", tmp_path))["content"]
+    assert vision.calls == 1
+
+
+@pytest.mark.parametrize("ref", ["https://example.com/a.png", "http://example.com/a.png", "data:image/png;base64,AA==",
+                                 "//[abc/x.png", "   "])
+async def test_a_url_or_an_unparsable_reference_has_no_key(tmp_path, ref):
+    assert await image_read._build_key(ref, {"session_id": "A", "workspace_path": str(tmp_path)}) is None
+
+
+async def test_an_unparsable_reference_is_refused_as_a_read_not_raised(tmp_path):
+    answer = await _read(Vision(), "//[abc/x.png", "A", tmp_path)
+    assert "error" in answer
+
+
+@pytest.mark.parametrize("ref", ["../B/pic.png", "/etc/pic.png", "/workspace/../B/pic.png"])
+async def test_in_a_bucket_a_path_out_of_the_workspace_has_no_key_and_nothing_is_stated(ref):
+    class Never(Bucket):
+        async def stat(self, bucket, key):
+            raise AssertionError(f"stat'ed {key}")
+
+    kwargs = {"session_id": UUID(int=1), "workspace_path": "/workspace", "storage": Never(),
+              "session_config": {"storage_bucket": "agent"}}
+    assert await image_read._build_key(ref, kwargs) is None
+
+
+async def test_a_threads_copy_of_the_workspace_has_no_key(monkeypatch):
+    from surogates.sandbox import copy_files
+
+    monkeypatch.setattr(copy_files, "has_copy", lambda pool, owner: True)
+    bucket = Bucket()
+    bucket.put("agent", session_workspace_key(UUID(int=1), "pic.png"), RED)
+    kwargs = {"session_id": UUID(int=1), "workspace_path": "/workspace", "storage": bucket,
+              "session_config": {"storage_bucket": "agent"}, "sandbox_pool": object(), "task_id": "t"}
+    assert await image_read._build_key("pic.png", kwargs) is None
 
 
 async def test_without_a_session_nothing_is_cached(tmp_path):

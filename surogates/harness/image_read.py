@@ -80,26 +80,32 @@ async def _build_key(path: str, kwargs: dict[str, Any]) -> tuple | None:
     thread's copy of the workspace, and wherever the image cannot be stat'ed.
     """
     session_id = kwargs.get("session_id")
-    if session_id is None or kwargs.get("workspace_io") is not None:
+    # The reference vision_analyze reads: it strips the path it is given.
+    ref = path.strip()
+    if session_id is None or not ref or kwargs.get("workspace_io") is not None:
         return None
-    if path.startswith("data:") or urlparse(path).scheme in {"http", "https"}:
+    try:
+        scheme = urlparse(ref).scheme
+    except ValueError:  # vision_analyze refuses it in its own words
+        return None
+    if ref.startswith("data:") or scheme in {"http", "https"}:
         return None
 
     # Lazy, as file_ops below: these pull in the tool registry.
     from surogates.sandbox.copy_files import has_copy
     from surogates.storage.tenant import boundary_workspace_key, workspace_session_shim
     from surogates.tools.builtin.vision import _validate_workspace_storage_path
-    from surogates.tools.utils.workspace_sandbox import validate_path
+    from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError, validate_path
     from surogates.tools.workspace_io.local import LocalWorkspaceIO
 
     workspace_path = kwargs.get("workspace_path")
     storage = kwargs.get("storage")
     session_config = kwargs.get("session_config")
-    bucket = (session_config or {}).get("storage_bucket")
     try:
+        bucket = (session_config or {}).get("storage_bucket")
         if storage is not None and bucket:
             # The session's object in its bucket, as vision_analyze reads it.
-            relative = _validate_workspace_storage_path(path, workspace_path=workspace_path)
+            relative = _validate_workspace_storage_path(ref, workspace_path=workspace_path)
             if has_copy(kwargs.get("sandbox_pool"), kwargs.get("task_id")):
                 return None
             object_key = boundary_workspace_key(
@@ -116,9 +122,14 @@ async def _build_key(path: str, kwargs: dict[str, Any]) -> tuple | None:
         # A file of this host's workspace: contained first (no workspace, or a
         # path out of it, is refused here), then stat'ed as vision_analyze
         # reads it, one folder at a time with no link followed (#655).
-        resolved = validate_path(workspace_path, path)
+        resolved = validate_path(workspace_path, ref)
         found = await LocalWorkspaceIO(workspace_path).stat(resolved)
-    except Exception:  # no key, so no cache: vision_analyze gives its own answer
+    except (WorkspaceSandboxError, ValueError, KeyError, OSError):
+        return None  # refused, or no such image: vision_analyze gives its own answer
+    except Exception:
+        # Not a refusal: still no key (an analysis is never wrongly shared for
+        # want of one), but said, so a fault does not just turn the cache off.
+        logger.warning("event=image.cache_key_failed path=%s", path, exc_info=True)
         return None
     if found is None or found.is_dir:
         return None
