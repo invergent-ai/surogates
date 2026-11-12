@@ -1092,18 +1092,27 @@ def load_settings() -> Settings:
     if cached is not None and cached[0] == (Settings, str(path), content, _surogates_environment()):
         return cached[1].model_copy(deep=True)
 
-    # The file is read once: the key holds the bytes the settings come from.
-    yaml_config = _parse_yaml_config(content)
-    if yaml_config:
-        _apply_config_environ(_flatten_yaml(yaml_config))
+    # Built by one thread at a time, from the file as it is then: a thread
+    # that read an older file must not put its values back, nor leave
+    # settings built from them under the newer file's key.
+    with _config_lock:
+        content = _read_config_bytes(path)
+        cached = _settings_cache
+        if cached is not None and cached[0] == (Settings, str(path), content, _surogates_environment()):
+            return cached[1].model_copy(deep=True)
 
-    # Keyed by the environment after the file's values went into it, taken
-    # before the settings read it: a variable another thread sets meanwhile
-    # makes the next call build them again, never keeps them stale.
-    inputs = (Settings, str(path), content, _surogates_environment())
-    settings = Settings()
-    _settings_cache = (inputs, settings.model_copy(deep=True))
-    return settings
+        # The file is read once: the key holds the bytes the settings come from.
+        yaml_config = _parse_yaml_config(content)
+        if yaml_config:
+            _apply_config_environ(_flatten_yaml(yaml_config))
+
+        # Keyed by the environment after the file's values went into it, taken
+        # before the settings read it: a variable another thread sets meanwhile
+        # makes the next call build them again, never keeps them stale.
+        inputs = (Settings, str(path), content, _surogates_environment())
+        settings = Settings()
+        _settings_cache = (inputs, settings.model_copy(deep=True))
+        return settings
 
 
 #: The last settings built, keyed by what they were built from.
@@ -1112,31 +1121,34 @@ _settings_cache: tuple[tuple, Any] | None = None
 #: The ``SUROGATES_*`` variables the config file put into the environment,
 #: with the values it put there.
 _config_environ: dict[str, str] = {}
-_config_environ_lock = threading.Lock()
+#: Held while settings are built from the file and while its values go
+#: into the environment (``load_settings``, ``_apply_config_environ``).
+_config_lock = threading.RLock()
 
 
 def _apply_config_environ(flat: dict[str, str]) -> None:
     """Put the config file's values (*flat*, as ``_flatten_yaml`` gives
     them) into the environment, where pydantic-settings reads them.
 
-    A real environment variable wins, as before.  A value the file put there
-    earlier follows the file: changed with it, removed when the file no longer
-    has it (a rotated key or password in the file reaches the next
-    ``load_settings()``; before, the first value read stayed for the life of
-    the process).  A variable someone else set or changed since is theirs and
-    stays.  Not called for a file that is missing, empty or unreadable: what
-    it gave last is kept, as before.
+    A real environment variable wins, as before, whatever the case of its
+    name (pydantic-settings matches names without regard to case).  A value
+    the file put there earlier follows the file: a key, token or password
+    changed in the file reaches the next ``load_settings()``; before, the
+    first value read stayed for the life of the process.  A value the file
+    no longer gives is kept, as before: a file caught half-written must not
+    take values away (a restart drops it).  A variable someone else set or
+    changed since is theirs and stays; one set to exactly the value the file
+    had put there cannot be told from it, and follows the file.
     """
-    with _config_environ_lock:
+    with _config_lock:
         for key, put in list(_config_environ.items()):
             if os.environ.get(key) != put:
                 del _config_environ[key]  # set or removed by someone else since
-            elif key not in flat:
-                del os.environ[key]
-                del _config_environ[key]
+        present = {name.upper() for name in os.environ}
         for key, value in flat.items():
-            if key in _config_environ or key not in os.environ:
-                os.environ[key] = value
+            if key in _config_environ or key.upper() not in present:
+                if os.environ.get(key) != value:
+                    os.environ[key] = value
                 _config_environ[key] = value
 
 
