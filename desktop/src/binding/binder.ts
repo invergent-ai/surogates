@@ -61,7 +61,7 @@ const noCopyOf = (folder: string, why: NoCopyAt): string => {
   return `The folder ${folder} cannot have a project's thread work in a copy of it, as ${reason}: choose another folder for the project's threads`;
 };
 // What a project's thread says where its project's folder can no longer be worked in here, for its user to choose it again.
-const CHOOSE_AGAIN = "choose Use this computer for this project in its Overview, then start this thread again";
+const CHOOSE_AGAIN = "choose Use this computer for this project in its Overview, then ask for the thread again";
 // A bind that recorded *thread*'s copy says so: the server counts a thread bound on no other answer (surogates/devices/binding.py).
 const boundTo = (thread: string | undefined): Outcome => (thread === undefined ? BOUND : { ok: { history: { thread } } });
 
@@ -268,7 +268,7 @@ export class Binder implements Executor {
   /**
    * The folder for a new project made here, as the user picks it in the folder dialog and confirms it in the sheet,
    * which names *project*: its coordinator works in the folder itself, and each of its threads in a copy of it,
-   * which asks no more (prepareThreadFolder). Null when the user cancels. With *again*, the folder of a project whose
+   * which the server asks for by naming that coordinator, and no sheet asks about. Null when the user cancels. With *again*, the folder of a project whose
    * coordinator, *again.master*, can no longer work in the one it had here (projectFolderLost), or works on another
    * computer: the sheet opens on its own path, and any other may be chosen; it binds that coordinator alone, afresh.
    */
@@ -278,23 +278,6 @@ export class Binder implements Executor {
     const last = this.options.bindings.last()?.folder;
     const offered = again?.folder ?? null;
     return this.confirm(offered, last ?? guestPathOf(this.options.guards.home), window, signal, null, project.trim(), { project: true, ...(again ? { master: again.master } : {}) });
-  }
-
-  /**
-   * A copy of a project's folder for one of its threads, with no dialog and no sheet: the folder its user chose for
-   * the project here, which its coordinator's chat, *master*, works in. The thread asks as that chat does, and the
-   * confirmation binds it to a copy alone. Refused, saying how the project works here again, for a chat whose folder
-   * was confirmed for no project, and for a folder that is no longer the one its user chose; and where no copy of it
-   * could be made, before the thread is.
-   */
-  async prepareThreadFolder(master: string, window: string): Promise<Prepared> {
-    const found = await this.projectFolder(master);
-    if (typeof found === "string") throw new Error(`${found}: ${CHOOSE_AGAIN}`);
-    if (this.options.keepsCopies !== true) throw new Error(NO_COPY_HERE);
-    const { binding, checked } = found;
-    const alone = noCopyAt(binding.folder, this.options.guards);
-    if (alone !== null) throw new Error(noCopyOf(shownPath(binding.folder), alone));
-    return this.prepare(checked, binding.mode === "free" ? "free" : "ask", window, { thread: true });
   }
 
   /**
@@ -496,6 +479,9 @@ export class Binder implements Executor {
     // chat that has one is bound again.
     const again = known?.project === true && preparation?.master === root;
     if (known && !again) return ALREADY_BOUND;
+    // A project's thread the server starts itself names its coordinator, not a confirmation of the page's.
+    const master = operation.args.master;
+    if (!preparation && typeof master === "string") return this.threadOf(master, root, copy, folder, nonce);
     if (!preparation) return NOT_BOUND;
     // One use, whatever the answer.
     this.byNonce.delete(nonce);
@@ -545,6 +531,34 @@ export class Binder implements Executor {
     }
     preparation.root = root;
     this.answered.set(operation.id, preparation);
+    return boundTo(copy);
+  }
+
+  /**
+   * A project's thread, *root*, bound to a copy of the folder its coordinator, *master*, works in here, with no dialog
+   * and no sheet: its user chose that folder for the project, and a thread works in a copy of it alone, whose changes
+   * reach the folder only as the coordinator's own would. Refused, saying how the project works here again, where
+   * *master*'s folder here is no project's or no longer the one its user chose; where no copy of it can be made; and,
+   * recording nothing, where the server names another folder or no copy at all.
+   */
+  private async threadOf(master: string, root: string, copy: string | undefined, folder: string, nonce: string): Promise<Outcome> {
+    if (copy === undefined || master === root) return NOT_BOUND;
+    const found = await this.projectFolder(master);
+    if (typeof found === "string") return { error: { type: "binding", message: `${found}: ${CHOOSE_AGAIN}` } };
+    if (this.options.keepsCopies !== true) return KEEPS_NO_COPY;
+    const { binding, checked } = found;
+    if (folder !== binding.folder) return NOT_BOUND;
+    const alone = noCopyAt(binding.folder, this.options.guards);
+    if (alone !== null) return { error: { type: "binding", message: noCopyOf(shownPath(binding.folder), alone) } };
+    try {
+      this.options.bindings.add({
+        root, nonce, folder, dev: checked.dev, ino: checked.ino, boot: BOOT_ID,
+        mode: binding.mode === "free" ? "free" : "ask", boundAt: Date.now(), history: copy,
+      });
+    } catch (error) {
+      report(this.options.onError, error);
+      return NOT_RECORDED;
+    }
     return boundTo(copy);
   }
 

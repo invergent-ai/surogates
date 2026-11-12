@@ -129,7 +129,6 @@ if (origin !== undefined && window.top === window && location.origin === origin)
     webSignIn: call("webSignIn"),
     signOut: call("signOut"),
     prepareFolder: call("prepareFolder"),
-    prepareThreadFolder: call("prepareThreadFolder"),
     bindSession: call("bindSession"),
     setMode: call("setMode"),
     requestFreeMode: call("requestFreeMode"),

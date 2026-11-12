@@ -312,7 +312,7 @@ async def test_a_project_made_on_the_app_works_in_its_folder_itself_and_starts_e
     folder.mkdir()
     (folder / "Report.docx").write_bytes(b"PK report v1")
     device = await register(api)
-    app = await client(built_client, link_url, device["token"], journal_dir / "journal.sqlite", confirm=folder, project=1)
+    app = await client(built_client, link_url, device["token"], journal_dir / "journal.sqlite", confirm=folder, project=True)
     try:
         [chosen] = await confirmed_on(app)
         # The project is made with the folder its user chose for it, and the app binds its coordinator to the folder itself.

@@ -408,6 +408,18 @@ async function aProject(user: User, chooser: Binder, master = ROOT, folder = not
 const threadBind = (root: string, ready: { folder: string; nonce: string }) =>
   bindOp(root, ready, { args: { folder: ready.folder, nonce: ready.nonce, history: { thread: root } } });
 
+// A thread's bind as the server sends it to start the thread itself: a copy of the folder its coordinator, *master*,
+// works in, named by that coordinator rather than by a confirmation of the page's.
+let served = 0;
+const masterBind = (root: string, master: string, folder = notes) => {
+  const nonce = `served-${String(++served).padStart(16, "0")}`;
+  return bindOp(root, { folder, nonce }, { args: { folder, nonce, history: { thread: root }, master } });
+};
+// The refusal of such a bind where the project's folder cannot be used here: its reason, and what to do.
+const refused = (reason: string): Outcome => ({
+  error: { type: "binding", message: `${reason}: choose Use this computer for this project in its Overview, then ask for the thread again` },
+});
+
 describe("a project's folder", () => {
   it("is picked in the dialog and confirmed in the sheet, which names the project, and binds its coordinator to the folder itself", async () => {
     const user = new User([notes], [{ mode: "ask" }]);
@@ -459,76 +471,88 @@ describe("a project's folder", () => {
     }
   });
 
-  it("is prepared for each of the project's threads at once, with no dialog and no sheet, and the thread asks as its coordinator does", async () => {
+  it("binds each of the project's threads to a copy of its own when the server names its coordinator, with no dialog and no sheet", async () => {
     const user = new User();
     const chooser = binder(user);
     await aProject(user, chooser);
     for (const thread of [OTHER, THIRD]) {
-      const ready = await chooser.prepareThreadFolder(ROOT, WINDOW);
-      expect(ready).toMatchObject({ folder: notes, mode: "ask" });
-      expect(await chooser.admit(threadBind(thread, ready), never())).toEqual(keeps(thread));
+      const op = masterBind(thread, ROOT);
+      expect(await chooser.admit(op, never())).toEqual(keeps(thread));
       expect(journal.bindings.get(thread)).toMatchObject({ folder: notes, mode: "ask", history: thread });
       expect(journal.bindings.get(thread)).not.toHaveProperty("project");
+      // The same operation again, as a reconnect sends it, answers the same.
+      expect(await chooser.admit(op, never())).toEqual(keeps(thread));
     }
     // Only the project's own confirmation was asked.
     expect([user.dialogs.length, user.sheets.length]).toEqual([1, 1]);
   });
 
-  it("is prepared for no thread of a chat whose folder was confirmed for no project, nor of a thread's", async () => {
+  it("binds no thread for a coordinator whose folder was confirmed for no project, nor for a thread", async () => {
     const user = new User();
     const chooser = binder(user);
     const plain = await confirmed(user, chooser);
     expect(await chooser.admit(bindOp(ROOT, plain), never())).toEqual({ ok: null });
     await aProject(user, chooser, OTHER);
-    const copy = await chooser.prepareThreadFolder(OTHER, WINDOW);
-    expect(await chooser.admit(threadBind(THIRD, copy), never())).toEqual(keeps(THIRD));
-    for (const root of [ROOT, THIRD, "77777777-7777-4777-8777-777777777777"]) {
-      await expect(chooser.prepareThreadFolder(root, WINDOW), root).rejects.toThrow("This project's folder is not set up on this computer");
+    expect(await chooser.admit(masterBind(THIRD, OTHER), never())).toEqual(keeps(THIRD));
+    const fresh = "88888888-8888-4888-8888-888888888888";
+    for (const master of [ROOT, THIRD, "77777777-7777-4777-8777-777777777777"]) {
+      expect(await chooser.admit(masterBind(fresh, master), never()), master).toEqual(refused(
+        "This project's folder is not set up on this computer",
+      ));
+      expect(journal.bindings.get(fresh), master).toBeUndefined();
     }
   });
 
-  it("is prepared for no thread once it is not the folder its user chose, nor where no copy of it can be made", async () => {
+  it("binds no thread once the folder is not the one its user chose, nor where no copy of it can be made", async () => {
     const user = new User();
     await aProject(user, binder(user));
     // Its tools make no copies here.
-    await expect(binder(user, { keepsCopies: false }).prepareThreadFolder(ROOT, WINDOW))
-      .rejects.toThrow("This computer keeps no copy of a folder for a project's thread to work in");
+    expect(await binder(user, { keepsCopies: false }).admit(masterBind(OTHER, ROOT), never())).toEqual(KEEPS_NO_COPY);
     renameSync(notes, join(base, "notes-before"));
     mkdirSync(notes);
     // Each says how the project works here again.
-    await expect(binder(user).prepareThreadFolder(ROOT, WINDOW)).rejects.toThrow(
-      `The folder ${notes} was replaced after it was chosen for this project: choose Use this computer for this project in its Overview, then start this thread again`,
-    );
+    expect(await binder(user).admit(masterBind(OTHER, ROOT), never())).toEqual(refused(
+      `The folder ${notes} was replaced after it was chosen for this project`,
+    ));
     rmSync(notes, { recursive: true });
-    await expect(binder(user).prepareThreadFolder(ROOT, WINDOW)).rejects.toThrow(
-      `This project's folder cannot be used: the folder ${notes} is not there: choose Use this computer for this project in its Overview, then start this thread again`,
-    );
-    await expect(binder(user).prepareThreadFolder(OTHER, WINDOW)).rejects.toThrow(
-      "This project's folder is not set up on this computer: choose Use this computer for this project in its Overview, then start this thread again",
-    );
+    expect(await binder(user).admit(masterBind(OTHER, ROOT), never())).toEqual(refused(
+      `This project's folder cannot be used: the folder ${notes} is not there`,
+    ));
+    expect(journal.bindings.get(OTHER)).toBeUndefined();
   });
 
-  it("is prepared for no thread, before the thread is made, where no copy of it can be named by its path", async () => {
+  it("binds no thread where no copy of the folder can be named by its path", async () => {
     const at = join(base, "notes ");
     mkdirSync(at);
     const user = new User();
     const chooser = binder(user);
     await aProject(user, chooser, ROOT, at);
-    await expect(chooser.prepareThreadFolder(ROOT, WINDOW))
-      .rejects.toThrow(`The folder ${at} cannot have a project's thread work in a copy of it`);
+    const answer = await chooser.admit(masterBind(OTHER, ROOT, at), never());
+    expect(JSON.stringify(answer)).toContain(`The folder ${at} cannot have a project's thread work in a copy of it`);
+    expect(journal.bindings.get(OTHER)).toBeUndefined();
   });
 
-  it("binds no chat to the folder itself with a confirmation made for a thread's copy of it", async () => {
+  it("binds no thread to another folder than its project's, to the folder itself, or as another chat's copy", async () => {
     const user = new User();
     const chooser = binder(user);
-    await aProject(user, chooser, ROOT, notes, "free");
-    const ready = await chooser.prepareThreadFolder(ROOT, WINDOW);
-    const waiting = chooser.bindSession(OTHER, ready.token, WINDOW);
-    // No history: the bind of a plain chat, as a new chat's creation sends it.
-    expect(await chooser.admit(bindOp(OTHER, ready), never())).toEqual(NOT_BOUND);
-    await expect(waiting).rejects.toThrow("The server asked for a project's folder itself for a thread");
+    await aProject(user, chooser);
+    const elsewhere = join(base, "elsewhere");
+    mkdirSync(elsewhere);
+    // The server names another folder than the project's.
+    expect(await chooser.admit(masterBind(OTHER, ROOT, elsewhere), never())).toEqual(NOT_BOUND);
+    // No copy asked for: the folder itself, which only a sheet gives a chat.
+    const itself = bindOp(OTHER, { folder: notes, nonce: "n".repeat(43) }, {
+      args: { folder: notes, nonce: "n".repeat(43), master: ROOT },
+    });
+    expect(await chooser.admit(itself, never())).toEqual(NOT_BOUND);
+    // A copy named for another chat than the one bound.
+    const another = bindOp(OTHER, { folder: notes, nonce: "m".repeat(43) }, {
+      args: { folder: notes, nonce: "m".repeat(43), history: { thread: THIRD }, master: ROOT },
+    });
+    expect(await chooser.admit(another, never())).toEqual(NOT_BOUND);
+    // Nor is the coordinator a thread of its own.
+    expect(await chooser.admit(masterBind(ROOT, ROOT), never())).not.toEqual(keeps(ROOT));
     expect(journal.bindings.get(OTHER)).toBeUndefined();
-    expect(user.sheets).toHaveLength(1);
   });
 
   it("says when it can no longer be worked in here: not set up, replaced, or not there", async () => {
@@ -567,8 +591,9 @@ describe("a project's folder", () => {
     const { ino } = statSync(notes);
     expect(journal.bindings.get(ROOT)).toMatchObject({ folder: notes, ino, mode: "free", project: true, nonce: ready.nonce });
     expect(await chooser.projectFolderLost(ROOT)).toBeNull();
-    // Its threads are prepared on it, as on any project's folder.
-    expect(await chooser.prepareThreadFolder(ROOT, WINDOW)).toMatchObject({ folder: notes, mode: "free" });
+    // Its threads are bound on it, as on any project's folder.
+    expect(await chooser.admit(masterBind(OTHER, ROOT), never())).toEqual(keeps(OTHER));
+    expect(journal.bindings.get(OTHER)).toMatchObject({ folder: notes, mode: "free", history: OTHER });
   });
 
   it("is chosen again in any folder, where its own path is not there", async () => {
