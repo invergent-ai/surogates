@@ -1678,7 +1678,7 @@ class SessionStore:
         """
         event = await self._ready_event(session_id, event_type, data)
         if delivery_data is not None:
-            event.delivery_data = redact_sensitive_data(delivery_data)
+            event.delivery_data = redact_sensitive_data(delivery_data, phones=False)
         async with self._sf() as db:
             if lease_token is not None:
                 held = (await db.execute(
@@ -1708,7 +1708,7 @@ class SessionStore:
         """
         if self._redis is None:
             return
-        frame = json.dumps(redact_sensitive_data(data), default=str)
+        frame = json.dumps(redact_sensitive_data(data, phones=False), default=str)
         try:
             await self._redis.publish(session_channel(session_id), encode_live_frame(after, seq, frame))
         except Exception:
@@ -1723,8 +1723,10 @@ class SessionStore:
         # Redact sensitive data but preserve binary image payloads —
         # the JWT regex in redact_sensitive_text falsely matches base64
         # image fragments (e.g. "eyJ..." which is common in PNG data).
+        # Phone numbers stay: they are the conversation's data, not secrets,
+        # and the model's context is rebuilt from these events.
         images_backup = data.get("images") if isinstance(data, dict) else None
-        redacted_data = redact_sensitive_data(data)
+        redacted_data = redact_sensitive_data(data, phones=False)
         if images_backup is not None and isinstance(redacted_data, dict):
             redacted_data["images"] = images_backup
         row = EventRow(

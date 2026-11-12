@@ -29,10 +29,18 @@ _SENSITIVE_QUERY_PARAMS = frozenset(
     }
 )
 
-_SECRET_ENV_NAMES = r"(?:API_?KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH)"
+_SECRET_ENV_NAMES = r"(?:API_?KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIALS?|AUTH)"
+# The secret word is a whole part of the name (``GITHUB_TOKEN``,
+# ``OPENAI_API_KEY``, ``AUTH_SECRET``), not a piece of a longer word: code
+# such as ``AUTHORITY_RANK = {...}`` or ``MAX_TOKENS = 4096`` is not a
+# secret.  The spacing around ``=`` is kept as written.
 _ENV_ASSIGN_RE = re.compile(
-    rf"([A-Z0-9_]{{0,50}}{_SECRET_ENV_NAMES}[A-Z0-9_]{{0,50}})\s*=\s*(['\"]?)(\S+)\2"
+    rf"((?<![A-Za-z0-9_])(?:[A-Z0-9]+_)*{_SECRET_ENV_NAMES}(?:_[A-Z0-9]+)*)(?![A-Za-z0-9_])"
+    r"(\s*=\s*)(['\"]?)(\S+)\3"
 )
+# A value that is code, not a literal: ``os.getenv("TOKEN")``,
+# ``settings["api_key"]``, ``{...}`` / ``[...]`` / ``(...)``.
+_CODE_VALUE_RE = re.compile(r"(?:[A-Za-z_][A-Za-z0-9_.]*)?[(\[{]")
 _JSON_KEY_NAMES = (
     r"(?:api_?[Kk]ey|token|secret|password|access_token|refresh_token|"
     r"auth_token|bearer|secret_value|raw_secret|secret_input|key_material)"
@@ -41,7 +49,11 @@ _JSON_FIELD_RE = re.compile(
     rf'("{_JSON_KEY_NAMES}")\s*:\s*"([^"]+)"',
     re.IGNORECASE,
 )
-_AUTH_HEADER_RE = re.compile(r"(Authorization:\s*Bearer\s+)(\S+)", re.IGNORECASE)
+# The token, then any closing punctuation after it ("... Bearer <jwt>)."),
+# which is prose and stays as written.
+_AUTH_HEADER_RE = re.compile(
+    r"(Authorization:\s*Bearer\s+)(\S+?)([).,;:!?'\"]*)(?=\s|$)", re.IGNORECASE,
+)
 _TELEGRAM_RE = re.compile(r"(bot)?(\d{8,}):([-A-Za-z0-9_]{30,})")
 _PRIVATE_KEY_RE = re.compile(
     r"-----BEGIN[A-Z ]*PRIVATE KEY-----[\s\S]*?-----END[A-Z ]*PRIVATE KEY-----"
@@ -122,10 +134,52 @@ def mask_secret(
     return f"{value[:head]}...{value[-tail:]}"
 
 
+# A template placeholder where a secret would go is not a secret: documents,
+# code and answers name them ("Bearer <jwt>", "API_KEY=<your-key>",
+# "Bearer $TOKEN", "TOKEN=${TOKEN}", "YOUR_API_KEY").  Masking one changes
+# what the text says (a stored "Bearer ***" read as a markdown divider) and
+# protects nothing.  The shapes are narrow on purpose: a bracketed or
+# $-prefixed NAME of letters, underscores, hyphens or spaces with no digit
+# (random tokens carry digits), a your- name, or pure filler.
+_PLACEHOLDER_RE = re.compile(
+    r"(?:"
+    r"<[A-Za-z][A-Za-z _-]{0,39}>"
+    r"|\{\{?\s*[A-Za-z][A-Za-z _.-]{0,39}\s*\}?\}"
+    r"|\$\{[A-Za-z][A-Za-z_]{0,39}\}"
+    r"|\$[A-Z][A-Z_]{0,39}"
+    r"|\[[A-Za-z][A-Za-z _-]{0,39}\]"
+    r"|your[_-][A-Za-z_-]{1,40}"
+    r"|x{3,}|X{3,}|\*{3,}|\.{3}|\u2026"
+    r")",
+    re.IGNORECASE,
+)
+_PLACEHOLDER_CASED_RE = re.compile(r"\$[A-Z][A-Z_]{0,39}")
+
+
+def _is_placeholder(value: str) -> bool:
+    """*value* is a template placeholder, not a secret (see ``_PLACEHOLDER_RE``)."""
+    if not _PLACEHOLDER_RE.fullmatch(value):
+        return False
+    # ``$NAME`` counts only in capitals (an environment variable), so a
+    # "$ecret"-style password is still masked.
+    if value.startswith("$") and not value.startswith("${"):
+        return bool(_PLACEHOLDER_CASED_RE.fullmatch(value))
+    return True
+
+
 def _mask_token(token: str) -> str:
     if not token:
         return "***"
+    if _is_placeholder(token):
+        return token
     return mask_secret(token, head=6, tail=4, floor=18)
+
+
+def _mask_env_assignment(m: re.Match[str]) -> str:
+    name, eq, quote, value = m.group(1), m.group(2), m.group(3), m.group(4)
+    if _CODE_VALUE_RE.match(value):
+        return m.group(0)
+    return f"{name}{eq}{quote}{_mask_token(value)}{quote}"
 
 
 def _redact_query_string(query: str) -> str:
@@ -165,11 +219,19 @@ def redact_sensitive_text(
     *,
     force: bool = True,
     code_file: bool = False,
+    phones: bool = True,
 ) -> str | None:
     """Redact known secret shapes from arbitrary text.
 
     Redaction is force-on by default because this function is used at
     persistence and stderr boundaries where tenant secrets must not leak.
+
+    *phones* masks phone numbers too.  A phone number is personal data,
+    not a secret: logs mask it (the default), but the session's events --
+    the conversation the user reads back and the model's context is rebuilt
+    from -- keep it as written (``phones=False``), or a number the user or a
+    tool gave would reach the model, its tool calls and its answer as
+    ``+919****3210``.
     """
     if text is None:
         return None
@@ -183,16 +245,13 @@ def redact_sensitive_text(
     text = _PREFIX_RE.sub(lambda m: _mask_token(m.group(1)), text)
 
     if not code_file:
-        text = _ENV_ASSIGN_RE.sub(
-            lambda m: f"{m.group(1)}={m.group(2)}{_mask_token(m.group(3))}{m.group(2)}",
-            text,
-        )
+        text = _ENV_ASSIGN_RE.sub(_mask_env_assignment, text)
         text = _JSON_FIELD_RE.sub(
             lambda m: f'{m.group(1)}: "{_mask_token(m.group(2))}"',
             text,
         )
 
-    text = _AUTH_HEADER_RE.sub(lambda m: m.group(1) + _mask_token(m.group(2)), text)
+    text = _AUTH_HEADER_RE.sub(lambda m: m.group(1) + _mask_token(m.group(2)) + m.group(3), text)
     text = _TELEGRAM_RE.sub(lambda m: f"{m.group(1) or ''}{m.group(2)}:***", text)
     text = _PRIVATE_KEY_RE.sub("[REDACTED PRIVATE KEY]", text)
     text = _DB_CONNSTR_RE.sub(lambda m: f"{m.group(1)}***{m.group(3)}", text)
@@ -204,10 +263,11 @@ def redact_sensitive_text(
         lambda m: f"<@{'!' if '!' in m.group(0) else ''}***>",
         text,
     )
-    text = _SIGNAL_PHONE_RE.sub(
-        lambda m: m.group(1)[:4] + "****" + m.group(1)[-4:],
-        text,
-    )
+    if phones:
+        text = _SIGNAL_PHONE_RE.sub(
+            lambda m: m.group(1)[:4] + "****" + m.group(1)[-4:],
+            text,
+        )
     return text
 
 
@@ -297,23 +357,24 @@ def typed_texts(tool_calls: list[dict[str, Any]]) -> list[str]:
     return sorted(found, key=len, reverse=True)
 
 
-def redact_sensitive_data(data: Any) -> Any:
+def redact_sensitive_data(data: Any, *, phones: bool = True) -> Any:
     """Return a redacted copy of nested event/log data.
 
     Typed text is masked in any tool call found at any depth: a tool.call's
     ``arguments``, an llm.response's ``tool_calls[].function`` and the
     messages a compaction keeps all name the tool beside its arguments.
+    *phones* as in :func:`redact_sensitive_text`.
     """
     if isinstance(data, str):
-        return redact_sensitive_text(data)
+        return redact_sensitive_text(data, phones=phones)
     if isinstance(data, Mapping):
-        redacted = {key: redact_sensitive_data(value) for key, value in data.items()}
+        redacted = {key: redact_sensitive_data(value, phones=phones) for key, value in data.items()}
         if "arguments" in redacted:
             name = data.get("name") or data.get("tool_name")
             redacted["arguments"] = mask_tool_arguments(name, redacted["arguments"])
         return redacted
     if isinstance(data, list):
-        return [redact_sensitive_data(value) for value in data]
+        return [redact_sensitive_data(value, phones=phones) for value in data]
     if isinstance(data, tuple):
-        return tuple(redact_sensitive_data(value) for value in data)
+        return tuple(redact_sensitive_data(value, phones=phones) for value in data)
     return copy.deepcopy(data)

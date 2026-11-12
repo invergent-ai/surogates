@@ -95,3 +95,29 @@ async def test_typed_text_is_masked_in_every_stored_copy_of_the_call(
     events = await session_store.get_events(session.id)
     assert password not in json.dumps([event.data for event in events])
     assert events[1].data["arguments"] == {"ref": "@e5", "text": "\u2022" * len(password)}
+
+
+async def test_session_store_keeps_phone_numbers_and_placeholders_as_written(
+    session_store,
+    session_factory,
+) -> None:
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    session = await session_store.create_session(
+        user_id=user_id,
+        org_id=org_id,
+        agent_id="test-agent",
+    )
+    user_text = "Create the user Asha, phone +919876543210."
+    reply = "Call it with `Authorization: Bearer <jwt>`)."
+
+    await session_store.emit_event(session.id, EventType.USER_MESSAGE, {"content": user_text})
+    await session_store.emit_event(
+        session.id,
+        EventType.LLM_RESPONSE,
+        {"message": {"role": "assistant", "content": reply}},
+    )
+
+    events = await session_store.get_events(session.id)
+    assert events[0].data["content"] == user_text
+    assert events[1].data["message"]["content"] == reply
