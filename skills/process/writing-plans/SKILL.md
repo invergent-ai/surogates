@@ -5,6 +5,7 @@ version: 2.0.0
 author: Surogate Agent (adapted from obra/superpowers)
 license: MIT
 tags: [process, planning, implementation]
+optional_tools: [agent]
 ---
 
 # Writing Plans

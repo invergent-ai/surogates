@@ -2,6 +2,7 @@
 name: pdf
 description: Create PDFs, or merge, split, watermark, encrypt/decrypt, extract tables/images from, or OCR existing ones.
 license: Proprietary. LICENSE.txt has complete terms
+optional_tools: [office_edit]
 ---
 
 # PDF Processing Guide

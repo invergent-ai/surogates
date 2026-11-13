@@ -2,6 +2,7 @@
 name: pdf-reading
 description: Read a PDF when read_file fails or returns garbled text, or for figures, layout, images, attachments or form-field values.
 license: Proprietary. LICENSE.txt has complete terms
+optional_tools: [office_edit]
 ---
 
 # PDF Processing Guide

@@ -5,6 +5,7 @@ version: 1.0.0
 author: Surogate Agent (adapted from obra/superpowers)
 license: MIT
 tags: [process, implementation, execution]
+optional_tools: [agent]
 ---
 
 # Executing Plans

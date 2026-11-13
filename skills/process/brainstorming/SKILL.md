@@ -5,6 +5,7 @@ version: 1.0.0
 author: Surogate Agent (adapted from obra/superpowers)
 license: MIT
 tags: [process, design, brainstorming]
+optional_tools: [ask_user_question, agent]
 ---
 
 # Brainstorming Ideas Into Designs

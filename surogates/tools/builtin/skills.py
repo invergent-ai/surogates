@@ -20,7 +20,13 @@ from surogates.devices.workspace import DeviceOperationError
 from surogates.storage.skill_staging import stage_in_folder, staging_preamble
 from surogates.tools.builtin.skill_validation import GRAPH_FILE, is_graph_file
 from surogates.tools.registry import ToolRegistry, ToolSchema
-from surogates.tools.skill_visibility import fallback_hidden, fallback_refusal, offered_fallback_tools
+from surogates.tools.skill_visibility import (
+    fallback_hidden,
+    fallback_refusal,
+    offered_fallback_tools,
+    skill_scope,
+    unavailable_tool_refusal,
+)
 from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
 from surogates.workstreams import master_skill_refusal, skills_left_out
 
@@ -246,7 +252,7 @@ async def _skills_list_handler(
     if api_client is not None:
         category = arguments.get("category")
         return await api_client.list_skills(
-            category, leave_out=skills_left_out(kwargs.get("session_config")),
+            category, leave_out=skills_left_out(kwargs.get("session_config")) | skill_scope.get().hidden,
         )
 
     tenant = kwargs.get("tenant")
@@ -255,6 +261,7 @@ async def _skills_list_handler(
 
     skills = await _load_all_skills(**kwargs)
     offered = offered_fallback_tools(kwargs.get("channel"), kwargs.get("session_config"))
+    hidden = skill_scope.get().hidden
 
     category_filter = arguments.get("category")
 
@@ -264,6 +271,9 @@ async def _skills_list_handler(
             continue
         # A skill standing in for tools this chat is sent: the api's list leaves it out too.
         if fallback_hidden(getattr(s, "fallback_for_tools", None) or (), offered):
+            continue
+        # One that names a tool this session is not sent (``skill_scope``).
+        if s.name in hidden:
             continue
         # Experts are not skills you read -- they are models you
         # consult, and their SKILL.md is the *expert's* system prompt.
@@ -441,6 +451,11 @@ async def _skill_view_handler(
     if name in skills_left_out(kwargs.get("session_config")):
         return json.dumps(
             {"success": False, "error": master_skill_refusal(name)},
+            ensure_ascii=False,
+        )
+    if name in skill_scope.get().hidden:
+        return json.dumps(
+            {"success": False, "error": unavailable_tool_refusal(name)},
             ensure_ascii=False,
         )
 

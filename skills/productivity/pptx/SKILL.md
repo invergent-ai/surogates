@@ -3,6 +3,7 @@ name: pptx
 description: Create, edit or read PowerPoint decks (.pptx/.potx), from scratch or from a template.
 fallback_for_tools: [office_edit]
 license: Proprietary. LICENSE.txt has complete terms
+optional_tools: [agent]
 ---
 
 # PPTX creation, editing, and analysis

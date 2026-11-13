@@ -132,6 +132,7 @@ from surogates.tools.builtin.case_item import item_awaiting_report
 from surogates.tools.builtin.case_step import step_awaiting_report, step_given_back
 from surogates.tools.builtin.send_form import SENT as FORM_SENT
 from surogates.tools.builtin.expert_loop import ExpertScope, expert_scope
+from surogates.tools.skill_visibility import SkillScope, needs_unavailable_tool, skill_scope
 from surogates.tools.builtin.media_gen import unwired_media_tools
 from surogates.keel.items import ITEM_NUDGE, is_case_item, item_contract_of
 from surogates.tools.builtin.ask_user_question import DISMISSED, TIMED_OUT
@@ -1958,6 +1959,27 @@ class AgentHarness(
             withheld |= {name for name in names if not gate.runs_unasked(name)}
         expert_scope.set(ExpertScope(withheld=frozenset(withheld), gate=gate))
 
+    def _scope_skills(self, session: Session) -> None:
+        """Have ``skills_list`` and ``skill_view`` leave out, for the model's
+        calls this turn, every skill the prompt's skill index leaves out for
+        naming a tool the session is never sent: the same set
+        (``_narrow_prompt_tools``, once per session and wake), so the index
+        and the tools never disagree (``skill_visibility.skill_scope``).
+
+        Per-turn narrowing after it is not followed, as the prompt does not
+        follow it: a tool ``drop_unusable_tools`` takes off a request (the
+        office tools without a document pane, unwired media) leaves the
+        skills naming it, which is what keeps the pdf skills in every chat."""
+        self._narrow_prompt_tools(session)
+        unavailable = getattr(self._prompt, "unavailable_tools", frozenset())
+        skills = getattr(self._prompt, "skills", None) or ()
+        hidden = frozenset(
+            getattr(skill, "name", None) or (skill.get("name") if isinstance(skill, dict) else None)
+            for skill in skills
+            if needs_unavailable_tool(skill, unavailable)
+        ) - {None}
+        skill_scope.set(SkillScope(hidden=hidden))
+
     def _scope_experts_before_the_turn(self, session: Session) -> None:
         """``_withhold_from_experts`` for an expert run before the turn's tool
         list exists (``/<expert>``), from the same filter and gate."""
@@ -2700,6 +2722,9 @@ class AgentHarness(
                 # An expert consulted here gets only tools the session could
                 # be sent, as one its model consults does.
                 self._scope_experts_before_the_turn(session)
+                # A user's /<skill> is the user's choice: no skill is hidden
+                # from it (nor by an earlier attempt's scope in this task).
+                skill_scope.set(SkillScope())
                 expansion = await expand_slash_skill(
                     text=last_user_content,
                     tools=self._tools,
@@ -3260,6 +3285,9 @@ class AgentHarness(
         # A consulted expert's model is not sent them, nor what the filter
         # and the policy took away.
         self._withhold_from_experts(usable, tool_filter)
+        # Nor do the skill tools show a skill naming a tool the session is
+        # never sent: the skill index's set, the same for both.
+        self._scope_skills(session)
         tool_schemas = describe_for_device(tool_schemas, session.config)
         tool_schemas = describe_for_project(tool_schemas, session.config)
         tool_schemas = describe_for_conversation(

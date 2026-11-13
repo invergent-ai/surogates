@@ -1120,6 +1120,14 @@ class ContextReplayMixin:
             offered = self._tool_filter_for_session(session)
             if offered is not None:
                 restrict(offered)
+                # The skills naming a tool the session is never sent: left out
+                # of the index here, and of the skill tools (``_scope_skills``).
+                # A tool its policy refuses by name is never sent either.
+                unavailable = getattr(self._prompt, "set_unavailable_tools", None)
+                if unavailable is not None:
+                    gate = getattr(self, "_governance_gate", None)
+                    sent = set(offered) if gate is None else {name for name in offered if gate.offers(name)}
+                    unavailable(set(self._tools.tool_names) - sent)
             self._prompt_narrowed_for = session.id
 
     async def _build_system_prompt(self, session: Session) -> str:

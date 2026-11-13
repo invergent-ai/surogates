@@ -1,6 +1,7 @@
 ---
 name: schedule
 description: Create, change, pause or cancel a prompt that runs on a schedule ("every weekday at 8:30", "remind me at noon").
+optional_tools: [ask_user_question]
 ---
 
 You make the schedule yourself with `cron_create`, once the user has approved it. Never ask the user to type a command or a cron expression. Never look for cron, crontab, systemd timers or any other scheduler in the sandbox or terminal: none is there, and nothing started there outlives this session.
