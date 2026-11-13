@@ -127,7 +127,7 @@ async def test_a_background_agent_returns_its_id_at_once_and_its_report_wakes_it
     [child] = await children(chats, chat)
     assert started["agent_id"] == str(child.id) and started["status"] == "running"
     assert child.channel == "delegation" and "subagent_parity" not in child.config
-    assert child.config[DISPATCH_KEY] == {
+    assert {k: v for k, v in child.config[DISPATCH_KEY].items() if k != "brief"} == {
         "description": "Count open items", "mode": "background", "fork": False,
         "tool_call_id": "call_agent", "parent": str(chat),
     }
@@ -285,6 +285,21 @@ async def test_a_session_runs_at_most_five_agents_in_the_background(chats, monke
     assert [s.get("status") for s in started[:2]] == ["running", "running"]
     assert "2 of your agents already run in the background" in started[2]["error"]
     assert len(await children(chats, chat)) == 2
+
+
+async def test_an_agent_with_the_brief_of_one_still_running_is_not_started_again(chats):  # noqa: F811
+    # A model that means to wait for a report can repeat its last call instead: the same agent again, at full cost.
+    chat = await a_chat(chats)
+    chats.replies = [
+        calling("agent", f"call_{i}", description="Generate", prompt="Write numbers.csv.", run_in_background=True)
+        for i in range(2)
+    ] + [_final_response("Started.")]
+    await chats.says(chat, "Start it.")
+    await chats.wake(chat)
+    first, second = [json.loads(await tool_result(chats, chat, f"call_{i}")) for i in range(2)]
+    assert first.get("status") == "running"
+    assert first["agent_id"] in second["error"] and "already running" in second["error"], second
+    assert len(await children(chats, chat)) == 1
 
 
 async def test_a_background_agent_that_ends_early_says_why_and_closes_its_run_in_the_parents_log(chats):  # noqa: F811

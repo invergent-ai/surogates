@@ -658,9 +658,10 @@ class OutcomeCommandMixin:
         session: Session,
         latest_response: str,
         model: str,
-    ) -> None:
+    ) -> str | None:
         """Bind self's session_factory / store / LLM and dispatch to the
-        module-level :func:`_maybe_run_mission_evaluator`.
+        module-level :func:`_maybe_run_mission_evaluator`, returning the
+        continuation prompt it wrote, if any.
 
         Kept as an instance method so it can pull the configured eval
         model and LLM client; the actual logic (trigger detection,
@@ -669,7 +670,7 @@ class OutcomeCommandMixin:
         constructing a full harness.
         """
         if self._session_factory is None:
-            return
+            return None
         from surogates.missions.store import MissionStore
 
         settings = self._outcome_settings()
@@ -677,7 +678,7 @@ class OutcomeCommandMixin:
         judge = _build_mission_judge(
             llm_client=self._llm, eval_model=eval_model,
         )
-        await _maybe_run_mission_evaluator(
+        return await _maybe_run_mission_evaluator(
             session_id=session.id,
             coordinator_last_response=latest_response,
             session_store=self._store,
@@ -702,6 +703,23 @@ class OutcomeCommandMixin:
                 settings, "evaluator_response_max_chars", 16384,
             ),
         )
+        # Free-form first, with room to reason: a reasoning model held to a
+        # schema answers without reasoning, and its verdict copies the form.
+        try:
+            response = await self._llm.chat.completions.create(
+                model=eval_model,
+                messages=messages,
+                temperature=0,
+                max_tokens=EVALUATOR_MAX_TOKENS,
+            )
+            evaluation = parse_outcome_evaluation(self._extract_chat_message_content(response))
+            error = None
+        except Exception as exc:
+            logger.warning("Outcome evaluator failed for %s: %s", state.id, exc)
+            evaluation, error = None, exc
+        if evaluation is not None and not evaluation.parse_failed:
+            return evaluation
+        # No verdict (a model that thought past its allowance answers nothing): the structured attempt still may.
         try:
             verdict = await generate_structured(
                 llm_client=self._llm,
@@ -712,36 +730,17 @@ class OutcomeCommandMixin:
                 temperature=0,
             )
         except Exception as exc:
-            logger.debug(
-                "Outcome evaluator structured generation failed for %s: %r",
-                state.id,
-                exc,
-            )
+            logger.debug("Outcome evaluator structured generation failed for %s: %r", state.id, exc)
             verdict = None
         if verdict is not None:
             return parse_outcome_evaluation(verdict.model_dump_json())
-
-        # A provider that cannot constrain its output still answers free-form.
-        try:
-            response = await self._llm.chat.completions.create(
-                model=eval_model,
-                messages=messages,
-                temperature=0,
-                max_tokens=EVALUATOR_MAX_TOKENS,
-            )
-            raw = self._extract_chat_message_content(response)
-        except Exception as exc:
-            logger.warning(
-                "Outcome evaluator failed for %s: %s",
-                state.id,
-                exc,
-            )
-            raw = json.dumps({
-                "result": "needs_revision",
-                "explanation": f"evaluator error: {type(exc).__name__}",
-                "feedback": "Continue working toward the outcome.",
-            })
-        return parse_outcome_evaluation(raw)
+        if evaluation is not None:
+            return evaluation
+        return parse_outcome_evaluation(json.dumps({
+            "result": "needs_revision",
+            "explanation": f"evaluator error: {type(error).__name__}",
+            "feedback": "Continue working toward the outcome.",
+        }))
 
     async def _maybe_continue_outcome(
         self,

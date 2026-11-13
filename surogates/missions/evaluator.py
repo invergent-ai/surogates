@@ -22,6 +22,7 @@ from uuid import UUID
 
 from sqlalchemy import select
 
+from surogates.harness.outcomes import today_line
 from surogates.session.events import EventType
 
 logger = logging.getLogger(__name__)
@@ -126,8 +127,19 @@ async def should_evaluate(
 # Caps on prompt content so a chatty coordinator response or a huge
 # completed-agents block can't blow past the judge's context window.
 _RESPONSE_MAX_CHARS: int = 16_384
-_RESULT_MAX_CHARS: int = 400
+#: How much of each agent's report the judge reads. A report over it keeps its
+#: opening and its end, where a verifier puts what it measured.
+_RESULT_MAX_CHARS: int = 4_000
 _AGENTS_BLOCK_LIMIT: int = 20
+
+
+def _excerpt(report: str) -> str:
+    """*report* as the judge reads it: whole, or its opening and its end around a cut."""
+    if len(report) <= _RESULT_MAX_CHARS:
+        return report
+    head = _RESULT_MAX_CHARS // 4
+    return f"{report[:head]}\n[...]\n{report[head - _RESULT_MAX_CHARS:]}"
+
 
 # Applied rubric amendments allowed per mission. Without a ceiling the
 # mechanism inverts: each amendment moves the criteria toward what the work
@@ -143,11 +155,10 @@ _SYSTEM_PROMPT = dedent("""\
     in the completed mission agents' reports demonstrates the rubric was
     met (typically the report of an agent that verified the work).
 
-    Respond with a single JSON object, no prose around it:
-
-        {"explanation": "<1-3 sentences>",
-         "feedback": "<actionable feedback for the coordinator if needs_revision; empty otherwise>",
-         "result": "satisfied" | "needs_revision" | "blocked" | "failed"}
+    Respond with a single JSON object, no prose around it, with the keys
+    explanation (why, in your own words), feedback (what the coordinator
+    should do next if needs_revision, otherwise empty) and result (one of
+    satisfied, needs_revision, blocked, failed).
 
     Verdict guidance:
     - "satisfied": evidence backs rubric completion.
@@ -170,10 +181,9 @@ _SYSTEM_PROMPT = dedent("""\
     If the completed agents' reports show the rubric is unreachable *as
     written* -- it asks for an artifact the work has demonstrated cannot
     exist, contradicts itself, or names something that was never part of
-    the mission description -- then also return:
-
-        "proposed_rubric": "<a complete replacement rubric>",
-        "refinement_evidence": "<the agent report that shows this>"
+    the mission description -- then also return proposed_rubric (a
+    complete replacement rubric) and refinement_evidence (the agent report
+    that shows this).
 
     Leave both empty in every other case. A rubric the work has not yet
     satisfied is `needs_revision`, not a proposal. Propose only a rubric
@@ -227,7 +237,7 @@ async def build_evaluator_prompt(
             return "(none)"
         return "\n".join(
             f"- A{str(a.session_id)[:8]} ({a.agent_type or 'agent'}) task={a.description!r}: "
-            f"report={reports.get(a.session_id, '')[:_RESULT_MAX_CHARS]!r}"
+            f"report={_excerpt(reports.get(a.session_id, ''))!r}"
             for a in rows
         )
 
@@ -258,8 +268,11 @@ async def build_evaluator_prompt(
         {history_block}
         # Verdict
 
+        {today}
+
         Return JSON only.
     """).format(
+        today=today_line(),
         rubric=mission.rubric,
         response=response_excerpt or "(empty)",
         n_done=len(completed_rows),
@@ -446,8 +459,11 @@ async def apply_verdict(
     session_store: Any,
     mission_store: Any,
     trigger: str,
-) -> None:
+) -> str | None:
     """Record the evaluator's verdict and act on it.
+
+    Returns the continuation prompt of a ``needs_revision`` that goes on, for
+    the coordinator's turn under way to read: nothing else wakes it for it.
 
     Writes the ``last_evaluation_*`` fields, emits the
     ``mission.evaluation.end`` event, then dispatches by verdict:
@@ -547,3 +563,4 @@ async def apply_verdict(
         coordinator_session_id, EventType.USER_MESSAGE,
         {"content": continuation, "synthetic": "mission_continuation"},
     )
+    return continuation

@@ -685,65 +685,22 @@ async def test_outcome_continuation_does_not_complete_session(
 
 
 @pytest.mark.asyncio
-async def test_evaluator_verdict_comes_from_structured_generation(
+async def test_the_goal_evaluator_reasons_free_form_first(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The feedback reaches the agent, and the model gets room to think."""
-    from surogates.harness import loop_outcome_commands
-    from surogates.harness.outcomes import (
-        EVALUATOR_MAX_TOKENS,
-        OutcomeState,
-        OutcomeVerdict,
-    )
+    """A structured answer on a reasoning model comes without reasoning: the verdict is asked for free-form,
+    with room to think and today's date, and the feedback reaches the agent."""
+    from datetime import datetime, timezone
 
-    seen: dict[str, Any] = {}
-
-    async def fake_generate(**kwargs: Any) -> OutcomeVerdict:
-        seen.update(kwargs)
-        return OutcomeVerdict(
-            explanation="No links on any item",
-            feedback="Add a link to every item",
-            result="needs_revision",
-        )
-
-    monkeypatch.setattr(loop_outcome_commands, "generate_structured", fake_generate)
-    llm = AsyncMock()
-    harness = _make_harness(FakeStore(), llm_client=llm)
-
-    evaluation = await harness._evaluate_outcome(
-        state=OutcomeState.from_config(_active_outcome_config()),
-        latest_response="The report.",
-        model="m",
-    )
-
-    assert evaluation.result == "needs_revision"
-    assert evaluation.feedback == "Add a link to every item"
-    assert evaluation.parse_failed is False
-    assert seen["output_model"] is OutcomeVerdict
-    assert seen["max_tokens"] == EVALUATOR_MAX_TOKENS
-    llm.chat.completions.create.assert_not_called()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("structured", ["none", "raises"])
-async def test_evaluator_falls_back_to_a_free_form_answer(
-    monkeypatch: pytest.MonkeyPatch,
-    structured: str,
-) -> None:
     from surogates.harness import loop_outcome_commands
     from surogates.harness.outcomes import EVALUATOR_MAX_TOKENS, OutcomeState
 
-    async def fake_generate(**_kwargs: Any) -> None:
-        if structured == "raises":
-            raise RuntimeError("provider refused the schema")
-
-    monkeypatch.setattr(loop_outcome_commands, "generate_structured", fake_generate)
+    structured = AsyncMock(return_value=None)
+    monkeypatch.setattr(loop_outcome_commands, "generate_structured", structured)
     llm = AsyncMock()
-    llm.chat.completions.create.return_value = MagicMock(choices=[MagicMock(
-        message=MagicMock(
-            content='{"explanation":"Met","feedback":"","result":"satisfied"}',
-        ),
-    )])
+    llm.chat.completions.create.return_value = MagicMock(choices=[MagicMock(message=MagicMock(
+        content='{"explanation":"No links on any item","feedback":"Add a link to every item","result":"needs_revision"}',
+    ))])
     harness = _make_harness(FakeStore(), llm_client=llm)
 
     evaluation = await harness._evaluate_outcome(
@@ -752,9 +709,41 @@ async def test_evaluator_falls_back_to_a_free_form_answer(
         model="m",
     )
 
-    assert evaluation.result == "satisfied"
-    assert evaluation.parse_failed is False
-    assert llm.chat.completions.create.call_args.kwargs["max_tokens"] == EVALUATOR_MAX_TOKENS
+    assert evaluation.result == "needs_revision" and evaluation.parse_failed is False
+    assert evaluation.feedback == "Add a link to every item"
+    structured.assert_not_awaited()
+    asked = llm.chat.completions.create.call_args.kwargs
+    assert asked["max_tokens"] == EVALUATOR_MAX_TOKENS
+    assert datetime.now(timezone.utc).date().isoformat() in asked["messages"][-1]["content"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("free_form", ["empty", "raises"])
+async def test_the_goal_evaluator_falls_back_to_a_structured_answer(
+    monkeypatch: pytest.MonkeyPatch,
+    free_form: str,
+) -> None:
+    from surogates.harness import loop_outcome_commands
+    from surogates.harness.outcomes import OutcomeState, OutcomeVerdict
+
+    async def fake_generate(**_kwargs: Any) -> OutcomeVerdict:
+        return OutcomeVerdict(explanation="Met", feedback="", result="satisfied")
+
+    monkeypatch.setattr(loop_outcome_commands, "generate_structured", fake_generate)
+    llm = AsyncMock()
+    if free_form == "raises":
+        llm.chat.completions.create.side_effect = RuntimeError("provider down")
+    else:
+        llm.chat.completions.create.return_value = MagicMock(choices=[MagicMock(message=MagicMock(content=""))])
+    harness = _make_harness(FakeStore(), llm_client=llm)
+
+    evaluation = await harness._evaluate_outcome(
+        state=OutcomeState.from_config(_active_outcome_config()),
+        latest_response="The report.",
+        model="m",
+    )
+
+    assert evaluation.result == "satisfied" and evaluation.parse_failed is False
 
 
 NO_REASON_VERDICTS = [
@@ -837,12 +826,11 @@ def test_verdict_reasons_come_before_the_result() -> None:
 
 
 @pytest.mark.asyncio
-async def test_mission_judge_retries_free_form_when_the_verdict_has_no_reason() -> None:
+async def test_the_mission_judge_reasons_free_form_first() -> None:
     from surogates.harness.loop_mission_evaluator import _build_mission_judge
+    from surogates.harness.outcomes import EVALUATOR_MAX_TOKENS
 
-    async def no_usable_verdict(**_kwargs: Any) -> None:
-        return None
-
+    structured = AsyncMock(return_value=None)
     llm = AsyncMock()
     llm.chat.completions.create.return_value = MagicMock(choices=[MagicMock(
         message=MagicMock(
@@ -850,14 +838,30 @@ async def test_mission_judge_retries_free_form_when_the_verdict_has_no_reason() 
             reasoning_content=None,
         ),
     )])
-    judge = _build_mission_judge(
-        llm_client=llm, eval_model="m", structured_generator=no_usable_verdict,
-    )
+    judge = _build_mission_judge(llm_client=llm, eval_model="m", structured_generator=structured)
 
     verdict = await judge("system", "user")
 
-    assert verdict["result"] == "satisfied"
-    assert verdict["explanation"] == "Every link opened"
+    assert verdict["result"] == "satisfied" and verdict["explanation"] == "Every link opened"
+    structured.assert_not_awaited()
+    assert llm.chat.completions.create.call_args.kwargs["max_tokens"] == EVALUATOR_MAX_TOKENS
+
+
+@pytest.mark.asyncio
+async def test_the_mission_judge_falls_back_to_a_structured_answer() -> None:
+    # A reasoning model that thinks past its allowance answers nothing: the structured attempt still may.
+    from surogates.harness.loop_mission_evaluator import _build_mission_judge, _MissionVerdict
+
+    async def structured(**_kwargs: Any) -> _MissionVerdict:
+        return _MissionVerdict(explanation="The verifier reported a match", result="satisfied")
+
+    llm = AsyncMock()
+    llm.chat.completions.create.return_value = MagicMock(choices=[MagicMock(
+        message=MagicMock(content="", reasoning_content=None),
+    )])
+    judge = _build_mission_judge(llm_client=llm, eval_model="m", structured_generator=structured)
+
+    assert (await judge("system", "user"))["result"] == "satisfied"
 
 
 @pytest.mark.asyncio

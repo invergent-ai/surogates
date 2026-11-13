@@ -302,3 +302,33 @@ async def test_a_stop_hands_the_turns_spend_to_its_teardown(monkeypatch, stopped
     )
     [(args, _)] = harness._abort_iteration_with_pause.await_args_list
     assert (args[0], args[2]) == (session, tracker)
+
+
+@pytest.mark.asyncio
+async def test_a_mission_continuation_is_read_by_the_turn_that_wrote_it(monkeypatch):
+    # The judge's feedback lands as the coordinator's turn ends. Nothing else wakes the coordinator for it,
+    # so the turn reads it and goes on instead of leaving it to the sweeper.
+    store = AsyncMock()
+    store.emit_event = AsyncMock(side_effect=range(100, 300))
+    store.get_events = AsyncMock(return_value=[])
+    store.execute = AsyncMock(return_value=None)
+    harness = _make_loop_harness(session_store=store)
+    harness._maybe_run_mission_evaluator_for_session = AsyncMock(
+        side_effect=["[Continuing toward your mission] the verifier gave no counts", None],
+    )
+    harness._mission_has_pending_work = AsyncMock(side_effect=[True, False])
+    asked: list[list[dict]] = []
+    replies = iter([_final_response("verifier done"), _final_response("started a new verifier")])
+
+    async def fake_call_llm_with_retry(**kwargs):
+        asked.append(list(kwargs["create_kwargs"]["messages"]))
+        return next(replies)
+
+    monkeypatch.setattr("surogates.harness.loop.call_llm_with_retry", fake_call_llm_with_retry)
+    await harness._run_loop(
+        _make_session(), [{"role": "user", "content": "do the task"}], "system",
+        SimpleNamespace(lease_token=uuid4()), all_events=[],
+    )
+    assert len(asked) == 2
+    assert "the verifier gave no counts" in str(asked[1][-1]["content"])
+    assert harness._complete_session.await_count == 1

@@ -4154,8 +4154,9 @@ class AgentHarness(
                 # mission task reached terminal state, or the coordinator
                 # emitted the [[mission-complete]] marker). Failures here
                 # must not break the response path; log and continue.
+                continuation = None
                 try:
-                    await self._maybe_run_mission_evaluator_for_session(
+                    continuation = await self._maybe_run_mission_evaluator_for_session(
                         session=session,
                         latest_response=assistant_message.get("content") or "",
                         model=model_id,
@@ -4180,6 +4181,10 @@ class AgentHarness(
                     # of the answer, and the next turn's request would end on
                     # that answer.
                     followup, steer_cursor = await self._collect_steer_messages(session, steer_cursor)
+                    # The judge's feedback is this turn's to read: no wake follows it.
+                    if continuation:
+                        said = {"role": "user", "content": continuation}
+                        followup = said if followup is None else coalesce_user_messages([said, followup])
                     if followup is not None:
                         messages.append(followup)
                         request = _latest_user_message_text([followup])

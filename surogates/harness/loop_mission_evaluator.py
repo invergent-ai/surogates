@@ -35,9 +35,10 @@ async def _maybe_run_mission_evaluator(
     session_factory: Any,
     mission_store: Any,
     judge: Any,
-) -> None:
+) -> str | None:
     """Run the mission evaluator iff the session has an active mission
-    and a trigger condition fires.
+    and a trigger condition fires, and return the continuation prompt a
+    ``needs_revision`` verdict wrote, if any.
 
     ``judge`` is an async callable ``(system_prompt, user_prompt) -> dict``
     that returns the parsed verdict JSON. Tests inject a stub; production
@@ -132,7 +133,7 @@ async def _maybe_run_mission_evaluator(
         verdict, completed_agents=done, total_agents=total,
     )
 
-    await apply_verdict(
+    return await apply_verdict(
         mission_id=active.id,
         verdict=verdict,
         coordinator_session_id=session_id,
@@ -192,17 +193,15 @@ def _build_mission_judge(
 ) -> Any:
     """Return an async ``(system, user) -> dict`` judge bound to ``llm_client``.
 
-    Prefers ``outlines``-backed structured generation against the
-    :class:`_MissionVerdict` schema so the LLM cannot emit malformed
-    JSON or omit required fields. Falls back to a free-form chat
-    completion with tolerant JSON extraction when structured generation
-    is unavailable (no outlines, provider doesn't support it) — the
-    fallback also reads ``reasoning_content`` for reasoning-mode models
-    (GLM, DeepSeek) that leave ``content`` empty.
+    Asks free-form first, with room to reason: a reasoning model held to a
+    schema answers without reasoning, and its verdict copies the form. Only
+    when that gives no verdict (a model that thought past its allowance
+    answers nothing) does it try ``outlines``-backed structured generation
+    against the :class:`_MissionVerdict` schema.
 
-    A parse / coercion failure raises :class:`MissionJudgeParseError`
-    so :func:`_maybe_run_mission_evaluator` can distinguish parse vs.
-    transport failure and record the right counter.
+    No verdict from either raises :class:`MissionJudgeParseError`, so
+    :func:`_maybe_run_mission_evaluator` can tell a parse failure from a
+    transport failure, which the free-form call raises as it comes.
     """
 
     if structured_generator is None:
@@ -213,31 +212,6 @@ def _build_mission_judge(
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ]
-
-        # Preferred path: constrain the LLM to the verdict schema.
-        # Returns None when outlines isn't available, the provider
-        # isn't supported, or coercion fails — fall through to the
-        # tolerant free-form parser in that case.
-        try:
-            verdict = await structured_generator(
-                llm_client=llm_client,
-                model=eval_model,
-                messages=messages,
-                output_model=_MissionVerdict,
-                max_tokens=EVALUATOR_MAX_TOKENS,
-                temperature=0,
-            )
-        except Exception as exc:
-            logger.debug(
-                "Mission judge structured generation raised %r; "
-                "falling back to free-form JSON parsing",
-                exc,
-            )
-            verdict = None
-        if verdict is not None:
-            return verdict.model_dump()
-
-        # Fallback: free-form completion + tolerant parser.
         resp = await llm_client.chat.completions.create(
             model=eval_model,
             messages=messages,
@@ -245,21 +219,37 @@ def _build_mission_judge(
             max_tokens=EVALUATOR_MAX_TOKENS,
         )
         try:
-            message = resp.choices[0].message
-        except (AttributeError, IndexError) as exc:
-            raise MissionJudgeParseError(
-                f"judge returned an unexpected shape: {exc}",
-            ) from exc
-        raw = next(iter(message_texts(message)), "")
-        if not raw or not str(raw).strip():
-            raise MissionJudgeParseError("judge returned empty content")
-        try:
-            parsed = _parse_judge_json(str(raw))
-            # Validate against the verdict schema so the caller always
-            # sees the documented shape (or a parse error, never a
-            # silently-malformed dict).
-            return _MissionVerdict.model_validate(parsed).model_dump()
-        except ValueError as exc:
-            raise MissionJudgeParseError(str(exc)) from exc
+            return _free_form_verdict(resp)
+        except MissionJudgeParseError as failure:
+            try:
+                verdict = await structured_generator(
+                    llm_client=llm_client,
+                    model=eval_model,
+                    messages=messages,
+                    output_model=_MissionVerdict,
+                    max_tokens=EVALUATOR_MAX_TOKENS,
+                    temperature=0,
+                )
+            except Exception as exc:
+                logger.debug("Mission judge structured generation raised %r", exc)
+                verdict = None
+            if verdict is None:
+                raise failure
+            return verdict.model_dump()
 
     return judge
+
+
+def _free_form_verdict(resp: Any) -> dict[str, Any]:
+    """The verdict a free-form judge response holds, validated; :class:`MissionJudgeParseError` when none."""
+    try:
+        message = resp.choices[0].message
+    except (AttributeError, IndexError) as exc:
+        raise MissionJudgeParseError(f"judge returned an unexpected shape: {exc}") from exc
+    raw = next(iter(message_texts(message)), "")
+    if not raw or not str(raw).strip():
+        raise MissionJudgeParseError("judge returned empty content")
+    try:
+        return _MissionVerdict.model_validate(_parse_judge_json(str(raw))).model_dump()
+    except ValueError as exc:
+        raise MissionJudgeParseError(str(exc)) from exc
