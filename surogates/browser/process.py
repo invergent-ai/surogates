@@ -21,7 +21,7 @@ from surogates.browser.base import (
 logger = logging.getLogger(__name__)
 
 _PORT_CONFLICT_RE = re.compile(
-    r"(port is already allocated|Bind for .* failed)",
+    r"(port is already allocated|Bind for .* failed|failed to bind host port .*address already in use)",
     re.IGNORECASE,
 )
 _MAX_PORT_ATTEMPTS = 25

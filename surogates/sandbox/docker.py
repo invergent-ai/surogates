@@ -35,8 +35,10 @@ logger = logging.getLogger(__name__)
 # fixed in-container port and only the published host port varies.
 _IN_CONTAINER_PORT = 8071
 _WORKSPACE_SENTINEL = "/workspace"
+# A port another process took: older Docker says it is "already allocated", newer that binding it failed as the
+# address is "already in use".
 _PORT_CONFLICT_RE = re.compile(
-    r"(port is already allocated|Bind for .* failed)", re.IGNORECASE,
+    r"(port is already allocated|Bind for .* failed|failed to bind host port .*address already in use)", re.IGNORECASE,
 )
 _MAX_PORT_ATTEMPTS = 25
 
