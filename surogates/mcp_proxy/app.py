@@ -6,12 +6,12 @@ import logging
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from redis.asyncio import Redis
 
 from surogates.audit import AuditStore
 from surogates.db.engine import async_engine_from_settings, async_session_factory
-from surogates.mcp_proxy.config import load_proxy_settings
+from surogates.mcp_proxy.config import McpProxySettings, load_proxy_settings
 from surogates.mcp_proxy.pool import ConnectionPool
 from surogates.tenant.credentials import CredentialVault
 
@@ -52,15 +52,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # fingerprints, which the pool keeps across connections.
     app.state.audit_store = AuditStore(app.state.session_factory)
 
-    # Connection pool.  Scan + audit wired in so every MCP tool
-    # advertised to an agent has a safety scan recorded.
-    pool = ConnectionPool(
-        idle_timeout=settings.idle_connection_timeout,
-        max_per_org=settings.max_connections_per_org,
-        governance_enabled=True,
-        audit_store=app.state.audit_store,
-        scan_wording=settings.mcp_scan_wording,
-    )
+    pool = _connection_pool(settings, app.state.audit_store)
     app.state.pool = pool
     pool.start_eviction_loop()
 
@@ -79,6 +71,30 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await _shutdown_shared_runtime_plumbing_for_proxy(app)
     await app.state.redis.aclose()
     await engine.dispose()
+
+
+def _connection_pool(settings: McpProxySettings, audit_store: AuditStore) -> ConnectionPool:
+    """The proxy's MCP connection pool.
+
+    Scan + audit wired in, so every MCP tool advertised to an agent has a
+    safety scan recorded, unless the deployment switched the scan off
+    (``mcp_governance_enabled``): then it says so at startup (once per
+    worker process), and ``/health`` says ``"mcp_scan": "off"``.
+    """
+    if not settings.mcp_governance_enabled:
+        logger.warning(
+            "MCP Proxy runs without the MCP security scan "
+            "(SUROGATES_MCP_GOVERNANCE_ENABLED=false): tools are advertised "
+            "unscanned, and a definition changed after its approval is not "
+            "blocked. For test and benchmark deployments only.",
+        )
+    return ConnectionPool(
+        idle_timeout=settings.idle_connection_timeout,
+        max_per_org=settings.max_connections_per_org,
+        governance_enabled=settings.mcp_governance_enabled,
+        audit_store=audit_store,
+        scan_wording=settings.mcp_scan_wording,
+    )
 
 
 class _NoOpVault:
@@ -175,7 +191,11 @@ def create_app() -> FastAPI:
 
     # Health check.
     @app.get("/health")
-    async def health():
+    async def health(request: Request):
+        pool = getattr(request.app.state, "pool", None)
+        if pool is not None and not pool.governance_enabled:
+            # Seen by whoever checks the proxy, not only in its startup log.
+            return {"status": "ok", "mcp_scan": "off"}
         return {"status": "ok"}
 
     # MCP proxy routes.

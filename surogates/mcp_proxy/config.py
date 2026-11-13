@@ -47,6 +47,13 @@ class McpProxySettings(BaseSettings):
     # id that looks like base64) and audits the hit; "drop" drops it, as
     # before (SUROGATES_MCP_SCAN_WORDING).
     mcp_scan_wording: Literal["advisory", "drop"] = "advisory"
+    # The MCP security scan of every advertised tool, and the rug-pull check
+    # of a definition changed after its approval (SUROGATES_MCP_GOVERNANCE_ENABLED).
+    # On by default.  Off is for test and benchmark deployments only: tools
+    # are advertised unscanned, none is dropped or blocked, and no
+    # policy.mcp_scan / policy.rug_pull rows are written.  The proxy logs a
+    # WARNING at startup when it is off.
+    mcp_governance_enabled: bool = True
 
     log_level: str = "INFO"
 
