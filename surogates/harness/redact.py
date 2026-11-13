@@ -399,18 +399,83 @@ def typed_texts(tool_calls: list[dict[str, Any]]) -> list[str]:
     return sorted(found, key=len, reverse=True)
 
 
+_JSON_KEY_NAME_RE = re.compile(_JSON_KEY_NAMES, re.IGNORECASE)
+
+
+def _redact_json_value(value: Any, *, phones: bool) -> Any:
+    """*value*, parsed JSON, redacted as :func:`redact_sensitive_text` redacts its text:
+    every string (keys too), and the string value of a secret-named key
+    masked as ``_JSON_FIELD_RE`` masks it."""
+    if isinstance(value, str):
+        return redact_sensitive_text(value, phones=phones)
+    if isinstance(value, list):
+        return [_redact_json_value(item, phones=phones) for item in value]
+    if isinstance(value, dict):
+        out: dict[Any, Any] = {}
+        for key, item in value.items():
+            if isinstance(key, str) and _JSON_KEY_NAME_RE.fullmatch(key) and isinstance(item, str) and item:
+                # Redacted first, then masked, as the text's patterns run in turn.
+                item = _mask_token(redact_sensitive_text(item, phones=phones))
+            new_key = redact_sensitive_text(key, phones=phones) if isinstance(key, str) else key
+            out[new_key] = _redact_json_value(item, phones=phones)
+        return out
+    return value
+
+
+def _redact_arguments_text(text: str, *, phones: bool) -> str:
+    """Tool-call arguments *text* redacted, and still JSON where it was JSON.
+
+    The text is redacted as any text is.  Where that cuts into the JSON's
+    own escapes -- ``Bearer $TOKEN\\"`` masked through its escaped quote --
+    the arguments are no longer JSON, and a history rebuilt from the event
+    sends text an engine refuses.  Then the parsed arguments are redacted
+    value by value and written anew instead, unless that would show anything
+    the text's mask hid (a private key spread over several strings) or could
+    not be stored: then the text's mask stands, and a request sends it as
+    ``{"_raw": ...}`` (:func:`surogates.harness.sanitize.sendable_arguments`).
+    """
+    redacted = redact_sensitive_text(text, phones=phones)
+    if redacted == text:
+        return text
+    try:
+        parsed = json.loads(text)
+    except (ValueError, RecursionError):
+        return redacted  # not JSON to begin with
+    try:
+        json.loads(redacted)
+        return redacted
+    except (ValueError, RecursionError):
+        pass
+    try:
+        out = json.dumps(_redact_json_value(parsed, phones=phones), ensure_ascii=False)
+        out.encode("utf-8")  # a lone surrogate escape decodes to text no store takes
+    except (RecursionError, UnicodeEncodeError, ValueError):
+        return redacted
+    # A private key masked across the text's strings (its BEGIN in one, its
+    # END in another) is seen by no single value: the text's mask stands.
+    if _PRIVATE_KEY_RE.search(out):
+        return redacted
+    return out
+
+
 def redact_sensitive_data(data: Any, *, phones: bool = True) -> Any:
     """Return a redacted copy of nested event/log data.
 
     Typed text is masked in any tool call found at any depth: a tool.call's
     ``arguments``, an llm.response's ``tool_calls[].function`` and the
     messages a compaction keeps all name the tool beside its arguments.
+    Arguments given as JSON text stay JSON (:func:`_redact_arguments_text`).
     *phones* as in :func:`redact_sensitive_text`.
     """
     if isinstance(data, str):
         return redact_sensitive_text(data, phones=phones)
     if isinstance(data, Mapping):
-        redacted = {key: redact_sensitive_data(value, phones=phones) for key, value in data.items()}
+        redacted = {
+            key: _redact_arguments_text(value, phones=phones)
+            if key == "arguments" and isinstance(value, str)
+            else redact_sensitive_data(value, phones=phones)
+            for key, value in data.items()
+        }
         if "arguments" in redacted:
             name = data.get("name") or data.get("tool_name")
             redacted["arguments"] = mask_tool_arguments(name, redacted["arguments"])

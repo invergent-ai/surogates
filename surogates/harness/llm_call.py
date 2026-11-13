@@ -45,6 +45,7 @@ from surogates.harness.sanitize import (
     sanitize_messages,
     sanitize_response_message,
     sanitize_tool_pairs,
+    sendable_tool_arguments,
 )
 from surogates.harness.stream_scrubbers import (
     StreamingContextScrubber,
@@ -62,6 +63,14 @@ if TYPE_CHECKING:
     from surogates.session.store import SessionStore
 
 logger = logging.getLogger(__name__)
+
+
+def _ready_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """*messages* as every request sends them: surrogates cleaned, tool pairs
+    fixed, every call's arguments a JSON object string.  Each history a call
+    sends goes through it, a compressed retry's too."""
+    sanitize_messages(messages)
+    return sendable_tool_arguments(sanitize_tool_pairs(messages))
 
 
 def _stamp_turn_meta(
@@ -684,8 +693,7 @@ async def call_llm_with_retry(
 
     # Pre-call sanitization: clean surrogates and fix orphaned tool pairs.
     if "messages" in create_kwargs:
-        sanitize_messages(create_kwargs["messages"])
-        create_kwargs["messages"] = sanitize_tool_pairs(create_kwargs["messages"])
+        create_kwargs["messages"] = _ready_messages(create_kwargs["messages"])
 
     # Once a fallback provider is in use the guard is stale: it is keyed to
     # the provider we just moved off, and the one now serving us is not the
@@ -815,8 +823,7 @@ async def call_llm_with_retry(
                 attempt,
             )
             if "messages" in create_kwargs:
-                sanitize_messages(create_kwargs["messages"])
-                create_kwargs["messages"] = sanitize_tool_pairs(create_kwargs["messages"])
+                create_kwargs["messages"] = _ready_messages(create_kwargs["messages"])
             if attempt >= MAX_LLM_RETRIES:
                 raise
             continue
@@ -938,7 +945,7 @@ async def call_llm_with_retry(
                     if compression_attempts <= max_compression_attempts:
                         compressed = await compress_context(api_messages)
                         if compressed is not None:
-                            create_kwargs["messages"] = compressed
+                            create_kwargs["messages"] = _ready_messages(compressed)
                             continue
                     # Fall through to normal 429 handling.
 
@@ -993,7 +1000,7 @@ async def call_llm_with_retry(
                     )
                     compressed = await compress_context(api_messages)
                     if compressed is not None:
-                        create_kwargs["messages"] = compressed
+                        create_kwargs["messages"] = _ready_messages(compressed)
                         continue
                 # Compression exhausted or didn't help.
                 raise
@@ -1089,7 +1096,7 @@ async def call_llm_with_retry(
                     )
                     compressed = await compress_context(api_messages)
                     if compressed is not None:
-                        create_kwargs["messages"] = compressed
+                        create_kwargs["messages"] = _ready_messages(compressed)
                         continue
                 # Compression exhausted or didn't help.
 
