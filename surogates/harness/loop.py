@@ -55,6 +55,7 @@ from surogates.harness.agent_resolver import (
     apply_agent_def_to_session,
     resolve_agent_def,
 )
+from surogates.harness.auxiliary_llm import without_reasoning
 from surogates.harness.connection_health import cleanup_dead_connections
 from surogates.harness.context import NOOP_STRATEGIES
 from surogates.harness.cost_tracker import SessionCostTracker
@@ -5544,8 +5545,13 @@ class AgentHarness(
                 "content": json.dumps(judge_payload, ensure_ascii=False),
             },
         ]
+        # The cheap summary model judges when there is one: the turn
+        # stays open until the judge answers.
+        llm = self._llm
+        if self._summary_client is not None and self._summary_model:
+            llm, model = without_reasoning(self._summary_client), self._summary_model
         structured = await _generate_user_action_rescue_structured(
-            llm_client=self._llm,
+            llm_client=llm,
             model=model,
             messages=judge_messages,
         )
@@ -5554,7 +5560,7 @@ class AgentHarness(
 
         for attempt in range(2):
             try:
-                response = await self._llm.chat.completions.create(
+                response = await llm.chat.completions.create(
                     model=model,
                     messages=judge_messages,
                     temperature=0,

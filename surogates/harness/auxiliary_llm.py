@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -66,3 +67,15 @@ async def create_without_reasoning(client: Any, **request: Any) -> Any:
         if not rejects_reasoning_controls(exc):
             raise
         return await client.chat.completions.create(**request)
+
+
+def without_reasoning(client: Any) -> Any:
+    """A client whose ``chat.completions.create`` goes through ``create_without_reasoning``."""
+
+    async def create(**request: Any) -> Any:
+        return await create_without_reasoning(client, **request)
+
+    return SimpleNamespace(
+        base_url=getattr(client, "base_url", ""),
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create)),
+    )
