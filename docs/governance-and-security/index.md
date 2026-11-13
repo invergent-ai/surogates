@@ -144,7 +144,7 @@ Sensitive values are stored encrypted at rest and never exposed to sandboxes:
 
 ## MCP Security Scanning
 
-Every MCP tool definition is scanned before registration:
+Every MCP tool definition is scanned before registration (unless a test or benchmark deployment sets `SUROGATES_MCP_GOVERNANCE_ENABLED=false`; see [the proxy settings](../mcp-integration/proxy.md#configuration-reference)):
 
 | Threat | What It Catches |
 |---|---|

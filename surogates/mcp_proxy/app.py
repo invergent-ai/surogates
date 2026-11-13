@@ -6,12 +6,12 @@ import logging
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from redis.asyncio import Redis
 
 from surogates.audit import AuditStore
 from surogates.db.engine import async_engine_from_settings, async_session_factory
-from surogates.mcp_proxy.config import load_proxy_settings
+from surogates.mcp_proxy.config import McpProxySettings, load_proxy_settings
 from surogates.mcp_proxy.pool import ConnectionPool
 from surogates.tenant.credentials import CredentialVault
 
@@ -73,12 +73,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await engine.dispose()
 
 
-def _connection_pool(settings, audit_store: AuditStore) -> ConnectionPool:
+def _connection_pool(settings: McpProxySettings, audit_store: AuditStore) -> ConnectionPool:
     """The proxy's MCP connection pool.
 
     Scan + audit wired in, so every MCP tool advertised to an agent has a
     safety scan recorded, unless the deployment switched the scan off
-    (``mcp_governance_enabled``): then it says so once, at startup.
+    (``mcp_governance_enabled``): then it says so at startup (once per
+    worker process), and ``/health`` says ``"mcp_scan": "off"``.
     """
     if not settings.mcp_governance_enabled:
         logger.warning(
@@ -190,7 +191,11 @@ def create_app() -> FastAPI:
 
     # Health check.
     @app.get("/health")
-    async def health():
+    async def health(request: Request):
+        pool = getattr(request.app.state, "pool", None)
+        if pool is not None and not pool.governance_enabled:
+            # Seen by whoever checks the proxy, not only in its startup log.
+            return {"status": "ok", "mcp_scan": "off"}
         return {"status": "ok"}
 
     # MCP proxy routes.

@@ -203,7 +203,7 @@ curl http://localhost:8001/health
 | `SUROGATES_ENCRYPTION_KEY`         | (empty)                | Fernet key for credential vault          |
 | `SUROGATES_IDLE_CONNECTION_TIMEOUT`| `300`                  | Seconds before idle MCP connections close |
 | `SUROGATES_MAX_CONNECTIONS_PER_ORG`| `50`                   | Max concurrent MCP connections per org   |
-| `SUROGATES_MCP_GOVERNANCE_ENABLED` | `true`                 | MCP security scan and rug-pull check of every advertised tool. `false` only for test and benchmark deployments: tools are advertised unscanned, none is dropped or blocked, no `policy.mcp_scan` / `policy.rug_pull` rows are written, and the proxy logs a WARNING at startup |
+| `SUROGATES_MCP_GOVERNANCE_ENABLED` | `true`                 | MCP security scan, rug-pull check and approval caps of every advertised tool. `false` only for test and benchmark deployments, for every tenant of that proxy: tools are advertised unscanned and uncapped, none is dropped or blocked (after a `tools/list_changed` a changed tool is off the list only until its re-list), no `policy.mcp_scan` / `policy.rug_pull` rows are written, each worker process logs a WARNING at startup, and `/health` says `"mcp_scan": "off"`. Read at startup |
 | `SUROGATES_DB_URL`                 | —                      | PostgreSQL connection string             |
 | `SUROGATES_REDIS_URL`             | —                      | Redis connection string                  |
 | `SUROGATES_JWT_SECRET`            | —                      | JWT signing secret                       |

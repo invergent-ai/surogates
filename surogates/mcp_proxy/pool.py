@@ -370,6 +370,11 @@ class ConnectionPool:
     # Lifecycle
     # ------------------------------------------------------------------
 
+    @property
+    def governance_enabled(self) -> bool:
+        """Whether advertised tools are scanned and held to their approval."""
+        return self._governance_enabled
+
     def start_eviction_loop(self) -> None:
         """Start the background idle-eviction loop."""
         if self._eviction_task is None or self._eviction_task.done():

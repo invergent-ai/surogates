@@ -107,7 +107,7 @@ Each row carries `transport` (`stdio` or `http`), `command`/`args`/`env` (stdio)
 
 ## MCP Security Scanning
 
-Every MCP tool definition is scanned before registration. The scanner combines pattern-based checks with the Microsoft AGT `MCPSecurityScanner`.
+Every MCP tool definition is scanned before registration (unless a test or benchmark deployment sets `SUROGATES_MCP_GOVERNANCE_ENABLED=false`; see [the proxy settings](proxy.md#configuration-reference)). The scanner combines pattern-based checks with the Microsoft AGT `MCPSecurityScanner`.
 
 ### Threat Detection
 
