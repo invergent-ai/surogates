@@ -12,11 +12,13 @@ from __future__ import annotations
 
 import json
 import logging
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from surogates.channels.constants import session_queue_priority
 from surogates.config import enqueue_session
+from surogates.harness.agent_news import NEW_FORMAT
 from surogates.session.events import EventType
 
 if TYPE_CHECKING:
@@ -36,7 +38,7 @@ _MAX_LEFT_OUT_NAMED = 200
 
 
 def is_delegated(session: Any) -> bool:
-    """Whether *session* is a ``delegate_task`` helper: its parent waits for it in the tool call that started
+    """Whether *session* is a helper the ``agent`` tool started (the delegation channel): its parent waits for it in the tool call that started
     it, and has its result as that call's result.  Its report says so (``delegated``), and the parent does not
     read it a second time (``loop_context_replay.worker_news``)."""
     return getattr(session, "channel", None) == "delegation"
@@ -77,7 +79,7 @@ async def _parent_priority(session_store: SessionStore, parent_session_id: UUID)
         return 0.0
 
 
-async def notify_parent_of_task_event(
+async def emit_and_wake(
     *,
     session_store: SessionStore,
     parent_session_id: UUID,
@@ -87,18 +89,13 @@ async def notify_parent_of_task_event(
 ) -> None:
     """Emit *event_type* into the parent's log and re-enqueue the parent.
 
-    The task layer's terminal signals (``TASK_BLOCKED``, ``TASK_FAILED``)
-    are emitted from the dispatcher tick or from ``worker_block``, neither
-    of which runs inside the parent's wake.  Emitting alone is not enough:
-    a coordinator that is not already queued has nothing to re-read the
-    event, so the fan-out stalls until an idle nudge fires — or forever,
-    for a plain ``spawn_task`` coordinator that has no nudge path.
+    For news written outside the parent's own wake (a background agent's
+    end, a thread's redo): emitting alone is not enough, since a parent that
+    is not already queued has nothing to re-read the event.
 
-    The parent's own ``org_id``/``agent_id`` select the work queue, not
-    the worker's: a task worker frequently runs a different agent_def
-    than the coordinator that spawned it.  Failing to resolve the parent
-    is logged and swallowed — the event write is the durable part, and
-    the caller is mid-teardown.
+    The parent's own ``org_id``/``agent_id`` select the work queue, not the
+    child's.  Failing to resolve the parent is logged and swallowed — the
+    event write is the durable part, and the caller is mid-teardown.
     """
     try:
         await session_store.emit_event(parent_session_id, event_type, payload)
@@ -128,6 +125,18 @@ async def notify_parent_of_task_event(
         )
 
 
+async def _usage_of(session_store: SessionStore, worker_session_id: UUID, status: str) -> dict[str, Any]:
+    """``{"usage": …}`` for the worker's report, as an agent's notification carries it; empty when it cannot be
+    read: the report goes without it."""
+    from surogates.harness.subagents import _usage
+
+    try:
+        return {"usage": await _usage(session_store, SimpleNamespace(id=worker_session_id), status)}
+    except Exception:
+        logger.debug("No usage for worker %s's report", worker_session_id, exc_info=True)
+        return {}
+
+
 async def notify_parent_on_completion(
     *,
     session_store: SessionStore,
@@ -136,7 +145,6 @@ async def notify_parent_on_completion(
     org_id: str,
     agent_id: str,
     redis: Redis | None = None,
-    task_id: UUID | None = None,
     session_factory: Any | None = None,
     files: list[dict[str, Any]] | None = None,
     landing: dict[str, Any] | None = None,
@@ -151,22 +159,6 @@ async def notify_parent_on_completion(
     can see what the worker produced.  ``agent_id`` is the parent's agent id
     (the child inherits it, so either value works) and selects the
     per-agent work queue.
-
-    ``task_id`` is included in the event payload when this worker session
-    was running for a subagent task (set by the ``spawn_task`` tool or
-    the dispatcher tick).  The coordinator agent uses it to correlate
-    the completion with the ``spawn_task`` call it made earlier; plain
-    ``spawn_worker`` sessions pass ``None`` and the key is omitted.
-
-    When ``task_id`` is set AND ``session_factory`` is provided, the
-    function reads the Task row and overrides the auto-extracted result
-    with ``task.result`` / ``task.result_metadata`` if the worker called
-    the ``worker_complete`` self-tool explicitly.  This keeps the
-    parent's view of "what did the worker produce" consistent with what
-    the worker chose to hand off (rather than the LLM's last response
-    text, which may differ from the explicit summary).  When the worker
-    completed naturally without ``worker_complete``, ``task.result`` is
-    typically ``None`` and we fall back to the extracted LLM response.
 
     A project's thread also reports its ``title``, and the *files* its
     turn's summary named.  A turn that ended early, or whose summary was
@@ -185,7 +177,11 @@ async def notify_parent_on_completion(
     A thread's helper whose hand-back failed reports *unkept*: ``kept``
     false, and ``left``, the files kept apart, which its thread's copy lacks.
 
-    A ``delegate_task`` helper's report is marked *delegated* (``is_delegated``).
+    A helper's report is marked *delegated* (``is_delegated``).
+
+    Every report carries the family's mark (``format``) and, when it can be
+    read, the worker's ``usage``: its parent reads it in the notification
+    frame (``loop_context_replay.worker_note``).
     """
     try:
         from surogates.harness.message_utils import extract_final_response
@@ -197,37 +193,11 @@ async def notify_parent_on_completion(
             "worker_id": str(worker_session_id),
             "result": final_response[:_MAX_RESULT_CHARS],
             **(unkept or {}),
+            "format": NEW_FORMAT,
+            **await _usage_of(session_store, worker_session_id, "completed"),
         }
         if delegated:
             payload["delegated"] = True
-        if task_id is not None:
-            payload["task_id"] = str(task_id)
-            # Override result/metadata with explicit handoff from
-            # worker_complete when the worker called it. Defensive: any
-            # error reading the Task falls through to the LLM-response
-            # default so we never lose the notification.
-            if session_factory is not None:
-                try:
-                    from sqlalchemy import select as _sel
-                    from surogates.db.models import Task as _Task
-
-                    async with session_factory() as _db:
-                        explicit = await _db.scalar(
-                            _sel(_Task).where(_Task.id == task_id)
-                        )
-                        if explicit is not None and explicit.result is not None:
-                            payload["result"] = (
-                                explicit.result[:_MAX_RESULT_CHARS]
-                            )
-                        if explicit is not None and explicit.result_metadata is not None:
-                            payload["metadata"] = explicit.result_metadata
-                except Exception:
-                    logger.warning(
-                        "Failed to read task %s for completion override; "
-                        "falling back to LLM-extracted result",
-                        task_id, exc_info=True,
-                    )
-
         title = await _thread_title(session_factory, worker_session_id)
         if title is not None:
             payload["title"] = title
@@ -291,35 +261,33 @@ async def notify_parent_on_failure(
     agent_id: str,
     error: str,
     redis: Redis | None = None,
-    task_id: UUID | None = None,
     session_factory: Any | None = None,
     not_taken: list[str] | None = None,
     set_aside: dict[str, Any] | None = None,
     delegated: bool = False,
+    title: str | None = None,
 ) -> None:
     """Emit a ``WORKER_FAILED`` event into the parent session and re-enqueue it.
 
     ``agent_id`` selects the per-agent work queue so the parent wakes on the
     same worker that owns its agent.
 
-    ``task_id`` is included in the event payload when this worker session
-    was running for a subagent task; ``None`` for plain spawn_worker.
-
     A project's thread whose failed turn was kept also reports
     *not_taken*, the helpers' files its copy did not take up, as a landing
     reports them; and a thread on the user's computer what its computer set
     aside of its work since its last report, as a completed turn reports it.
+    A thread that never began has no row to read its *title* from: it is given.
     """
     try:
         payload: dict[str, Any] = {
             "worker_id": str(worker_session_id),
             "error": error[:2000],
+            "format": NEW_FORMAT,
+            **await _usage_of(session_store, worker_session_id, "failed"),
         }
         if delegated:
             payload["delegated"] = True
-        if task_id is not None:
-            payload["task_id"] = str(task_id)
-        title = await _thread_title(session_factory, worker_session_id)
+        title = title or await _thread_title(session_factory, worker_session_id)
         if title is not None:
             payload["title"] = title
             if not_taken:

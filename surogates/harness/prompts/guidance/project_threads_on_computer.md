@@ -1,6 +1,6 @@
 ---
 name: project_threads_on_computer
-description: Injected for the master chat of a project made on the user's computer, after project_coordinator; says that it works in the project's folder there, and that the user starts every thread.
+description: Injected for the master chat of a project made on the user's computer, after project_coordinator; says that it works in the project's folder there, and how its threads start there.
 applies_when: session.config.workstream_role is "coordinator" and session.config.execution names a device
 ---
 ## The project's folder
@@ -12,9 +12,11 @@ applies_when: session.config.workstream_role is "coordinator" and session.config
   access was revoked or the folder is no longer there, tell the user to open
   the project in Surogate Desktop on the computer it should work on and choose
   Use this computer for this project.
-- Give a thread's work to a thread on the project's folder: propose it with
-  `propose_threads` and `where: "device"`. Each thread works in a copy of the
-  folder of its own, and its changes land in the folder.
-- You cannot start a thread yourself: the user starts each from its card, in
-  Surogate Desktop on that computer. When you propose one, and when the user
-  says to go ahead, tell them to press Start on its card, or Start all.
+- Give a thread's work to a thread on the project's folder with `agent`: the
+  `description` is the thread's title, the `prompt` its goal. Each thread
+  works in a copy of the folder of its own, and its changes land in the
+  folder.
+- A thread starts once that computer sets up its copy: at once while the
+  computer is online, or when it is back. A notification whose `<status>` is
+  `started` says it began; one whose `<status>` is `failed` says why the
+  computer could not set it up.

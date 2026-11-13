@@ -15,7 +15,7 @@ Load plan, review critically, execute all tasks, report when complete.
 
 **Announce at start:** "I'm using the executing-plans skill to implement this plan."
 
-**Note:** This skill drives task-by-task execution *inline* in the current session. If your platform supports sub-agent dispatch (`delegate_task`, `spawn_worker`), the `subagent-driven-development` skill produces higher-quality results with two-stage review and isolated contexts. Use this skill when sub-agent dispatch is not available or your human partner explicitly chose inline execution.
+**Note:** This skill drives task-by-task execution *inline* in the current session. If your platform supports sub-agents (the `agent` tool), the `subagent-driven-development` skill produces higher-quality results with two-stage review and isolated contexts. Use this skill when sub-agent dispatch is not available or your human partner explicitly chose inline execution.
 
 ## The Process
 

@@ -138,12 +138,8 @@ _ORPHAN_STALE_SECONDS: int = 60
 # mode for restart scenarios.
 _ORPHAN_BOOT_STALE: int = 60
 
-# Subagent task layer tick cadence — promote ``todo`` Tasks whose parents
-# have all completed, finalise ended worker Sessions, and atomically
-# claim ``ready`` Tasks. 5s keeps the wake-after-parent-completion
-# latency tight without burning DB cycles. See
-# ``surogates.tasks.dispatcher.tasks_tick`` for what each tick does.
-_TASKS_TICK_INTERVAL: float = 5.0
+# Idle-mission nudge cadence (``surogates.missions.nudge``).
+_MISSIONS_TICK_INTERVAL: float = 5.0
 
 # A queued wake can race with an already-running harness that still owns
 # the session lease, especially when the user interrupts and immediately
@@ -281,9 +277,7 @@ class Orchestrator:
         poll_timeout: int = 5,
         browser_pool: BrowserPool | None = None,
         session_factory: Any | None = None,
-        tenant_for_task: Callable[[Any], Any] | None = None,
         turn_gate: Any | None = None,
-        file_bundle_cache: Any | None = None,
     ) -> None:
         self.redis = redis_client
         self.session_store = session_store
@@ -293,15 +287,8 @@ class Orchestrator:
         self._queue_key = queue_key
         self._poll_timeout = poll_timeout
         self._browser_pool = browser_pool
-        # Subagent task layer plumbing — both must be set for tasks_tick
-        # to run. When either is None the loop logs a warning at startup
-        # and stays disabled (the orchestrator still serves direct
-        # spawn_worker / chat sessions normally).
+        # The database, for the idle-mission nudge (``_missions_tick_forever``).
         self._session_factory = session_factory
-        self._tenant_for_task = tenant_for_task
-        # Per-agent Hub bundle cache so the tick's task-spawn path can
-        # resolve bundle-delivered sub-agents.
-        self._file_bundle_cache = file_bundle_cache
         # per-tenant TurnConcurrencyGate.  ``None`` in tests →
         # dequeue skips the gate.
         self._turn_gate = turn_gate
@@ -389,22 +376,16 @@ class Orchestrator:
             name="orphan-sweeper",
         )
 
-        # Start the subagent task layer tick.  Disabled when the caller
-        # didn't provide ``session_factory`` and ``tenant_for_task`` —
-        # the orchestrator still serves plain spawn_worker / chat
-        # sessions, just without the durable Task abstraction.
-        tasks_tick_task: asyncio.Task | None = None
-        if self._session_factory is not None and self._tenant_for_task is not None:
-            tasks_tick_task = asyncio.create_task(
-                self._tasks_tick_forever(),
-                name="tasks-tick",
+        # Re-drive missions whose coordinator went quiet.  Disabled when the
+        # caller didn't provide ``session_factory``.
+        missions_tick_task: asyncio.Task | None = None
+        if self._session_factory is not None:
+            missions_tick_task = asyncio.create_task(
+                self._missions_tick_forever(),
+                name="missions-tick",
             )
         else:
-            logger.warning(
-                "Orchestrator started without session_factory/tenant_for_task; "
-                "tasks_tick is disabled. spawn_task tools will create rows but "
-                "deferred (todo) tasks will not be promoted by this worker."
-            )
+            logger.warning("Orchestrator started without session_factory; the idle-mission nudge is disabled.")
 
         while self._running:
             try:
@@ -460,8 +441,8 @@ class Orchestrator:
 
         # Stop background helpers.
         helpers = [interrupt_task, orphan_sweeper_task]
-        if tasks_tick_task is not None:
-            helpers.append(tasks_tick_task)
+        if missions_tick_task is not None:
+            helpers.append(missions_tick_task)
         for task in helpers:
             task.cancel()
             try:
@@ -965,7 +946,6 @@ class Orchestrator:
                 agent_id=session.agent_id,
                 error=error,
                 redis=self.redis,
-                task_id=getattr(session, "task_id", None),
                 session_factory=self._session_factory,
                 delegated=is_delegated(session),
             )
@@ -1345,48 +1325,37 @@ class Orchestrator:
             except asyncio.CancelledError:
                 return
 
-    async def _tasks_tick_forever(self) -> None:
-        """Run one ``tasks_tick`` every ``_TASKS_TICK_INTERVAL`` seconds.
-
-        Each tick:
-        1. Promotes ``todo`` Tasks whose every parent has reached ``done``.
-        2. Finalises Tasks whose worker Session ended (done / retry / failed).
-        3. Atomically claims ``ready`` Tasks and enqueues their child Sessions.
+    async def _missions_tick_forever(self) -> None:
+        """Re-drive idle missions every ``_MISSIONS_TICK_INTERVAL`` seconds (``nudge_idle_missions``).
 
         Errors in a single tick are logged and swallowed so a transient
         DB hiccup doesn't kill the loop. Cancellation (orchestrator
         shutdown) is propagated normally.
 
-        Caller invariant: ``self._session_factory`` and
-        ``self._tenant_for_task`` are non-None (checked at start in
-        :meth:`run`).
+        Caller invariant: ``self._session_factory`` is non-None (checked at
+        start in :meth:`run`).
         """
-        from surogates.tasks.dispatcher import tasks_tick
+        from surogates.missions.nudge import nudge_idle_missions
 
         # Small random offset so replicas don't all tick in unison after
         # a fleet restart — keeps the lock contention bounded.
-        await asyncio.sleep(random.uniform(0, _TASKS_TICK_INTERVAL))
+        await asyncio.sleep(random.uniform(0, _MISSIONS_TICK_INTERVAL))
 
         while self._running:
             try:
-                counts = await tasks_tick(
+                nudged = await nudge_idle_missions(
                     session_factory=self._session_factory,
-                    redis=self.redis,
                     session_store=self.session_store,
-                    tenant_for_task=self._tenant_for_task,
-                    file_bundle_cache=self._file_bundle_cache,
+                    redis=self.redis,
                 )
-                if any(counts.values()):
-                    logger.debug(
-                        "tasks_tick: promoted=%d finalized=%d enqueued=%d",
-                        counts["promoted"], counts["finalized"], counts["enqueued"],
-                    )
+                if nudged:
+                    logger.debug("missions tick: nudged=%d", nudged)
             except asyncio.CancelledError:
                 raise
             except Exception:
-                logger.exception("tasks_tick failed; continuing")
+                logger.exception("missions tick failed; continuing")
 
             try:
-                await asyncio.sleep(_TASKS_TICK_INTERVAL)
+                await asyncio.sleep(_MISSIONS_TICK_INTERVAL)
             except asyncio.CancelledError:
                 return

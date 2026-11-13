@@ -37,43 +37,6 @@ export interface SessionCreateRequest {
   surface?: "whiteboard";
 }
 
-export interface SessionEvent {
-  id: number;
-  session_id: string;
-  type: EventType;
-  data: Record<string, unknown>;
-  created_at: string;
-}
-
-export type EventType =
-  | "user.message"
-  | "llm.request"
-  | "llm.response"
-  | "loop.result"
-  | "llm.thinking"
-  | "llm.delta"
-  | "tool.call"
-  | "tool.result"
-  | "sandbox.provision"
-  | "sandbox.execute"
-  | "sandbox.result"
-  | "sandbox.destroy"
-  | "session.start"
-  | "session.pause"
-  | "session.resume"
-  | "session.complete"
-  | "session.fail"
-  | "context.compact"
-  | "memory.update"
-  | "harness.wake"
-  | "harness.crash"
-  | "worker.spawned"
-  | "worker.complete"
-  | "worker.failed"
-  | "artifact.created"
-  | "artifact.updated"
-  | "ask_user_question.response";
-
 // ── Ask-user-question tool ───────────────────────────────────────────
 //
 // Shape of the `ask_user_question` tool's JSON arguments (from tool.call

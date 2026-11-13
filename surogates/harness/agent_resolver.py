@@ -1,7 +1,7 @@
 """Wake-time resolution of sub-agent types for child sessions.
 
-When a coordinator spawns a worker via ``spawn_worker`` / ``delegate_task``
-with ``agent_type=<name>``, the child session's ``config["agent_type"]``
+When a session starts a sub-agent with ``agent``
+and ``agent_type=<name>``, the child session's ``config["agent_type"]``
 is set.  On each :meth:`AgentHarness.wake`, the harness calls
 :func:`resolve_agent_def` to load the corresponding :class:`AgentDef`
 from the tenant's merged agent catalog, then :func:`apply_agent_def_to_session`
@@ -32,10 +32,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Absolute ceiling on iteration budgets applied at wake-time.  Matches
-# the worker-spawn cap in ``tools/builtin/coordinator.WORKER_MAX_ITERATIONS``
+# the sub-agent cap in ``tools/builtin/delegate._CHILD_MAX_ITERATIONS``
 # so an agent def loaded via ``session.config["agent_type"]`` (without
-# going through ``spawn_worker``) cannot grant itself a bigger budget
-# than a coordinator-spawned child would get.
+# going through ``agent``) cannot grant itself a bigger budget than a
+# sub-agent would get.
 _MAX_ITERATIONS_CEILING: int = 30
 
 
@@ -62,7 +62,7 @@ async def resolve_agent_by_name(
     ----------
     name:
         The agent name (from ``session.config['agent_type']`` or the
-        ``agent_type`` argument on ``spawn_worker``/``delegate_task``).
+        ``agent_type`` argument on ``agent``).
     tenant:
         The tenant context used to scope the agent catalog.
     session_factory:
@@ -167,7 +167,7 @@ def apply_agent_def_to_session(
     if agent_def.disallowed_tools is not None and not cfg.get("excluded_tools"):
         cfg["excluded_tools"] = list(agent_def.disallowed_tools)
     if agent_def.max_iterations is not None and not cfg.get("max_iterations"):
-        # Cap at the worker ceiling: spawn_worker already clamps to this
+        # Cap at the sub-agent ceiling: ``agent`` already clamps to this
         # value, but a session created directly with ``config.agent_type``
         # (e.g. via a webhook) skips that path, so enforce it here too.
         cfg["max_iterations"] = min(

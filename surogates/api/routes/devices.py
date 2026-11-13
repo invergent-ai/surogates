@@ -23,6 +23,7 @@ from surogates.runtime import AgentRuntimeContext, agent_runtime_context_dep
 from surogates.tenant.auth.middleware import get_current_tenant
 from surogates.tenant.auth.oauth import OAuthTokens
 from surogates.tenant.context import TenantContext
+from surogates.workstreams.threads import fail_threads_of_revoked
 
 logger = logging.getLogger(__name__)
 
@@ -131,6 +132,8 @@ async def revoke_device(
     if device is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No such device.")
     await _notify(request, device_id, f"revoked:{device.credential_generation}")
+    # Its revocation closed the binds of threads that waited for it: their masters hear they will not begin.
+    await fail_threads_of_revoked(request.app.state.session_factory, request.app.state.redis, device_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

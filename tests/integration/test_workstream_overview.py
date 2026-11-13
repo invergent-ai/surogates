@@ -13,10 +13,8 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select, text
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 import surogates.api.routes.workstreams as workstreams_routes
-from surogates.config import DatabaseSettings
 from surogates.db.models import InboxItem
 from surogates.jobs.inbox_expire import expire_inbox_items
 from surogates.session.events import EventType
@@ -33,7 +31,7 @@ from . import test_workstream_threads as threads_tests
 from .conftest import issue_service_account_token, leave_mid_stream
 from .test_devices import add_user, api, next_control  # noqa: F401  (api is a fixture)
 from .test_workstream_threads import (
-    PROPOSED,
+    blocks,
     TODO_CALL,
     answered,
     asks,
@@ -41,7 +39,6 @@ from .test_workstream_threads import (
     events_of,
     gives_up_asking,
     live_turn,
-    queued,
     quiet_for,
     resolve,
     start,
@@ -182,7 +179,7 @@ async def test_a_coordinators_follow_up_ends_the_wait_on_a_question_that_expired
     await gives_up_asking(api, thread)
     assert (await summary_of(api, project))["waiting"] == 1
     # Not the user's message, but the thread works on it as on one: its question waits no more.
-    await call_tool(api, master, "message_thread", thread_id=str(thread.id), message="Use the 2025 figures.")
+    await call_tool(api, master, "send_message", to=str(thread.id), message="Use the 2025 figures.", summary="Follow-up")
     [row] = await rows(api, project)
     assert (row["group"], row["reason"]) == ("working", None)
     summary = await summary_of(api, project)
@@ -751,7 +748,7 @@ async def test_a_resolve_by_the_coordinator_is_heard_once_it_is_resolved(api, mo
         await answered(api, thread, "Drafted the memo.")
         await turn_ends(api, thread)
     changes = heard(api, monkeypatch)
-    result = await call_tool(api, master, "resolve_thread", thread_id=str(thread.id))
+    result = await call_tool(api, master, "stop_agent", agent_id=str(thread.id), resolve=True)
     assert result["status"] == "resolved", result
     *_, (session_id, kind, groups) = changes
     assert (session_id, kind, groups[str(thread.id)]) == (str(thread.id), "thread.resolved", "resolved")
@@ -771,141 +768,9 @@ async def test_only_the_projects_live_threads_are_resolved_or_reopened(api, sess
         assert (await act_on(api, project, mine, action, their_token)).status_code == 404
 
 
-async def proposed(api, master) -> str:
-    """The master proposes ``PROPOSED``: a thread in the cloud, keyed "1", and one on the user's computer, "2"."""
-    return (await call_tool(api, master, "propose_threads", threads=PROPOSED))["proposal_id"]
-
-
-async def start_card(api, project: dict, proposal_id: str, key: str, token: str | None = None):
-    return await api.client.post(
-        f"/v1/workstreams/{project['id']}/threads", json={"proposal_id": proposal_id, "key": key},
-        headers=api.auth(token),
-    )
-
-
-async def test_the_user_starts_a_proposed_thread_from_its_card(api):
-    project = await create(api)
-    master = await master_of(api, project)
-    proposal_id = await proposed(api, master)
-    response = await start_card(api, project, proposal_id, "1")
-    assert response.status_code == 201, response.text
-    row = response.json()
-    assert (row["title"], row["group"]) == ("Draft A", "working")
-    thread = await api.app.state.session_store.get_session(UUID(row["id"]))
-    assert thread.parent_id == master.id
-    [goal] = await events_of(api, thread.id, EventType.USER_MESSAGE)
-    assert goal.data == {"content": "Draft the A memo as A.docx."}
-    [spawned] = await events_of(api, master.id, EventType.WORKER_SPAWNED)
-    assert spawned.data == {
-        "worker_id": row["id"], "title": "Draft A", "goal": "Draft the A memo as A.docx.",
-        "started_by": "user", "proposal_id": proposal_id, "key": "1",
-    }
-    assert await queued(api, thread)
-
-
-async def test_a_card_started_twice_starts_one_thread(api):
-    project = await create(api)
-    master = await master_of(api, project)
-    proposal_id = await proposed(api, master)
-    assert (await start_card(api, project, proposal_id, "1")).status_code == 201
-    again = await start_card(api, project, proposal_id, "1")
-    assert (again.status_code, again.json()["detail"]) == (409, "This thread was already started.")
-    # At once, as a double click sends it.
-    proposal_id = await proposed(api, master)
-    both = await asyncio.gather(*(start_card(api, project, proposal_id, "1") for _ in range(2)))
-    assert sorted(response.status_code for response in both) == [201, 409]
-    assert len(await events_of(api, master.id, EventType.WORKER_SPAWNED)) == 2
-
-
-async def test_start_all_on_a_large_proposal_starts_every_card(api, monkeypatch):
-    project = await create(api)
-    master = await master_of(api, project)
-    cards = [{"title": f"Draft {n}", "goal": f"Draft memo {n}.", "where": "cloud"} for n in range(1, 31)]
-    proposal_id = (await call_tool(api, master, "propose_threads", threads=cards))["proposal_id"]
-    # Production's pool, which a start must not hold while it waits for more of it.
-    production = DatabaseSettings()
-    engine = create_async_engine(
-        production.url, pool_size=production.pool_size, max_overflow=production.pool_overflow, pool_timeout=5,
-        connect_args={"statement_cache_size": 0},
-    )
-    pooled = async_sessionmaker(engine, expire_on_commit=False)
-    state = api.app.state
-    monkeypatch.setattr(state, "session_factory", pooled)
-    monkeypatch.setattr(state, "session_store", SessionStore(pooled, state.redis))
-    try:
-        # Start all sends every card's start at once.
-        started = await asyncio.gather(
-            *(start_card(api, project, proposal_id, str(n)) for n in range(1, 31)), return_exceptions=True,
-        )
-    finally:
-        await engine.dispose()
-    assert [getattr(response, "status_code", response) for response in started] == [201] * 30
-
-
-async def test_a_start_that_fails_can_be_tried_again(api, monkeypatch):
-    project = await create(api)
-    proposal_id = await proposed(api, await master_of(api, project))
-    real = workstreams_routes.start_thread
-    calls = []
-
-    async def fails_once(**kwargs):
-        calls.append(kwargs)
-        if len(calls) == 1:
-            raise ConnectionError("the database went away")
-        return await real(**kwargs)
-
-    monkeypatch.setattr(workstreams_routes, "start_thread", fails_once)
-    with pytest.raises(ConnectionError):
-        await start_card(api, project, proposal_id, "1")
-    assert (await start_card(api, project, proposal_id, "1")).status_code == 201
-
-
-async def test_a_start_past_its_claims_expiry_leaves_the_next_starts_claim(api, monkeypatch):
-    project = await create(api)
-    proposal_id = await proposed(api, await master_of(api, project))
-    claim = f"surogates:workstream:card:{project['id']}:{proposal_id}:1"
-    redis = api.app.state.redis
-    real = workstreams_routes.start_thread
-
-    async def slow(**kwargs):
-        # The start runs past its claim's expiry, and another start claims the card.
-        await redis.set(claim, "another start's", ex=60)
-        return await real(**kwargs)
-
-    monkeypatch.setattr(workstreams_routes, "start_thread", slow)
-    assert (await start_card(api, project, proposal_id, "1")).status_code == 201
-    assert await redis.get(claim) == b"another start's"
-
-
-async def test_a_card_starts_only_over_redis(api, monkeypatch):
-    project = await create(api)
-    proposal_id = await proposed(api, await master_of(api, project))
-    monkeypatch.setattr(api.app.state, "redis", None)
-    response = await start_card(api, project, proposal_id, "1")
-    assert response.status_code == 503, response.text
-
-
-async def test_only_a_card_of_the_projects_own_proposals_starts(api, session_factory):
-    project = await create(api)
-    proposal_id = await proposed(api, await master_of(api, project))
-    budget = await create(api, name="Budget")
-    theirs = await proposed(api, await master_of(api, budget))
-    _, their_token = await add_user(session_factory, api.org_id)
-    for case, (proposal, key, token) in {
-        "an unknown proposal": (str(uuid4()), "1", None),
-        "an unknown card": (proposal_id, "3", None),
-        "another project's proposal": (theirs, "1", None),
-        "another user": (proposal_id, "1", their_token),
-    }.items():
-        response = await start_card(api, project, proposal, key, token)
-        assert response.status_code == 404, case
-    assert (await start_card(api, project, proposal_id, "one")).status_code == 422
-
-
 @pytest.mark.parametrize("method, path", [
     ("get", "threads"),
     ("get", "stream"),
-    ("post", "threads"),
     ("post", "threads/{thread}/resolve"),
     ("post", "threads/{thread}/reopen"),
 ])
@@ -915,16 +780,19 @@ async def test_a_session_token_reaches_no_projects_route(api, session_factory, m
     chat = await api.client.post("/v1/sessions", json={}, headers=api.auth())
     account = await issue_service_account_token(session_factory, api.org_id)
     token = create_service_account_session_token(api.org_id, account.id, UUID(chat.json()["id"]))
-    body = {"json": {"proposal_id": str(uuid4()), "key": "1"}} if (method, path) == ("post", "threads") else {}
     response = await getattr(api.client, method)(
-        f"/v1/workstreams/{project['id']}/{path.format(thread=thread.id)}", headers=api.auth(token), **body,
+        f"/v1/workstreams/{project['id']}/{path.format(thread=thread.id)}", headers=api.auth(token),
     )
     assert response.status_code == 403, response.text
 
 
-async def test_a_master_leaves_proposed_threads_to_their_cards(api):
-    prompt = await system_prompt(api, await master_of(api, await create(api)))
-    assert "A proposed thread is started from its card" in prompt
+async def test_a_master_asks_in_chat_before_starting_work_the_user_did_not_ask_for(api):
+    prompt = " ".join((await system_prompt(api, await master_of(api, await create(api)))).split())
+    assert (
+        "Before you start a thread on work the user did not ask for, say in this conversation what you would start "
+        "and why, and start it once they agree."
+    ) in prompt
+    assert "propose" not in prompt.lower()
 
 
 async def coordinator_with_a_report(api):
@@ -957,7 +825,10 @@ async def test_a_turns_summary_takes_the_users_request_not_a_report(api, monkeyp
     parent, worker = await coordinator_with_a_report(api)
     made = harnesses(monkeypatch)
     [request] = await live_turn(api, monkeypatch, parent, [_final_response("The figures add up.")])
-    assert request[-1]["content"] == f"[Worker {worker.id} completed]\nChecked the figures."
+    assert blocks(request[-1]["content"]) == {
+        "task-id": str(worker.id), "status": "completed", "summary": f"Agent {worker.id} finished",
+        "result": "Checked the figures.",
+    }
     assert made[0]._complete_session.await_args.kwargs["user_message"] == "Check the Q3 figures."
 
 

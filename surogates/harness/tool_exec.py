@@ -611,13 +611,10 @@ def is_parallelizable(tool_name: str) -> bool:
 # independent session with its own lease, event log, and budget, so a
 # batch can safely fan out concurrently after the LLM stream completes.
 # Heavyskill (parallel-reason-then-synthesize) relies on this for
-# ``delegate_task``; ``spawn_worker`` already documents parallel
-# fan-out in its schema.  Excluded from :data:`PARALLEL_TOOLS` so the
+# ``agent``.  Excluded from :data:`PARALLEL_TOOLS` so the
 # streaming executor doesn't dispatch them eagerly — a discarded
 # stream would orphan child sessions created speculatively.
 DELEGATION_TOOLS: frozenset[str] = frozenset({
-    "delegate_task",
-    "spawn_worker",
     "agent",
 })
 
@@ -632,14 +629,8 @@ BATCH_PARALLEL_TOOLS: frozenset[str] = PARALLEL_TOOLS | DELEGATION_TOOLS
 # again, and a call that had already run would start its session twice, or
 # show its proposal twice.
 SESSION_STARTING_TOOLS: frozenset[str] = DELEGATION_TOOLS | frozenset({
-    "send_worker_message",
     "send_message",
-    "spawn_task",
-    "unblock_task",
     "cron_create",
-    "start_thread",
-    "message_thread",
-    "propose_threads",
 })
 
 #: Tools whose call must not start before the response that makes it is saved: a stream discarded and retried
@@ -649,14 +640,11 @@ AFTER_THE_RESPONSE_TOOLS: frozenset[str] = frozenset({"office_edit"})
 # The tools whose step starts a helper.  In a project's thread the copy goes
 # on the thread's hand-off first, for the helper's own copy to start from, and
 # what helpers kept comes into the copy after.
-HELPER_STARTING_TOOLS: frozenset[str] = frozenset({"delegate_task", "spawn_worker", "spawn_task", "agent"})
+HELPER_STARTING_TOOLS: frozenset[str] = frozenset({"agent"})
 
-# The session-starting tools the thread's rule leaves alone: four only reach
-# a session that exists, and two answer a thread themselves.
-_NOT_THE_THREADS_TO_REFUSE: frozenset[str] = frozenset({
-    "send_worker_message", "unblock_task", "message_thread", "start_thread", "propose_threads",
-    "send_message",
-})
+# The session-starting tool the thread's rule leaves alone: it only reaches a
+# session that exists.
+_NOT_THE_THREADS_TO_REFUSE: frozenset[str] = frozenset({"send_message"})
 
 
 def refused_in_a_thread(session_starting: frozenset[str]) -> frozenset[str]:
@@ -2157,6 +2145,7 @@ async def _run_single_tool(
                     interrupt_check=interrupt_check,
                     task_id=sandbox_session_key(session),
                     offered_tools=offered_tools,
+                    governance_gate=governance_gate,
                     # The proxy fakes what it cannot tell is a read; this call was judged one here.
                     **({"simulation_read": True} if simulation_changes is False else {}),
                 )

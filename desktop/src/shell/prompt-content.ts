@@ -84,13 +84,8 @@ const BUSY = "Another chat on this computer is working in this folder. The two c
 /** The folder sheet: the folder, its mode, and what the user should know; or why it cannot be used. */
 export function folderSheet(sheet: FolderSheet): PromptContent {
   const name = named(sheet.folder);
-  // A project's thread is named under its folder: the page's words, set as text.
   const details = [code("Folder", shownPath(sheet.folder))];
   let room = 0;
-  if (sheet.thread !== null) {
-    details.push(plain("Project", sheet.thread.project), plain("Thread", sheet.thread.thread));
-    room = tall(sheet.thread.project) + tall(sheet.thread.thread);
-  }
   // A new project's own folder: its name, once it has one, and what its threads do with the folder.
   if (sheet.project) {
     details.push(plain("Project", sheet.project));

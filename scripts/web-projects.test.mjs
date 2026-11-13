@@ -436,7 +436,6 @@ test("each project route is asked at its own path, and answers the shell's types
   assert.equal((await routes.threads("p-1", "t-1"))[0].id, "t-1");
   assert.equal((await routes.resolve("p-1", "t-1")).id, "t-1");
   assert.equal((await routes.reopen("p-1", "t-1")).id, "t-1");
-  assert.equal((await routes.start("p-1", "pr-1", "2")).id, "t-1");
   assert.deepEqual(await routes.library("p-1"), [{
     path: "threads/Draft A/A.docx", origin: "produced", threadId: "t-1", size: 2048, updatedAt: "2026-10-07T11:00:00Z",
     place: { kind: "cloud" },
@@ -456,7 +455,6 @@ test("each project route is asked at its own path, and answers the shell's types
     ["GET", "/api/v1/workstreams/p-1/threads?thread_id=t-1", undefined],
     ["POST", "/api/v1/workstreams/p-1/threads/t-1/resolve", undefined, undefined],
     ["POST", "/api/v1/workstreams/p-1/threads/t-1/reopen", undefined, undefined],
-    ["POST", "/api/v1/workstreams/p-1/threads", { proposal_id: "pr-1", key: "2" }, "application/json"],
     ["GET", "/api/v1/workstreams/p-1/library", undefined],
     // The routines are the master's schedules: the project is read for its master first.
     ["GET", "/api/v1/workstreams/p-1", undefined],
@@ -510,7 +508,6 @@ test("a project route puts each id in its path as one segment, so no id reaches 
   await routes.resolve("p%1", "t/../2");
   await routes.reopen("p1", "t?2");
   await routes.library("p/1");
-  await routes.start("p/1", "pr-1", "2");
   assert.deepEqual(asked.map(([method, url]) => [method, url]), [
     ["GET", "/api/v1/workstreams/..%2Fdevices"],
     ["PATCH", "/api/v1/workstreams/p%2F1"],
@@ -520,12 +517,11 @@ test("a project route puts each id in its path as one segment, so no id reaches 
     ["POST", "/api/v1/workstreams/p%251/threads/t%2F..%2F2/resolve"],
     ["POST", "/api/v1/workstreams/p1/threads/t%3F2/reopen"],
     ["GET", "/api/v1/workstreams/p%2F1/library"],
-    ["POST", "/api/v1/workstreams/p%2F1/threads"],
   ]);
   // A dot segment the URL would resolve away is no id at all.
   await assert.rejects(routes.archive(".."), { message: "No such project." });
   await assert.rejects(routes.resolve("p1", "."), { message: "No such thread." });
-  assert.equal(asked.length, 9);
+  assert.equal(asked.length, 8);
 });
 
 test("a project route whose answer is not JSON, or not of its shape, says the route's own words, and never succeeds hollow", async () => {
@@ -538,7 +534,6 @@ test("a project route whose answer is not JSON, or not of its shape, says the ro
     resolve: "The thread could not be resolved.",
     reopen: "The thread could not be reopened.",
     library: "Failed to fetch the project's Library",
-    start: "The thread could not be started.",
   };
   for (const body of ["<!doctype html><p>Sign in</p>", "{}", "[{}]", "null", '[{"id": "t-1"}]', '{"id": "t-1"}']) {
     const { routes } = routesOver(() => new Response(body, { headers: { "content-type": "application/json" } }));
@@ -551,7 +546,6 @@ test("a project route whose answer is not JSON, or not of its shape, says the ro
       resolve: () => routes.resolve("p-1", "t-1"),
       reopen: () => routes.reopen("p-1", "t-1"),
       library: () => routes.library("p-1"),
-      start: () => routes.start("p-1", "pr-1", "2"),
     };
     for (const [name, call] of Object.entries(calls)) {
       await assert.rejects(call(), { message: words[name] }, `${name} answered ${body}`);
@@ -564,30 +558,6 @@ test("a project route whose answer is not JSON, or not of its shape, says the ro
       : Response.json(PROJECT));
     await assert.rejects(routes.routines("p-1"), { message: "Failed to fetch the project's routines" }, `routines answered ${body}`);
   }
-});
-
-test("a thread on the user's computer is made from its card with the folder confirmed there, and begun at its own route", async () => {
-  const { asked, routes } = routesOver((url) => Response.json(url.endsWith("/start") ? ROW : { thread_id: "t-1" }, { status: 201 }));
-  const folder = { kind: "device", device_id: "d-1", folder: "/home/flavius/Budget", nonce: "n".repeat(43) };
-  assert.equal(await routes.makeOnComputer("p/1", "pr-1", "2", folder), "t-1");
-  assert.equal((await routes.begin("p-1", "t/1")).id, "t-1");
-  assert.deepEqual(asked, [
-    ["POST", "/api/v1/workstreams/p%2F1/threads", { proposal_id: "pr-1", key: "2", execution: folder }, "application/json"],
-    ["POST", "/api/v1/workstreams/p-1/threads/t%2F1/start", undefined, undefined],
-  ]);
-  // An answer of another shape is the route's own failure, never a thread with no id.
-  for (const body of ["{}", '{"thread_id": 7}', "[]"]) {
-    const { routes: hollow } = routesOver(() => new Response(body, { headers: { "content-type": "application/json" } }));
-    await assert.rejects(hollow.makeOnComputer("p-1", "pr-1", "2", folder), { message: "The thread could not be started." });
-    await assert.rejects(hollow.begin("p-1", "t-1"), { message: "The thread could not be started." });
-  }
-  // A folder the server refuses is said in words.
-  const { routes: refusing } = routesOver(() => Response.json({
-    detail: [{ type: "string_pattern_mismatch", loc: ["body", "execution", "nonce"], msg: "String should match pattern '^[A-Za-z0-9_-]{16,128}$'" }],
-  }, { status: 422 }));
-  await assert.rejects(refusing.makeOnComputer("p-1", "pr-1", "2", folder), {
-    message: "nonce: String should match pattern '^[A-Za-z0-9_-]{16,128}$'",
-  });
 });
 
 test("a project route that refuses a field says why in words, never as the route's raw detail", async () => {

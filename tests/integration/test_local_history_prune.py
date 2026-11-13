@@ -14,7 +14,6 @@ from __future__ import annotations
 import asyncio
 import time
 from datetime import UTC, datetime, timedelta
-from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
@@ -28,10 +27,10 @@ from tests.test_steer_loop import _final_response
 
 from .test_devices import FOLDER, api, eventually, link_url, register  # noqa: F401  (api and link_url are fixtures)
 from .test_local_history_open import asked, begun_with_copy, turn_end, woken
-from .test_local_history_settle import SECOND, left_open
+from .test_local_history_settle import left_open
 from .test_local_history_threads import computer  # noqa: F401  (a fixture)
 from .test_local_history_waits import back, landing_away
-from .test_local_threads import device_card
+from .test_workstreams import create, master_of
 from .test_turn_sagas import calling
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -60,7 +59,7 @@ def refs_of(*threads) -> list[str]:
 @pytest.mark.slow
 async def test_a_folders_history_is_pruned_after_a_landing_keeping_every_thread_that_works_in_it(api, computer, monkeypatch):
     _, master, thread = await begun_with_copy(api, computer)
-    _, _, other = await begun_with_copy(api, computer, nonce=SECOND)
+    _, _, other = await begun_with_copy(api, computer)
     pruned = prunings(computer)
     await woken(api, monkeypatch, thread, [WORK, _final_response("Done.")])
     # Asked once the landing is recorded and forgotten, under an invocation of its own, of the thread's alone.
@@ -102,11 +101,12 @@ async def test_a_pruning_its_computer_does_not_answer_holds_the_turns_end_no_lon
 
 async def begun_on(api, device_id: str, folder: str = FOLDER):
     """A project's thread on *folder* of the computer *device_id*, with its row: a thread of the project's, as its start makes it."""
-    project, master, proposal = await device_card(api)
+    project = await create(api)
+    master = await master_of(api, project)
     thread = await make_thread(
         session_store=api.app.state.session_store, session_factory=api.app.state.session_factory, master=master, live_config=None,
-        title="Check the totals", device=SimpleNamespace(id=UUID(device_id), name="Flavius's ThinkPad"), folder=folder,
-        card={"proposal_id": proposal, "key": "2"},
+        title="Check the totals", device_id=UUID(device_id), device_name="Flavius's ThinkPad", folder=folder,
+        start="Check the totals in Budget.xlsx.",
     )
     async with api.app.state.session_factory() as db:
         await db.execute(insert(WorkstreamThread).values(session_id=thread.id, workstream_id=UUID(project["id"]), title="Check the totals"))

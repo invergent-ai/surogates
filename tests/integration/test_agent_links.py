@@ -14,7 +14,7 @@ import pytest
 from surogates.session.events import EventType
 from tests.test_steer_loop import _final_response
 
-from .test_agent_tool import PARITY, a_chat, calling, chats, children  # noqa: F401  (chats is a fixture)
+from .test_agent_tool import a_chat, calling, chats, children  # noqa: F401  (chats is a fixture)
 from .test_command_wake_once import workers  # noqa: F401  (a fixture)
 from .test_devices import api  # noqa: F401  (a fixture)
 
@@ -22,7 +22,7 @@ pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 
 async def test_the_tree_and_the_logs_link_a_parent_and_its_agent_by_the_call_that_started_it(chats):  # noqa: F811
-    chat = await a_chat(chats, PARITY)
+    chat = await a_chat(chats)
     chats.replies = [
         calling("agent", "call_count", description="Count open items", prompt="Count the open items in the tracker.",
                 run_in_background=True),

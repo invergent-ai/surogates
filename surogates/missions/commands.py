@@ -209,13 +209,14 @@ Description: {description}
 Rubric:
 {rubric}
 
-You are this mission's coordinator. Decompose into specialist sub-agent
-tasks via ``spawn_task``; gate dependencies with ``parents=[...]``;
-end criterion-driven rounds with a verifier task whose
-``result_metadata`` carries the measurable signal the rubric checks.
+You are this mission's coordinator. Start agents with ``agent`` to do the
+work, wait for their reports, and sequence the next steps yourself: an
+agent that depends on another's result starts once that result is in, and
+a failed agent is continued or replaced by you. End each round with an
+agent that verifies the work against the rubric.
 
-Do NOT claim completion in prose alone — the evaluator only honours
-completion claims backed by verifier-task evidence OR an explicit
+Do NOT claim completion in prose alone -- the evaluator only honours
+completion claims backed by your agents' reports OR an explicit
 ``[[mission-complete]]`` marker on its own line in your response.
 """
 
@@ -281,7 +282,7 @@ async def handle_mission_create(
 
     On success: inserts the Mission row, updates session.config with
     ``active_mission_id``, ``coordinator=True``, ``strict_coordinator=True``,
-    and the ``subagent-task-orchestrator`` preloaded skill; emits
+    and no preloaded skill; emits
     ``mission.defined``; returns the kickoff text via
     :attr:`MissionHandlerResult.kickoff_content`.
 
@@ -347,17 +348,11 @@ async def handle_mission_create(
         cfg = dict(sess.config or {})
         cfg["active_mission_id"] = str(mission_id)
         cfg["coordinator"] = True
-        # Strip implementation tools so the LLM has to delegate via
-        # spawn_task/delegate_task instead of "fixing it quickly"
-        # itself.  ``_tool_filter_for_session`` reads this flag and
-        # subtracts ``COORDINATOR_IMPLEMENTATION_TOOLS`` from the
-        # effective tool set — the structural enforcement that the
-        # ``subagent-task-orchestrator`` skill assumes is in place.
+        # Strip implementation tools so the LLM has to start agents
+        # instead of "fixing it quickly" itself.  ``_tool_filter_for_session``
+        # reads this flag and subtracts ``COORDINATOR_IMPLEMENTATION_TOOLS``
+        # from the effective tool set.
         cfg["strict_coordinator"] = True
-        preloaded = list(cfg.get("preloaded_skills") or [])
-        if "subagent-task-orchestrator" not in preloaded:
-            preloaded.append("subagent-task-orchestrator")
-        cfg["preloaded_skills"] = preloaded
         sess.config = cfg
         await db.commit()
 
@@ -487,10 +482,9 @@ async def handle_mission_cancel(
     # taken again: a run cut off before it leaves the mission in flight, and
     # the command run again takes each step again, its helpers' stop with them.
     if cascade_to_workers:
-        await _cascade_cancel_workers(
-            mission_id=active.id,
-            session_factory=session_factory,
-            redis=redis,
+        await _stop_mission_agents(
+            mission_id=active.id, coordinator_id=session_id, session_store=session_store,
+            session_factory=session_factory, mission_store=mission_store, redis=redis,
         )
     await session_store.clear_session_config_key(session_id, "active_mission_id")
     await mission_store.set_status(
@@ -639,63 +633,34 @@ async def handle_mission_reject(
     )
 
 
-async def _cascade_cancel_workers(
-    *, mission_id: UUID, session_factory: Any, redis: Any,
+async def _stop_mission_agents(
+    *, mission_id: UUID, coordinator_id: UUID, session_store: Any, session_factory: Any,
+    mission_store: MissionStore, redis: Any,
 ) -> None:
-    """Cancel every non-terminal task belonging to ``mission_id``.
+    """Stop every running agent of ``mission_id``, with the agents under it, as ``stop_agent`` stops one.
 
-    For each ``running`` task, publishes an interrupt on its current
-    Session's ``INTERRUPT_CHANNEL_PREFIX:<session_id>`` channel (the same
-    mechanism ``cancel_task`` / ``stop_worker`` use). All non-terminal
-    rows then transition to ``cancelled`` in a single UPDATE so we do
-    not leave a window in which the dispatcher could re-claim a ready
-    task while we are still iterating.
-
-    A task already ``cancelled`` has its session interrupted too while a
-    worker still holds it: a cascade cut off after its UPDATE marked it
-    never told it, and the run that takes the cascade again is the one that
-    does.  One whose session is at rest, cancelled long since, is not told
-    again.
+    An agent already stopped is interrupted again while a worker still holds its session: a cascade cut off after
+    its stop was written never told it, and the run that takes the cascade again is the one that does.  One at rest
+    is not told again.
     """
-    from sqlalchemy import and_ as _and, exists as _exists, func as _func, or_ as _or, select as _sel, update as _upd
+    import json
 
     from surogates.config import INTERRUPT_CHANNEL_PREFIX
-    from surogates.db.models import SessionLease, Task
+    from surogates.tools.builtin.agents import _STOP_SIGNAL, stop_tree
 
-    held = _exists().where(
-        SessionLease.session_id == Task.current_session_id, SessionLease.expires_at > _func.now(),
-    )
-    async with session_factory() as db:
-        running_session_ids = (await db.execute(
-            _sel(Task.current_session_id).where(
-                Task.mission_id == mission_id,
-                _or(Task.status == "running", _and(Task.status == "cancelled", held)),
-                Task.current_session_id.isnot(None),
-            )
-        )).scalars().all()
-        await db.execute(
-            _upd(Task)
-            .where(
-                Task.mission_id == mission_id,
-                Task.status.in_(("todo", "ready", "running", "blocked")),
-            )
-            .values(status="cancelled", completed_at=_func.now())
-        )
-        await db.commit()
-
-    for sid in running_session_ids:
+    for agent in await mission_store.agents(mission_id):
         try:
-            await redis.publish(
-                f"{INTERRUPT_CHANNEL_PREFIX}:{sid}",
-                "mission_cancel_cascade",
-            )
+            if agent.status in ("active", "processing"):
+                await stop_tree(
+                    session_store=session_store, redis=redis, session_factory=session_factory,
+                    top_id=agent.session_id, by=coordinator_id, reason="the mission was cancelled",
+                )
+            elif agent.status == "paused" and redis is not None and await session_store.has_live_lease(agent.session_id):
+                await redis.publish(f"{INTERRUPT_CHANNEL_PREFIX}:{agent.session_id}", json.dumps({"reason": _STOP_SIGNAL}))
         except Exception:
-            # Don't let one bad publish strand the rest of the cascade.
-            # The worker session times out naturally if the interrupt
-            # doesn't land; the task is already marked cancelled in DB.
+            # One agent that cannot be stopped does not strand the rest of the cascade.
             logger.warning(
-                "Failed to publish interrupt for session %s during mission %s cascade",
-                sid, mission_id, exc_info=True,
+                "Failed to stop agent %s during mission %s cascade", agent.session_id, mission_id, exc_info=True,
             )
 
 

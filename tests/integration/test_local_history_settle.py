@@ -61,7 +61,6 @@ def lost_after(monkeypatch, action: str, answered: int) -> None:
     monkeypatch.setattr(Steps, "ask", asking)
 
 
-SECOND, THIRD = "second-binding-nonce-0001", "third-binding-nonce-00001"
 #: The next thread's turn: one file of its own, which lands in the folder after the lost landing is settled.
 NEXT = [calling(("write_file", {"path": "Y.md", "content": "y\n"})), _final_response("Done.")]
 
@@ -72,10 +71,10 @@ async def two_threads(api, monkeypatch, here):
     With their masters.  A third thread landed first: the folder's history
     has a ``main``, as it has after any landing there.
     """
-    _, _, first = await begun_with_copy(api, here, nonce=THIRD)
+    _, _, first = await begun_with_copy(api, here)
     await woken(api, monkeypatch, first, [calling(("write_file", {"path": "Plans/Q4.md", "content": "Q4 plan\n"})), _final_response("Done.")])
     _, lost_master, lost = await begun_with_copy(api, here)
-    _, next_master, next_ = await begun_with_copy(api, here, nonce=SECOND)
+    _, next_master, next_ = await begun_with_copy(api, here)
     return lost_master, lost, next_master, next_
 
 

@@ -14,7 +14,7 @@ These tests pin the contract that ``_run_single_delegation`` re-emits
 ``artifact.created`` on the parent with ``originating_session_id``
 set to the session that actually owns the spec.  Propagation
 cascades naturally up the chain because the parent's own
-``delegate_task`` handler runs the same scan on the events it gets
+run path runs the same scan on the events it gets
 back from THIS session, preserving the original
 ``originating_session_id`` rather than rewriting it to the
 intermediate session.
@@ -183,7 +183,7 @@ async def test_artifact_created_propagates_to_parent_with_originating_session_id
         delegate_module, "_POLL_INTERVAL_SECONDS", 0.01,
     )
 
-    await delegate_module._delegate_handler(
+    await _run_agent(
         {"goal": "x", "agent_type": "engineer"},
         session_store=store,
         redis=None,
@@ -247,7 +247,7 @@ async def test_propagation_preserves_originating_session_from_grandchild(
         delegate_module, "_POLL_INTERVAL_SECONDS", 0.01,
     )
 
-    await delegate_module._delegate_handler(
+    await _run_agent(
         {"goal": "x", "agent_type": "engineer"},
         session_store=store,
         redis=None,
@@ -283,7 +283,7 @@ async def test_no_artifact_no_propagation(
         delegate_module, "_POLL_INTERVAL_SECONDS", 0.01,
     )
 
-    await delegate_module._delegate_handler(
+    await _run_agent(
         {"goal": "x", "agent_type": "engineer"},
         session_store=store,
         redis=None,
@@ -297,3 +297,12 @@ async def test_no_artifact_no_propagation(
         if et == EventType.ARTIFACT_CREATED
     ]
     assert propagated == []
+
+
+async def _run_agent(arguments: dict, **kwargs):
+    """A foreground ``agent`` call: the run path a sub-agent takes from its start to its report."""
+    from surogates.tools.builtin.agents import _agent_handler
+
+    call = {"description": "Test task", "prompt": arguments["goal"], "run_in_background": False}
+    call.update({key: arguments[key] for key in ("agent_type", "model") if key in arguments})
+    return await _agent_handler(call, **kwargs)

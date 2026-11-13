@@ -36,8 +36,10 @@ from surogates.db.models import Session as SessionRow
 from surogates.devices.binding import (
     BIND,
     RETIRE,
+    Binding,
     THREAD_ACTIONS,
     THREAD_KINDS,
+    binding_from,
     binding_of,
     copy_of,
     device_of,
@@ -291,7 +293,10 @@ def _completing(device_id: UUID, generation: int, operation_id: UUID, digest: st
             ),
         )
         .values(outcome=outcome, completed_at=func.now())
-        .returning(DeviceOperation.id)
+        .returning(
+            DeviceOperation.id, DeviceOperation.kind, DeviceOperation.args, DeviceOperation.outcome,
+            DeviceOperation.root_session_id,
+        )
     )
 
 
@@ -887,14 +892,18 @@ class DeviceOperations:
 
     async def bind(
         self, *, session_id: UUID, device_id: UUID, folder: str, nonce: str, history: UUID | None = None,
+        master: UUID | None = None,
     ) -> None:
         """Ask the device to bind a new root session to *folder*, without waiting.
 
         The app answers once its user has confirmed that folder under *nonce*.
         With *history*, the thread the session is, the app binds it to a copy
         of the folder that the folder's history makes for that thread, never
-        to the folder itself.  For an HTTP request, so a database outage
-        fails it rather than holding it open.
+        to the folder itself.  With *master* as well, the project's master
+        bound there to that folder, the app binds the thread with no
+        confirmation: its user chose the folder for the project, and the
+        thread begins once the app answers (``workstreams.threads.thread_bound``).
+        A database outage fails the call rather than holding it open.
         """
         operation_id, outcome = await self._record(OperationRequest(
             device_id=device_id,
@@ -903,7 +912,11 @@ class DeviceOperations:
             invocation_id=BIND,
             ordinal=0,
             kind=BIND,
-            args={"folder": folder, "nonce": nonce, **({"history": {"thread": str(history)}} if history is not None else {})},
+            args={
+                "folder": folder, "nonce": nonce,
+                **({"history": {"thread": str(history)}} if history is not None else {}),
+                **({"master": str(master)} if master is not None else {}),
+            },
         ))
         if outcome is None:
             await self._announce(control_channel(device_id), f"op:{operation_id}")
@@ -1288,14 +1301,18 @@ class DeviceOperations:
         credentials.
 
         The credential check is part of the write, not a step before it, so a
-        reauthorization or revocation cannot land between the two.
+        reauthorization or revocation cannot land between the two.  A thread's
+        bind its master asked for begins the thread, or fails it, as it is
+        recorded; and again for a duplicate, which the app sends until it is
+        acknowledged: the retry of a begin cut short.  A thread begun or
+        failed already is left as it is.
         """
         async with self._sf() as db:
             if not await self._current(db, device_id, generation):
                 return "stale"
             completed = (await db.execute(
                 _completing(device_id, generation, operation_id, digest, outcome)
-            )).scalar_one_or_none()
+            )).one_or_none()
             await db.commit()
             row = None
             if completed is None:
@@ -1304,16 +1321,38 @@ class DeviceOperations:
                 if not await self._current(db, device_id, generation):
                     return "stale"
                 row = (await db.execute(
-                    select(DeviceOperation.device_id, DeviceOperation.digest)
-                    .where(DeviceOperation.id == operation_id)
+                    select(
+                        DeviceOperation.device_id, DeviceOperation.digest, DeviceOperation.kind, DeviceOperation.args,
+                        DeviceOperation.outcome, DeviceOperation.root_session_id,
+                    ).where(DeviceOperation.id == operation_id)
                 )).one_or_none()
         if completed is None and row is None:
             return "gone"
         if completed is None and (row.device_id != device_id or row.digest != digest):
             return "rejected"
+        recorded = completed if completed is not None else row
+        if recorded.kind == BIND and "master" in recorded.args:
+            await self._thread_bound(recorded.root_session_id, binding_from(recorded.args, recorded.outcome))
         # Announced for a duplicate too: its worker may have missed the first.
         await self._announce(operation_channel(operation_id), "completed")
         return "completed" if completed is not None else "duplicate"
+
+    async def _thread_bound(self, thread_id: UUID, binding: Binding) -> None:
+        """Begin or fail the thread *thread_id* its master started on this computer, as its bind's answer reads.
+
+        Shielded, so the link's deadline for recording the answer cuts no
+        begin short; and logged, so the answer stays recorded whatever the
+        begin meets.
+        """
+        from surogates.workstreams.threads import thread_bound
+
+        async def bound() -> None:
+            try:
+                await thread_bound(self._sf, self._redis, thread_id, binding)
+            except Exception:
+                logger.exception("Could not begin or fail thread %s after its bind", thread_id)
+
+        await asyncio.shield(bound())
 
     async def start_transfer(
         self,

@@ -18,8 +18,8 @@ import surogates.devices.operations as operations_module
 from surogates.db.models import WorkstreamHistory
 from surogates.devices.binding import Binding, copy_of
 from surogates.devices.operations import DeviceOperations
-from surogates.devices.store import DeviceStore
 from surogates.harness import landing as landing_module
+from surogates.harness.agent_news import NEW_FORMAT
 from surogates.harness.tool_exec import execute_single_tool
 from surogates.sandbox.copy_files import writes_to_copy
 from surogates.sandbox.pool import SandboxPool, sandbox_session_key
@@ -28,7 +28,7 @@ from surogates.session.provisioning import create_child_session
 from surogates.session.store import SessionStore
 from surogates.tools.builtin import delegate as delegate_module
 from surogates.tools.workspace_io import LocalWorkspaceIO
-from surogates.workstreams.threads import make_thread
+from surogates.workstreams.threads import make_thread, thread_bound
 from tests.fake_laptop import FakeLaptop
 from tests.test_steer_loop import _final_response
 from tests.thread_pods import ThreadPods
@@ -52,7 +52,7 @@ from .test_thread_copies import pods  # noqa: F401  (a fixture)
 from .test_turn_sagas import a_turn, calling
 from .test_workstream_library import library, upload
 from .test_workstream_overview import rows
-from .test_workstream_threads import PROPOSED, call_tool, children_of, events_of, queued, start, turn_ends
+from .test_workstream_threads import call_tool, children_of, events_of, queued, turn_ends
 from .test_workstreams import create, master_of
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -101,90 +101,9 @@ async def test_deleting_a_session_that_is_its_own_sandbox_root_has_its_computer_
     assert (retire.kind, retire.root_session_id, retire.args) == ("retire", root, {})
 
 
-async def device_card(api) -> tuple[dict, object, str]:
-    """A project whose master proposed ``PROPOSED``: card "2" is a thread on the user's computer."""
-    project = await create(api)
-    master = await master_of(api, project)
-    return project, master, (await call_tool(api, master, "propose_threads", threads=PROPOSED))["proposal_id"]
-
-
 def confirmed(device_id: str, **changes) -> dict:
     """What the page sends for a folder its user confirmed on *device_id*."""
     return {"kind": "device", "device_id": device_id, "folder": FOLDER, "nonce": NONCE, **changes}
-
-
-async def make_local(api, project: dict, proposal_id: str, execution: dict, *, key: str = "2", token: str | None = None):
-    return await api.client.post(
-        f"/v1/workstreams/{project['id']}/threads",
-        json={"proposal_id": proposal_id, "key": key, "execution": execution}, headers=api.auth(token),
-    )
-
-
-async def test_a_card_makes_its_thread_in_a_copy_of_the_folder_the_user_confirmed_waiting_for_its_binding(api):
-    device = await register(api)
-    project, master, proposal_id = await device_card(api)
-    response = await make_local(api, project, proposal_id, confirmed(device["id"]))
-    assert response.status_code == 201, response.text
-    thread = await api.app.state.session_store.get_session(UUID(response.json()["thread_id"]))
-    # A child of the master for its report, and its own root for its computer.
-    assert (thread.parent_id, thread.user_id) == (master.id, master.user_id)
-    config = thread.config
-    # It works in a copy of the folder of its own there, never in the folder itself: the server says so once, as it makes it.
-    assert config["execution"] == {
-        "kind": "device", "device_id": device["id"], "device_name": "Flavius's ThinkPad", "history": {"thread": str(thread.id)},
-    }
-    assert (config["workspace_path"], config["sandbox_root_session_id"]) == (FOLDER, str(thread.id))
-    assert (config["workstream_role"], config["memory_boundary"]) == ("thread", master.config["memory_boundary"])
-    assert config["workstream_card"] == {"proposal_id": proposal_id, "key": "2"}
-    assert await binding(api, thread.id) == Binding("pending")
-    [bind] = await journal(api).pending(UUID(device["id"]), 1)
-    assert (bind.kind, bind.root_session_id, bind.args) == (
-        "bind", thread.id, {"folder": FOLDER, "nonce": NONCE, "history": {"thread": str(thread.id)}},
-    )
-    # Not started: it has no goal, the master has not heard of it, nothing runs it, and no row lists it.
-    assert await events_of(api, thread.id) == []
-    assert await events_of(api, master.id, EventType.WORKER_SPAWNED) == []
-    assert not await queued(api, thread)
-    listed = await api.client.get(f"/v1/workstreams/{project['id']}/threads", headers=api.auth())
-    assert listed.json() == []
-
-
-async def test_a_card_allowed_twice_at_once_makes_one_thread(api):
-    device = await register(api)
-    project, master, proposal_id = await device_card(api)
-    both = await asyncio.gather(*(make_local(api, project, proposal_id, confirmed(device["id"])) for _ in range(2)))
-    assert sorted(response.status_code for response in both) == [201, 409]
-    assert len(await children_of(api, master)) == 1
-
-
-async def test_a_thread_works_only_on_the_users_own_live_computer(api, session_factory):
-    project, master, proposal_id = await device_card(api)
-    _, their_token = await add_user(session_factory, api.org_id)
-    theirs = await register(api, token=their_token)
-    elsewhere = await DeviceStore(session_factory).create(
-        org_id=api.org_id, agent_id="another-agent", user_id=api.user_id, name="Elsewhere",
-    )
-    revoked = await register(api)
-    await api.client.delete(f"/v1/devices/{revoked['id']}", headers=api.auth())
-    mine = await register(api)
-    for case, (execution, status) in {
-        "another user's computer": (confirmed(theirs["id"]), 404),
-        "another agent's computer": (confirmed(str(elsewhere.device.id)), 404),
-        "a revoked computer": (confirmed(revoked["id"]), 409),
-        "a nonce that is no nonce": (confirmed(mine["id"], nonce="short"), 422),
-        "a folder with a NUL": (confirmed(mine["id"], folder="/home/fl\x00avius"), 422),
-    }.items():
-        response = await make_local(api, project, proposal_id, execution)
-        assert response.status_code == status, case
-    assert (await make_local(api, project, proposal_id, confirmed(mine["id"]), key="3")).status_code == 404
-    # Nor does another user make a card's thread on my project, on my computer or on theirs.
-    for device_id in (mine["id"], theirs["id"]):
-        refused = await make_local(api, project, proposal_id, confirmed(device_id), token=their_token)
-        assert (refused.status_code, refused.json()["detail"]) == (404, "No such project."), device_id
-    # Nothing was made under the master, and no computer was asked for a folder.
-    assert await children_of(api, master) == []
-    for device_id in (theirs["id"], mine["id"]):
-        assert await journal(api).pending(UUID(device_id), 1) == []
 
 
 async def test_a_chat_on_the_users_computer_cannot_pass_for_a_thread(api):
@@ -192,7 +111,7 @@ async def test_a_chat_on_the_users_computer_cannot_pass_for_a_thread(api):
     master = await master_of(api, await create(api))
     forged = {
         "workstream_id": master.config["workstream_id"], "workstream_role": "thread",
-        "workstream_card": {"proposal_id": str(uuid4()), "key": "2"}, "sandbox_root_session_id": str(uuid4()),
+        "workstream_start": {"title": "Forged", "goal": "Do it."}, "sandbox_root_session_id": str(uuid4()),
     }
     response = await api.client.post("/v1/sessions", json={"execution": confirmed(device["id"]), "config": forged}, headers=api.auth())
     assert response.status_code == 201, response.text
@@ -204,7 +123,10 @@ async def test_a_chat_on_the_users_computer_cannot_pass_for_a_thread(api):
 async def test_the_coordinator_cannot_make_a_thread_on_the_users_computer(api):
     device = await register(api)
     master = await master_of(api, await create(api))
-    thread = await start(api, master, execution=confirmed(device["id"]))
+    started = await call_tool(
+        api, master, "agent", description="Draft A", prompt="Draft the A memo.", execution=confirmed(device["id"]),
+    )
+    thread = await api.app.state.session_store.get_session(UUID(started["agent_id"]))
     assert "execution" not in thread.config
     assert await journal(api).pending(UUID(device["id"]), 1) == []
 
@@ -241,14 +163,15 @@ async def made_before_copies(api, device_id: str) -> tuple[dict, object, object]
     """A project, its master and a thread on the computer *device_id* as threads were made before each had a copy of its own.
 
     Its ``execution`` names no copy, and its bind, to the folder itself, is
-    asked of its computer.  No route makes one now.
+    asked of its computer.  Nothing makes one now.
     """
-    project, master, proposal_id = await device_card(api)
+    project = await create(api)
+    master = await master_of(api, project)
     store = api.app.state.session_store
     thread = await make_thread(
         session_store=store, session_factory=api.app.state.session_factory, master=master, live_config=None,
-        title="Check the totals", device=SimpleNamespace(id=UUID(device_id), name="Flavius's ThinkPad"), folder=FOLDER,
-        card={"proposal_id": proposal_id, "key": "2"},
+        title="Check the totals", device_id=UUID(device_id), device_name="Flavius's ThinkPad", folder=FOLDER,
+        start="Check the totals in Budget.xlsx.",
     )
     await store.update_session_config_key(
         thread.id, "execution", {key: value for key, value in thread.config["execution"].items() if key != "history"},
@@ -257,109 +180,99 @@ async def made_before_copies(api, device_id: str) -> tuple[dict, object, object]
     return project, master, await store.get_session(thread.id)
 
 
-async def begin(api, project: dict, thread_id: str, token: str | None = None):
-    return await api.client.post(
-        f"/v1/workstreams/{project['id']}/threads/{thread_id}/start", headers=api.auth(token),
+async def begin(api, thread_id: str) -> None:
+    """Begin a thread made on the user's computer, as the server does once that computer has bound it."""
+    state = api.app.state
+    await thread_bound(state.session_factory, state.redis, UUID(thread_id), Binding("bound"))
+
+
+async def has_begun(api, thread_id: str) -> bool:
+    return bool(await events_of(api, UUID(thread_id), EventType.USER_MESSAGE))
+
+
+async def held(api, master, name: str, **arguments) -> dict:
+    """``call_tool`` by the worker holding *master*'s lease: a session on a computer answers only for that worker."""
+    store = api.app.state.session_store
+    lease = await store.try_acquire_lease(master.id, "worker-projects", ttl_seconds=60)
+    try:
+        return await call_tool(api, master, name, lease=lease, **arguments)
+    finally:
+        await store.release_lease(master.id, lease.lease_token)
+
+
+async def made_local(api, laptop) -> tuple[dict, object, str]:
+    """A project made on *laptop*'s computer, its master bound there, and a thread its master started there while the
+    computer was away, which waits for it: *laptop* is not connected."""
+    project = await create(api, execution=confirmed(laptop.device_id))
+    master = await master_of(api, project)
+    await laptop.app.connect()
+    await eventually(lambda: is_bound(api, str(master.id)))
+    await laptop.app.disconnect()
+    started = await held(api, master, "agent", description="Check the totals", prompt="Check the totals in Budget.xlsx.")
+    assert started["status"] == "waiting", started
+    return project, master, started["agent_id"]
+
+
+async def begun_in_a_cloud_project(api, laptop):
+    """A project in the cloud, its master and a thread of it on *laptop*'s computer, begun there, as threads were made
+    before every thread started in its project's own place; *laptop* is connected."""
+    project = await create(api)
+    master = await master_of(api, project)
+    state = api.app.state
+    thread = await make_thread(
+        session_store=state.session_store, session_factory=state.session_factory, master=master, live_config=None,
+        title="Check the totals", device_id=UUID(laptop.device_id), device_name="Flavius's ThinkPad", folder=FOLDER,
+        start="Check the totals in Budget.xlsx.",
     )
-
-
-async def made_local(api, laptop) -> tuple[dict, object, str, str]:
-    """A project, its master, the proposal and the thread made from its card "2" on *laptop*'s computer."""
-    project, master, proposal_id = await device_card(api)
-    made = await make_local(api, project, proposal_id, confirmed(laptop.device_id))
-    assert made.status_code == 201, made.text
-    return project, master, proposal_id, made.json()["thread_id"]
+    # The app binds a thread's copy in the name of a coordinator that works in the folder there.
+    laptop.app.bindings[str(master.id)] = FOLDER
+    await journal(api).bind(
+        session_id=thread.id, device_id=UUID(laptop.device_id), folder=FOLDER, nonce=NONCE, history=thread.id, master=master.id,
+    )
+    await laptop.app.connect()
+    await eventually(lambda: has_begun(api, str(thread.id)))
+    return project, master, await state.session_store.get_session(thread.id)
 
 
 async def begun_local(api, laptop):
     """A project, its master and a thread begun on *laptop*'s computer, which is connected."""
-    project, master, _, thread_id = await made_local(api, laptop)
+    project, master, thread_id = await made_local(api, laptop)
     await laptop.app.connect()
-    await eventually(lambda: is_bound(api, thread_id))
-    assert (await begin(api, project, thread_id)).status_code == 201
+    await eventually(lambda: has_begun(api, thread_id))
     return project, master, await api.app.state.session_store.get_session(UUID(thread_id))
 
 
 async def test_a_thread_on_the_users_computer_begins_once_its_computer_has_bound_it(api, laptop):
-    project, master, proposal_id, thread_id = await made_local(api, laptop)
-    early = await begin(api, project, thread_id)
-    assert (early.status_code, early.json()["detail"]) == (409, "This chat's folder is still being set up on your computer.")
-    assert await events_of(api, UUID(thread_id)) == []
+    project, master, thread_id = await made_local(api, laptop)
+    assert await events_of(api, UUID(thread_id)) == [] and await rows(api, project) == []
 
     await laptop.app.connect()
-    await eventually(lambda: is_bound(api, thread_id))
+    await eventually(lambda: has_begun(api, thread_id))
     # Bound to a copy of the folder of its own, which its app keeps.
-    assert (laptop.app.bindings, laptop.app.places.threads) == ({thread_id: FOLDER}, {thread_id: thread_id})
-    response = await begin(api, project, thread_id)
-    assert response.status_code == 201, response.text
-    assert (response.json()["id"], response.json()["title"], response.json()["group"]) == (thread_id, "Check the totals", "working")
+    assert (laptop.app.bindings[thread_id], laptop.app.places.threads) == (FOLDER, {thread_id: thread_id})
+    [row] = await rows(api, project)
+    assert (row["id"], row["title"], row["group"]) == (thread_id, "Check the totals", "working")
     thread = await api.app.state.session_store.get_session(UUID(thread_id))
     [goal] = await events_of(api, thread.id, EventType.USER_MESSAGE)
     assert goal.data == {"content": "Check the totals in Budget.xlsx."}
     [spawned] = await events_of(api, master.id, EventType.WORKER_SPAWNED)
     assert spawned.data == {
         "worker_id": thread_id, "title": "Check the totals", "goal": "Check the totals in Budget.xlsx.",
-        "started_by": "user", "proposal_id": proposal_id, "key": "2",
+        "bound": True, "format": NEW_FORMAT,
     }
     assert await queued(api, thread)
 
 
-async def test_a_thread_begins_once(api, laptop):
-    project, master, _, thread_id = await made_local(api, laptop)
-    await laptop.app.connect()
-    await eventually(lambda: is_bound(api, thread_id))
-    both = await asyncio.gather(*(begin(api, project, thread_id) for _ in range(2)))
-    assert sorted(response.status_code for response in both) == [201, 409]
-    again = await begin(api, project, thread_id)
-    assert (again.status_code, again.json()["detail"]) == (409, "This thread was already started.")
-    assert len(await events_of(api, master.id, EventType.WORKER_SPAWNED)) == 1
-    assert len(await events_of(api, UUID(thread_id), EventType.USER_MESSAGE)) == 1
-
-
-async def test_a_folder_the_user_did_not_confirm_keeps_its_thread_from_beginning(api, laptop):
-    laptop.app.prepared.clear()
-    project, master, _, thread_id = await made_local(api, laptop)
+async def test_a_thread_its_computer_refuses_never_begins_and_its_master_hears_why(api, laptop):
+    project, master, thread_id = await made_local(api, laptop)
+    # Its coordinator's folder there was chosen again meanwhile: the app binds no thread in that coordinator's name.
+    laptop.app.bindings.pop(str(master.id))
     await laptop.app.connect()
     await eventually(lambda: has_failed(api, thread_id))
-    refused = await begin(api, project, thread_id)
-    assert (refused.status_code, refused.json()["detail"]) == (409, (
-        "This chat's folder could not be set up: This folder was not confirmed on this computer. Start a new chat."
-    ))
-    assert await events_of(api, master.id, EventType.WORKER_SPAWNED) == []
-
-
-async def test_only_the_projects_own_threads_made_on_a_computer_begin(api, laptop, session_factory):
-    project, master, _, thread_id = await made_local(api, laptop)
-    await laptop.app.connect()
-    await eventually(lambda: is_bound(api, thread_id))
-    other = await create(api, name="Budget")
-    cloud = await start(api, master)
-    _, their_token = await add_user(session_factory, api.org_id)
-    for case, (asked, thread, token, detail) in {
-        "another project": (other, thread_id, None, "No such thread."),
-        "an unknown thread": (project, str(uuid4()), None, "No such thread."),
-        "the master": (project, str(master.id), None, "No such thread."),
-        "a thread in the cloud": (project, str(cloud.id), None, "No such thread."),
-        "another user": (project, thread_id, their_token, "No such project."),
-    }.items():
-        refused = await begin(api, asked, thread, token)
-        assert (refused.status_code, refused.json()["detail"]) == (404, detail), case
-    assert await events_of(api, UUID(thread_id)) == []
-
-
-async def test_a_thread_proposed_for_the_users_computer_runs_in_the_cloud_when_the_user_says_so(api, laptop):
-    project, master, proposal_id = await device_card(api)
-    response = await api.client.post(
-        f"/v1/workstreams/{project['id']}/threads", json={"proposal_id": proposal_id, "key": "2"}, headers=api.auth(),
-    )
-    assert response.status_code == 201, response.text
-    thread = await api.app.state.session_store.get_session(UUID(response.json()["id"]))
-    assert "execution" not in thread.config
-    assert await queued(api, thread)
-    # Started in the cloud, it is not made again on the computer.
-    again = await make_local(api, project, proposal_id, confirmed(laptop.device_id))
-    assert (again.status_code, again.json()["detail"]) == (409, "This thread was already started.")
-    assert await journal(api).pending(UUID(laptop.device_id), 1) == []
+    [failed] = await events_of(api, master.id, EventType.WORKER_FAILED)
+    assert failed.data["worker_id"] == thread_id and "This folder was not confirmed on this computer" in failed.data["error"]
+    assert (await api.app.state.session_store.get_session(UUID(thread_id))).status == "archived"
+    assert await events_of(api, master.id, EventType.WORKER_SPAWNED) == [] and await rows(api, project) == []
 
 
 PLACE = {"kind": "device", "device_name": "Flavius's ThinkPad"}
@@ -403,8 +316,12 @@ async def test_a_threads_row_names_its_computer_and_says_when_its_work_waits_for
     assert not (laptop.folder / "Totals.md").exists()
 
 
-async def test_the_library_lists_a_local_threads_files_on_its_computer_and_the_clouds_as_they_are(api, laptop):
-    project, master, thread = await begun_local(api, laptop)
+async def test_the_library_lists_a_local_threads_files_on_its_computer_and_the_clouds_as_they_are(api):
+    # A project in the cloud with a thread on the user's computer, as one made before every thread started in its
+    # project's own place.
+    project = await create(api)
+    master = await master_of(api, project)
+    thread = await answered_by_the_journal(api, project, master)
     await upload(api, master, "Budget.xlsx", b"PK the cloud's")
     # A ref as the model gave it: from the folder's top, or the whole path there. One outside the folder is none
     # of its files, and nor is the folder itself.
@@ -414,7 +331,7 @@ async def test_the_library_lists_a_local_threads_files_on_its_computer_and_the_c
     ])
     response = await library(api, project)
     assert response.status_code == 200, response.text
-    here = {**PLACE, "device_id": laptop.device_id, "online": True}
+    here = {**PLACE, "device_id": thread.config["execution"]["device_id"], "online": False}
     listed = [(e["path"], e["origin"], e["thread_id"], e["size"], e["place"]) for e in response.json()]
     assert sorted(listed, key=repr) == sorted([
         # The cloud's file of that name is the user's: the thread made its own on the computer.
@@ -428,15 +345,19 @@ async def test_the_library_lists_a_local_threads_files_on_its_computer_and_the_c
 
 
 async def answered_by_the_journal(api, project: dict, master) -> object:
-    """A thread begun from a new card of *master* on a new computer of the user's, its binding answered as its app answers."""
-    device = await register(api)
-    proposal_id = (await call_tool(api, master, "propose_threads", threads=PROPOSED))["proposal_id"]
-    thread_id = (await make_local(api, project, proposal_id, confirmed(device["id"]))).json()["thread_id"]
+    """A thread of *master* on a new computer of the user's, begun as its binding is answered as its app answers."""
+    device_id = UUID((await register(api))["id"])
+    state = api.app.state
+    thread = await make_thread(
+        session_store=state.session_store, session_factory=state.session_factory, master=master, live_config=None,
+        title="Check the totals", device_id=device_id, device_name="Flavius's ThinkPad", folder=FOLDER,
+        start="Check the totals in Budget.xlsx.",
+    )
     ops = journal(api)
-    [bind] = await ops.pending(UUID(device["id"]), 1)
-    assert await ops.complete(UUID(device["id"]), 1, bind.id, bind.digest, {"ok": {"history": {"thread": thread_id}}}) == "completed"
-    assert (await begin(api, project, thread_id)).status_code == 201
-    return await api.app.state.session_store.get_session(UUID(thread_id))
+    await ops.bind(session_id=thread.id, device_id=device_id, folder=FOLDER, nonce=NONCE, history=thread.id, master=master.id)
+    [bind] = await ops.pending(device_id, 1)
+    assert await ops.complete(device_id, 1, bind.id, bind.digest, {"ok": {"history": {"thread": str(thread.id)}}}) == "completed"
+    return await state.session_store.get_session(thread.id)
 
 
 async def test_a_thread_on_the_users_computer_works_in_its_copy_and_its_turn_lands_in_the_folder_and_reports_to_its_master(
@@ -515,7 +436,7 @@ async def test_a_helper_of_a_thread_on_the_users_computer_works_in_the_threads_c
         await journal(api).bind(session_id=helper.id, device_id=UUID(laptop.device_id), folder=FOLDER, nonce=NONCE)
 
 
-@pytest.mark.parametrize("tool", ["delegate_task", "spawn_worker", "spawn_task"])
+@pytest.mark.parametrize("tool", ["agent", "background agent"])
 async def test_a_thread_on_the_users_computer_starts_a_helper_in_its_copy_and_hands_no_copy_on(api, laptop, monkeypatch, tmp_path, tool):
     _, _, thread = await begun_local(api, laptop)
     store = api.app.state.session_store
@@ -529,7 +450,11 @@ async def test_a_thread_on_the_users_computer_starts_a_helper_in_its_copy_and_ha
     pods = ThreadPods(tmp_path / "pods")
     pool = SandboxPool(pods)
     await asyncio.wait_for(a_turn(api, monkeypatch, thread, [
-        calling((tool, {"goal": "Check the totals."})), _final_response("Started."),
+        calling((
+            "agent" if tool == "background agent" else tool,
+            {"description": "Check", "prompt": "Check the totals.", "run_in_background": tool == "background agent"}
+            if tool.endswith("agent") else {"goal": "Check the totals."},
+        )), _final_response("Started."),
         _final_response("The helper has it."),  # asked once more for the file its goal names
     ], pool=pool), 60)
     [helper] = await children_of(api, thread)
@@ -545,7 +470,7 @@ async def test_a_thread_on_the_users_computer_starts_a_helper_in_its_copy_and_ha
 async def test_a_routine_run_of_a_project_whose_thread_works_on_a_folder_runs_on_the_projects_own_files_and_asks_the_computer_nothing(
     api, laptop, monkeypatch, pods,
 ):
-    _, master, thread = await begun_local(api, laptop)
+    _, master, thread = await begun_in_a_cloud_project(api, laptop)
     (laptop.folder / "notes.txt").write_text("the folder's notes\n")
     pool = SandboxPool(pods)
     await a_history(api, pool, master)

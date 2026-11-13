@@ -1,12 +1,10 @@
 """Sub-agents an agent dispatches on its own: the ``agent`` tool family and what binds it together.
 
-With ``subagent_parity`` on (``AgentsSettings``; a session's own config key
-wins), a session is offered ``agent`` in place of ``delegate_task``: one tool
-that starts a sub-agent in the foreground (it waits for the report) or in the
-background (it returns the agent's id at once, and the agent's end reaches it
-as an ``agent.notification``), from a fresh context or from a fork of the
-conversation.  ``delegate_task`` stays callable under its old name.  Off, the
-tools the model sees are those it always saw.
+``agent`` starts a sub-agent in the foreground (it waits for the report) or in
+the background (it returns the agent's id at once, and the agent's end reaches
+its parent as an ``agent.notification``), from a fresh context or from a fork
+of the conversation.  ``send_message``, ``list_agents``, ``stop_agent`` and
+``monitor`` go with it.
 
 A sub-agent the ``agent`` tool started carries ``agent_dispatch`` in its
 config: what it was started for, how, and by which call.
@@ -21,8 +19,6 @@ from surogates.session.events import EventType
 
 logger = logging.getLogger(__name__)
 
-#: A session's config key that turns the family on or off for it (and its sub-agents).
-PARITY_KEY = "subagent_parity"
 #: A sub-agent's config key: how the ``agent`` tool started it.
 DISPATCH_KEY = "agent_dispatch"
 #: A session's config key: the token budget of each agent it starts (``AgentsSettings.agent_token_budget``).
@@ -38,84 +34,132 @@ TOKEN_BUDGET_REPORT_REQUEST = (
     "with your report to the agent that started you: what you found and did so far, and what is still left undone."
 )
 
-#: The config keys of the family only the server writes: a client naming one could switch the family on
-#: against the deployment's setting, pose as another agent's sub-agent, or lift its own depth or budget.
+#: The config keys of the family only the server writes: a client naming one could pose as another agent's
+#: sub-agent, or lift its own depth or budget.
 SERVER_OWNED_KEYS: tuple[str, ...] = (
-    PARITY_KEY, DISPATCH_KEY, "agent_token_budget", "agent_budget", "delegation_depth",
+    DISPATCH_KEY, "agent_token_budget", "agent_budget", "delegation_depth",
 )
 
-#: Policy names that stand for the family's tools: a policy that names ``delegate_task`` names the
-#: tools that take its place, one that names ``terminal`` names ``monitor``, and one that names the
-#: coordinator's worker tools names the ``agent`` tools that do their work.
+#: Policy names that stand for the family's tools: a policy that names ``terminal`` names ``monitor``, which
+#: runs commands too.
 STANDS_IN_FOR: dict[str, tuple[str, ...]] = {
-    "delegate_task": ("agent", "send_message", "list_agents", "stop_agent"),
     "terminal": ("monitor",),
-    # The coordinator's worker tools: ``agent`` starts in the background what
-    # ``spawn_worker`` starts, so a policy on them binds the agent family too.
-    "spawn_worker": ("agent", "send_message", "list_agents", "stop_agent"),
-    "send_worker_message": ("send_message",),
-    "stop_worker": ("stop_agent",),
 }
 
 #: The tools that go with ``agent``: offered to a session that may start agents, and to every agent it started.
 COMPANION_TOOLS: frozenset[str] = frozenset({"send_message", "list_agents", "stop_agent"})
 #: Offered with the companions where the session runs commands (``terminal``), never on the user's computer.
 MONITOR_TOOL = "monitor"
-#: The tools of the family, offered only with parity on.
-PARITY_TOOLS: frozenset[str] = frozenset({"agent", MONITOR_TOOL}) | COMPANION_TOOLS
-#: The tool ``agent`` stands in for; with parity on it is no longer offered, but still callable.
-REPLACED_TOOL = "delegate_task"
+#: The tools of the family.
+FAMILY_TOOLS: frozenset[str] = frozenset({"agent", MONITOR_TOOL}) | COMPANION_TOOLS
 
 
-def parity_enabled(config: dict | None) -> bool:
-    """Whether a session with *config* has the ``agent`` tool family: its own key, else the deployment's setting."""
-    value = (config or {}).get(PARITY_KEY)
-    if isinstance(value, bool):
-        return value
-    try:
-        from surogates.config import load_settings
+def offer_family(tools: set[str], config: dict | None, *, root: bool = True) -> set[str]:
+    """*tools*, a session's offered set, with the family's companions decided.
 
-        return bool(load_settings().agents.subagent_parity)
-    except Exception:
-        logger.debug("Could not read the agents settings; sub-agent parity stays off", exc_info=True)
-        return False
-
-
-def apply_parity(tools: set[str], config: dict | None, *, root: bool = True) -> set[str]:
-    """*tools*, a session's offered set, with the family in or out.
-
-    On: ``agent`` takes ``delegate_task``'s place wherever the session may
-    delegate, so a policy that denies ``delegate_task`` denies ``agent``
-    too.  Its companions (``COMPANION_TOOLS``) go to such a session and to
-    every agent the ``agent`` tool started, unless the session's config
-    leaves them out by name; ``monitor`` only to a *root* session
-    (``monitor_allowed``).  Off: none of the family.
+    ``agent`` stays where the session's filters left it.  Its companions
+    (``COMPANION_TOOLS``) go to a session offered ``agent`` and to every agent
+    the ``agent`` tool started, unless the session's config leaves them out by
+    name; ``monitor`` only to a *root* session that runs commands
+    (``monitor_allowed``).  What the session keeps whatever its tool list says
+    (``kept_whatever_policy``) it has unless its config excludes it by name.
     """
-    result = set(tools) - PARITY_TOOLS
+    result = set(tools) - COMPANION_TOOLS - {MONITOR_TOOL}
     config = config or {}
-    if not parity_enabled(config):
-        return result
-    if REPLACED_TOOL in result:
-        result.discard(REPLACED_TOOL)
-        if "agent" not in set(config.get("excluded_tools") or ()):
-            result.add("agent")
-    if "agent" in result or isinstance(config.get(DISPATCH_KEY), dict):
+    excluded = set(config.get("excluded_tools") or ())
+    # A sub-agent can always reach the agent that started it, whatever its type's tool list, as a task worker
+    # kept its self-tools; kept only this way, it reaches its parent and nobody else.  A project's master keeps
+    # the family, its only way to give out work.
+    kept = kept_whatever_policy(config, has_agents=False) - excluded
+    if "agent" in result or isinstance(config.get(DISPATCH_KEY), dict) or kept:
         allowed = config.get("allowed_tools")
-        excluded = set(config.get("excluded_tools") or ())
         from surogates.devices.binding import device_of
 
         companions = set(COMPANION_TOOLS)
         if "terminal" in result and device_of(config) is None and root and monitor_allowed(config):
             companions.add(MONITOR_TOOL)
         result |= {name for name in companions if name not in excluded and (not allowed or name in allowed)}
-    return result
+    return result | kept
+
+
+def kept_whatever_policy(config: dict | None, *, has_agents: bool) -> frozenset[str]:
+    """What of the family a session with *config* keeps whatever its agent's policy or its tool list says.
+
+    A project's master keeps the family: Studio's policy editor does not
+    know projects, and a master that can start no thread does no work.  A
+    sub-agent keeps ``send_message``, to reach the agent that started it.  A
+    session that started agents (*has_agents*) keeps listing, messaging and
+    stopping them, so a policy cannot strand work that waits on it.  Nothing
+    else: a policy that denies ``agent`` denies starting agents.
+    """
+    from surogates.workstreams import is_project_master
+
+    config = config or {}
+    kept: set[str] = set()
+    if is_project_master(config):
+        kept |= {"agent"} | COMPANION_TOOLS
+    if isinstance(config.get(DISPATCH_KEY), dict):
+        kept.add("send_message")
+    if has_agents:
+        kept |= COMPANION_TOOLS
+    return frozenset(kept)
+
+
+async def kept_family_gate(gate: Any, session: Any, store: Any) -> Any:
+    """*gate*, an agent's policy, as *session* gets it: with what the session keeps of the family whatever the
+    policy says (``kept_whatever_policy``).  The worker builds one per wake, and the harness, the prompt and
+    every tool call read it."""
+    from surogates.governance.policy import KeptFamilyGate
+
+    has_agents = await store.has_event(session.id, EventType.DELEGATION_START)
+    return KeptFamilyGate(gate, kept_whatever_policy(session.config, has_agents=has_agents))
+
+
+#: The (agent type, tool) pairs this process has already warned of (``warn_unknown_tools``).
+_WARNED_UNKNOWN_TOOLS: set[tuple[str, str]] = set()
+
+
+def warn_unknown_tools(agents: Any, known: set[str]) -> None:
+    """Warn, once per process for each agent type and name, of a tool an agent type's ``tools`` or
+    ``disallowed_tools`` names that this runtime does not have: such a name is ignored.  A bundle published
+    before a tool was removed still names it.  MCP tools are left out: they come and go with their servers."""
+    for agent in agents:
+        for name in [*(agent.tools or ()), *(agent.disallowed_tools or ())]:
+            if name in known or name.startswith("mcp__") or (agent.name, name) in _WARNED_UNKNOWN_TOOLS:
+                continue
+            _WARNED_UNKNOWN_TOOLS.add((agent.name, name))
+            logger.warning(
+                "Agent type %r names the tool %r, which this runtime does not have; it is ignored", agent.name, name,
+            )
+
+
+def parent_only(config: dict | None, *, kept_only: bool = False) -> bool:
+    """Whether a sub-agent with *config* has ``send_message`` only to reach its parent: its tool list leaves it
+    out and ``offer_family`` put it back for that alone, or its agent's policy denies it and the session's gate
+    keeps it for that alone (*kept_only*, ``KeptFamilyGate.kept_only``)."""
+    config = config or {}
+    if not isinstance(config.get(DISPATCH_KEY), dict):
+        return False
+    allowed = config.get("allowed_tools")
+    return kept_only or (bool(allowed) and "send_message" not in allowed)
+
+
+def reports_elsewhere(session: Any) -> bool:
+    """Whether *session*'s end is reported somewhere other than to a person in it: a session with a parent to
+    its parent, a Keel case's step or work item to Keel, a routine's run where the routine says.  Work it left
+    running past its turn, an agent in the background or a monitor, would end after that report and wake a
+    turn that is no step's, no item's, or announce a second time: such a session's agents run in the
+    foreground, and it runs no monitor."""
+    from surogates.keel.steps import is_case_work
+    from surogates.session.execution_context import is_scheduled_run
+
+    return getattr(session, "parent_id", None) is not None or is_case_work(session) or is_scheduled_run(session)
 
 
 def monitor_allowed(config: dict | None) -> bool:
     """Whether a session with *config* may run monitors: not a sub-agent, whose work ends with its report,
     and not a project's thread or one under it, whose sandbox ends with its turn.  Either would be woken by
-    lines after its end.  Only a root session may (no ``parent_id``): every other session's end is someone's
-    news, a helper's, a worker's or a routine run's; the callers check that, from the session."""
+    lines after its end.  The callers also check the session itself (``reports_elsewhere``)."""
     from surogates.workstreams import under_a_thread
 
     config = config or {}
@@ -215,6 +259,82 @@ def budget_report(events: list[Any]) -> str:
     return ""
 
 
+def run_events(events: list[Any], status: str) -> list[Any]:
+    """The events of the run of an agent that just ended with *status*.
+
+    A ``completed`` or ``budget`` end has already written its run's
+    ``session.complete``, so the run is after the one before it; a
+    ``failed`` or ``killed`` end writes none, so the run is after the last
+    one.  With no earlier end, the whole log.
+    """
+    def kind(event: Any) -> str:
+        value = getattr(event, "type", None)
+        return str(getattr(value, "value", value))
+
+    ends = [at for at, event in enumerate(events) if kind(event) == EventType.SESSION_COMPLETE.value]
+    if status in ("completed", "budget"):
+        start = ends[-2] + 1 if len(ends) >= 2 else 0
+    else:
+        start = ends[-1] + 1 if ends else 0
+    return events[start:]
+
+
+async def _usage(store: Any, session: Any, status: str) -> dict[str, int]:
+    """What agent *session* used: tokens over it and its own agents so far, its tool calls so far, and the
+    duration of the run that just ended."""
+    from datetime import datetime, timezone
+
+    fresh = await store.get_session(session.id)
+    events = await store.get_events(session.id, exclude_types=[EventType.LLM_DELTA])
+    run = run_events(events, status)
+    started = getattr(run[0], "created_at", None) if run else None
+    started = started or getattr(fresh, "created_at", None)
+    if started is not None and started.tzinfo is not None:
+        started = started.astimezone(timezone.utc).replace(tzinfo=None)
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    return {
+        "subagent_tokens": int(await store.session_tree_tokens(session.id)),
+        "tool_uses": int(getattr(fresh, "tool_call_count", 0) or 0),
+        "duration_ms": max(0, int((now - started).total_seconds() * 1000)) if started is not None else 0,
+    }
+
+
+async def resolve_agent(store: Any, session_factory: Any, caller: Any, to: str, *, own_only: bool = False) -> Any | None:
+    """The session *to* names for *caller*: ``parent`` (any case), an id, or an agent's name.
+
+    A name is looked for among the agents of the family *caller* can reach
+    (its own at any depth, its parent and its siblings, as ``list_agents``
+    shows them; with *own_only*, its own only), and the newest one with it
+    answers.  Who may be messaged is ``may_message``'s to decide.
+    """
+    from uuid import UUID
+
+    to = (to or "").strip()
+    if to.lower() == "parent":
+        return await store.get_session(caller.parent_id) if getattr(caller, "parent_id", None) else None
+    try:
+        session_id = UUID(to)
+    except ValueError:
+        session_id = None
+    if session_id is not None:
+        try:
+            return await store.get_session(session_id)
+        except Exception:
+            return None
+    if not to or session_factory is None:
+        return None
+    from surogates.tools.builtin.agents import reachable_agents
+
+    rows = [
+        row for row, relation in await reachable_agents(session_factory, caller)
+        if (not own_only or relation == "yours") and (row["dispatch"] or {}).get("name") == to
+    ]
+    if not rows:
+        return None
+    newest = max(rows, key=lambda row: (row["created_at"], str(row["id"])))
+    return await store.get_session(newest["id"])
+
+
 async def lineage(store: Any, session: Any, *, limit: int = 8) -> list[Any]:
     """*session*'s ancestors, its parent first, at most *limit* of them."""
     chain: list[Any] = []
@@ -256,13 +376,14 @@ async def tell_parent(
     its token budget); *result* the agent's last words.  Best effort: the agent's own log keeps its end whatever
     becomes of this.
     """
-    from surogates.harness.agent_news import MAX_RESULT_CHARS
-    from surogates.harness.worker_notify import notify_parent_of_task_event
+    from surogates.harness.agent_news import MAX_RESULT_CHARS, NEW_FORMAT
+    from surogates.harness.worker_notify import emit_and_wake
 
     dispatch = dispatch_of(session) or {}
     payload: dict[str, Any] = {
         "agent_id": str(session.id), "kind": "agent", "status": status,
         "summary": str(dispatch.get("description") or ""), "result": (result or "")[:MAX_RESULT_CHARS],
+        "format": NEW_FORMAT,
     }
     if status == "budget":
         payload["budget_tokens"] = budget_of(session)
@@ -273,6 +394,13 @@ async def tell_parent(
         payload["reason"] = reason
     if dispatch.get("tool_call_id"):
         payload["tool_call_id"] = dispatch["tool_call_id"]
+    if dispatch.get("name"):
+        payload["name"] = dispatch["name"]
+    try:
+        payload["usage"] = await _usage(store, session, status)
+    except Exception:
+        # Best effort: without its usage the notification still goes.
+        logger.warning("Could not measure what agent %s used", session.id, exc_info=True)
     try:
         # The parent's log closes the agent's run as it closes a foreground one: what training and viewers join
         # on.  Before the notification, so the turn it gives reads past them; on their own, so a failure here
@@ -305,7 +433,7 @@ async def tell_parent(
     except Exception:
         logger.warning("Could not close the run of agent %s in its parent's log", session.id, exc_info=True)
     try:
-        await notify_parent_of_task_event(
+        await emit_and_wake(
             session_store=store, parent_session_id=session.parent_id,
             event_type=EventType.AGENT_NOTIFICATION, payload=payload, redis=redis,
         )

@@ -11,7 +11,7 @@ from uuid import UUID
 from surogates.channels.memory_boundary import rerun_kind_of
 from surogates.devices.binding import device_of
 from surogates.devices.browser import of_a_sub_agent, resumes_the_agent, takes_the_browser_over
-from surogates.harness.agent_news import AGENT_NEWS_TYPES, notification_note
+from surogates.harness.agent_news import AGENT_NEWS_TYPES, NEW_FORMAT, frame, notification_note
 from surogates.harness.context import NOOP_STRATEGIES
 from surogates.harness.context_files import load_folder_context
 from surogates.harness.loop_attachments import (
@@ -133,8 +133,9 @@ def build_user_message_dict(
 #: The events that carry a worker's report to the session that started it.
 WORKER_REPORT_TYPES = frozenset({EventType.WORKER_COMPLETE.value, EventType.WORKER_FAILED.value})
 #: What a coordinator hears of its workers between its own requests: their
-#: reports, and the threads the user started (``worker.spawned`` with
-#: ``started_by``).  A spawn of its own is its own tool call's result.
+#: reports, and the threads its computer began after the turn that started
+#: them (``worker.spawned`` with ``bound``).  A spawn of its own is its own
+#: tool call's result.
 WORKER_NEWS_TYPES = WORKER_REPORT_TYPES | {EventType.WORKER_SPAWNED.value}
 
 
@@ -440,13 +441,32 @@ def _left_out_lines(data: dict, *keys: str) -> str:
     return lines
 
 
+def _by_landing(files: object) -> tuple[list, list, list, list]:
+    """A thread's reported *files*: the ones that did not land, the ones it deleted, the ones it made or changed,
+    and the ones being redone."""
+    kept, deleted, made, redoing = [], [], [], []
+    for f in files if isinstance(files, list) else ():
+        landing, change = (f.get("landing"), f.get("change")) if isinstance(f, dict) else (None, None)
+        (
+            kept if landing == "not_merged" else redoing if landing == "redoing"
+            else deleted if change == "deleted" else made
+        ).append(f)
+    return kept, deleted, made, redoing
+
+
 def worker_note(event_type: str, data: dict) -> dict:
     """The user-role message a worker's report is read as, built from its
     payload alone, so the live loop and replay produce the same bytes.  A
     project's thread is named by its title, quoted, and lists the files of
-    the turn it reports.  Its own words sit between the harness's markers:
-    they may quote a document or a web page, and the master reads them as
-    the thread's, never as the user's."""
+    the turn it reports.
+
+    A payload with the family's mark reads in its frame
+    (``_framed_worker_note``).  One written before the mark reads as it
+    always has: the thread's own words sit between the harness's markers,
+    since they may quote a document or a web page, and the master reads them
+    as the thread's, never as the user's."""
+    if data.get("format") == NEW_FORMAT:
+        return _framed_worker_note(event_type, data)
     worker_id = data.get("worker_id", "?")
     title = data.get("title")
     failed = event_type == EventType.WORKER_FAILED.value
@@ -466,13 +486,7 @@ def worker_note(event_type: str, data: dict) -> dict:
             files = data.get("files")
             # A thread's files that did not land, and the ones it deleted,
             # are named apart from the ones it made or changed.
-            kept, deleted, made, redoing = [], [], [], []
-            for f in files if isinstance(files, list) else ():
-                landing, change = (f.get("landing"), f.get("change")) if isinstance(f, dict) else (None, None)
-                (
-                    kept if landing == "not_merged" else redoing if landing == "redoing"
-                    else deleted if change == "deleted" else made
-                ).append(f)
+            kept, deleted, made, redoing = _by_landing(files)
             listed = _listed(made) if isinstance(files, list) else "not listed (the turn ended early)"
             if data.get("stopped"):
                 # Its user stopped its turn, and the harness alone speaks: what the stop did not take back.
@@ -491,6 +505,52 @@ def worker_note(event_type: str, data: dict) -> dict:
                     f"Files: {listed}"
                 ) + _landing_lines(data, kept, deleted, redoing) + _set_aside_lines(data)
     return {"role": "user", "content": content}
+
+
+def _framed_worker_note(event_type: str, data: dict) -> dict:
+    """A marked ``worker.*`` payload in the family's frame (``agent_news.frame``).
+
+    The summary names the thread by its title, quoted, and says how its turn
+    ended; ``<result>`` holds its words, and ``<files>`` the lines the
+    unmarked text appends after them, in the same order.  A helper's report
+    (no title) is an agent's.
+    """
+    worker_id = str(data.get("worker_id") or "?")
+    title = data.get("title")
+    usage = data.get("usage")
+    words = str(data.get("result") or "")
+    error = data.get("error") or "unknown error"
+    failed = event_type == EventType.WORKER_FAILED.value
+    named = f"Thread {json.dumps(title, ensure_ascii=False)}"
+    if event_type == EventType.WORKER_SPAWNED.value:
+        return frame(task_id=worker_id, status="started", summary=f"{named} started, in its copy of the project's folder")
+    if title is None:
+        summary = f"Agent {worker_id} failed: {error}" if failed else f"Agent {worker_id} finished"
+        return frame(
+            task_id=worker_id, status="failed" if failed else "completed", summary=summary, result=words,
+            files=not_handed_back(data), usage=usage,
+        )
+    if failed:
+        # A failed turn that was kept names what its take-ups left out, as a landing does.
+        lines = _left_out_lines(data, "not_taken") + _set_aside_lines(data)
+        return frame(task_id=worker_id, status="failed", summary=f"{named} failed: {error}", files=lines.lstrip("\n"), usage=usage)
+    if data.get("stopped"):
+        # Its user stopped its turn: what the stop did not take back, if anything.
+        return frame(task_id=worker_id, status="killed", summary=f"{named} was stopped", result=words, usage=usage)
+    files = data.get("files")
+    kept, deleted, made, redoing = _by_landing(files)
+    if data.get("recovered"):
+        # No turn of the thread ended: a later lock holder settled what its lost worker left.
+        lines = _landing_lines(data, kept, deleted, redoing) + (f"\n{_NONE_PUT_BACK}" if data.get("gone") else "")
+        return frame(
+            task_id=worker_id, status="completed", summary=f"{named}: a landing its worker left unfinished was settled",
+            files=lines.lstrip("\n"), usage=usage,
+        )
+    listed = _listed(made) if isinstance(files, list) else "not listed (the turn ended early)"
+    return frame(
+        task_id=worker_id, status="completed", summary=f"{named} reported", result=words,
+        files=f"Files: {listed}" + _landing_lines(data, kept, deleted, redoing) + _set_aside_lines(data), usage=usage,
+    )
 
 
 #: How a thread reads each file its landing left out, by why it was.
@@ -550,18 +610,18 @@ def wait_note(data: dict) -> dict | None:
 
 def worker_news(event_type: str, data: dict, answered: frozenset[str] = frozenset()) -> dict | None:
     """The message a coordinator reads a worker's news as: its report, or a
-    thread the user started; None for a spawn the coordinator made, and for
-    the report of a ``delegate_task`` helper whose call got its result
+    thread its computer began; None for a spawn the coordinator made, and for
+    the report of a foreground agent whose call got its result
     (*answered*, ``loop_pending.answered_helpers``): its parent has it as
     that call's result (``worker_notify.is_delegated``)."""
     if (data or {}).get("delegated") and str((data or {}).get("worker_id")) in answered:
         return None
     if event_type != EventType.WORKER_SPAWNED.value:
         return worker_note(event_type, data)
-    if data.get("started_by") != "user":
+    # An old log's thread started from a card is no news: no card is left.
+    if not data.get("bound"):
         return None
-    title = json.dumps(data.get("title"), ensure_ascii=False)
-    return {"role": "user", "content": f"[Thread {title} ({data.get('worker_id', '?')}) started by the user]"}
+    return _framed_worker_note(event_type, data)
 
 
 def news(event, answered: frozenset[str] = frozenset()) -> dict | None:
@@ -752,7 +812,7 @@ class ContextReplayMixin:
         # ``workspace_path.rstrip("/")``.
         workspace_root = (workspace_path or "").rstrip("/")
         events = _in_typed_order(events)
-        # The helpers whose delegate_task call got their result, in the whole
+        # The helpers whose agent call got their result, in the whole
         # log: a helper's report can land after the call has returned.
         answered = answered_helpers(events)
         messages: list[dict] = []
@@ -936,32 +996,6 @@ class ContextReplayMixin:
                     deferred_users.append(note)
                 else:
                     messages.append(note)
-
-            # Task-layer terminal signals.  Same synthetic-user-message
-            # shape as the worker events above: without a branch here a
-            # coordinator woken by ``notify_parent_of_task_event`` replays
-            # its log, finds nothing new, and re-runs its previous turn.
-            elif etype == EventType.TASK_BLOCKED.value:
-                task_id = event.data.get("task_id", "?")
-                reason = event.data.get("reason", "no reason given")
-                messages.append({
-                    "role": "user",
-                    "content": (
-                        f"[Task {task_id} is blocked: {reason}] "
-                        "It will not run again until it is unblocked."
-                    ),
-                })
-
-            elif etype == EventType.TASK_FAILED.value:
-                task_id = event.data.get("task_id", "?")
-                attempts = event.data.get("attempt_count", "?")
-                messages.append({
-                    "role": "user",
-                    "content": (
-                        f"[Task {task_id} failed after {attempts} attempts "
-                        "and will not be retried]"
-                    ),
-                })
 
             # Coding-agent run result — surface the final message to the
             # coordinator LLM so it can follow up on what /code did.  Progress

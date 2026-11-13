@@ -68,6 +68,7 @@ logger = logging.getLogger(__name__)
 # truth for all tool execution policy).  Import here for use by the executor.
 from surogates.harness.sanitize import (  # noqa: E402 — after TYPE_CHECKING block
     cap_delegate_calls,
+    delegate_cap,
     deduplicate_tool_calls,
 )
 from surogates.harness.tool_exec import (  # noqa: E402 — after TYPE_CHECKING block
@@ -236,7 +237,7 @@ class StreamingToolExecutor:
         # stream ends -- here, before anything starts.  A duplicate or an
         # over-cap delegate that was already dispatched cannot be undone.
         batch =[t.tool_call for t in self._tracked] + [tool_call]
-        if len(cap_delegate_calls(deduplicate_tool_calls(batch))) == len(self._tracked):
+        if len(cap_delegate_calls(deduplicate_tool_calls(batch), delegate_cap(self._session.config))) == len(self._tracked):
             return
 
         fn = tool_call.get("function", {})
@@ -607,7 +608,7 @@ class StreamingToolExecutor:
     def _promote_batch_parallel_tools(self) -> None:
         """Promote delegation-style tools to parallel-eligible post-stream.
 
-        Delegation tools (``delegate_task``, ``spawn_worker``) are kept out
+        Delegation tools (``agent``) are kept out
         of :data:`~surogates.harness.tool_exec.PARALLEL_TOOLS` so the
         streaming executor doesn't speculatively spawn child sessions
         mid-stream -- if the stream were later discarded, those sessions

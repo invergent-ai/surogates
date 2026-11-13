@@ -32,27 +32,12 @@ export interface MissionRow {
   updated_at: string;
 }
 
-export interface MissionTaskRow {
-  id: string;
-  goal: string;
-  status: string;
-  attempt_count: number;
-  max_attempts: number;
-  agent_def_name: string | null;
-  result: string | null;
-  result_metadata: Record<string, unknown> | null;
-  parent_ids: string[];
-  current_session_id: string | null;
-  created_at: string | null;
-  started_at: string | null;
-  completed_at: string | null;
-}
-
+/** One of the mission's agents: a session its coordinator started with the
+ * ``agent`` tool while the mission was active. */
 export interface MissionWorkerRow {
-  task_id: string;
   worker_session_id: string;
   agent_def_name: string | null;
-  task_status: string;
+  description: string;
   session_status: string;
   latest_event_id: number | null;
   latest_event_kind: string | null;
@@ -85,16 +70,6 @@ export async function listMissions(params?: {
 export async function getMission(missionId: string): Promise<MissionRow> {
   return readJson(
     await authFetch(`/api/v1/missions/${encodeURIComponent(missionId)}`),
-  );
-}
-
-export async function getMissionTasks(
-  missionId: string,
-): Promise<{ tasks: MissionTaskRow[] }> {
-  return readJson(
-    await authFetch(
-      `/api/v1/missions/${encodeURIComponent(missionId)}/tasks`,
-    ),
   );
 }
 
@@ -168,9 +143,8 @@ export interface MissionEventsPage {
   sessions: Record<
     string,
     {
-      task_id: string | null;
       agent_def_name: string | null;
-      kind: "coordinator" | "task" | "worker" | "delegation";
+      kind: "coordinator" | "agent";
     }
   >;
 }

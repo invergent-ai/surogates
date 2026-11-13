@@ -136,7 +136,7 @@ After writing the complete plan, look at the spec with fresh eyes and check the 
 
 If you find issues, fix them inline. No need to re-review — just fix and move on. If you find a spec requirement with no task, add the task.
 
-**Optional external review:** For a high-stakes plan, dispatch a reviewer via `delegate_task` using the template at [references/plan-reviewer-prompt.md](references/plan-reviewer-prompt.md).
+**Optional external review:** For a high-stakes plan, start a reviewer with the `agent` tool using the template at [references/plan-reviewer-prompt.md](references/plan-reviewer-prompt.md).
 
 ## Execution Handoff
 
@@ -144,7 +144,7 @@ After saving the plan, offer execution choice to your human partner:
 
 > "Plan complete and saved to `.surogate/plans/<filename>.md`. Two execution options:
 >
-> **1. Subagent-Driven (recommended if your platform supports it)** — I dispatch a fresh sub-agent per task via `delegate_task`, review between tasks, fast iteration.
+> **1. Subagent-Driven (recommended if your platform supports it)** — I start a fresh sub-agent per task with the `agent` tool, review between tasks, fast iteration.
 >
 > **2. Inline Execution** — Execute tasks in this session using `executing-plans`, batch execution with checkpoints.
 >

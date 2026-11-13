@@ -221,7 +221,6 @@ async def create_child_session(
     service_account_id: UUID | None = None,
     idempotency_key: str | None = None,
     session_id: UUID | None = None,
-    task_id: UUID | None = None,
     context: dict | None = None,
 ) -> Session:
     """Create a session that shares its parent's workspace.
@@ -239,10 +238,6 @@ async def create_child_session(
     ``parent.model`` when not supplied — which is itself whatever the
     worker recorded for the parent, or ``None`` if the parent has not
     woken yet; the child's own wake stamps the authoritative value.
-
-    *task_id* links the child to a ``tasks`` row when the spawn is a
-    subagent task attempt.  Plain ``spawn_worker`` children pass
-    ``None`` (the default), keeping their existing semantics unchanged.
 
     *context* is what a schedule captured when it was made; without it the
     child takes the parent's (see :mod:`surogates.session.execution_context`).
@@ -345,7 +340,6 @@ async def create_child_session(
         parent_id=parent.id,
         service_account_id=effective_service_account_id,
         idempotency_key=idempotency_key,
-        task_id=task_id,
     )
 
 

@@ -52,7 +52,7 @@ async def test_creates_ambient_session_and_injects_prompt(monkeypatch):
         enqueued.append(session_id)
     monkeypatch.setattr("surogates.ambient.materialize.enqueue_session", fake_enqueue)
     async def fake_changes(*a, **k): return []
-    monkeypatch.setattr("surogates.ambient.materialize.recent_task_changes", fake_changes)
+    monkeypatch.setattr("surogates.ambient.materialize.recent_agent_changes", fake_changes)
 
     store = FakeSessionStore()
     amb = FakeAmbientStore()
@@ -73,7 +73,7 @@ async def test_reuses_existing_ambient_session(monkeypatch):
     async def fake_enqueue(redis, *, org_id, agent_id, session_id): pass
     monkeypatch.setattr("surogates.ambient.materialize.enqueue_session", fake_enqueue)
     async def fake_changes(*a, **k): return []
-    monkeypatch.setattr("surogates.ambient.materialize.recent_task_changes", fake_changes)
+    monkeypatch.setattr("surogates.ambient.materialize.recent_agent_changes", fake_changes)
 
     store = FakeSessionStore()
     existing = uuid.uuid4()

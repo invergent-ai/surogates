@@ -17,7 +17,7 @@ import uuid
 import pytest
 from sqlalchemy import update
 
-from surogates.db.models import Session as ORMSession, Task
+from surogates.db.models import Session as ORMSession
 from surogates.missions.store import MissionStore
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -55,30 +55,20 @@ async def test_the_coordinator_session_counts(
     assert await store.tokens_spent(mid) == 150
 
 
-async def test_worker_sessions_under_the_mission_count(
+async def test_agent_sessions_under_the_mission_count(
     session_factory, org_id, user_id, chat_session, session_store,
 ):
-    """Spend joins through tasks: a worker session bills to its mission."""
+    """Spend joins through the mission's agents: an agent's session bills to its mission."""
+    from tests.integration.missions.conftest import a_mission_agent
+
     store = MissionStore(session_factory)
     mid = await store.create(
         org_id=org_id, user_id=user_id, session_id=chat_session.id,
         agent_id="a", description="ship", rubric="works",
     )
-    async with session_factory() as db:
-        task = Task(
-            org_id=org_id, parent_session_id=chat_session.id,
-            goal="do it", status="ready", mission_id=mid,
-        )
-        db.add(task)
-        await db.commit()
-        task_id = task.id
-
-    worker = await session_store.create_session(
-        org_id=org_id, user_id=user_id, agent_id="a",
-        channel="web", task_id=task_id,
-    )
+    agent = await a_mission_agent(session_factory, chat_session, mid, status="active")
     await _spend(session_factory, chat_session.id, inp=10, out=10)
-    await _spend(session_factory, worker.id, inp=200, out=100)
+    await _spend(session_factory, agent.id, inp=200, out=100)
 
     assert await store.tokens_spent(mid) == 320
 

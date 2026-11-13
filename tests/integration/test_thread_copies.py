@@ -35,7 +35,7 @@ from tests.test_wake_slash_command_gate import _harness as a_waking_harness
 
 from .test_devices import api  # noqa: F401  (api is a fixture)
 from .test_turn_sagas import a_turn, calling, saga_events, stop
-from .test_workstream_threads import harness_of, start
+from .test_workstream_threads import harness_of, heard_as, start
 from .test_workstreams import create, master_of
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -178,7 +178,7 @@ async def test_two_threads_change_one_docx_and_the_second_leaves_it_to_the_first
         ("Budget.xlsx", "landed", None), ("Report.docx", "redoing", "changed"),
     ]
     # The master reads that B is redoing its docx: not finished.
-    assert worker_note(EventType.WORKER_COMPLETE.value, b)["content"].endswith("Files: Budget.xlsx\nBeing redone: Report.docx")
+    assert heard_as(EventType.WORKER_COMPLETE.value, b)["files"].endswith("Files: Budget.xlsx\nBeing redone: Report.docx")
     # B is told who changed it.
     [redo] = await api.app.state.session_store.get_events(second.id, types=[EventType.HISTORY_REDO])
     assert redo.data["files"] == [
@@ -250,7 +250,7 @@ async def test_an_apply_that_fails_on_the_third_of_five_files_puts_the_first_two
     assert report["landing"] == "compensated"
     assert {f["landing"] for f in report["files"]} == {"not_merged"}
     # The master hears that nothing landed, and that the turn's work is not lost for it.
-    assert worker_note(EventType.WORKER_COMPLETE.value, report)["content"].endswith(
+    assert heard_as(EventType.WORKER_COMPLETE.value, report)["files"].endswith(
         "Files: none\n"
         "Not landed, and the project's files are as they were: a.md, b.md, c.md, d.md, e.md\n"
         "The thread's work is kept, and lands with its next turn"
@@ -366,7 +366,7 @@ class FailsToCommit(SandboxPool):
 
 
 async def landing_told(api, monkeypatch, pool) -> tuple[dict, str]:
-    """A thread's turn that writes a.md, ended through *pool*: its report and the master's note."""
+    """A thread's turn that writes a.md, ended through *pool*: its report and the files block of the master's note."""
     master = await master_of(api, await create(api))
     thread = await a_thread(api, "Draft A", master)
     await a_turn(api, monkeypatch, thread, [
@@ -374,7 +374,7 @@ async def landing_told(api, monkeypatch, pool) -> tuple[dict, str]:
         _final_response("I wrote a.md."),
     ], pool=pool, saga_settings=QUICK)
     [report] = await reports(api, master)
-    return report, worker_note(EventType.WORKER_COMPLETE.value, report)["content"]
+    return report, heard_as(EventType.WORKER_COMPLETE.value, report)["files"]
 
 
 async def test_a_landing_that_never_knew_its_files_still_tells_the_master(api, monkeypatch, pods):
@@ -409,7 +409,7 @@ async def test_an_excluded_file_a_turn_made_is_named_in_its_report(api, monkeypa
     assert pods.real_names() == ["Report.docx", "kept.md", "notes.txt"]
     [report] = await reports(api, master)
     assert report["excluded"] == ["node_modules/", "notes.tmp"]
-    assert worker_note(EventType.WORKER_COMPLETE.value, report)["content"].endswith(
+    assert heard_as(EventType.WORKER_COMPLETE.value, report)["files"].endswith(
         "Files: kept.md\n"
         "Not merged, because they go with a change that was not merged (a move lands whole or not at all): notes.txt\n"
         "Not saved, because the project's history leaves them out: node_modules/, notes.tmp"
@@ -428,7 +428,7 @@ async def test_a_landed_deletion_is_named_apart_in_its_report(api, monkeypatch, 
     assert pods.real_names() == ["Report.docx", "kept.md"]
     [report] = await reports(api, master)
     # A deletion is named apart: the master must not read it as a file to open.
-    assert worker_note(EventType.WORKER_COMPLETE.value, report)["content"].endswith(
+    assert heard_as(EventType.WORKER_COMPLETE.value, report)["files"].endswith(
         "Files: kept.md\nDeleted: notes.txt"
     )
 
@@ -443,7 +443,7 @@ async def test_a_folder_inside_a_git_repository_a_turn_wrote_into_is_named_as_no
     assert pods.real_names() == ["Report.docx", "kept.md", "notes.txt"]
     [report] = await reports(api, master)
     assert (report["repositories"], "excluded" in report) == (["clone/"], False)
-    assert worker_note(EventType.WORKER_COMPLETE.value, report)["content"].endswith(
+    assert heard_as(EventType.WORKER_COMPLETE.value, report)["files"].endswith(
         "Files: kept.md\n"
         "Not landed, because they are inside a git repository: clone/"
     )
@@ -655,7 +655,7 @@ async def test_a_reports_excluded_files_are_capped_in_its_payload_and_counted(ap
     ], pool=SandboxPool(pods))
     [report] = await reports(api, master)
     assert (len(report["excluded"]), report["excluded_count"]) == (200, 250)
-    note = worker_note(EventType.WORKER_COMPLETE.value, report)["content"]
+    note = heard_as(EventType.WORKER_COMPLETE.value, report)["files"]
     assert note.endswith(", n010.tmp, and 240 more")
 
 
@@ -665,12 +665,12 @@ async def test_a_helper_starting_call_the_allow_list_refuses_takes_no_snapshot_a
     await store.update_session_config_key(thread.id, "tool_allow_list", ["terminal"])
     # Bounded: a delegation let through waits on its helper, and would hang the test.
     await asyncio.wait_for(a_turn(api, monkeypatch, await store.get_session(thread.id), [
-        calling(("delegate_task", {"goal": "Summarise the report."})),
+        calling(("agent", {"description": "Summary", "prompt": "Summarise the report."})),
         _final_response("Summarised it myself."),
     ], pool=SandboxPool(pods)), 60)
     [answer] = [json.loads(e.data["content"]) for e in await store.get_events(thread.id, types=[EventType.TOOL_RESULT])
-                if e.data["name"] == "delegate_task"]
-    assert answer == {"error": "Tool 'delegate_task' is not in this session's allow-list. Allowed: ['terminal']"}
+                if e.data["name"] == "agent"]
+    assert answer == {"error": "Tool 'agent' is not in this session's allow-list. Allowed: ['terminal']"}
     # A call that never runs takes no snapshot of the copy.
     [call] = await store.get_events(thread.id, types=[EventType.TOOL_CALL])
     assert "checkpoint_hash" not in call.data
@@ -753,14 +753,12 @@ async def test_every_tool_that_starts_a_session_is_named_as_handing_a_threads_co
     )
 
     # The tools whose step puts a thread's copy on its hand-off first, for the helper they start.
-    assert HELPER_STARTING_TOOLS == {"delegate_task", "spawn_worker", "spawn_task", "agent"}
+    assert HELPER_STARTING_TOOLS == {"agent"}
     # A thread schedules no routine: its runs would work on old files, and land only at the thread's next turn.
     assert THREAD_REFUSED_TOOLS == {"cron_create"}
     # Every other tool that starts a session is named, with why the thread's rule leaves it: it reaches a
-    # session that exists already, or it answers a thread itself.
-    assert SESSION_STARTING_TOOLS - HELPER_STARTING_TOOLS - THREAD_REFUSED_TOOLS == {
-        "send_worker_message", "unblock_task", "message_thread", "start_thread", "propose_threads", "send_message",
-    }
+    # session that exists already.
+    assert SESSION_STARTING_TOOLS - HELPER_STARTING_TOOLS - THREAD_REFUSED_TOOLS == {"send_message"}
     assert HELPER_STARTING_TOOLS <= SESSION_STARTING_TOOLS and THREAD_REFUSED_TOOLS <= SESSION_STARTING_TOOLS
     # A new tool that starts a session is refused in a thread by the code itself, until it is placed: it never
     # runs there with no hand-off because nobody thought of threads.  Do not loosen this.

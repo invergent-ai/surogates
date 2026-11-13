@@ -4,7 +4,7 @@
 // its shape. What the page sends is copied field by field. No call answers an approval.
 
 import type {
-  DesktopAccount, DesktopAppearance, DesktopBinding, DesktopDeviceState, DesktopFolderChoice, DesktopPreparedFolder, DesktopThreadLabel,
+  DesktopAccount, DesktopAppearance, DesktopBinding, DesktopDeviceState, DesktopFolderChoice, DesktopPreparedFolder,
 } from "../../../web/src/lib/desktop-bridge-contract.js";
 import { sameOrigin } from "./window-policy.js";
 
@@ -18,10 +18,8 @@ export interface BridgeCalls {
   getDevice(): DesktopDeviceState;
   webSignIn(): Promise<{ code: string } | null>;
   signOut(): Promise<void>;
-  prepareFolder(choice: DesktopFolderChoice, window: string, thread: DesktopThreadLabel | null): Promise<DesktopPreparedFolder | null>;
+  prepareFolder(choice: DesktopFolderChoice, window: string): Promise<DesktopPreparedFolder | null>;
   bindSession(sessionId: string, token: string, window: string): Promise<void>;
-  // A copy of the folder its user chose for a project made here, for a thread of it: no sheet asks again.
-  prepareThreadFolder(masterSessionId: string, window: string): Promise<DesktopPreparedFolder>;
   // The chat asks every time from now on: the page can make a chat only safer.
   setMode(sessionId: string, mode: "ask"): Promise<void>;
   // The desktop's own confirmation: true once the chat works freely.
@@ -57,16 +55,6 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const text = (value: unknown, max: number): value is string => typeof value === "string" && value.length <= max;
 const named = (value: unknown): value is string => text(value, 200) && value !== "";
 
-// A project's name and a thread's title, as the server keeps them: at most 256 UTF-16 units, and not blank.
-const titled = (value: unknown): value is string => text(value, 256) && value.trim() !== "";
-
-function threadOf(value: unknown): DesktopThreadLabel | null {
-  if (value === undefined || value === null) return null;
-  const { project, thread } = (typeof value === "object" ? value : {}) as Record<string, unknown>;
-  if (!titled(project) || !titled(thread)) throw new Error("Not a project's thread");
-  return { project, thread };
-}
-
 // A chat's id, as the page names one, or the call is refused.
 function chat(value: unknown): string {
   if (typeof value !== "string" || !UUID.test(value)) throw new Error("Not a chat");
@@ -97,17 +85,15 @@ export function bridgeHandlers(origin: string, calls: BridgeCalls): Record<strin
     getDevice: checked(() => calls.getDevice()),
     webSignIn: checked(() => calls.webSignIn()),
     signOut: checked(() => calls.signOut()),
-    prepareFolder: checked((window, choice, thread) => {
+    prepareFolder: checked((window, choice) => {
       if (choice !== "new" && choice !== "last" && choice !== "pick") throw new Error("Not a folder choice");
-      const label = threadOf(thread);
-      return alone("folder", window, () => calls.prepareFolder(choice, window, label));
+      return alone("folder", window, () => calls.prepareFolder(choice, window));
     }),
     bindSession: checked((window, sessionId, token) => {
       if (typeof sessionId !== "string" || !UUID.test(sessionId)) throw new Error("Not a chat");
       if (typeof token !== "string" || !PREPARED.test(token)) throw new Error("Not a folder confirmation");
       return calls.bindSession(sessionId, token, window);
     }),
-    prepareThreadFolder: checked((window, masterSessionId) => calls.prepareThreadFolder(chat(masterSessionId), window)),
     setMode: checked((_window, sessionId, mode) => {
       if (typeof sessionId !== "string" || !UUID.test(sessionId)) throw new Error("Not a chat");
       if (mode !== "ask") throw new Error("Only the desktop can let a chat work freely");

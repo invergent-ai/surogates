@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import datetime
 import uuid
 
 import pytest
@@ -14,7 +13,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from surogates.db import many_rows
 
-from surogates.db.models import Session, Task, TaskLink
+from surogates.db.models import Event, Session
 
 from .conftest import create_org, create_user
 
@@ -24,78 +23,52 @@ pytestmark = pytest.mark.asyncio(loop_scope="session")
 RESULT = "r" * 40_000
 
 
-_ORGS: list[uuid.UUID] = []
-
-
-@pytest_asyncio.fixture(autouse=True, loop_scope="session")
-async def _its_tasks_go_with_the_test(session_factory):
-    """The tasks a test here makes are deleted with it: the dispatcher's tests take up every task they find."""
-    yield
-    async with session_factory() as db:
-        for statement in (
-            "DELETE FROM task_links WHERE child_id IN (SELECT id FROM tasks WHERE org_id = ANY(:orgs))",
-            "DELETE FROM tasks WHERE org_id = ANY(:orgs)",
-        ):
-            await db.execute(text(statement), {"orgs": _ORGS})
-        await db.commit()
-    _ORGS.clear()
-
-
-async def seed(session_factory, tasks: int) -> tuple[uuid.UUID, uuid.UUID, list[uuid.UUID]]:
-    """A session of a fresh org and *tasks* tasks of it."""
+async def seed(session_factory, events: int) -> tuple[uuid.UUID, list[int]]:
+    """A session of a fresh org and *events* events of it: the session and the events' ids."""
     org_id = await create_org(session_factory)
-    _ORGS.append(org_id)
     user_id = await create_user(session_factory, org_id)
     session_id = uuid.uuid4()
-    ids = [uuid.uuid4() for _ in range(tasks)]
     async with session_factory() as db:
         db.add(Session(id=session_id, org_id=org_id, user_id=user_id, agent_id="agent-x", config={}))
         await db.commit()
-        await db.execute(
+        ids = list((await db.execute(
             text(
-                "INSERT INTO tasks (id, org_id, parent_session_id, goal) "
-                "SELECT u, :org, :sess, 'g' FROM unnest(CAST(:ids AS uuid[])) AS u"
+                "INSERT INTO events (session_id, type, data) "
+                "SELECT :sess, 'many.seed', '{}'::jsonb FROM generate_series(1, :n) RETURNING id"
             ),
-            {"org": org_id, "sess": session_id, "ids": ids},
-        )
+            {"sess": session_id, "n": events},
+        )).scalars())
         await db.commit()
-    return org_id, session_id, ids
+    return session_id, ids
 
 
-async def finalize(session_factory, ids: list[uuid.UUID]) -> None:
-    """As the dispatcher finalises ended tasks, but for its completed_at: a datetime of
-    Python's, with which the ORM sends every task's row in one statement."""
+async def finalize(session_factory, ids: list[int]) -> None:
+    """Every event's row changed in one flush, each a packet of its own: the ORM sends them in one statement."""
     async with session_factory() as db:
-        for task in (await db.execute(select(Task).where(Task.id.in_(ids)))).scalars().all():
-            task.status = "done"
-            task.result = RESULT
-            task.completed_at = datetime.datetime(2026, 1, 1)
+        for row in (await db.execute(select(Event).where(Event.id.in_(ids)))).scalars().all():
+            row.type = "many.done"
+            row.data = {"result": RESULT}
         await db.commit()
 
 
-async def link(session_factory, org_id, session_id, parents: list[uuid.UUID]) -> uuid.UUID:
-    """As create_task_and_spawn records a task and its parents (surogates/tasks/service.py)."""
+async def link(session_factory, session_id, parents: list[int]) -> None:
+    """One event per *parents* entry added in one flush: the ORM inserts them in one statement, or in groups."""
     async with session_factory() as db:
-        task = Task(org_id=org_id, parent_session_id=session_id, goal="g", status="todo")
-        db.add(task)
-        await db.flush()
-        for parent in parents:
-            db.add(TaskLink(parent_id=parent, child_id=task.id))
+        db.add_all([Event(session_id=session_id, type="many.link", data={"of": parent}) for parent in parents])
         await db.commit()
-        return task.id
 
 
 async def done(session_factory, ids) -> int:
     async with session_factory() as db:
         return (await db.execute(
-            select(func.count()).select_from(Task).where(Task.id.in_(ids), Task.status == "done")
+            select(func.count()).select_from(Event).where(Event.id.in_(ids), Event.type == "many.done")
         )).scalar_one()
 
 
-async def links(session_factory, parents) -> int:
+async def links(session_factory, session_id) -> int:
     async with session_factory() as db:
         return (await db.execute(
-            select(func.count()).select_from(TaskLink).where(TaskLink.parent_id.in_(parents))
+            select(func.count()).select_from(Event).where(Event.session_id == session_id, Event.type == "many.link")
         )).scalar_one()
 
 
@@ -112,7 +85,7 @@ def statements(engine, table: str):
 
 
 async def test_six_results_of_40_kb_changed_in_one_flush_end_when_stopped_at_any_wait(stopping, session_factory):
-    _, _, ids = await seed(session_factory, 6)
+    _, ids = await seed(session_factory, 6)
     for at in range(200):
         await stopping.stop_at(at, finalize(stopping.session_factory, ids))
         changed = await done(session_factory, ids)
@@ -121,15 +94,15 @@ async def test_six_results_of_40_kb_changed_in_one_flush_end_when_stopped_at_any
         # Stopped before its commit: none of them.
         assert changed == 0
     else:
-        pytest.fail("the tasks were never finalised")
+        pytest.fail("the events were never changed")
     async with session_factory() as db:
-        assert set((await db.execute(select(Task.result).where(Task.id.in_(ids)))).scalars()) == {RESULT}
+        assert {row["result"] for row in (await db.execute(select(Event.data).where(Event.id.in_(ids)))).scalars()} == {RESULT}
 
 
 @pytest.mark.slow
 async def test_the_same_flush_never_ends_when_stopped_without_the_guard(stopping, session_factory, unguarded):
     """The driver's own fault, kept in sight: the day this fails, asyncpg ends such a call and the guard may go."""
-    _, _, ids = await seed(session_factory, 6)
+    _, ids = await seed(session_factory, 6)
     with pytest.raises(AssertionError, match="the call did not end"):
         for at in range(200):
             await stopping.stop_at(at, finalize(stopping.session_factory, ids), within=3.0)
@@ -138,33 +111,33 @@ async def test_the_same_flush_never_ends_when_stopped_without_the_guard(stopping
 
 
 @pytest.mark.parametrize("parents", [5, pytest.param(2_600, marks=pytest.mark.slow)])
-async def test_a_task_with_many_parents_has_every_link_or_none_when_stopped_at_any_wait(stopping, session_factory, parents):
-    org_id, session_id, ids = await seed(session_factory, parents)
+async def test_many_rows_added_in_one_flush_are_all_or_none_when_stopped_at_any_wait(stopping, session_factory, parents):
+    session_id, ids = await seed(session_factory, parents)
     for at in range(400):
-        stopped = await stopping.stop_at(at, link(stopping.session_factory, org_id, session_id, ids))
-        made = await links(session_factory, ids)
+        stopped = await stopping.stop_at(at, link(stopping.session_factory, session_id, ids))
+        made = await links(session_factory, session_id)
         if made == parents:
             break
         assert made == 0 and stopped
     else:
-        pytest.fail("the task was never linked")
+        pytest.fail("the rows were never added")
 
 
 async def test_few_small_rows_go_as_one_statement_and_many_in_groups_all_of_them_once(engine, session_factory):
-    org_id, session_id, ids = await seed(session_factory, 2_600)
-    seen, stop = statements(engine, "task_links")
+    session_id, ids = await seed(session_factory, 2_600)
+    seen, stop = statements(engine, "INSERT INTO events")
     try:
-        await link(session_factory, org_id, session_id, ids[:5])
+        await link(session_factory, session_id, ids[:5])
         # As it always was: one statement of the five rows.
-        assert seen == [(True, 5)]
+        assert len(seen) == 1
         seen.clear()
-        child = await link(session_factory, org_id, session_id, ids)
+        await link(session_factory, session_id, ids)
     finally:
         stop()
     async with session_factory() as db:
         assert sorted((await db.execute(
-            select(TaskLink.parent_id).where(TaskLink.child_id == child)
-        )).scalars()) == sorted(ids)
+            select(Event.data["of"].as_integer()).where(Event.session_id == session_id, Event.type == "many.link")
+        )).scalars()) == sorted(ids[:5] + ids)
 
 
 # -- a table of the tests' own -------------------------------------------------

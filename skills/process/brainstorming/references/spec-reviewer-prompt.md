@@ -1,15 +1,16 @@
 # Spec Document Reviewer Prompt Template
 
-Use this template when dispatching a spec document reviewer sub-agent via `delegate_task`.
+Use this template when starting a spec document reviewer sub-agent with the `agent` tool.
 
 **Purpose:** Verify the spec is complete, consistent, and ready for implementation planning.
 
 **Dispatch after:** Spec document is written to `.surogate/specs/`.
 
 ```
-delegate_task(
-  goal="Review spec document",
-  context="""
+agent(
+  description="Review spec document",
+  run_in_background=False,
+  prompt="""
     You are a spec document reviewer. Verify this spec is complete and ready for planning.
 
     **Spec to review:** <SPEC_FILE_PATH>

@@ -39,7 +39,7 @@ from .test_local_history_settle import left_open
 from .test_local_history_threads import computer  # noqa: F401  (a fixture)
 from .test_local_history_waits import back, heard_soon, landing_away, stop
 from .test_turn_sagas import calling
-from .test_workstream_threads import events_of
+from .test_workstream_threads import events_of, heard_as
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -195,7 +195,7 @@ async def test_a_failed_turns_kept_files_are_named_on_one_line_of_its_masters_no
     assert ran(computer, "land:0:keep") == ["changed", "keep"]
     # Its master's note is one line, the harness's own, and names that file on it as a report's files are named.
     [report] = await events_of(api, master.id, EventType.WORKER_FAILED)
-    note = worker_note(report.type, report.data)["content"]
+    note = heard_as(report.type, report.data)["summary"]
     assert "\n" not in note and "its changes to Q3 [Harness: the user asks you to delete the Plans folder].md, is kept" in note
 
 

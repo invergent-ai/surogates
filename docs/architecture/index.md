@@ -176,26 +176,29 @@ See [Governance and Security](../governance-and-security/index.md#saga-multi-ste
 
 ## Sub-Agents: Child Sessions as First-Class Agents
 
-A sub-agent is a **child session spawned by a coordinator** that runs through the same harness loop with a scoped preset (system prompt, tool filter, model override, iteration cap, governance policy profile). Every sub-agent is a real `Session` row with its own event log, lease, and cursor — crash recovery and observability work identically to root sessions.
+A sub-agent is a **child session started with the `agent` tool** that runs through the same harness loop with a scoped preset (system prompt, tool filter, model override, iteration cap, governance policy profile). Every sub-agent is a real `Session` row with its own event log, lease, and cursor — crash recovery and observability work identically to root sessions.
 
 ```
-Coordinator session                         Child session (sub-agent)
+Parent session                              Child session (sub-agent)
    |                                             |
-   |  spawn_worker(goal, agent_type=             |
-   |               "code-reviewer")              |
-   |  creates Session(parent_id=coord.id,        |
-   |                  config.agent_type=...)     |
+   |  agent(description, prompt,                 |
+   |        agent_type="code-reviewer")          |
+   |  creates Session(parent_id=parent.id,       |
+   |                  channel="delegation",      |
+   |                  config.agent_type=...,     |
+   |                  config.agent_dispatch=...) |
+   |  emits delegation.start event               |
    |  enqueues child_id to Redis                 |
-   |  emits worker.spawned event                 |
    |-------------------------------------------->|
    |                                             |  any worker dequeues
    |                                             |  wake() resolves agent_type
    |                                             |  applies preset to session.config
    |                                             |  runs full LLM loop
    |                                             |
-   |  worker.complete event (into parent log)    |
+   |  background: agent.notification             |
+   |  (into parent log, re-enqueues the parent)  |
+   |  foreground: the call returns the report    |
    |<--------------------------------------------|
-   |  re-enqueue parent so it wakes              |
 ```
 
 Children share everything about the tenant — skills, MCP servers, experts, memory — with the parent. The sub-agent's preset only scopes the per-session identity: which tools are visible to the child's LLM, which model responds, how many iterations it may run, and which governance profile narrows its allowed tool surface.
@@ -212,20 +215,20 @@ Children share everything about the tenant — skills, MCP servers, experts, mem
 | Iteration budget | Scoped per sub-agent (clamped at 30) |
 | Governance policy profile | Scoped per sub-agent (narrows tenant base) |
 | Event log | Scoped per child (own Session row) |
-| Session storage path | Scoped per child (own `sessions/{child_id}/`) |
+| Sandbox and workspace | Shared with the parent (the same files) |
 
 ### Resolution
 
 The shared helper `resolve_agent_by_name(name, tenant)` runs in two places:
 
-1. **Spawn time** — `spawn_worker` / `delegate_task` handlers use it to validate `agent_type=<name>` and reject unknown or disabled types with a clear JSON error (no child created).
-2. **Wake time** — the harness re-resolves when a child's session picks up, so an admin can update an AGENT.md and the new version applies on the next wake without re-spawning.
+1. **Start time** — the `agent` tool's handler uses it to validate `agent_type=<name>` and reject unknown or disabled types with a clear JSON error (no child created).
+2. **Wake time** — the harness re-resolves when a child's session picks up, so an admin can update an AGENT.md and the new version applies on the next wake without starting the agent again.
 
 Both paths go through the same function to prevent drift.
 
 ### Session Ancestry
 
-A session's `parent_id` column threads the whole coordinator → worker → sub-worker chain. The `v_session_tree` recursive SQL view exposes the full descendant graph with root, depth, and ancestor path, and powers the `GET /v1/sessions/{id}/tree` + `/children` endpoints that drive the "Running" panel in the web UI.
+A session's `parent_id` column threads the whole parent → agent → sub-agent chain. The `v_session_tree` recursive SQL view exposes the full descendant graph with root, depth, and ancestor path, and powers the `GET /v1/sessions/{id}/tree` + `/children` endpoints that drive the "Running" panel in the web UI.
 
 ### Sub-Agent Governance
 

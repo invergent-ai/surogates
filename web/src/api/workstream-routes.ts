@@ -30,18 +30,6 @@ export type OpenEvents = (url: string, fetchFn: Fetch) => EventStreamLike<"ready
 export type SaveFile = (data: Blob, name: string) => void;
 
 export interface WorkstreamRoutes extends ProjectsSource {
-  /** Start the thread a proposal's card *key* names, in the cloud. */
-  start(projectId: string, proposalId: string, key: string): Promise<ThreadRow>;
-  /**
-   * Make the thread a proposal's card *key* names in a folder its user confirmed on their
-   * computer: its id. It begins once that computer has bound it.
-   */
-  makeOnComputer(
-    projectId: string, proposalId: string, key: string,
-    execution: { kind: "device"; device_id: string; folder: string; nonce: string },
-  ): Promise<string>;
-  /** Begin a thread made on the user's computer, once that computer has bound it. */
-  begin(projectId: string, threadId: string): Promise<ThreadRow>;
   /**
    * The project's stream, ``ready`` then a ``change`` for each change. It opens itself again
    * after any failure, and ends, with ``onerror``, only when the project is gone: its route
@@ -91,7 +79,6 @@ const SUMMARY = one(["id", "name", "created_at", "updated_at"], projectSummaryOf
 const PROJECT = one(["id", "name", "created_at", "updated_at", "master_session_id"], projectOf);
 // A row's group is no part of its shape: one that is none, or no group's name, is a group the page does not know.
 const ROW = one(["id", "title", "created_at", "updated_at"], threadRowOf);
-const MADE = one(["thread_id"], (body: { thread_id: string }) => body.thread_id);
 const ENTRY = one(["path", "origin"], libraryEntryOf);
 const ROUTINE = one(["id", "schedule_display", "status"], routineOf);
 const VERSION = one(["id", "path", "at"], fileVersionOf);
@@ -212,12 +199,6 @@ export function workstreamRoutes(fetchFn: Fetch, openEvents: OpenEvents, saveFil
       const found = await read(`/api/v1/sessions?${page}`, undefined, "Failed to fetch the chats", CHATS);
       return { chats: found.slice(0, limit), more: found.length > limit };
     },
-    start: async (projectId, proposalId, key) =>
-      row(`${project(projectId)}/threads`, sent("POST", { proposal_id: proposalId, key }), "The thread could not be started."),
-    makeOnComputer: async (projectId, proposalId, key, execution) =>
-      asked(`${project(projectId)}/threads`, sent("POST", { proposal_id: proposalId, key, execution }), "The thread could not be started.", MADE),
-    begin: async (projectId, threadId) =>
-      row(`${project(projectId)}/threads${thread(threadId)}/start`, sent("POST"), "The thread could not be started."),
     stream: (projectId) => {
       const path = `${ROUTE}${project(projectId)}/stream`;
       return projectStream((watched) => openEvents(path, watched), fetchFn);

@@ -28,7 +28,6 @@ from surogates.sandbox.pool import SandboxPool
 from surogates.session.events import EventType
 from surogates.tools.builtin import agents as agents_module
 
-from .test_agent_tool import PARITY
 from .test_background_completions import Daemon, daemon_registry  # noqa: F401  (a fixture)
 from .test_devices import api  # noqa: F401  (a fixture)
 
@@ -94,7 +93,7 @@ async def crashes(worker: Worker) -> None:
 
 
 async def a_session(api) -> UUID:  # noqa: F811
-    created = await api.client.post("/v1/sessions", json={"config": PARITY}, headers=api.auth())
+    created = await api.client.post("/v1/sessions", json={"config": {}}, headers=api.auth())
     return UUID(created.json()["id"])
 
 
@@ -195,7 +194,7 @@ async def test_the_commands_of_a_crashed_worker_are_told_by_another_workers_swee
     second.watch.start_sweeping(every=0.1)
     [lost] = await until(lambda: notes(store, chat))
     assert lost["agent_id"] == proc and lost["status"] == "lost"
-    assert notification_note(lost)["content"].startswith(f"[Background process {proc} cannot be watched any more")
+    assert f"<summary>Background process {proc} cannot be watched any more" in notification_note(lost)["content"]
     # Told once: the claim keeps every other sweep from telling it again.
     await asyncio.sleep(0.5)
     assert len(await notes(store, chat)) == 1

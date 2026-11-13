@@ -1436,7 +1436,6 @@ class ArtifactCompletionMixin:
                     org_id=str(session.org_id),
                     agent_id=session.agent_id,
                     redis=self._redis,
-                    task_id=getattr(session, "task_id", None),
                     session_factory=self._session_factory,
                     files=files,
                     landing=landing,
@@ -1454,11 +1453,11 @@ class ArtifactCompletionMixin:
         await self._finalize_dynamic_loop_if_needed(session)
 
         if landing is not None and landing.get("redo"):
-            from surogates.harness.worker_notify import notify_parent_of_task_event
+            from surogates.harness.worker_notify import emit_and_wake
 
             # After the turn's end, so that its next turn reads it, and queued,
             # as a report queues its master: the thread redoes those files.
-            await notify_parent_of_task_event(
+            await emit_and_wake(
                 session_store=self._store, parent_session_id=session.id, event_type=EventType.HISTORY_REDO,
                 payload={"saga": landing["saga"], "files": landing["redo"]}, redis=self._redis,
             )
@@ -1792,7 +1791,6 @@ class ArtifactCompletionMixin:
                     agent_id=session.agent_id,
                     error=error,
                     redis=self._redis,
-                    task_id=getattr(session, "task_id", None),
                     session_factory=self._session_factory,
                     not_taken=not_taken,
                     set_aside=newly_aside,

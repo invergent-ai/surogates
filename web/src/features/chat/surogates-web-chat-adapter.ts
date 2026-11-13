@@ -3,7 +3,6 @@ import * as codingAgentsApi from "@/api/coding-agents";
 import * as composioApi from "@/api/composio";
 import { authFetch } from "@/api/auth";
 import { submitAskUserQuestionResponse as submitAskUserQuestionResponseApi } from "@/api/ask_user_question";
-import { listDevices } from "@/api/devices";
 import { submitTurnFeedback } from "@/api/feedback";
 import * as inboxApi from "@/api/inbox";
 import * as missionsApi from "@/api/missions";
@@ -12,8 +11,6 @@ import { type SkillSummary, listSkills } from "@/api/skills";
 import * as workspaceApi from "@/api/workspace";
 import { workstreams } from "@/api/workstreams";
 import { getAuthToken } from "@/features/auth";
-import { getDesktop } from "@/lib/desktop-bridge";
-import { localThreads, projectFolderLost } from "@/lib/local-thread";
 import { INBOX_REOPENING, reopeningStream } from "@/lib/reopening-stream";
 import { useAppStore } from "@/stores/app-store";
 import type { ScheduledWorkItem, Session } from "@/types/session";
@@ -24,7 +21,6 @@ import { FetchSseEventStream } from "@invergent/agent-chat-react";
 import type {
   AgentChatAdapter,
   AgentChatMissionSummary,
-  AgentChatMissionTask,
   AgentChatMissionWorker,
   AgentChatScheduledWorkItem,
   AgentChatSession,
@@ -205,24 +201,9 @@ export const surogatesWebChatAdapter: AgentChatAdapter = {
     return workstreams.stream(input.projectId);
   },
 
-  async startProposedThread(input) {
-    return workstreams.start(input.projectId, input.proposalId, input.key);
-  },
-
   async undoProjectChanges(input) {
     return workstreams.undo(input.projectId, input.target);
   },
-
-  // A computer project's card says to use another computer for it once its own can no longer reach its folder.
-  async isProjectFolderLost(input) {
-    return projectFolderLost(workstreams, input.projectId);
-  },
-
-  // Only Surogate Desktop has folders of this computer for a thread to work in.
-  ...localThreads(getDesktop(), {
-    ...workstreams,
-    online: async (deviceId) => (await listDevices()).some((row) => row.id === deviceId && row.online),
-  }),
 
   async stopSession(input) {
     await sessionsApi.stopSession(input.sessionId);
@@ -452,11 +433,6 @@ export const surogatesWebChatAdapter: AgentChatAdapter = {
     return toAgentChatMission(await missionsApi.getMission(input.missionId));
   },
 
-  async getMissionTasks(input) {
-    const response = await missionsApi.getMissionTasks(input.missionId);
-    return { tasks: response.tasks.map(toAgentChatMissionTask) };
-  },
-
   async getMissionWorkers(input) {
     const response = await missionsApi.getMissionWorkers(input.missionId);
     return { workers: response.workers.map(toAgentChatMissionWorker) };
@@ -479,7 +455,6 @@ export const surogatesWebChatAdapter: AgentChatAdapter = {
         Object.entries(page.sessions).map(([sid, meta]) => [
           sid,
           {
-            taskId: meta.task_id,
             agentDefName: meta.agent_def_name,
             kind: meta.kind,
           },
@@ -577,38 +552,13 @@ function toAgentChatMission(
   };
 }
 
-function toAgentChatMissionTask(
-  row: missionsApi.MissionTaskRow,
-): AgentChatMissionTask {
-  return {
-    id: row.id,
-    goal: row.goal,
-    status: row.status,
-    attemptCount: row.attempt_count,
-    maxAttempts: row.max_attempts,
-    agentDefName: row.agent_def_name,
-    result: row.result,
-    resultMetadata: row.result_metadata,
-    parentIds: row.parent_ids,
-    currentSessionId: row.current_session_id,
-    createdAt: row.created_at,
-    startedAt: row.started_at,
-    completedAt: row.completed_at,
-  };
-}
-
 function toAgentChatMissionWorker(
   row: missionsApi.MissionWorkerRow,
 ): AgentChatMissionWorker {
-  // The web missions API only returns durable Task-backed workers, so
-  // every row here is `kind: "task"`. Workers spawned via `spawn_worker`
-  // or `delegate_task` are not surfaced through this endpoint.
   return {
-    kind: "task",
-    taskId: row.task_id,
     workerSessionId: row.worker_session_id,
     agentDefName: row.agent_def_name,
-    taskStatus: row.task_status,
+    description: row.description,
     sessionStatus: row.session_status,
     latestEventId: row.latest_event_id,
     latestEventKind: row.latest_event_kind,

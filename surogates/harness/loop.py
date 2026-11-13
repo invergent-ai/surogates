@@ -92,6 +92,7 @@ from surogates.harness.resilience import (
 )
 from surogates.harness.sanitize import (
     cap_delegate_calls,
+    delegate_cap,
     deduplicate_tool_calls,
 )
 from surogates.harness.slash_skill import (
@@ -111,7 +112,6 @@ from surogates.harness.todo_reminder import (
 )
 from surogates.harness.tool_exec import (
     _open_local_copy,
-    _parse_tool_args_for_guardrail,
     _turn_now,
     cancelled_result,
     execute_single_tool,
@@ -164,6 +164,7 @@ from surogates.harness.tool_schemas import (
     channel_tool_flags,
     describe_for_conversation,
     describe_for_device,
+    describe_for_project,
     drop_unusable_tools,
     filter_schemas_for_tenant,
     has_file_pane,
@@ -276,7 +277,6 @@ from surogates.harness.loop_pending import (
     answered_helpers,
     read_as_result,
     _actionable_pending_events,
-    _awaited_report_unread,
     _aware,
     _command_answered,
     _cut_off_at,
@@ -294,16 +294,15 @@ from surogates.harness.loop_pending import (
     _redo_unread,
     _turn_for_a_hand_back,
     _turn_for_a_redo,
-    _waits_on_its_workers,
 )
-from surogates.harness.agent_news import agent_news_unread, started_notified_work, starts_notified_work
+from surogates.harness.agent_news import NEW_FORMAT, agent_news_unread, started_notified_work, starts_notified_work
 from surogates.harness.subagents import (
     BUDGET_REASON,
-    REPLACED_TOOL,
     TOKEN_BUDGET_REPORT_REQUEST,
-    apply_parity,
     budget_of,
+    offer_family,
     over_budget,
+    reports_elsewhere,
     runs_in_background,
 )
 from surogates.harness.loop_tool_recovery import (
@@ -562,7 +561,7 @@ _COMMAND_FOR_THE_MODEL = "deep-research"
 #: Commands that do their work in the conversation itself.  A project's
 #: master works through threads: a goal or a mission there could neither
 #: delegate nor do the work, ``/deep-research`` hands its
-#: topic to ``delegate_task``, and ``/code`` clones into the project's shared
+#: topic to an ``agent``, and ``/code`` clones into the project's shared
 #: workspace.  ``/loop`` (a routine), ``/compress`` and ``/clear`` still run.
 _PROJECT_MASTER_REFUSED_COMMANDS = frozenset({
     "goal", "mission", "code", "deep-research",
@@ -1289,7 +1288,7 @@ class AgentHarness(
             session_id,
             types=[
                 EventType.LLM_REQUEST, EventType.WORKER_COMPLETE, EventType.WORKER_FAILED,
-                # Which delegate_task helpers' reports are their calls' results (``answered_helpers``).
+                # Which foreground agents' reports are their calls' results (``answered_helpers``).
                 EventType.DELEGATION_COMPLETE, EventType.DELEGATION_FAILED,
             ],
         )
@@ -1303,25 +1302,6 @@ class AgentHarness(
             session_id, types=[EventType.LLM_REQUEST, EventType.AGENT_NOTIFICATION],
         )
         return agent_news_unread(events)
-
-    async def _has_awaited_report(self, session: Session) -> bool:
-        """Return True if a report the session was told to wait for is newer than its last model
-        request (``_awaited_report_unread``).
-
-        Every skipped wake of a finished chat asks this, and reads little of
-        its log: none for a session that does not wait on its workers
-        (``_waits_on_its_workers``), and a single row for one that never
-        started a worker, as most have not.
-        """
-        if not _waits_on_its_workers(session) or not await self._store.has_event(
-            session.id, EventType.WORKER_SPAWNED,
-        ):
-            return False
-        events = await self._store.get_events(
-            session.id,
-            types=[EventType.LLM_REQUEST, EventType.WORKER_SPAWNED, EventType.WORKER_COMPLETE, EventType.WORKER_FAILED],
-        )
-        return _awaited_report_unread(session, events)
 
     async def _collect_reports(
         self,
@@ -1343,8 +1323,8 @@ class AgentHarness(
         coordinator whose mission is in flight, of its helpers: replay puts
         a report before the first request written after it, so one that
         request did not read would stand ahead of the turn's answer, and
-        the next turn's request would end on that answer.  A ``delegate_task``
-        parent, which a master never is, already has its child's result as
+        the next turn's request would end on that answer.  A foreground ``agent``
+        call's parent, which a master never is, already has its child's result as
         the tool's result.  A session that started background work which
         reports back (``started_notified_work``) reads its notifications
         live too.
@@ -1373,7 +1353,7 @@ class AgentHarness(
         return held, max(event.id for event in events)
 
     async def _answered_helpers(self, session: Session, events: list) -> frozenset[str]:
-        """The ``delegate_task`` helpers whose call got their result (``answered_helpers``), read from the log only
+        """The foreground agents whose call got their result (``answered_helpers``), read from the log only
         when *events* hold a report of one."""
         if not any((event.data or {}).get("delegated") for event in events):
             return frozenset()
@@ -1640,7 +1620,7 @@ class AgentHarness(
                 result = STOP_TAKEN_BACK
             await self._store.emit_event(session.parent_id, EventType.WORKER_COMPLETE, {
                 "worker_id": str(session.id), "title": named.title, "stopped": True,
-                "result": result, "not_taken_back": left,
+                "result": result, "not_taken_back": left, "format": NEW_FORMAT,
             })
         except Exception:
             logger.warning(
@@ -2211,12 +2191,6 @@ class AgentHarness(
             # A project's master is also resumed by a thread's report that
             # no turn has read: the master's turn has usually ended long
             # before a thread finishes, and the report is what it waits for.
-            # So is a session that waits on its workers by the report of a
-            # worker it started with spawn_worker or spawn_task, which told
-            # it the report comes in its next turn: a chat no other started,
-            # neither a case's step, a routine's run nor a mission's
-            # coordinator, and a report within a day of its worker's start
-            # (``_awaited_report_unread``).  Only one whose turn completed.
             # A project's thread is resumed by a redo no turn has read: its
             # landing left a file out, and the thread redoes it.  Only one
             # whose turn completed, as the redo is written at such an end.
@@ -2235,8 +2209,6 @@ class AgentHarness(
                     ):
                         revived_by = "stranded_user_message"
                     elif is_project_master(session.config) and await self._has_unread_report(session_id):
-                        revived_by = "worker_report"
-                    elif session.status == "completed" and await self._has_awaited_report(session):
                         revived_by = "worker_report"
                     elif session.status == "completed" and await self._has_unread_agent_news(session_id):
                         # Background work it started ended after its turn did:
@@ -2685,7 +2657,6 @@ class AgentHarness(
                 at_rest = await self._end_command_turn(session, lease, typed_at, written, ends_here=is_new)
                 if is_new and self._redis is not None and (
                     not at_rest or is_project_master(session.config) and unread_reports(written)
-                    or _awaited_report_unread(session, written)
                     or is_project_thread(session.config) and _redo_unread(written)
                     or device_of(session.config) is not None and _hand_back_unread(written)
                 ):
@@ -2709,7 +2680,7 @@ class AgentHarness(
             # 10b. /deep-research <topic> -- rewrite the user message to
             # a deterministic delegation directive so the base LLM hands
             # the topic to the ``deep-research`` sub-agent via
-            # delegate_task rather than running the research itself.
+            # an ``agent`` call rather than running the research itself.
             # No early return: the rewritten message flows into step 11
             # so the LLM still runs this turn.
             elif (
@@ -3125,7 +3096,7 @@ class AgentHarness(
         partial_tool_call_retries = 0  # retries for truncated tool-call arguments
         # One-shot safety net for the deep-research planner.  Fires when
         # the planner ends a turn with no tool calls AND has never
-        # called ``delegate_task(agent_type="research-writer")`` in any
+        # called ``agent(agent_type="research-writer")`` in any
         # prior turn -- the model described the handoff in prose but
         # forgot to emit the actual tool call.  We inject a synthetic
         # user message reminding it that prose is not a tool call and
@@ -3290,6 +3261,7 @@ class AgentHarness(
         # and the policy took away.
         self._withhold_from_experts(usable, tool_filter)
         tool_schemas = describe_for_device(tool_schemas, session.config)
+        tool_schemas = describe_for_project(tool_schemas, session.config)
         tool_schemas = describe_for_conversation(
             tool_schemas, channel=session.channel, forms=whatsapp_forms,
             contract=step_contract_of(session) if is_case_step(session) else None,
@@ -3308,9 +3280,6 @@ class AgentHarness(
         offered_tools = (
             frozenset(s["function"]["name"] for s in tool_schemas) | deferred_tools.names
         )
-        if "agent" in offered_tools:
-            # ``agent`` stands in for ``delegate_task``, which stays callable under its old name.
-            offered_tools |= {REPLACED_TOOL}
 
         # The browser pause notice costs a Redis read, and only a session
         # that can drive a browser can ever be holding one.
@@ -4255,7 +4224,7 @@ class AgentHarness(
 
                 # One-shot deep-research orphan-completion guard.  The
                 # planner is supposed to end its work by calling
-                # ``delegate_task(agent_type="research-writer")``.  In
+                # ``agent(agent_type="research-writer")``.  In
                 # the wild we have seen the model describe the handoff
                 # in prose without emitting the tool call -- it stops,
                 # the harness completes the session, and the report is
@@ -4410,11 +4379,11 @@ class AgentHarness(
                     continue  # re-enter the loop without appending anything
                 invalid_json_retries = 0  # reset on a turn with valid args
 
-            # 5b. Deduplicate tool calls and cap delegate_task calls.  The
+            # 5b. Deduplicate tool calls and cap agent calls.  The
             # streaming executor already applied both rules on add, so the
             # persisted message matches what executes on either path.
             tool_calls_raw = deduplicate_tool_calls(tool_calls_raw)
-            tool_calls_raw = cap_delegate_calls(tool_calls_raw)
+            tool_calls_raw = cap_delegate_calls(tool_calls_raw, delegate_cap(session.config))
             # A garbled name the model gave an unoffered call must not reach
             # the history: the server would refuse every later request.
             tool_calls_raw = neutralize_unsendable_tool_names(tool_calls_raw, offered_tools)
@@ -4730,25 +4699,6 @@ class AgentHarness(
                     )
                     return
                 logger.info("Session %s: a question timed out; ending turn", session.id)
-                # A task's worker blocks instead, as ``worker_block`` does: its
-                # parent is told what it asked, and the task waits for the
-                # answer rather than being retried to ask it again.  One that
-                # cannot block fails its attempt, for the dispatcher to retry:
-                # a reply to nobody would finish the task with it.
-                if session.task_id is not None:
-                    if await self._block_task_on_question(session, unanswered_call):
-                        await self._complete_session(
-                            session, messages, lease,
-                            reason="question_timed_out",
-                            cost_tracker=cost_tracker,
-                            turn_id=turn_id,
-                            notify_parent=False,
-                        )
-                    else:
-                        await self._fail_session(
-                            session, messages, lease, reason="question_block_failed", cost_tracker=cost_tracker,
-                        )
-                    return
                 await self._request_final_summary(
                     session, messages, system_prompt, lease,
                     request=request, cost_tracker=cost_tracker, turn_id=turn_id,
@@ -5972,32 +5922,20 @@ class AgentHarness(
         """Gate self-tools on the execution context that makes them work.
 
         Mirror of ``worker._filter_effective_tools``, which applies these
-        exact three conditions to the PROMPT surface.  Its output feeds
+        conditions to the PROMPT surface.  Its output feeds
         ``PromptBuilder(available_tools=...)`` only -- the LLM-visible
         schemas come from here -- so the two must agree.  They did not:
         the prompt already dropped these groups for sessions lacking the
         gate, while the schema kept advertising them, and every handler
         behind them fails closed on the same condition
         (``board/tools.py`` returns "(no context_group_id on this
-        session)", the ``worker_*`` tools need ``Session.task_id``).  So the model was
-        paying context for tools it was never told about and could not
-        have used.
-
-        The force-add half matters as much as the subtract: a task worker
-        under a restrictive AgentDef allowlist still needs its
-        ``worker_*`` tools.  Observed in the wild before that rule
-        existed -- a ``claude-coder`` worker could not signal failure, so
-        its refusal was filed as a successful result and the parent
-        mission stalled.
+        session)").  So the model was paying context for tools it was
+        never told about and could not have used.
 
         ``None`` means "every registered tool"; it is materialised here
         because the gates have to subtract from it.
         """
-        from surogates.runtime.governance import (
-            BOARD_SELF_TOOLS,
-            PROJECT_THREAD_TOOLS,
-            WORKER_SELF_TOOLS,
-        )
+        from surogates.runtime.governance import BOARD_SELF_TOOLS
 
         config = session.config or {}
         result = (
@@ -6005,20 +5943,11 @@ class AgentHarness(
             else set(tool_filter)
         )
 
-        is_task_worker = session.task_id is not None
-        if is_task_worker:
-            result |= WORKER_SELF_TOOLS
-        else:
-            result -= WORKER_SELF_TOOLS
-
         if config.get("context_group_id"):
             result |= BOARD_SELF_TOOLS
         else:
             result -= BOARD_SELF_TOOLS
 
-        # Only a project's master starts and follows up its threads.
-        if not is_project_master(config):
-            result -= PROJECT_THREAD_TOOLS
 
         return result
 
@@ -6059,11 +5988,7 @@ class AgentHarness(
         elif explicit_allowed:
             tool_filter = set(config["allowed_tools"])
         else:
-            from surogates.tools.builtin.coordinator import WORKER_EXCLUDED_TOOLS
-
-            excluded = set(config.get("excluded_tools") or [])
-            excluded.update(WORKER_EXCLUDED_TOOLS)
-            tool_filter = set(self._tools.tool_names) - excluded
+            tool_filter = set(self._tools.tool_names) - set(config.get("excluded_tools") or [])
 
         tool_filter = self._apply_execution_context_gates(session, tool_filter)
 
@@ -6145,9 +6070,8 @@ class AgentHarness(
         # Last, as in ``worker._filter_effective_tools``: a Keel case's
         # sessions keep only the case's tools, and only its step's own
         # session gets the step tools, which every other session loses.
-        # Then the sub-agent family: ``agent`` in ``delegate_task``'s place
-        # with parity on, none of it with parity off.
-        return apply_parity(gate_case_tools(tool_filter, session), config, root=session.parent_id is None)
+        # Then the sub-agent family's companions, where ``agent`` is offered.
+        return offer_family(gate_case_tools(tool_filter, session), config, root=not reports_elsewhere(session))
 
     @staticmethod
     def _dynamic_loop_wait_succeeded(
@@ -6277,25 +6201,6 @@ class AgentHarness(
     # ------------------------------------------------------------------
     # /compress command handler
     # ------------------------------------------------------------------
-
-    async def _block_task_on_question(self, session: Session, call: dict) -> bool:
-        """Block *session*'s task on its unanswered question *call*, through ``worker_block``: whether it blocked."""
-        from surogates.tasks.tools import _worker_block_handler
-
-        prompts = "; ".join(_question_prompts(call)) or "(no prompt)"
-        try:
-            got = await _worker_block_handler(
-                {"reason": f"Blocked: no answer to the question: {prompts}"},
-                session_store=self._store, redis=self._redis,
-                session_id=str(session.id), session_factory=self._session_factory,
-            )
-            blocked = json.loads(got).get("ok") is True
-        except Exception:
-            logger.warning("Session %s: its task could not block on the question", session.id, exc_info=True)
-            return False
-        if not blocked:
-            logger.warning("Session %s: its task could not block on the question: %s", session.id, got)
-        return blocked
 
     async def _request_final_summary(
         self,
@@ -6643,7 +6548,7 @@ class AgentHarness(
             await notify_parent_on_completion(
                 session_store=self._store, worker_session_id=session.id, parent_session_id=session.parent_id,
                 org_id=str(session.org_id), agent_id=session.agent_id, redis=self._redis,
-                task_id=getattr(session, "task_id", None), session_factory=self._session_factory,
+                session_factory=self._session_factory,
                 delegated=is_delegated(session),
             )
 
@@ -7097,14 +7002,6 @@ def _unanswered_question(tool_calls_raw: list[dict], tool_results: list[dict]) -
         if result.get("tool_call_id") in asked and (got := cancelled_result(result.get("content"))) is not None:
             return got.get("reason"), asked[result.get("tool_call_id")]
     return None, None
-
-
-def _question_prompts(call: dict) -> list[str]:
-    """The prompts of the questions *call* asked."""
-    questions = _parse_tool_args_for_guardrail(call).get("questions")
-    if not isinstance(questions, list):
-        return []
-    return [q["prompt"].strip() for q in questions if isinstance(q, dict) and isinstance(q.get("prompt"), str)]
 
 
 def _whiteboard_sketch_turn_done(

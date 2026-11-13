@@ -477,7 +477,7 @@ These endpoints are only valid for skills with `type=expert`:
 
 ## Sub-Agents
 
-Declarative agent types referenced by coordinators as `spawn_worker(agent_type=<name>)`. See [Sub-Agents](../sub-agents/index.md) for the full concept and lifecycle.
+Declarative agent types a session starts as `agent(agent_type=<name>)`. See [Sub-Agents](../sub-agents/index.md) for the full concept and lifecycle.
 
 ### `GET /v1/agents`
 
@@ -569,7 +569,7 @@ Delete a user-scoped sub-agent. A sub-agent in the org-shared layer can be delet
 
 **Response: 204 No Content.**
 
-Coordinators that reference the deleted `agent_type` by name will receive a clear JSON error from `spawn_worker` / `delegate_task` on the next attempted spawn — no silent fallback.
+A session that names the deleted `agent_type` gets a clear JSON error from `agent` on its next call — no silent fallback.
 
 ## Memory
 

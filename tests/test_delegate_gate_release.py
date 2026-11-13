@@ -1,4 +1,4 @@
-"""``delegate_task`` gives the parent turn's slots back during the child-polling window.
+"""A foreground ``agent`` call gives the parent turn's slots back during the child-polling window.
 
 The parent's slots are meant to track *active worker consumption*.
 A parent that's sleeping inside ``_poll_child_completion`` waiting
@@ -170,7 +170,7 @@ async def _delegate_in_turn(slots: TurnSlots, store: _CompletingChildStore, pare
     token = current_turn.set(slots)
     try:
         async with as_tool_call(slots):
-            return await delegate_module._delegate_handler(
+            return await _run_agent(
                 {"goal": "x", "agent_type": "engineer"},
                 session_store=store,
                 redis=None,
@@ -227,7 +227,7 @@ async def test_release_fires_even_when_no_gate(
         delegate_module, "_POLL_INTERVAL_SECONDS", 0.01,
     )
 
-    result = await delegate_module._delegate_handler(
+    result = await _run_agent(
         {"goal": "x", "agent_type": "engineer"},
         session_store=store,
         redis=None,
@@ -270,3 +270,12 @@ async def test_a_failed_child_creation_leaves_the_slots_held(
         "the turn must hold both slots after a failed child creation; "
         f"semaphore.locked() = {semaphore.locked()}, gate.held = {gate.held}"
     )
+
+
+async def _run_agent(arguments: dict, **kwargs):
+    """A foreground ``agent`` call: the run path a sub-agent takes from its start to its report."""
+    from surogates.tools.builtin.agents import _agent_handler
+
+    call = {"description": "Test task", "prompt": arguments["goal"], "run_in_background": False}
+    call.update({key: arguments[key] for key in ("agent_type", "model") if key in arguments})
+    return await _agent_handler(call, **kwargs)

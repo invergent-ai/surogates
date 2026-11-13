@@ -11,7 +11,6 @@ from surogates.harness.subagents import (
     AGENT_BUDGET_KEY,
     BUDGET_KEY,
     BUDGET_REASON,
-    PARITY_KEY,
     TOKEN_BUDGET_REPORT_REQUEST,
     budget_report,
 )
@@ -27,7 +26,7 @@ from .test_send_message import a_background_agent, send
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 #: Each scripted call uses 2 tokens (1 in, 1 out): a budget of 3 allows two calls.
-BUDGETED = {PARITY_KEY: True, BUDGET_KEY: 3}
+BUDGETED = {BUDGET_KEY: 3}
 
 
 async def test_a_background_agent_stops_on_its_budget_and_its_parent_is_told(chats):  # noqa: F811
@@ -46,18 +45,20 @@ async def test_a_background_agent_stops_on_its_budget_and_its_parent_is_told(cha
     assert note.data["status"] == "budget" and note.data["budget_tokens"] == 3
     # Its report, never a line from the middle of a step.
     assert note.data["result"] == "Report: 2 of 12 items counted."
-    assert notification_note(note.data)["content"].startswith(
-        f"[Agent {child.id} (Count open items) stopped before it finished: it used its budget of 3 tokens]",
-    )
+    assert (
+        f'<summary>Agent {child.id} ("Count open items") used its budget of 3 tokens before it finished; '
+        "its result is partial</summary>"
+    ) in notification_note(note.data)["content"]
     chats.replies = []
 
 
 async def test_a_foreground_agent_that_runs_out_says_so_in_its_result(chats):  # noqa: F811
     from .test_agent_tool import wake_children_as_they_come
 
-    chat = await a_chat(chats, {PARITY_KEY: True, BUDGET_KEY: 1})
+    chat = await a_chat(chats, {BUDGET_KEY: 1})
     chats.replies = [
-        calling("agent", "call_agent", description="Read the tracker", prompt="Report the open items in the tracker."),
+        calling("agent", "call_agent", description="Read the tracker", prompt="Report the open items in the tracker.",
+                run_in_background=False),
         _final_response("Report: none counted yet."),
         _final_response("Done."),
     ]
@@ -72,7 +73,7 @@ async def test_a_foreground_agent_that_runs_out_says_so_in_its_result(chats):  #
 
 
 async def test_without_a_budget_an_agent_runs_as_before(chats):  # noqa: F811
-    chat = await a_chat(chats, {PARITY_KEY: True})
+    chat = await a_chat(chats, {})
     child = await a_background_agent(chats, chat)
     assert AGENT_BUDGET_KEY not in child.config
     chats.replies = [TODO_CALL, TODO_CALL, TODO_CALL, _final_response("12 open items.")]
@@ -96,7 +97,7 @@ async def test_an_agent_that_used_its_budget_is_not_resumed_by_a_message(chats):
 async def test_an_agents_own_agents_get_at_most_what_it_has_left(chats):  # noqa: F811
     from .test_agent_tool import wake_children_as_they_come
 
-    chat = await a_chat(chats, {PARITY_KEY: True, BUDGET_KEY: 10})
+    chat = await a_chat(chats, {BUDGET_KEY: 10})
     child = await a_background_agent(chats, chat)
     chats.replies = [
         TODO_CALL,
@@ -145,7 +146,7 @@ async def test_agents_started_at_once_share_what_their_parent_has_left(chats, mo
 
 
 async def test_the_iteration_cap_of_an_agent_without_a_token_budget_is_no_budget_stop(chats):  # noqa: F811
-    chat = await a_chat(chats, {PARITY_KEY: True})
+    chat = await a_chat(chats, {})
     child = await a_background_agent(chats, chat)
     # The test worker's iteration budget is 10: the eleventh step asks for a summary and ends there.
     chats.replies = [TODO_CALL] * 10 + [_final_response("Two items so far.")]
@@ -158,7 +159,7 @@ async def test_the_iteration_cap_of_an_agent_without_a_token_budget_is_no_budget
 
 
 async def test_a_resumed_agent_that_runs_out_reports_this_runs_words_not_its_first_report(chats):  # noqa: F811
-    chat = await a_chat(chats, {PARITY_KEY: True, BUDGET_KEY: 5})
+    chat = await a_chat(chats, {BUDGET_KEY: 5})
     child = await a_background_agent(chats, chat)
     chats.replies = [_final_response("First report: 12 open items.")]
     await chats.wake(child.id)

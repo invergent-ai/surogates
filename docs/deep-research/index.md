@@ -28,8 +28,8 @@ User
  v
 Base agent  ──────────────────────────────────────────────────────────┐
    |                                                                  |
-   |  delegate_task(agent_type="deep-research", goal=<topic>)        |
-   |  (single call, no batching, no retry on failure)                 |
+   |  agent(agent_type="deep-research", prompt=<topic>)             |
+   |  (one call, in the background, no retry on failure)              |
    v                                                                  |
 deep-research planner  (child session, channel="delegation")          |
    |                                                                  |
@@ -41,7 +41,8 @@ deep-research planner  (child session, channel="delegation")          |
    |                                                                  |
    |  reconcile outline vs. bank (action="list")                      |
    |                                                                  |
-   |  delegate_task(agent_type="research-writer", goal=<outline>)    |
+   |  agent(agent_type="research-writer", prompt=<outline>)         |
+   |  (in the foreground: the planner waits for the report)          |
    v                                                                  |
 research-writer  (grandchild session, channel="delegation")           |
    |                                                                  |
@@ -54,6 +55,7 @@ research-writer  (grandchild session, channel="delegation")           |
    |                                                                  |
    v                                                                  |
 artifact lands in user session  <──────────────────────────────────────┘
+   (the planner's report reaches the base agent as an agent.notification)
 ```
 
 The shared `.research/` directory under the session workspace is the
@@ -80,7 +82,7 @@ tools:
   - web_extract
   - research_memory
   - research_outline
-  - delegate_task
+  - agent
   - ask_user_question
 max_iterations: 60
 ```
@@ -221,8 +223,8 @@ are visible only when the flag is on.
 
 The chat composer reads `agent.deepResearchEnabled` from its store and
 conditionally adds the `/deep-research` slash entry to the builtin menu.
-Disabling the flag both removes the bundle entries (so a delegate by
-name fails) and hides the slash entry (so the user can't invoke it
+Disabling the flag both removes the bundle entries (so an `agent` call
+naming the type fails) and hides the slash entry (so the user can't invoke it
 from the menu either).
 
 ---
@@ -233,27 +235,31 @@ The deep-research workflow runs expensive children that themselves
 spawn sub-agents; without guardrails one user prompt can fan out into a
 runaway fleet. The harness enforces four:
 
-1. **Delegation timeout is 900s** (15 min). Set in
+1. **A foreground agent's wait ends after 3600s** (one hour). Set in
    `surogates/tools/builtin/delegate.py::_DELEGATION_TIMEOUT_SECONDS`.
-   Long enough for a planner → writer hand-off; a child that doesn't
-   complete in 15 minutes is considered wedged.
+   The planner waits this long for the writer's report; a writer that
+   has not finished by then is treated as wedged. The planner itself
+   runs in the background: its end reaches the base agent as an
+   `agent.notification`.
 
-2. **Slash directive forbids retry-on-failure and batch fan-out.** The
+2. **The slash directive forbids retry-on-failure and fan-out.** The
    `/deep-research` slash command rewrites the user message to a
-   directive that explicitly instructs the base LLM: *"Call
-   delegate_task EXACTLY ONCE with a single goal. If it returns an
-   error or times out, report the failure to the user verbatim and
-   stop. Do NOT retry."*
+   directive that tells the base LLM to start the planner with
+   *exactly one* `agent` call, not to split the topic into several
+   agents, not to state or guess the findings before the notification
+   arrives, and, if the call or the agent fails, to report the failure
+   to the user verbatim and stop.
 
 3. **Planner self-recursion is rejected at the tool layer.** A session
-   running as `agent_type="deep-research"` cannot delegate to another
-   `deep-research`. Defined by `_NON_RECURSIVE_AGENT_TYPES` in
+   running as `agent_type="deep-research"` cannot start another
+   `deep-research` agent. Defined by `_NON_RECURSIVE_AGENT_TYPES` in
    `delegate.py`; the writer (`research-writer`) is intentionally not
    on this list so the normal handoff is allowed.
 
-4. **Batch `goals=[...]` rejected for non-recursive agent types.** A
-   single `delegate_task` call may not fan multiple deep-research
-   goals out in parallel. Single-goal calls remain legal.
+4. **One deep-research agent at a time.** While an agent of a
+   non-recursive type runs (or is starting) under a session, the
+   `agent` tool refuses to start another of that type there:
+   "an agent of type 'deep-research' already runs: one at a time".
 
 In the UI: any session with `channel="delegation"` (or any session
 with a `parentId`) is rendered **read-only**. The composer is replaced
@@ -313,12 +319,12 @@ A complete smoke test:
 3. Open a new chat session.
 4. Type `/<deep-research>` from the slash menu, append a topic, send.
 5. Watch the timeline for:
-   - `delegate_task → deep-research` (planner spawned).
+   - `agent → deep-research` (planner started, in the background).
    - Multiple `research_memory(add)` calls populating the Sources
      panel.
    - One or more `research_outline(set)` calls updating the outline
      card.
-   - `delegate_task → research-writer` (handoff).
+   - `agent → research-writer` (handoff, in the foreground).
    - Writer's `research_memory(retrieve)` calls and final
      `create_artifact`.
    - Markdown artifact rendered inline with linkified `[S#]` chips.
@@ -326,4 +332,4 @@ A complete smoke test:
 If `create_artifact` is rejected with the Guard 3 error, the planner
 left dangling citations in the outline — see §4. The writer will
 retry once with the validator's hint; persistent failure means the
-planner needs to be re-prompted to reconcile before delegating.
+planner needs to be re-prompted to reconcile before handing off.

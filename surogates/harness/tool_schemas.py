@@ -2,7 +2,7 @@
 
 Strips parameters that cannot resolve for the current tenant so the
 LLM never sees them and cannot hallucinate values.  Currently gates the
-``agent_type`` parameter on ``delegate_task`` / ``spawn_worker``: when
+``agent_type`` parameter on ``agent``: when
 the tenant has no enabled sub-agents, no value for it can resolve, so
 it is removed from the exported schema.
 """
@@ -31,10 +31,7 @@ from surogates.tools.builtin.send_form import describe_forms
 from surogates.tools.builtin.terminal import DEVICE_GIT_NOTE, DEVICE_MAPPING_NOTE
 
 _AGENT_TYPE_GATED_TOOLS: frozenset[str] = frozenset({
-    "delegate_task",
     "agent",
-    "spawn_worker",
-    "spawn_task",
 })
 
 
@@ -293,3 +290,26 @@ def describe_for_conversation(
             schema = describe_intake(schema, intake)
         described.append(schema)
     return described
+
+
+#: The arguments only a project's master is given: a thread resolved.
+_PROJECT_ONLY_ARGUMENTS: dict[str, tuple[str, ...]] = {"stop_agent": ("resolve",)}
+
+
+def describe_for_project(schemas: list[dict[str, Any]], config: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """*schemas* without the project-only arguments, unless *config* is a project's master's."""
+    from surogates.workstreams import is_project_master
+
+    if is_project_master(config):
+        return schemas
+    out: list[dict[str, Any]] = []
+    for schema in schemas:
+        dropped = _PROJECT_ONLY_ARGUMENTS.get(schema["function"]["name"])
+        if not dropped:
+            out.append(schema)
+            continue
+        clone = copy.deepcopy(schema)
+        for name in dropped:
+            clone["function"]["parameters"]["properties"].pop(name, None)
+        out.append(clone)
+    return out

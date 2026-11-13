@@ -245,24 +245,16 @@ class OutcomeCommandMixin:
                         if result.ok and result.mission_id is not None:
                             # Propagate the config write back to the
                             # in-memory session so the rest of this wake
-                            # sees ``coordinator=True`` + the orchestrator
-                            # skill preload. Without this, the kickoff
-                            # message gets processed by the same wake
-                            # against a stale config and tools gated on
-                            # ``coordinator`` (``spawn_task`` &c) get
-                            # filtered out as worker-excluded.
+                            # sees ``coordinator=True``. Without this, the
+                            # kickoff message gets processed by the same wake
+                            # against a stale config.
                             cfg = dict(session.config or {})
                             cfg["active_mission_id"] = str(result.mission_id)
                             cfg["coordinator"] = True
                             # Strip implementation tools so the LLM has to
-                            # delegate via spawn_task/delegate_task instead of
-                            # "fixing it quickly" itself.  See
-                            # COORDINATOR_IMPLEMENTATION_TOOLS for the set.
+                            # start agents instead of "fixing it quickly"
+                            # itself.  See COORDINATOR_IMPLEMENTATION_TOOLS.
                             cfg["strict_coordinator"] = True
-                            preloaded = list(cfg.get("preloaded_skills") or [])
-                            if "subagent-task-orchestrator" not in preloaded:
-                                preloaded.append("subagent-task-orchestrator")
-                            cfg["preloaded_skills"] = preloaded
                             session.config = cfg
                 elif command.action == "budget":
                     message = await handle_mission_budget(

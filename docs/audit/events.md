@@ -257,8 +257,16 @@ by the training-data selector to prioritize or exclude trajectories.
 
 ### Worker coordination
 
-`worker.spawned`, `worker.complete`, `worker.failed` — used by the
-coordinator pattern to track spawned sub-agents.
+`worker.spawned`, `worker.complete`, `worker.failed` — a project's
+master hears of its threads by them: a thread started (`bound: true` when
+it began on the user's computer after the turn that started it, once that
+computer set up its copy of the project's folder), a thread's turn report,
+and its failure (a thread whose computer did not set up its copy fails
+before it begins). A helper of a thread reports to the thread the same way.
+Each written now carries `format: "task-notification"`, and a report or
+failure its worker's `usage`. An older `worker.spawned` with `started_by:
+"user"`, of a thread started from a proposal's card, and an older
+`thread.proposed` read as nothing.
 
 ### Outcome / `/goal` loop
 
@@ -321,10 +329,11 @@ repeated evaluator parse failures.
 ### Sub-agent delegation
 
 `delegation.start`, `delegation.complete`, `delegation.failed`,
-`delegation.stale` — emitted on the **parent**'s event log by the
-`delegate_task` tool. The child's own event log is still the source of
-truth for everything that happened inside it; these events are the
-parent-side audit trail.
+`delegation.stale` — emitted on the **parent**'s event log for every
+agent the `agent` tool starts. The child's own event log is still the
+source of truth for everything that happened inside it; these events are
+the parent-side audit trail. A background agent's end also reaches the
+parent as an `agent.notification`.
 
 `delegation.start` — a child session has been created and enqueued.
 

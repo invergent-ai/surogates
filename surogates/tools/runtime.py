@@ -63,7 +63,6 @@ class ToolRuntime:
             voice_call,
             agents,
             coding_agent,
-            coordinator,
             cron,
             delegate,
             expert,
@@ -83,7 +82,6 @@ class ToolRuntime:
             skill_step,
             skills,
             terminal,
-            threads,
             todo,
             tool_groups,
             user_reports,
@@ -92,7 +90,6 @@ class ToolRuntime:
             whiteboard,
         )
         from surogates.board import tools as board_tools
-        from surogates.tasks import tools as task_tools
         from surogates.tools import mate_ambient
 
         modules = [
@@ -109,7 +106,6 @@ class ToolRuntime:
             kb_tools,
             office,  # office_read, office_edit (live document editing through runtime-office)
             loop_control,
-            delegate,
             expert,
             terminal,  # also registers the 'process' tool
             session_search,
@@ -118,12 +114,9 @@ class ToolRuntime:
             tool_groups,  # load_tools (held-back tool groups of a prompt profile)
             ask_user_question,
             cron,
-            coordinator,
-            threads,  # a project's master: start, message, stop, list, read, resolve and propose threads
             artifact,
             coding_agent,  # run_coding_agent (Claude Code / Codex)
             github,  # github (scoped GitHub REST — read + writes — for the agent's repos)
-            task_tools,  # spawn_task, unblock_task, cancel_task, worker_block/complete/context
             board_tools,  # share_note, read_board, expand_note (coordination board)
             mate_ambient,  # mate_ambient_post (gated ambient channel post)
             channel_files,  # fetch_channel_file (pull a shared channel file)

@@ -125,7 +125,7 @@ After writing the spec, look at it with fresh eyes:
 
 Fix issues inline. No need to re-review — just fix and move on.
 
-**Optional external review:** For a high-stakes spec, dispatch a reviewer via `delegate_task` using the template at [references/spec-reviewer-prompt.md](references/spec-reviewer-prompt.md). The reviewer returns status, issues, recommendations. Apply changes and re-review.
+**Optional external review:** For a high-stakes spec, start a reviewer with the `agent` tool using the template at [references/spec-reviewer-prompt.md](references/spec-reviewer-prompt.md). The reviewer returns status, issues, recommendations. Apply changes and re-review.
 
 **Partner Review Gate:**
 

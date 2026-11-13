@@ -454,66 +454,12 @@ CREATE TRIGGER events_populate_tenant_trg
 
 
 -- ----------------------------------------------------------------------------
--- Subagent task layer — retrofits.
---
--- ``Base.metadata.create_all`` creates ``tasks`` and ``task_links`` on
--- fresh databases, but does not add the ``sessions.task_id`` column to
--- an already-existing ``sessions`` table. Each statement is guarded so
--- re-running the DDL is a no-op on fresh and upgraded databases alike.
---
--- See ``surogates/db/models.py`` (``Task``, ``TaskLink``, ``Session.task_id``)
--- and ``docs/sub-agents/2026-05-16-subagent-task-layer-v1.md`` for the
--- design rationale.
--- ----------------------------------------------------------------------------
-
-CREATE TABLE IF NOT EXISTS tasks (
-    id                 uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    org_id             uuid NOT NULL REFERENCES orgs(id),
-    parent_session_id  uuid NOT NULL REFERENCES sessions(id),
-    agent_def_name     text,
-    goal               text NOT NULL,
-    context            text,
-    current_session_id uuid REFERENCES sessions(id),
-    status             text NOT NULL DEFAULT 'todo',
-    result             text,
-    blocked_reason     text,
-    attempt_count      integer NOT NULL DEFAULT 0,
-    max_attempts       integer NOT NULL DEFAULT 3,
-    created_at         timestamp NOT NULL DEFAULT now(),
-    started_at         timestamp,
-    completed_at       timestamp
-);
-
-CREATE TABLE IF NOT EXISTS task_links (
-    parent_id uuid NOT NULL REFERENCES tasks(id),
-    child_id  uuid NOT NULL REFERENCES tasks(id),
-    PRIMARY KEY (parent_id, child_id)
-);
-
-ALTER TABLE sessions
-    ADD COLUMN IF NOT EXISTS task_id uuid REFERENCES tasks(id);
-
--- v1.5: structured handoff metadata (set by the task_complete self-tool;
--- plain workers that complete naturally leave it NULL).
-ALTER TABLE tasks
-    ADD COLUMN IF NOT EXISTS result_metadata jsonb;
-
-CREATE INDEX IF NOT EXISTS idx_tasks_org_status
-    ON tasks (org_id, status);
-CREATE INDEX IF NOT EXISTS idx_tasks_parent_session
-    ON tasks (parent_session_id);
-CREATE INDEX IF NOT EXISTS idx_tasks_current_session
-    ON tasks (current_session_id);
-
-
--- ----------------------------------------------------------------------------
 -- Mission layer (orchestrated goals) — retrofits.
 --
 -- ``Base.metadata.create_all`` creates ``missions`` and the indexes on
--- fresh databases, but does NOT add ``tasks.mission_id`` to an existing
--- ``tasks`` table. Each statement guarded for idempotent re-runs.
+-- fresh databases. Each statement guarded for idempotent re-runs.
 --
--- See ``surogates/db/models.py`` (``Mission``, ``Task.mission_id``) and
+-- See ``surogates/db/models.py`` (``Mission``) and
 -- ``docs/superpowers/specs/2026-05-16-mission-orchestrated-goals-design.md``.
 -- ----------------------------------------------------------------------------
 
@@ -585,13 +531,9 @@ BEGIN
     END IF;
 END $$;
 
-ALTER TABLE tasks
-    ADD COLUMN IF NOT EXISTS mission_id uuid REFERENCES missions(id);
 
 CREATE INDEX IF NOT EXISTS idx_missions_session
     ON missions (session_id);
-CREATE INDEX IF NOT EXISTS idx_tasks_mission
-    ON tasks (mission_id);
 
 
 -- ----------------------------------------------------------------------------
@@ -1483,3 +1425,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_simulation_messages_web_wamid
 -- Research missions (Arbor) are gone: drop their sidecar tables.
 DROP TABLE IF EXISTS idea_nodes;
 DROP TABLE IF EXISTS research_runs;
+
+-- The sub-agent task layer is gone: a mission's agents are its coordinator's sessions.  The column first, then the
+-- edges, then the tasks, each a foreign key of the next.
+ALTER TABLE sessions DROP COLUMN IF EXISTS task_id;
+DROP TABLE IF EXISTS task_links;
+DROP TABLE IF EXISTS tasks;

@@ -20,7 +20,7 @@ from surogates.config import SHARED_WORK_QUEUE_KEY
 from surogates.db.models import InboxItem, WorkstreamHistory
 from surogates.harness import landing as landing_module
 from surogates.harness import loop_artifact_completion
-from surogates.harness.loop_context_replay import news, unread_reports, worker_note
+from surogates.harness.loop_context_replay import news, unread_reports
 from surogates.harness.loop import AgentHarness
 from surogates.harness.loop_pending import NAMES_ANSWERS
 from surogates.jobs.inbox_expire import expire_inbox_items
@@ -37,7 +37,7 @@ from surogates.workstreams.stream import STREAM_TYPES, project_of
 from tests.test_steer_loop import _final_response, _make_loop_harness
 
 from .test_command_placements import Model, calls
-from .test_command_wake_once import DiesWriting, workers  # noqa: F401  (workers is a fixture)
+from .test_command_wake_once import DiesWriting, ReportOf, workers  # noqa: F401  (workers is a fixture)
 from .test_devices import api  # noqa: F401  (api is a fixture)
 from .test_durable_landings import (  # noqa: F401  (a_short_fence is a fixture)
     FENCED,
@@ -64,7 +64,7 @@ from .test_thread_copies import (  # noqa: F401  (pods is a fixture)
 from .test_turn_sagas import a_turn, calling, stop
 from .test_workstream_overview import act_on
 from .test_workstream_overview import rows as thread_rows
-from .test_workstream_threads import call_tool, harness_of, queued
+from .test_workstream_threads import call_tool, harness_of, heard_as, queued
 from .test_workstream_threads import turn_ends as a_turn_ends
 from .test_workstreams import create, master_of
 
@@ -230,7 +230,7 @@ async def test_your_edit_then_a_landing_tells_the_thread_to_redo_and_the_redo_la
     # The master hears the file is being redone: not finished.
     [report] = await reports(api, master)
     assert {f["ref"]: f["landing"] for f in report["files"]} == {"Report.docx": "redoing", "a.md": "landed"}
-    assert worker_note(EventType.WORKER_COMPLETE.value, report)["content"].endswith(
+    assert heard_as(EventType.WORKER_COMPLETE.value, report)["files"].endswith(
         "Files: a.md\nBeing redone: Report.docx"
     )
     # The redo turn starts on the landing, with your version, and lands its edit on it.
@@ -621,14 +621,15 @@ async def test_a_thread_whose_mission_is_in_flight_asks_the_model_once_for_its_n
             workers.replies = [calling(("memory", {"action": "add", "content": "The figures are in Q3.xlsx."}))]
             workers.during_the_tool_call = a_helper_reports
         elif news == "a message typed as the turn's request is made ready":
-            harvest = AgentHarness.maybe_harvest_research
+            # The board's update is read as the request is made ready.
+            board = AgentHarness.maybe_emit_board_update
 
-            async def the_user_types_meanwhile(harness, session, messages):
-                during.setattr(AgentHarness, "maybe_harvest_research", harvest)
+            async def the_user_types_meanwhile(harness, session, messages, cursor):
+                during.setattr(AgentHarness, "maybe_emit_board_update", board)
                 await workers.says(thread.id, "And Q1?")
-                return await harvest(harness, session, messages)
+                return await board(harness, session, messages, cursor)
 
-            during.setattr(AgentHarness, "maybe_harvest_research", the_user_types_meanwhile)
+            during.setattr(AgentHarness, "maybe_emit_board_update", the_user_types_meanwhile)
         await workers.wake(thread.id, SlashCommandConfig())
     # What the turn's last request came after and did not read is read by the turn, which goes on for it.
     assert (len(workers.requests), await workers.status(thread.id)) == (
@@ -643,7 +644,7 @@ async def test_a_thread_whose_mission_is_in_flight_asks_the_model_once_for_its_n
         })
     for _ in range(3):
         await workers.wake(thread.id, SlashCommandConfig())
-    told = [{"role": "user", "content": f"[Worker {helper} completed]\nChecked the figures."} for helper in helpers]
+    told = [ReportOf(helper) for helper in helpers]
     if news == "a redo":
         told = [{"role": "user", "content": REDO_OF_THE_REPORT}]
     elif news == "a message typed as the turn's request is made ready":
@@ -920,7 +921,7 @@ async def test_a_follow_up_wake_reads_the_follow_up_and_runs_no_command_of_the_u
     command = "/report-writer Edit the report."
     await store.emit_event(thread.id, EventType.USER_MESSAGE, {"content": command})
     await store.emit_event(thread.id, EventType.SKILL_INVOKED, {"skill": "report-writer", "raw_message": command})
-    await call_tool(api, master, "message_thread", thread_id=str(thread.id), message="Use the 2025 figures.")
+    await call_tool(api, master, "send_message", to=str(thread.id), message="Use the 2025 figures.", summary="Follow-up")
     expanded: list = []
 
     async def a_skill(**kwargs):
@@ -1024,7 +1025,7 @@ async def test_a_threads_waits_over_a_clash_end_when_it_is_resolved_by_you_or_it
     await store.emit_event(yours.id, EventType.INBOX_ACTION_REQUIRED, approval)
     assert await pending_in_the_inbox(api) == {str(yours.id), str(its_coordinators.id)}
     assert (await act_on(api, project, yours, "resolve")).status_code == 200
-    await call_tool(api, master, "resolve_thread", thread_id=str(its_coordinators.id))
+    await call_tool(api, master, "stop_agent", agent_id=str(its_coordinators.id), resolve=True)
     # A clash's is over: expired, never answered.  One over a landing left half-done in your folder is your only
     # notice of it, and stays until you answer or dismiss it.  Another kind of wait is not one over its files.
     assert sorted((w.payload["action_type"], w.payload.get("escalated"), w.status) for w in await waits_of(api, yours)) == [
@@ -1088,7 +1089,7 @@ async def test_a_wait_on_you_is_answered_by_your_next_message_not_by_a_wake(api,
     [wait] = await waits_of(api, thread)
     assert wait.status == "pending"
     # Nor is the coordinator's follow-up: it is the coordinator's, never the user's.
-    await call_tool(api, master, "message_thread", thread_id=str(thread.id), message="Finish the report.")
+    await call_tool(api, master, "send_message", to=str(thread.id), message="Finish the report.", summary="Follow-up")
     await a_waking_thread_harness(api, monkeypatch, pool, a_turn_that_does_nothing).wake(thread.id)
     [wait] = await waits_of(api, thread)
     assert wait.status == "pending"
@@ -1121,7 +1122,7 @@ async def test_a_redo_turn_that_calls_no_tool_marks_the_file_not_merged_and_noth
     # It never used its pod, so it lands nothing; the master hears the file was left as it is.
     _, second = await reports(api, master)
     assert [(f["ref"], f["landing"], f.get("reason")) for f in second["files"]] == [("Report.docx", "not_merged", "left")]
-    assert worker_note(EventType.WORKER_COMPLETE.value, second)["content"].endswith(
+    assert heard_as(EventType.WORKER_COMPLETE.value, second)["files"].endswith(
         "Not merged, because the thread left the newer file as it is: Report.docx"
     )
     assert await waits_of(api, thread) == []
@@ -1408,7 +1409,7 @@ async def test_an_answer_typed_while_the_thread_works_ends_the_wait(workers, mon
     retired = answers_of(monkeypatch)
     await store.emit_event(thread.id, EventType.INBOX_ACTION_REQUIRED, landing_module.waiting_on_you(["Report.docx"], escalated=False))
     # Its coordinator's follow-up starts a turn, which is no answer of yours.
-    await call_tool(api, master, "message_thread", thread_id=str(thread.id), message="Finish the report.")
+    await call_tool(api, master, "send_message", to=str(thread.id), message="Finish the report.", summary="Follow-up")
     model.script.append(calls("call_1"))
 
     async def you_answer() -> None:
@@ -1493,7 +1494,7 @@ async def test_an_answer_steered_into_a_turn_finds_the_wait_already_read_by_that
     thread, master, _ = await a_waiting_thread(workers, pods)
     model = Model()
     monkeypatch.setattr(loop_module, "call_llm_with_retry", model)
-    await call_tool(api, master, "message_thread", thread_id=str(thread.id), message="Finish the report.")
+    await call_tool(api, master, "send_message", to=str(thread.id), message="Finish the report.", summary="Follow-up")
     model.script.append(calls("call_1"))
 
     async def you_answer() -> None:
@@ -1554,7 +1555,7 @@ async def test_a_wait_over_a_file_that_has_since_landed_is_over(api, monkeypatch
     await a_clash(api, monkeypatch, pods, pool, thread, b"PK\x03\x04 report v3 by you")
     assert (await row_of(api, project, thread))["reason"] == "files"
     # Its coordinator reads the file was left out and follows up; the thread puts its change in again, and it lands.
-    await call_tool(api, master, "message_thread", thread_id=str(thread.id), message="Put your change in again.")
+    await call_tool(api, master, "send_message", to=str(thread.id), message="Put your change in again.", summary="Follow-up")
     await a_turn(api, monkeypatch, thread, [
         calling(("terminal", {"command": "printf ' by A' >> Report.docx"})), _final_response("Put it in again."),
     ], pool=pool)

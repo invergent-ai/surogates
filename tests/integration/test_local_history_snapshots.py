@@ -42,6 +42,7 @@ from .test_devices import FOLDER, api, builtin_tools, eventually, link_url  # no
 from .test_local_history_open import a_worker, asked, begun_with_copy, lease_let_go, status_of, woken
 from .test_local_history_settle import Lost, left_open
 from .test_local_history_threads import asked as request_of
+from .test_workstream_threads import heard_as
 from .test_local_history_threads import bound_with_copy, computer, picture, recorded  # noqa: F401  (computer is a fixture)
 from .test_local_threads import confirmed, journal, laptop  # noqa: F401  (laptop is a fixture)
 from .test_turn_sagas import calling, saga_events
@@ -668,7 +669,8 @@ async def test_a_stop_whose_computer_does_not_answer_its_undo_lets_the_thread_go
     owed, finished = await what_the_master_heard(api, thread)
     assert [entry["why"] for entry in owed["not_taken_back"]] == ["owed"] * 3
     assert (finished["result"], finished["not_taken_back"]) == (STOP_TAKEN_BACK, [])
-    assert worker_note(EventType.WORKER_COMPLETE.value, finished)["content"].endswith(f"was stopped]\n{STOP_TAKEN_BACK}")
+    heard = heard_as(EventType.WORKER_COMPLETE.value, finished)
+    assert heard["summary"].endswith("was stopped") and heard["result"] == STOP_TAKEN_BACK
 
 
 @pytest.mark.slow

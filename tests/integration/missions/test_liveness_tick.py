@@ -18,7 +18,7 @@ from sqlalchemy import update
 
 from surogates.db.models import Mission as MissionRow
 from surogates.missions.store import MissionStore
-from surogates.tasks.dispatcher import nudge_idle_missions
+from surogates.missions.nudge import nudge_idle_missions
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -193,20 +193,15 @@ async def test_the_coordinator_is_told_why_it_woke(
     assert "mission" in synthetic[0].data["content"].lower()
 
 
-async def test_a_coordinator_waiting_on_its_tasks_is_not_idle(
+async def test_a_coordinator_waiting_on_its_agents_is_not_idle(
     session_factory, session_store, org_id, user_id,
 ):
-    """The judge holds off while tasks run, so no evaluation resets the count:
-    nudging here would block a mission whose tasks simply take a while."""
-    from surogates.db.models import Task
+    """The judge holds off while agents run, so no evaluation resets the count:
+    nudging here would block a mission whose agents simply take a while."""
+    from tests.integration.missions.conftest import a_mission_agent
 
     store, mid, sess = await _mission(session_factory, session_store, org_id, user_id)
-    async with session_factory() as db:
-        db.add(Task(
-            org_id=org_id, parent_session_id=sess.id, goal="long research",
-            status="running", mission_id=mid,
-        ))
-        await db.commit()
+    await a_mission_agent(session_factory, sess, mid, status="active")
     await _idle(session_factory, mid)
 
     await nudge_idle_missions(

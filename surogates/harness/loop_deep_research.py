@@ -9,17 +9,18 @@ if TYPE_CHECKING:
 
 
 DEEP_RESEARCH_NO_DELEGATE_NUDGE: str = (
-    "You stopped without emitting a `delegate_task` tool call.  Your "
-    "outline and evidence bank are ready, but the writer was never "
-    "spawned, so the user has no report.\n\n"
+    "You stopped without an `agent` tool call.  Your outline and evidence "
+    "bank are ready, but the writer was never started, so the user has no "
+    "report.\n\n"
     "Prose like \"Now handing off to the writer\" or a `<next_action>` "
-    "block DOES NOT trigger the delegation -- only an actual "
-    "`delegate_task` tool call does.\n\n"
-    "Emit `delegate_task(agent_type=\"research-writer\", goal=<full "
-    "outline>, context=<original question + bank reminder>)` as your "
-    "next tool call.  If you legitimately cannot hand off (e.g. the "
-    "bank is empty), say so plainly and stop -- do not narrate a "
-    "handoff that isn't happening."
+    "block DOES NOT start the writer -- only an actual `agent` tool call "
+    "does.\n\n"
+    "Emit `agent(agent_type=\"research-writer\", description=\"Write the "
+    "report\", prompt=<the full outline, the original question, and a "
+    "reminder that the evidence bank holds the sources>)` as your next tool "
+    "call.  If you legitimately cannot hand off (e.g. the bank is empty), "
+    "say so plainly and stop -- do not narrate a handoff that isn't "
+    "happening."
 )
 # The orphan-completion nudge above intentionally still mentions a
 # ``<next_action>`` block: the model occasionally narrates one even
@@ -39,17 +40,16 @@ def _is_deep_research_planner(session: Session) -> bool:
 def _planner_already_delegated_to_writer(
     messages: list[dict[str, Any]] | None,
 ) -> bool:
-    """Return True when the in-memory message list shows a prior
-    ``delegate_task(agent_type="research-writer")`` call on this turn
-    so the orphan-completion nudge does not fire on a planner that
-    already did its job.
+    """Return True when the in-memory message list shows an
+    ``agent(agent_type="research-writer")`` call on this turn, so the
+    orphan-completion nudge does not fire on a planner that already did
+    its job.
 
-    Reads ``messages`` (not the wake's ``all_events`` snapshot)
-    because ``all_events`` is captured ONCE at wake start and does
-    not include tool calls emitted during the current wake.  A
-    planner that just finished a successful delegate_task earlier
-    this same wake would otherwise look like one that never
-    delegated -- triggering the nudge and a duplicate writer spawn.
+    Reads ``messages`` (not the wake's ``all_events`` snapshot) because
+    ``all_events`` is captured ONCE at wake start and does not include
+    tool calls emitted during the current wake.  A planner that just
+    handed off earlier this same wake would otherwise look like one that
+    never did -- triggering the nudge and a duplicate writer.
     """
     if not messages:
         return False
@@ -57,12 +57,11 @@ def _planner_already_delegated_to_writer(
     for message in messages:
         if message.get("role") != "assistant":
             continue
-        tool_calls = message.get("tool_calls") or []
-        for call in tool_calls:
+        for call in message.get("tool_calls") or []:
             if not isinstance(call, dict):
                 continue
             fn = call.get("function") or {}
-            if fn.get("name") != "delegate_task":
+            if fn.get("name") != "agent":
                 continue
             raw_args = fn.get("arguments")
             if isinstance(raw_args, str):
@@ -74,15 +73,6 @@ def _planner_already_delegated_to_writer(
                 args = raw_args
             else:
                 continue
-            # ``delegate_task`` carries either a scalar ``agent_type`` or
-            # a ``goals`` array whose items each have their own
-            # ``agent_type``.  Honor both shapes.
-            if args.get("agent_type") == "research-writer":
+            if isinstance(args, dict) and args.get("agent_type") == "research-writer":
                 return True
-            for item in args.get("goals") or []:
-                if (
-                    isinstance(item, dict)
-                    and item.get("agent_type") == "research-writer"
-                ):
-                    return True
     return False

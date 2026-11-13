@@ -83,11 +83,6 @@ export interface DesktopBrowser {
 
 // The project's thread a folder is asked for (Section 12): the sheet names both. The page's own
 // words, which the desktop shows as text.
-export interface DesktopThreadLabel {
-  project: string; // at most 256 UTF-16 units, as the project's name
-  thread: string; // at most 256, as the thread's title
-}
-
 export interface DesktopAppearance {
   theme: "light" | "dark"; // the theme in effect: it drives the page's prefers-color-scheme, which the web client follows
   textSize: "small" | "medium" | "large";
@@ -120,16 +115,9 @@ export interface DesktopBridge {
   // folders here are forgotten, and this page's session goes with the window's storage.
   signOut(): Promise<void>;
   // Null when the user cancels the sheet, or its page goes. Rejects with "Surogate is already
-  // asking" while this window's last one is still open. *thread*, for a project's thread, is
-  // named on the sheet.
-  prepareFolder(choice: DesktopFolderChoice, thread?: DesktopThreadLabel | null): Promise<DesktopPreparedFolder | null>;
+  // asking" while this window's last one is still open.
+  prepareFolder(choice: DesktopFolderChoice): Promise<DesktopPreparedFolder | null>;
   bindSession(sessionId: string, token: string): Promise<void>;
-  // A copy of a project's folder for a thread of the project, asking nothing: the folder its user chose for it
-  // here, which its coordinator's chat, *masterSessionId*, works in on this computer. The thread asks as that
-  // chat does. Rejects, saying to choose Use this computer for this project, for a chat whose folder here was
-  // confirmed for no project, and when the folder is no longer the one its user chose.
-  // Desktops built before it have none: the page looks first.
-  prepareThreadFolder?(masterSessionId: string): Promise<DesktopPreparedFolder>;
   // From now on the chat asks before each command, file change and input. The page can
   // make a chat only safer: "Work freely" is the desktop's own to grant.
   setMode(sessionId: string, mode: "ask"): Promise<void>;

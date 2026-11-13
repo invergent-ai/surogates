@@ -93,11 +93,6 @@ _B64_SUSPICIOUS_KEYWORDS: frozenset[str] = frozenset({
 })
 
 
-def _or_list(items: list[str]) -> str:
-    """``a``, ``a or b``, ``a, b or c``."""
-    return " or ".join(filter(None, (", ".join(items[:-1]), items[-1])))
-
-
 class PromptBuilder:
     """Builds system prompts from tenant config, skills, memory, and platform settings."""
 
@@ -310,6 +305,12 @@ class PromptBuilder:
             parts.append(self._prompts.get("guidance/parallel_tools"))
         if "memory" in self._available_tools:
             parts.append(self._prompts.get("guidance/memory"))
+        # The ``agent`` family: how to start and direct agents, and, for an agent started by one, how to report.
+        # A project's master starts threads with it, which its own guidance covers.
+        if "agent" in self._available_tools and not is_project_master(getattr(self._session, "config", None)):
+            parts.append(self._prompts.get("guidance/agents"))
+        if isinstance((getattr(self._session, "config", None) or {}).get("agent_dispatch"), dict):
+            parts.append(self._prompts.get("guidance/sub_agent"))
         if "session_search" in self._available_tools:
             parts.append(self._prompts.get("guidance/session_search"))
         # Advisor timing is model-driven, so the only lever on when it
@@ -498,18 +499,18 @@ class PromptBuilder:
         return "\n\n".join(parts)
 
     def _available_agents_section(self) -> str:
-        """Render an "# Available Sub-Agents" block for coordinator sessions.
+        """Render an "# Available Sub-Agents" block for a session offered ``agent``.
 
         Memoized after the first call because the agent catalog is
         immutable per builder and rendering runs regex injection scans
         on every description.  Returns the empty string when the
-        session is not a coordinator or when no agents are configured.
-        A project's master has neither ``spawn_worker`` nor
-        ``delegate_task``, so it gets none.
+        session is not offered ``agent`` or when no agents are configured.
+        A project's master starts threads, not sub-agent types, so it gets
+        none.
         """
         if self._session is None:
             return ""
-        if not self._session.config.get("coordinator"):
+        if "agent" not in self._available_tools:
             return ""
         if is_project_master(self._session.config):
             return ""
@@ -537,17 +538,13 @@ class PromptBuilder:
             self._available_agents_section_cache = ""
             return ""
 
-        spawn_tools = [
-            f"``{name}``" for name in ("spawn_task", "spawn_worker", "delegate_task", "agent")
-            if name in self._available_tools
-        ] or ["``spawn_task``", "``spawn_worker``", "``delegate_task``"]
         rendered = (
             "# Available Sub-Agents\n"
-            f"Pass ``agent_type=<name>`` to {_or_list(spawn_tools)} to use one of "
+            "Pass ``agent_type=<name>`` to ``agent`` to use one of "
             "these pre-configured sub-agent types. "
             "Each sub-agent runs with its own system prompt, tool filter, and model. "
             "These are not skills, so ``skill_view`` does not open them. You see "
-            "what is listed here and not their instructions, so say in each goal "
+            "what is listed here and not their instructions, so say in each brief "
             "what to read and where to write.\n"
             + "\n".join(lines)
         )
@@ -559,10 +556,9 @@ class PromptBuilder:
 
         Injected only for coordination-group members (sessions whose
         config carries ``context_group_id`` — every fan-out parent and
-        child).  Task workers additionally get the deeper protocol from
-        the ``subagent-task-worker`` skill; this block is the baseline
-        so delegate/spawn_worker children and coordinators use the
-        board without being told to in their goals.
+        child).  This block is the baseline so sub-agents and
+        coordinators use the board without being told to in their
+        briefs.
 
         Returns "" for solo sessions so the section is omitted.
         """
@@ -599,7 +595,7 @@ class PromptBuilder:
         Lists active experts (``type=expert`` and ``expert_status="active"``)
         with their description and trigger phrases. The LLM uses
         ``consult_expert(expert, task)`` to consult one; the block also
-        disambiguates from ``delegate_task`` which has a different
+        disambiguates from ``agent`` which has a different
         purpose (multi-step sub-agent work in a fresh session).
 
         Returns an empty string when no active experts are loaded so the
@@ -644,7 +640,7 @@ class PromptBuilder:
             "Call `consult_expert(expert, task)` when a request falls "
             "within an expert's specialty — for example, a SQL writer for "
             "query-shaped questions or a code reviewer for inspecting a "
-            "file. Do NOT use `delegate_task` for this — that tool spawns "
+            "file. Do NOT use `agent` for this — that tool starts "
             "sub-agents for multi-step work in a fresh session; experts "
             "are single-shot specialists.\n"
             "Prefer a domain expert whenever one covers the subject. "
@@ -778,8 +774,7 @@ class PromptBuilder:
         description), this section emits the entire skill content so
         the agent has the playbook in its system prompt without having
         to call ``skill_view``. Used to auto-enforce role-specific
-        playbooks like ``subagent-task-worker`` for sessions running a
-        Task — set by ``surogates.tasks.spawn._build_task_worker_config``.
+        playbooks a session's config names.
 
         Returns an empty string when ``preloaded_skills`` is unset or
         empty, or when no listed name resolves against the tenant skill

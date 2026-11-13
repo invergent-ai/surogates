@@ -75,17 +75,14 @@ class PolicyDecision:
 
 def _with_stand_ins(names: set[str] | None, *, starting_work: bool = False) -> set[str] | None:
     """*names* with the tools each stands for (``surogates.harness.subagents.STANDS_IN_FOR``) added; with
-    *starting_work*, only those that start work (``agent``, ``monitor``, ``delegate_task``)."""
+    *starting_work*, only those that start work (``agent``, ``monitor``)."""
     if not names:
         return names
     from surogates.harness.subagents import STANDS_IN_FOR
 
     aliases = {alias for name in names for alias in STANDS_IN_FOR.get(name, ())}
-    if "agent" in names:
-        # ``delegate_task`` stays callable beside ``agent``: what binds one binds the other.
-        aliases.add("delegate_task")
     if starting_work:
-        aliases &= {"agent", "monitor", "delegate_task"}
+        aliases &= {"agent", "monitor"}
     return set(names) | aliases
 
 
@@ -124,9 +121,9 @@ class GovernanceGate:
             denied_tools = [n for t in denied_tools for n in sorted(configured_tool_names(t))]
         if require_approval is not None:
             require_approval = {n for t in require_approval for n in configured_tool_names(t)}
-        # A name a policy gives stands for the tools that take its place
-        # (``subagents.STANDS_IN_FOR``): denying ``delegate_task`` denies
-        # ``agent``, allowing it allows ``agent``.
+        # A name a policy gives stands for the tools that do the same work
+        # (``subagents.STANDS_IN_FOR``): denying ``terminal`` denies
+        # ``monitor``, allowing it allows ``monitor``.
         allowed_tools = _with_stand_ins(allowed_tools)
         if denied_tools:
             denied_tools = [*denied_tools, *sorted(_with_stand_ins(denied_tools) - set(denied_tools))]
@@ -696,3 +693,39 @@ def _strictest_egress_default(base: str | None, profile: str | None) -> str:
     return "allow" if all(v == "allow" for v in candidates) else "deny"
 
 
+
+
+class KeptFamilyGate:
+    """An agent's policy (*inner*) as one session gets it: the family's tools in
+    *kept* (``subagents.kept_whatever_policy``) are offered whatever the policy
+    says.  A kept tool the policy would refuse (denied, or left off an
+    allow-list) meets only the platform floor's checks; one the policy offers
+    meets the policy's, so an approval rule on it still asks first.  Everything
+    else is *inner*'s."""
+
+    def __init__(self, inner: GovernanceGate, kept: frozenset[str]) -> None:
+        self._inner = inner
+        self._kept = frozenset(kept)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    def offers(self, tool_name: str) -> bool:
+        return tool_name in self._kept or self._inner.offers(tool_name)
+
+    def runs_unasked(self, tool_name: str) -> bool:
+        return self.kept_only(tool_name) or self._inner.runs_unasked(tool_name)
+
+    def check(self, tool_name: str, arguments: dict[str, Any] | None = None, **kwargs: Any) -> PolicyDecision:
+        if self.kept_only(tool_name):
+            from surogates.runtime.governance import floor_gate
+
+            return floor_gate().check(tool_name, arguments, **kwargs)
+        return self._inner.check(tool_name, arguments, **kwargs)
+
+    def kept_only(self, tool_name: str) -> bool:
+        """Whether *tool_name* is offered only because it is kept: the policy itself does not offer it."""
+        return tool_name in self._kept and not self._inner.offers(tool_name)
+
+    def with_profile(self, profile: dict[str, Any]) -> KeptFamilyGate:
+        return KeptFamilyGate(self._inner.with_profile(profile), self._kept)

@@ -12,7 +12,6 @@ function calls(): BridgeCalls & Record<string, ReturnType<typeof vi.fn>> {
     getDevice: vi.fn(() => ({ device: null, localFolders: true })),
     webSignIn: vi.fn(() => Promise.resolve({ code: "web-code" })),
     prepareFolder: vi.fn(() => Promise.resolve(null)),
-    prepareThreadFolder: vi.fn(() => Promise.resolve({ folder: "/home/flavius/Q3", mode: "ask", nonce: "n", token: "t" })),
     bindSession: vi.fn(() => Promise.resolve()),
     setMode: vi.fn(() => Promise.resolve()),
     requestFreeMode: vi.fn(() => Promise.resolve(true)),
@@ -51,11 +50,9 @@ describe("the bridge", () => {
     const handlers = bridgeHandlers(ORIGIN, made);
     expect(await handlers.webSignIn!(TOP, "7")).toEqual({ code: "web-code" });
     await handlers.prepareFolder!(TOP, "7", "pick");
-    expect(made.prepareFolder).toHaveBeenCalledWith("pick", "7", null);
+    expect(made.prepareFolder).toHaveBeenCalledWith("pick", "7");
     await handlers.bindSession!(TOP, "7", SESSION, "b".repeat(43));
     expect(made.bindSession).toHaveBeenCalledWith(SESSION, "b".repeat(43), "7");
-    expect(await handlers.prepareThreadFolder!(TOP, "7", SESSION)).toMatchObject({ folder: "/home/flavius/Q3" });
-    expect(made.prepareThreadFolder).toHaveBeenCalledWith(SESSION, "7");
     expect(await handlers.getAppearance!(TOP, "7")).toMatchObject({ theme: "dark" });
     await handlers.setMode!(TOP, "7", SESSION, "ask");
     expect(made.setMode).toHaveBeenCalledWith(SESSION, "ask");
@@ -162,12 +159,7 @@ describe("the bridge", () => {
 
   it.each([
     ["prepareFolder", ["other"], "Not a folder choice"],
-    ["prepareFolder", ["last", "Check the totals"], "Not a project's thread"],
-    ["prepareFolder", ["last", { project: "Q3 report", thread: 42 }], "Not a project's thread"],
-    ["prepareFolder", ["last", { project: "", thread: "Check the totals" }], "Not a project's thread"],
-    ["prepareFolder", ["last", { project: "Q3 report", thread: "x".repeat(257) }], "Not a project's thread"],
     ["bindSession", ["not-a-session", "b".repeat(43)], "Not a chat"],
-    ["prepareThreadFolder", ["../other"], "Not a chat"],
     ["bindSession", [SESSION, "short"], "Not a folder confirmation"],
     ["setAccount", [{ ...ACCOUNT, name: "x".repeat(201) }], "Not an account"],
     ["setAccount", [{ ...ACCOUNT, userId: "" }], "Not an account"],
@@ -188,17 +180,6 @@ describe("the bridge", () => {
     const made = calls();
     await expect(bridgeHandlers(ORIGIN, made)[name]!(TOP, "7", ...args)).rejects.toThrow(message);
     expect(made[name]).not.toHaveBeenCalled();
-  });
-
-  it("passes on the project's thread a folder is asked for, and only its two names", async () => {
-    const made = calls();
-    const handlers = bridgeHandlers(ORIGIN, made);
-    await handlers.prepareFolder!(TOP, "7", "last", { project: "Q3 report", thread: "Check the totals", folder: "/etc" });
-    expect(made.prepareFolder).toHaveBeenCalledWith("last", "7", { project: "Q3 report", thread: "Check the totals" });
-    await handlers.prepareFolder!(TOP, "7", "new", null);
-    expect(made.prepareFolder).toHaveBeenLastCalledWith("new", "7", null);
-    await handlers.prepareFolder!(TOP, "7", "pick", null);
-    expect(made.prepareFolder).toHaveBeenLastCalledWith("pick", "7", null);
   });
 
   it("keeps only what it knows of an account, takes none, and hears a registration", async () => {

@@ -16,7 +16,7 @@ from surogates.tools.builtin import agents as agents_module
 from surogates.tools.workspace_io import LocalWorkspaceIO
 from tests.test_steer_loop import _final_response
 
-from .test_agent_tool import PARITY, a_chat, calling, chats, children, tool_result  # noqa: F401  (chats is a fixture)
+from .test_agent_tool import a_chat, calling, chats, children, tool_result  # noqa: F401  (chats is a fixture)
 from .test_command_wake_once import workers  # noqa: F401  (a fixture)
 from .test_devices import api  # noqa: F401  (a fixture)
 from .test_send_message import a_background_agent
@@ -40,7 +40,7 @@ async def stop(chats, session, target) -> dict:  # noqa: F811
 
 
 async def test_an_agent_lists_its_agents_its_parent_and_its_siblings(chats):  # noqa: F811
-    chat = await a_chat(chats, PARITY)
+    chat = await a_chat(chats)
     first = await a_background_agent(chats, chat, "First")
     chats.replies = [
         calling("agent", "call_two", description="Second", prompt="Count the closed items.", run_in_background=True),
@@ -63,7 +63,7 @@ async def test_an_agent_lists_its_agents_its_parent_and_its_siblings(chats):  # 
 
 
 async def test_stopping_a_running_agent_stops_it_and_tells_its_parent(chats):  # noqa: F811
-    chat = await a_chat(chats, PARITY)
+    chat = await a_chat(chats)
     child = await a_background_agent(chats, chat)
     answers: list[dict] = []
     pubsub = chats.api.app.state.redis.pubsub()
@@ -107,7 +107,7 @@ async def test_stopping_a_running_agent_stops_it_and_tells_its_parent(chats):  #
 
 
 async def test_a_queued_agent_stopped_before_it_runs_is_told_once(chats):  # noqa: F811
-    chat = await a_chat(chats, PARITY)
+    chat = await a_chat(chats)
     child = await a_background_agent(chats, chat)
     answer = await stop(chats, chat, child.id)
     assert answer["status"] == "stopped"
@@ -122,7 +122,7 @@ async def test_a_queued_agent_stopped_before_it_runs_is_told_once(chats):  # noq
 
 
 async def test_the_users_stop_of_an_agent_its_parent_stopped_is_the_users_to_lift(chats):  # noqa: F811
-    chat = await a_chat(chats, PARITY)
+    chat = await a_chat(chats)
     child = await a_background_agent(chats, chat)
     assert (await stop(chats, chat, child.id))["status"] == "stopped"
     # The user stops it too, as it already rests: from now on the stop is the user's.
@@ -138,7 +138,7 @@ async def test_the_users_stop_of_an_agent_its_parent_stopped_is_the_users_to_lif
 
 
 async def test_an_agent_stops_only_what_it_started(chats):  # noqa: F811
-    chat, stranger = await a_chat(chats, PARITY), await a_chat(chats, PARITY)
+    chat, stranger = await a_chat(chats), await a_chat(chats)
     child = await a_background_agent(chats, chat, "Mine")
     theirs = await a_background_agent(chats, stranger, "Theirs")
     for sender, target in [(stranger, child.id), (child.id, chat), (theirs.id, child.id), (chat, uuid4()), (chat, theirs.id)]:
@@ -149,8 +149,8 @@ async def test_an_agent_stops_only_what_it_started(chats):  # noqa: F811
 
 async def test_a_background_command_is_listed_and_stopped_by_the_session_that_started_it(api, monkeypatch):  # noqa: F811
     store, redis = api.app.state.session_store, api.app.state.redis
-    created = await api.client.post("/v1/sessions", json={"config": PARITY}, headers=api.auth())
-    other = await api.client.post("/v1/sessions", json={"config": PARITY}, headers=api.auth())
+    created = await api.client.post("/v1/sessions", json={"config": {}}, headers=api.auth())
+    other = await api.client.post("/v1/sessions", json={"config": {}}, headers=api.auth())
     mine, theirs = created.json()["id"], other.json()["id"]
     watch = BackgroundWatch(poll_seconds=0.05)
     watch.configure(store=store, redis=redis, sandbox_pool=None)
@@ -194,7 +194,7 @@ async def test_a_stop_of_a_foreground_agent_ends_the_call_that_waits_for_it(chat
     from surogates.session.provisioning import create_child_session
     from surogates.tools.builtin import delegate
 
-    chat = await a_chat(chats, PARITY)
+    chat = await a_chat(chats)
     child = await create_child_session(store=chats.store, parent=await chats.session(chat), channel="delegation")
     await chats.store.emit_event(child.id, EventType.SESSION_PAUSE, {"reason": "stopped", "message": "enough", "stopped_by": str(chat)})
     outcome = await delegate._poll_child_completion(
@@ -204,22 +204,22 @@ async def test_a_stop_of_a_foreground_agent_ends_the_call_that_waits_for_it(chat
 
 
 async def test_a_stop_reaches_only_agents_of_the_family(chats):  # noqa: F811
-    from surogates.harness.subagents import DISPATCH_KEY, PARITY_KEY
+    from surogates.harness.subagents import DISPATCH_KEY
     from surogates.session.provisioning import create_child_session
 
-    chat = await a_chat(chats, PARITY)
+    chat = await a_chat(chats)
     # A worker of the chat's, and an agent under it: not the chat's agents.
     worker = await create_child_session(store=chats.store, parent=await chats.session(chat), channel="worker")
     hidden = await create_child_session(
         store=chats.store, parent=worker, channel="delegation",
-        config={PARITY_KEY: True, DISPATCH_KEY: {"mode": "background", "description": "Hidden", "parent": str(worker.id)}},
+        config={DISPATCH_KEY: {"mode": "background", "description": "Hidden", "parent": str(worker.id)}},
     )
     assert (await stop(chats, chat, hidden.id))["error"].startswith("no agent ")
     assert all(a["agent_id"] != str(hidden.id) for a in (await listed(chats, chat))["agents"])
 
 
 async def test_a_users_pause_during_an_agents_stop_brings_no_second_notice(chats):  # noqa: F811
-    chat = await a_chat(chats, PARITY)
+    chat = await a_chat(chats)
     child = await a_background_agent(chats, chat)
 
     async def stopped_then_paused_by_its_user():

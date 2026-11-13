@@ -28,7 +28,7 @@ async def test_seed_then_resolvable(session_factory):
     assert _CREW.issubset(by)
     assert "run_coding_agent" in (by["claude-coder"].tools or [])
     assert "run_coding_agent" in (by["codex-reviewer"].tools or [])
-    assert "spawn_task" in (by["code-orchestrator"].tools or [])
+    assert "agent" in (by["code-orchestrator"].tools or [])
     assert "run_coding_agent" in (by["code-orchestrator"].disallowed_tools or [])
     assert by["code-orchestrator"].system_prompt.strip()
 

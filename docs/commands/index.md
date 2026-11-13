@@ -137,15 +137,16 @@ Outcome behavior:
 
 ### `/mission <description>`
 
-Creates a **mission** — an objective the coordinator decomposes into tasks and
+Creates a **mission** — an objective the coordinator gives out to agents and
 an LLM judge evaluates against a rubric, across as many turns as it takes.
+See [Missions](../missions/index.md).
 
 ```text
 /mission Audit every test file for tests that pass for the wrong reason.
 
 Budget: 20M
-Rubric: every directory under tests/ has a completed task, and each finding
-names a file, a test, and a demonstrated reason it is vacuous.
+Rubric: an agent has reported on every directory under tests/, and each
+finding names a file, a test, and a demonstrated reason it is vacuous.
 ```
 
 `Rubric:` is required. `Budget:` is optional and may sit either side of it.
@@ -155,7 +156,7 @@ names a file, a test, and a demonstrated reason it is vacuous.
 | `/mission status` | Current status, iteration, and last verdict |
 | `/mission pause [reason]` | Pause automatic continuation |
 | `/mission resume` | Resume a paused mission |
-| `/mission cancel [--cascade] [reason]` | Cancel (with `--cascade`, its running workers too) |
+| `/mission cancel [--cascade] [reason]` | Cancel (with `--cascade`, its running agents too, with the agents they started) |
 | `/mission budget <count>` | Set the token allowance on a running mission |
 | `/mission budget none` | Remove the ceiling |
 | `/mission accept` | Apply a proposed rubric refinement and resume |
@@ -168,8 +169,8 @@ are human — `20M`, `500k`, `1.5M`, `2_000_000`, or a raw integer. A value that
 cannot be parsed is rejected rather than treated as unbounded.
 
 Spend is **derived**, not counted: it sums the coordinator session plus every
-session attached to one of the mission's tasks, so it cannot drift from what
-was actually billed. `/mission budget` reports the spend so far alongside the
+one of the mission's agents and the agents they started, so it cannot drift
+from what was actually billed. `/mission budget` reports the spend so far alongside the
 new ceiling.
 
 Tokens, not cost, deliberately: tier-sentinel models are priced at 0.0, so a
@@ -186,8 +187,8 @@ Three gates run at the evaluator boundary, all machine-checked rather than
 taken on the coordinator's word:
 
 - **No corroboration.** A `satisfied` verdict is demoted to `needs_revision`
-  when the mission has tasks and none completed. Task status is written by the
-  dispatcher, not by the agent's prose. A mission that spawned no tasks is
+  when the mission has agents and none completed. An agent's status is its
+  session's, not the coordinator's prose. A mission that started no agents is
   exempt — there is nothing to corroborate against.
 - **No progress.** Consecutive evaluations that do not report progress are
   counted. The judge is shown its own previous verdict and the streak length,

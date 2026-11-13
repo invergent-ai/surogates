@@ -42,8 +42,8 @@ from tests.thread_pods import ThreadPods
 from .test_device_sessions import is_bound
 from .test_devices import FOLDER, NONCE, api, builtin_tools, eventually, link_url  # noqa: F401  (api and link_url are fixtures)
 from .test_durable_landings import ends
-from .test_local_history_threads import computer, made_with_copy, picture  # noqa: F401  (computer is a fixture)
-from .test_local_threads import begin, begun_local, confirmed, journal, laptop, made_before_copies  # noqa: F401  (laptop is a fixture)
+from .test_local_history_threads import bind_with_copy, computer, made_with_copy, picture  # noqa: F401  (computer is a fixture)
+from .test_local_threads import begin, begun_local, confirmed, has_begun, journal, laptop, made_before_copies  # noqa: F401  (laptop is a fixture)
 from .test_turn_sagas import calling
 from .test_workstream_overview import rows
 from .test_workstream_threads import children_of
@@ -54,15 +54,16 @@ pytestmark = pytest.mark.asyncio(loop_scope="session")
 SCRIPTS: dict[UUID, list] = {}
 
 
-async def begun_with_copy(api, computer, *, nonce: str = NONCE):
-    """A project, its master and a thread made on *computer*, bound with a copy of its own by its app, which is connected, and begun."""
+async def begun_with_copy(api, computer):
+    """A project, its master and a thread made on *computer*, bound with a copy of its own by its app, which is connected,
+    and so begun."""
     project, master, thread = await made_with_copy(api, computer.device_id)
-    computer.app.prepare(nonce, FOLDER)
-    await journal(api).bind(session_id=thread.id, device_id=UUID(computer.device_id), folder=FOLDER, nonce=nonce, history=thread.id)
+    # Its master's chat works in the project's folder there, as a computer project's does: the thread is bound in its name.
+    computer.app.bindings[str(master.id)] = FOLDER
+    await bind_with_copy(api, thread)
     if not computer.app.connected:
         await computer.app.connect()
-    await eventually(lambda: is_bound(api, str(thread.id)))
-    assert (await begin(api, project, str(thread.id))).status_code == 201
+    await eventually(lambda: has_begun(api, str(thread.id)))
     return project, master, await api.app.state.session_store.get_session(thread.id)
 
 
@@ -624,7 +625,7 @@ async def test_only_a_threads_own_turn_opens_its_copy_and_no_other_sessions_turn
     ], said="Write the notes."), 30)
     assert (computer.app.places.copy(str(thread.id)) / "Notes.md").read_text() == "notes\n"
     # Another thread on the folder opens its own copy, under its own turn, and works in it.
-    _, _, other = await begun_with_copy(api, computer, nonce="second-thread-nonce-0002")
+    _, _, other = await begun_with_copy(api, computer)
     await asyncio.wait_for(woken(api, monkeypatch, other, [
         calling(("write_file", {"path": "Budget.xlsx", "content": "Total,42\n"})), _final_response("Done."),
     ]), 30)
@@ -650,7 +651,7 @@ async def test_a_thread_made_before_threads_had_copies_works_nowhere_and_a_chat_
     project, master, thread = await made_before_copies(api, laptop.device_id)
     await laptop.app.connect()
     await eventually(lambda: is_bound(api, str(thread.id)))
-    assert (await begin(api, project, str(thread.id))).status_code == 201
+    await begin(api, str(thread.id))
     helper = await create_child_session(store=store, parent=thread, channel="worker")
     folder = picture(laptop.folder)
     # A worker before the switch called write_file for the thread; its computer had its write when that worker was killed.

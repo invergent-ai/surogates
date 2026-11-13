@@ -457,15 +457,13 @@ async def test_a_master_does_a_simple_thing_itself_and_gives_out_the_rest(api, m
         "read_file", "search_files", "list_files", "write_file", "patch", "terminal", "process",
         "kb_list_pages", "kb_read_page", "kb_search_pages",
         "memory", "todo", "ask_user_question", "session_search", "skills_list", "skill_view",
-        "start_thread", "propose_threads", "message_thread",
+        "agent", "send_message", "list_agents", "stop_agent",
     } <= sent
     # With /loop off its routines stay readable, and nothing makes or ends one.
     assert ROUTINE_TOOLS & sent == (ROUTINE_TOOLS if loop else {"cron_list"})
     # Research, a site's study and every other piece of work are a thread's.
     assert not sent & {
-        "web_search", "web_extract", "browser_navigate", "create_artifact", "vision_analyze",
-        "spawn_worker", "send_worker_message", "stop_worker", "delegate_task",
-        "spawn_task", "unblock_task", "cancel_task", "run_coding_agent",
+        "web_search", "web_extract", "browser_navigate", "create_artifact", "vision_analyze", "run_coding_agent",
     }
 
 
@@ -474,7 +472,7 @@ async def test_a_mission_coordinator_keeps_its_own_tools(api):
     session = await api.app.state.session_store.get_session(UUID(chat.json()["id"]))
     session.config.update(coordinator=True, strict_coordinator=True)
     tools = harness_with_every_tool()._tool_filter_for_session(session)
-    assert {"spawn_worker", "delegate_task", "spawn_task", "run_coding_agent"} <= tools
+    assert {"agent", "run_coding_agent"} <= tools
     assert not tools & {"read_file", "kb_read_page"}
 
 
@@ -537,12 +535,13 @@ async def test_a_master_refuses_a_goal_the_web_client_sends_as_an_event(api):
 
 
 async def turn_calling(
-    monkeypatch, session, calls: dict[str, dict], *, streamed=False, loop=True, session_factory=None,
+    monkeypatch, session, calls: dict[str, dict], *, streamed=False, loop=True, session_factory=None, schemas=None,
 ):
     """One turn of *session* whose model makes *calls* (name: arguments).
 
     Returns the tools the model was sent, the dispatch, and each call's
-    answer.  The dispatch is a stub unless *session_factory* is given.
+    answer.  The dispatch is a stub unless *session_factory* is given.  A
+    *schemas* dict is filled with each sent tool's schema, by name.
     """
     registry = ToolRegistry()
     ToolRuntime(registry).register_builtins()
@@ -576,6 +575,8 @@ async def turn_calling(
 
     async def llm(**kwargs):
         sent.append({schema["function"]["name"] for schema in kwargs["create_kwargs"]["tools"]})
+        if schemas is not None and not schemas:
+            schemas.update({schema["function"]["name"]: schema for schema in kwargs["create_kwargs"]["tools"]})
         message, usage = next(responses)
         if kwargs["on_tool_call_complete"] is not None:
             for call in message["tool_calls"] or []:
@@ -596,7 +597,7 @@ def unknown(name: str, sent: set[str]) -> str:
 @pytest.mark.parametrize("streamed", [False, True], ids=["sequential", "streamed"])
 async def test_a_masters_model_cannot_call_a_tool_it_was_not_offered(api, monkeypatch, streamed):
     master = await master_of(api, await create(api))
-    refused = {"spawn_task": {}, "delegate_task": {}, "run_coding_agent": {}}
+    refused = {"web_search": {}, "run_coding_agent": {}}
     sent, ran, answered = await turn_calling(monkeypatch, master, refused, streamed=streamed)
     ran.assert_not_awaited()
     assert answered == {f"call_{name}": unknown(name, sent) for name in refused}
@@ -625,20 +626,25 @@ async def test_a_masters_model_makes_a_routine(api, monkeypatch, session_factory
 async def test_a_chats_model_calls_its_tools_as_before(api, monkeypatch, streamed):
     chat = await api.client.post("/v1/sessions", json={}, headers=api.auth())
     session = await api.app.state.session_store.get_session(UUID(chat.json()["id"]))
-    _, ran, answered = await turn_calling(monkeypatch, session, {"todo": {}, "delegate_task": {}}, streamed=streamed)
-    assert [call.args[0] for call in ran.await_args_list] == ["todo", "delegate_task"]
-    assert answered == {"call_todo": '{"ok": true}', "call_delegate_task": '{"ok": true}'}
+    _, ran, answered = await turn_calling(monkeypatch, session, {"todo": {}, "agent": {}}, streamed=streamed)
+    assert [call.args[0] for call in ran.await_args_list] == ["todo", "agent"]
+    assert answered == {"call_todo": '{"ok": true}', "call_agent": '{"ok": true}'}
 
 
-async def system_prompt(api, session) -> str:
+async def system_prompt(api, session, tools: frozenset[str] = frozenset()) -> str:
     tenant = TenantContext(
         org_id=api.org_id, user_id=api.user_id, org_config={}, user_preferences={},
         permissions=frozenset(), asset_root="/tmp/test",
     )
-    builder = PromptBuilder(tenant, session=session, available_agents=[
+    builder = PromptBuilder(tenant, session=session, available_tools=set(tools), available_agents=[
         AgentDef(name="analyst", description="Reads the numbers", system_prompt="", source="platform"),
     ])
-    return await _make_harness(prompt_builder=builder)._build_system_prompt(session)
+    registry = ToolRegistry()
+    if "agent" in tools:
+        from surogates.tools.builtin import agents
+
+        agents.register(registry)
+    return await _make_harness(prompt_builder=builder, tool_registry=registry)._build_system_prompt(session)
 
 
 async def test_a_masters_prompt_runs_the_project(api):
@@ -654,11 +660,14 @@ async def test_a_masters_prompt_runs_the_project(api):
     ) in said
     assert "Never do complex work yourself." in said
     assert "Never do the work and then give it to a thread" in said
-    assert "## Starting threads - Give it to a new thread with `start_thread`." in said
+    assert (
+        "## Starting threads - Give it to a new thread with `agent`: the `description` is the thread's title, "
+        "the `prompt` its goal."
+    ) in said
     assert "## The project's folder" not in said
     # A thread is named by its title, not linked: the chat opens no link to a thread, and its card is where it opens.
     assert "Name a thread by its title and never write a link to it" in prompt
-    assert "# Worker Delegation" not in prompt
+    assert "# Coordinating agents" not in prompt
     assert "# Available Sub-Agents" not in prompt
     assert prompt.endswith(
         "## Session instructions\n\nProject: Quarterly report\n\nGoal: The board's Q3 report\n\nUse euros."
@@ -667,8 +676,10 @@ async def test_a_masters_prompt_runs_the_project(api):
 
 async def test_a_coordinator_chat_keeps_its_delegation_prompt(api):
     chat = await api.client.post("/v1/sessions", json={"config": {"coordinator": True}}, headers=api.auth())
-    prompt = await system_prompt(api, await api.app.state.session_store.get_session(UUID(chat.json()["id"])))
-    assert "# Worker Delegation" in prompt
+    prompt = await system_prompt(
+        api, await api.app.state.session_store.get_session(UUID(chat.json()["id"])), frozenset({"agent"}),
+    )
+    assert "# Coordinating agents" in prompt
     assert "# Available Sub-Agents" in prompt
     assert "# Running a project" not in prompt
 

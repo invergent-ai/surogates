@@ -1602,12 +1602,11 @@ function bridge(contents: WebContents, agent: Agent): void {
       if (typeof code !== "string") throw new Error("The agent gave this window no session");
       return { code };
     },
-    prepareFolder: (choice, window, thread) =>
-      preparing(window, async (signal) => (await registered()).binder.prepareFolder(choice, window, signal, thread)),
+    prepareFolder: (choice, window) =>
+      preparing(window, async (signal) => (await registered()).binder.prepareFolder(choice, window, signal)),
     bindSession: async (sessionId, token, window) => {
       await (await registered()).binder.bindSession(sessionId, token, window);
     },
-    prepareThreadFolder: async (masterSessionId, window) => (await registered()).binder.prepareThreadFolder(masterSessionId, window),
     setMode: async (sessionId, mode) => (await registered()).binder.approvals.setMode(sessionId, mode),
     requestFreeMode: (sessionId, window) =>
       preparing(window, async (signal) => (await registered()).binder.approvals.requestFreeMode(sessionId, signal, `${window}:${load}`)),

@@ -266,93 +266,17 @@ Fixed-cron loop child sessions do not expose `cron_create`, `cron_list`, or
 schedule. As a fallback, the user can always run `/loop cancel <id>` from a
 normal session.
 
-### `delegate_task` / `spawn_worker` -- Sub-Agent Delegation
+### `agent`, `send_message`, `list_agents`, `stop_agent`, `monitor` -- The Agent Family
 
-Spawn a child session for parallel or scoped work.  Pass an optional `agent_type=<name>` to apply a pre-configured [sub-agent](../sub-agents/index.md) preset (system prompt, tool filter, model, iteration cap, policy profile).  `delegate_task` blocks until the child completes; `spawn_worker` returns immediately with a worker ID and the result flows back as a `worker.complete` event in the parent's log.
+The one way to start and follow sub-agents. A session offered `agent` gets its companions with it; `monitor` only where a root session runs commands. The [Sub-Agents](../sub-agents/index.md) reference (section 13) covers depth, notifications, budgets and policies.
 
-### Subagent Task Layer Tools
-
-The task layer wraps `spawn_worker` with durable, DAG-aware, retry-with-history semantics. See [Tasks](../tasks/index.md) for the full conceptual chapter (when to use, state machine, dispatcher tick, event vocabulary). Six tools register into the same `core` toolset:
-
-| Tool | Available to | Purpose |
+| Tool | Parameters | What it does |
 |---|---|---|
-| `spawn_task` | Coordinator agents | Create a durable task; optionally with DAG `parents=[...]` |
-| `unblock_task` | Coordinator agents | Resume a blocked task with optional context |
-| `cancel_task` | Coordinator agents | Abort a non-terminal task |
-| `worker_complete` | Workers running for a task | Mark own attempt done with structured handoff |
-| `worker_block` | Workers running for a task | Self-pause without consuming a retry |
-| `worker_context` | Workers running for a task | Read own task + parents + prior attempts |
-
-The three "self-tools" are gated by `Session.task_id is not None`; plain chat and `spawn_worker` children never see them. Children spawned via either `spawn_worker` or `spawn_task` cannot recursively spawn tasks (the coordinator-side tools are in `WORKER_EXCLUDED_TOOLS`).
-
-#### `spawn_task` -- Durable Subagent Task
-
-Create a Task row that survives parent crash, supports fan-in dependencies, and retries on transient failure. Eager-spawns the child Session when no parents are pending; otherwise stays in `todo` until the dispatcher tick promotes it.
-
-| Parameter | Type | Description |
-|---|---|---|
-| `goal` | string | Complete, self-contained description of the task. Subagents do not see the parent's conversation. |
-| `context` | string | Optional structured context appended as a `## Context` block in the worker's first user message |
-| `agent_type` | string | Optional pre-configured sub-agent type name (see [Sub-Agents](../sub-agents/index.md)) |
-| `parents` | array | Task ids this task depends on. Stays `todo` until every parent reaches `done`. Cancelled/failed parents do **not** promote children -- orchestrate explicitly. |
-| `max_attempts` | integer | Retry budget (default 3). Transitions to `failed` after this many consecutive crash/timeout attempts. |
-
-Returns `{"task_id": str, "status": "todo" | "ready" | "running"}`. Status is `running` (with `worker_id`) when the task was eagerly spawned, `todo` when waiting on parents, `ready` when the dispatcher tick beat the eager-spawn path and already claimed it.
-
-#### `unblock_task` -- Resume a Blocked Task
-
-| Parameter | Type | Description |
-|---|---|---|
-| `task_id` | string | Task to unblock |
-| `additional_context` | string | Optional new context appended to the task; surfaced as part of the next attempt's initial user message |
-
-Only the spawning parent session may unblock its own children. Status must be `blocked`; transitions back to `ready` for re-claim on the next tick.
-
-#### `cancel_task` -- Abort a Non-Terminal Task
-
-| Parameter | Type | Description |
-|---|---|---|
-| `task_id` | string | Task to cancel |
-| `reason` | string | Optional human-readable reason |
-
-Only the spawning parent session may cancel. Status must be non-terminal (`todo` / `ready` / `running` / `blocked`). If `running`, publishes to `INTERRUPT_CHANNEL_PREFIX<worker_id>` (the same channel `stop_worker` uses) so the in-flight Session exits cleanly.
-
-#### `worker_complete` -- Explicit Structured Handoff
-
-Available only when running for a task. Marks the task `done` and writes the structured handoff fields. Prefer this over the natural-completion path when you want machine-readable output for downstream automation.
-
-| Parameter | Type | Description |
-|---|---|---|
-| `summary` | string | 1-3 sentence human-readable handoff. Becomes `task.result` and the `result` field on the `worker.complete` event delivered to the parent. |
-| `metadata` | object | Free-form JSON dict. Common keys: `changed_files`, `tests_run`, `tests_passed`, `decisions`, `findings`, `approved`. Becomes `task.result_metadata` and the `metadata` field on the parent's `worker.complete` event. |
-
-Plain workers that complete naturally (without calling this tool) get their auto-extracted LLM final response as `result` and no `metadata` -- the existing `spawn_worker` contract is unchanged.
-
-#### `worker_block` -- Self-Pause for Context
-
-Available only when running for a task. Pauses the current attempt without consuming a retry budget (blocking is a deliberate pause, not a failure).
-
-| Parameter | Type | Description |
-|---|---|---|
-| `reason` | string | One-sentence reason naming the specific decision needed. Surfaced in the `task.blocked` event the parent receives. |
-
-Emits a `task.blocked` event to the spawning parent and publishes an interrupt on the worker's own session channel so the harness exits cleanly. The task stays in `blocked` until someone calls `unblock_task` -- the spawning parent agent or a future human-facing dashboard control.
-
-#### `worker_context` -- Read Own Task Context
-
-Available only when running for a task. Returns a JSON object with the calling worker's task, its parent tasks (with their completed results and metadata), and prior attempt summaries linked via `sessions.task_id`. Use this on retry to read the full detail of every prior attempt -- the new attempt's USER_MESSAGE already includes a brief summary, but `worker_context` exposes the structured form.
-
-No parameters. Returns:
-
-```json
-{
-  "task": {"id", "goal", "context", "status", "attempt_count", "max_attempts", "agent_def_name", "blocked_reason"},
-  "parents": [{"id", "goal", "status", "result", "result_metadata"}, ...],
-  "prior_attempts": [{"session_id", "outcome", "summary"? | "blocked_reason"?}, ...]
-}
-```
-
-Prior attempts are classified as `"completed"` (worker finished, summary present), `"blocked"` (called `worker_block`, reason present), or `"crashed"` (no completion event -- timeout / hard-kill / OOM).
+| `agent` | `description`, `prompt`; optional `agent_type`, `model`, `run_in_background`, `fork`, `name` | Starts one sub-agent from its brief. In the background (the default for a main session) it returns the `agent_id` at once and the report arrives as a notification; in the foreground the call waits for the report. `agent_type` applies a [sub-agent](../sub-agents/index.md) preset (system prompt, tool filter, model, iteration cap, policy profile). In a project's master it starts a thread; in a project on the user's computer, the thread begins once that computer sets up its copy of the project's folder. |
+| `send_message` | `to`, `message`, `summary` | Continues, corrects or answers an agent of the caller's tree: an agent it started, its parent (`to: "parent"`), or a sibling. A running agent reads it before its next step; a finished one is resumed with its context and reports again. |
+| `list_agents` | optional `agent_id` | Lists the agents the caller started, or reads one. |
+| `stop_agent` | `agent_id`, optional `reason`; in a project's master, `resolve` | Stops an agent with the agents it started, or a background command. In a project's master, `resolve` moves a thread to Resolved. |
+| `monitor` | `command`, `description`, optional `timeout_seconds`, `max_notifications_per_minute` | Runs a command in the sandbox; each line it prints reaches the session as a notification, until it exits, times out or is stopped. |
 
 ### `clarify` -- Interactive Clarification
 

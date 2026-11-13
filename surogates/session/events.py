@@ -174,7 +174,7 @@ class EventType(str, Enum):
     # step's report to Keel carries every page its sessions read.
     KB_PAGE_READ = "kb.page_read"
 
-    # Sub-agent delegation (delegate_task tool)
+    # Sub-agent runs (the agent tool)
     DELEGATION_START = "delegation.start"
     DELEGATION_COMPLETE = "delegation.complete"
     DELEGATION_FAILED = "delegation.failed"
@@ -195,8 +195,6 @@ class EventType(str, Enum):
     WORKER_SPAWNED = "worker.spawned"
     WORKER_COMPLETE = "worker.complete"
     WORKER_FAILED = "worker.failed"
-    # Threads a project's master proposes for the user to start (propose_threads).
-    THREAD_PROPOSED = "thread.proposed"
     # A project's thread is told to redo its change to files its landing left out.
     HISTORY_REDO = "history.redo"
     # A thread's redo whose wake was held back, by its user's limit or with ops unreachable:
@@ -205,14 +203,6 @@ class EventType(str, Enum):
     # A project coordinator's follow-up to one of its threads: the thread
     # reads it as a message typed into it, but it is never the user's.
     COORDINATOR_MESSAGE = "coordinator.message"
-
-    # Subagent task layer (spawn_task tool / tasks_tick dispatcher).
-    # Emitted to the parent (spawning) session so the coordinator agent
-    # observes task state transitions on its next wake. ``WORKER_COMPLETE``
-    # is reused for successful task completion; the payload carries the
-    # ``task_id`` so the parent can correlate.
-    TASK_BLOCKED = "task.blocked"
-    TASK_FAILED = "task.failed"
 
     # Coordination board (shared verified context).
     # ``BOARD_NOTE`` is emitted on the WRITER session when notes pass
