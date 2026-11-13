@@ -729,52 +729,54 @@ class ConnectionPool:
             clean["description"] = str(clean.get("description", "")).replace(owning_server_key, plain)
             clean["name"] = clean_name
 
+            original_server = plain
+
+            # The Composio Tool Router is a first-party, platform-minted
+            # server (we create the session against backend.composio.dev
+            # with our own API key). Its meta-tool descriptions
+            # legitimately use imperative guidance ("you must …") and
+            # remote-execution fields ("command"/"code_to_execute") that
+            # trip the third-party tool-poisoning / description-injection
+            # heuristics. Exempt it from the scan-drop so
+            # COMPOSIO_SEARCH_TOOLS (and the bash/workbench executors)
+            # reach the agent — without SEARCH_TOOLS the router cannot
+            # discover or execute any app tool and is dead weight.
+            is_trusted_server = original_server == COMPOSIO_SERVER_NAME
+
             # Governance scan — run before adding the tool to the
             # advertised schema set so unsafe tools never reach the
             # agent.  Skipped when governance is disabled on the pool.
-            if governance is not None:
-                original_server = plain
+            if governance is not None and not is_trusted_server and not await self._scan_and_record(
+                governance=governance,
+                org_id=org_id,
+                user_id=user_id,
+                server_name=original_server,
+                tool_name=original_tool or clean_name,
+                schema=clean,
+                is_service_account=is_service_account,
+                server_identity=_server_identity(configs.get(original_server)),
+                approval_room=approval_room,
+            ):
+                continue  # unsafe or rug-pulled — exclude from advertised set
 
-                # The Composio Tool Router is a first-party, platform-minted
-                # server (we create the session against backend.composio.dev
-                # with our own API key). Its meta-tool descriptions
-                # legitimately use imperative guidance ("you must …") and
-                # remote-execution fields ("command"/"code_to_execute") that
-                # trip the third-party tool-poisoning / description-injection
-                # heuristics. Exempt it from the scan-drop so
-                # COMPOSIO_SEARCH_TOOLS (and the bash/workbench executors)
-                # reach the agent — without SEARCH_TOOLS the router cannot
-                # discover or execute any app tool and is dead weight.
-                is_trusted_server = original_server == COMPOSIO_SERVER_NAME
-                if not is_trusted_server and not await self._scan_and_record(
-                    governance=governance,
-                    org_id=org_id,
-                    user_id=user_id,
-                    server_name=original_server,
-                    tool_name=original_tool or clean_name,
-                    schema=clean,
-                    is_service_account=is_service_account,
-                    server_identity=_server_identity(configs.get(original_server)),
-                    approval_room=approval_room,
-                ):
-                    continue  # unsafe or rug-pulled — exclude from advertised set
-
-                # Debrand the Composio router's advertised name + description
-                # so the model never reads (and then echoes) the brand. The
-                # reverse-route below keeps using the real upstream tool name
-                # (``original_tool``), so calls still reach Composio.
-                if is_trusted_server:
-                    # Named from the debranded server and tool, so the
-                    # name keeps its ``mcp__tool_router__`` prefix and is
-                    # shortened (if at all) after debranding.
-                    clean["name"] = fit_tool_name(
-                        debrand_composio_text(sanitize_mcp_name_component(original_server)),
-                        debrand_composio_text(sanitize_mcp_name_component(original_tool or clean_name)),
-                    )
-                    clean["description"] = debrand_composio_text(
-                        clean.get("description", ""),
-                    )
-                    clean_name = clean["name"]
+            # Debrand the Composio router's advertised name + description
+            # so the model never reads (and then echoes) the brand. The
+            # reverse-route below keeps using the real upstream tool name
+            # (``original_tool``), so calls still reach Composio.  Not part
+            # of the scan: done with governance off too, so switching the
+            # scan off changes no tool's name or description.
+            if is_trusted_server:
+                # Named from the debranded server and tool, so the
+                # name keeps its ``mcp__tool_router__`` prefix and is
+                # shortened (if at all) after debranding.
+                clean["name"] = fit_tool_name(
+                    debrand_composio_text(sanitize_mcp_name_component(original_server)),
+                    debrand_composio_text(sanitize_mcp_name_component(original_tool or clean_name)),
+                )
+                clean["description"] = debrand_composio_text(
+                    clean.get("description", ""),
+                )
+                clean_name = clean["name"]
 
             if clean_name in seen_names:
                 # Two tools under one name (their names sanitize alike):

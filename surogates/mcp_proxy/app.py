@@ -52,15 +52,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # fingerprints, which the pool keeps across connections.
     app.state.audit_store = AuditStore(app.state.session_factory)
 
-    # Connection pool.  Scan + audit wired in so every MCP tool
-    # advertised to an agent has a safety scan recorded.
-    pool = ConnectionPool(
-        idle_timeout=settings.idle_connection_timeout,
-        max_per_org=settings.max_connections_per_org,
-        governance_enabled=True,
-        audit_store=app.state.audit_store,
-        scan_wording=settings.mcp_scan_wording,
-    )
+    pool = _connection_pool(settings, app.state.audit_store)
     app.state.pool = pool
     pool.start_eviction_loop()
 
@@ -79,6 +71,29 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await _shutdown_shared_runtime_plumbing_for_proxy(app)
     await app.state.redis.aclose()
     await engine.dispose()
+
+
+def _connection_pool(settings, audit_store: AuditStore) -> ConnectionPool:
+    """The proxy's MCP connection pool.
+
+    Scan + audit wired in, so every MCP tool advertised to an agent has a
+    safety scan recorded, unless the deployment switched the scan off
+    (``mcp_governance_enabled``): then it says so once, at startup.
+    """
+    if not settings.mcp_governance_enabled:
+        logger.warning(
+            "MCP Proxy runs without the MCP security scan "
+            "(SUROGATES_MCP_GOVERNANCE_ENABLED=false): tools are advertised "
+            "unscanned, and a definition changed after its approval is not "
+            "blocked. For test and benchmark deployments only.",
+        )
+    return ConnectionPool(
+        idle_timeout=settings.idle_connection_timeout,
+        max_per_org=settings.max_connections_per_org,
+        governance_enabled=settings.mcp_governance_enabled,
+        audit_store=audit_store,
+        scan_wording=settings.mcp_scan_wording,
+    )
 
 
 class _NoOpVault:
