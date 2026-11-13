@@ -322,3 +322,10 @@ async def test_an_experts_malformed_call_is_refused_and_its_next_request_is_send
     assert "must be a JSON object" in json.loads(model.results()["c0"])["error"]
     [call] = [c for m in model.requests[-1]["messages"] for c in m.get("tool_calls") or []]
     assert json.loads(call["function"]["arguments"]) == {"_raw": arguments}
+
+
+@pytest.mark.parametrize("arguments, valid", [("null", True), ("", True), ('{"a": 1}', True), ("[1]", False), ('{"a"', False)])
+def test_the_loops_all_invalid_retry_takes_null_as_no_arguments(arguments, valid):
+    from surogates.harness.loop_tool_recovery import _is_valid_json_args
+
+    assert _is_valid_json_args({"function": {"name": "t", "arguments": arguments}}) is valid

@@ -18,7 +18,7 @@ def _is_valid_json_args(tc: dict) -> bool:
         return True
     try:
         parsed = _json.loads(args_raw)
-        return isinstance(parsed, dict)
+        return parsed is None or isinstance(parsed, dict)  # null: no arguments
     except (ValueError, TypeError):
         return False
 
