@@ -59,12 +59,6 @@ def kw(store=None):
                 tools=None, tenant=None, interrupt_check=lambda: False, tool_guardrails=Warns())
 
 
-async def test_sequential_skips_after_an_unanswered_question_with_guidance(ran):
-    results = await tool_exec.execute_tool_calls_sequential([ASK, AFTER], **kw())
-    assert ran == ["ask_user_question"]
-    assert SKIPPED_BEHIND_QUESTION in results[1]["content"]
-
-
 async def test_streaming_skips_after_an_unanswered_question_with_guidance(ran):
     executor = streaming_executor.StreamingToolExecutor(**kw())
     for tc in (ASK, AFTER):

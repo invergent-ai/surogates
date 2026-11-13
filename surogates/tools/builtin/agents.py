@@ -58,7 +58,8 @@ FORK_NOTE = (
 #: What a background agent's call returns, after its id.
 STARTED_NOTE = (
     "It works in the background. Its report reaches you as a notification when it ends. Until then, "
-    "do not do its task yourself, and never state or guess its result."
+    "do not do its task yourself, and never state or guess its result. Do not sleep or poll list_agents "
+    "to wait for it: when you have nothing else to do, end your turn."
 )
 
 _AGENT_DESCRIPTION = (

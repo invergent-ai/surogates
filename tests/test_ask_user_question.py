@@ -620,4 +620,39 @@ def test_the_channel_schema_offers_ten_choices_without_touching_the_original():
     assert ask_user_question.widen_for_channel(schema, "web") is schema
     choices = lambda s: s["function"]["parameters"]["properties"]["questions"]["items"]["properties"]["choices"]  # noqa: E731
     assert choices(wide)["maxItems"] == 10 and choices(schema)["maxItems"] == 4
-    assert "up to 10 labeled options" in wide["function"]["description"]
+    said = wide["function"]["description"]
+    assert "up to 10" in said and "up to 4" not in said, said
+
+
+class _JudgeClient:
+    """A model endpoint that answers the user-action judge "nothing asked", and notes which model it was asked."""
+
+    def __init__(self, name: str, asked: list[tuple[str, str]]) -> None:
+        self.name, self.asked, self.base_url = name, asked, f"http://{name}"
+        self.chat = SimpleNamespace(completions=SimpleNamespace(create=self.create))
+
+    async def create(self, **request: Any) -> Any:
+        self.asked.append((self.name, request["model"]))
+        answer = json.dumps({"action_kind": "none", "needs_ask_user_question": False, "reason": "a plain answer"})
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=answer), finish_reason="stop")],
+            usage=None, model=request["model"],
+        )
+
+
+@pytest.mark.asyncio
+async def test_the_user_action_judge_runs_on_the_summary_model_and_on_the_sessions_without_one():
+    from tests.test_steer_loop import _make_loop_harness
+
+    asked: list[tuple[str, str]] = []
+    harness = _make_loop_harness(session_store=None)
+    harness._llm = _JudgeClient("main", asked)
+    harness._summary_client, harness._summary_model = _JudgeClient("summary", asked), "cheap-model"
+    judged = {"messages": [{"role": "user", "content": "Count the rows."}], "assistant_content": "There are 12."}
+    await harness._judge_final_response_user_action(**judged, model="opus-5-5")
+    assert asked and set(asked) == {("summary", "cheap-model")}
+
+    asked.clear()
+    harness._summary_client, harness._summary_model = None, ""
+    await harness._judge_final_response_user_action(**judged, model="opus-5-5")
+    assert asked and set(asked) == {("main", "opus-5-5")}

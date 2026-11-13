@@ -16,17 +16,14 @@ class FakeDocker:
         self.calls: list[list[str]] = []
         self._containers: dict[str, dict[str, Any]] = {}
         self.fail_next_run_with_port_conflict = False
+        self.conflict = b"Bind for 0.0.0.0:32000 failed: port is already allocated"
 
     async def run(self, args: list[str]) -> tuple[int, bytes, bytes]:
         self.calls.append(args)
         if args[:2] == ["run", "-d"]:
             if self.fail_next_run_with_port_conflict:
                 self.fail_next_run_with_port_conflict = False
-                return (
-                    125,
-                    b"",
-                    b"Bind for 0.0.0.0:32000 failed: port is already allocated",
-                )
+                return (125, b"", self.conflict)
             cid = f"cid-{len(self._containers) + 1}"
             labels = {}
             for idx, arg in enumerate(args):
@@ -105,12 +102,20 @@ class TestProvision:
         assert "--add-host host.docker.internal:host-gateway" in joined
         assert run_call[-1] == "kernel-test:1"
 
+    @pytest.mark.parametrize("conflict", [
+        b"Bind for 0.0.0.0:32000 failed: port is already allocated",
+        # A newer Docker's words for the same conflict.
+        b"docker: Error response from daemon: failed to set up container networking: driver failed programming "
+        b"external connectivity on endpoint e1: failed to bind host port for 0.0.0.0:30000:10.0.1.2:10001/tcp: "
+        b"address already in use",
+    ], ids=["older-docker", "newer-docker"])
     async def test_provision_retries_next_port_when_port_is_allocated(
         self,
         fake_spec_json_transport,
+        conflict,
     ) -> None:
         docker = FakeDocker()
-        docker.fail_next_run_with_port_conflict = True
+        docker.fail_next_run_with_port_conflict, docker.conflict = True, conflict
         backend = ProcessBrowserBackend(
             image="i",
             rest_port_base=30000,

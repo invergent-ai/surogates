@@ -156,6 +156,31 @@ def reports_elsewhere(session: Any) -> bool:
     return getattr(session, "parent_id", None) is not None or is_case_work(session) or is_scheduled_run(session)
 
 
+async def agents_run_in_its_sandbox(session_factory: Any, session: Any) -> bool:
+    """Whether an agent below *session* still runs in the sandbox it shares with *session*.
+
+    An agent works in its root's sandbox (``sandbox_session_key``), and a
+    background one runs on past the turn that started it: the root's turn end
+    lets that sandbox go only once none runs, or a command of the agent's dies
+    with it.
+    """
+    if session_factory is None:
+        return False
+    from sqlalchemy import and_, exists, or_, select
+
+    from surogates.db.models import Session as SessionRow
+    from surogates.sandbox.pool import sandbox_session_key
+
+    key = sandbox_session_key(session)
+    stamped = SessionRow.config["sandbox_root_session_id"].astext
+    async with session_factory() as db:
+        # A child with no stamp works in its parent's (sandbox_session_key); a project's thread has its own.
+        return bool(await db.scalar(select(exists().where(
+            SessionRow.status == "active", SessionRow.id != session.id,
+            or_(stamped == key, and_(stamped.is_(None), SessionRow.parent_id == session.id)),
+        ))))
+
+
 def monitor_allowed(config: dict | None) -> bool:
     """Whether a session with *config* may run monitors: not a sub-agent, whose work ends with its report,
     and not a project's thread or one under it, whose sandbox ends with its turn.  Either would be woken by

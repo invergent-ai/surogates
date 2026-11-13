@@ -873,15 +873,19 @@ async def a_worker_gone_under_a_turn_that_handed_on(api, monkeypatch, tmp_path, 
             monkeypatch.setattr(harness, "_take_back_what_the_turn_handed_on", killed)
             await stop(harness)
             return
-        raise asyncio.CancelledError("the worker died under the turn")
+        # The worker dies under the turn: its task is cancelled from outside, as a shutdown cancels it, while the
+        # step still runs.
+        turn.cancel()
+        await asyncio.Event().wait()
 
+    turn = asyncio.ensure_future(a_turn(api, monkeypatch, thread, [
+        calling(("terminal", {"command": "echo the stopped turn > stopped.md"})),
+        calling(("agent", {"description": "Helper", "prompt": "Check the sources.", "run_in_background": True})),
+        calling(("memory", {"action": "add", "content": "x"})),
+        _final_response("Done."),
+    ], pool=mine, during=the_worker_dies))
     with pytest.raises(BaseException):
-        await asyncio.wait_for(a_turn(api, monkeypatch, thread, [
-            calling(("terminal", {"command": "echo the stopped turn > stopped.md"})),
-            calling(("agent", {"description": "Helper", "prompt": "Check the sources.", "run_in_background": True})),
-            calling(("memory", {"action": "add", "content": "x"})),
-            _final_response("Done."),
-        ], pool=mine, during=the_worker_dies), 120)
+        await asyncio.wait_for(turn, 120)
     async with api.app.state.session_factory() as db:
         await db.execute(text("DELETE FROM session_leases WHERE session_id = :id"), {"id": thread.id})
         await db.commit()

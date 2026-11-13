@@ -16,7 +16,6 @@ import logging
 import math
 import re
 import time
-from types import SimpleNamespace
 from typing import Any, Awaitable, Callable
 
 from pydantic import BaseModel
@@ -152,16 +151,10 @@ def summary_judge(client: Any, model: str | None) -> Judge | None:
     """An LLM yes/no on whether a tool changes something, from the summary model."""
     if client is None or not model:
         return None
-    from surogates.harness.auxiliary_llm import create_without_reasoning
+    from surogates.harness.auxiliary_llm import without_reasoning
     from surogates.harness.structured_output import generate_structured
 
-    async def create(**request: Any) -> Any:
-        return await create_without_reasoning(client, **request)
-
-    quiet = SimpleNamespace(
-        base_url=getattr(client, "base_url", ""),
-        chat=SimpleNamespace(completions=SimpleNamespace(create=create)),
-    )
+    quiet = without_reasoning(client)
 
     async def judge(name: str, description: str) -> bool:
         verdict = await generate_structured(

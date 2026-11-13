@@ -319,11 +319,25 @@ async def _run_single_delegation(
             if early is not None:
                 return early
 
-        outcome = await _poll_child_completion(
-            session_store=session_store,
-            parent_session_id=parent_session_id,
-            child_id=child_id,
-        )
+        try:
+            outcome = await _poll_child_completion(
+                session_store=session_store,
+                parent_session_id=parent_session_id,
+                child_id=child_id,
+            )
+        except asyncio.CancelledError:
+            # The turn that waited for the agent was stopped: no call takes its report now, so it stops too, as
+            # stop_agent stops one.
+            from surogates.tools.builtin.agents import stop_tree
+
+            try:
+                await asyncio.shield(stop_tree(
+                    session_store=session_store, redis=redis, session_factory=session_factory, top_id=child_id,
+                    by=parent_session_id, reason="the turn that waited for it was stopped",
+                ))
+            except Exception:
+                logger.warning("Could not stop agent %s after its caller's turn was stopped", child_id, exc_info=True)
+            raise
 
         duration_s = round(time.monotonic() - started_at, 3)
 

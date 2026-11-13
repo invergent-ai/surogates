@@ -46,7 +46,7 @@ async def maybe_build_fetched_image_messages(
     message with text + image_url blocks.
 
     Args:
-        tool_results:  The list of tool-result dicts (role=tool) from execute_tool_calls.
+        tool_results:  The list of tool-result dicts (role=tool) from the turn's tool executor.
         tool_calls_raw: The raw assistant tool_calls list (to map call_id -> name).
         supports_vision: Whether the current model supports native vision.
         read_image: Async callback ``path -> (bytes, mime) | None``.

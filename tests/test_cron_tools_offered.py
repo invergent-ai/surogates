@@ -51,7 +51,11 @@ async def _offered(monkeypatch, session: Session, *, loop: bool = True, denied: 
     if denied:
         harness._governance_gate = SimpleNamespace(
             offers=lambda name: name not in denied, allow_listed=lambda names: frozenset(),
+            runs_unasked=lambda name: name not in denied,
         )
+    # The scheduling group's schemas wait for load_tools, though its tools count as offered: with no groups held
+    # back, what the model is sent is all it is offered.
+    monkeypatch.setattr(loop_module, "tool_groups", lambda: ())
     harness._slash_commands = SlashCommandConfig() if loop else SlashCommandConfig(
         commands=SLASH_COMMAND_IDS - {"loop"},
     )

@@ -18,13 +18,14 @@ class FakeDocker:
         self.calls: list[list[str]] = []
         self._containers: dict[str, dict[str, Any]] = {}
         self.fail_next_run_with_port_conflict = False
+        self.conflict = b"Bind for 0.0.0.0:33000 failed: port is already allocated"
 
     async def run(self, args: list[str]) -> tuple[int, bytes, bytes]:
         self.calls.append(args)
         if args[:2] == ["run", "-d"]:
             if self.fail_next_run_with_port_conflict:
                 self.fail_next_run_with_port_conflict = False
-                return (125, b"", b"Bind for 0.0.0.0:33000 failed: port is already allocated")
+                return (125, b"", self.conflict)
             cid = f"cid-{len(self._containers) + 1}"
             labels = {}
             for idx, arg in enumerate(args):
@@ -133,9 +134,14 @@ class TestProvision:
         assert "stale" not in docker._containers
         await backend.aclose()
 
-    async def test_retries_next_port_on_conflict(self, healthz_transport):
+    @pytest.mark.parametrize("conflict", [
+        b"Bind for 0.0.0.0:33000 failed: port is already allocated",
+        # A newer Docker's words for the same conflict.
+        b"docker: Error response from daemon: failed to set up container networking: driver failed programming external connectivity on endpoint e1: failed to bind host port for 0.0.0.0:33000:10.0.1.2:8071/tcp: address already in use",
+    ], ids=["older-docker", "newer-docker"])
+    async def test_retries_next_port_on_conflict(self, healthz_transport, conflict):
         docker = FakeDocker()
-        docker.fail_next_run_with_port_conflict = True
+        docker.fail_next_run_with_port_conflict, docker.conflict = True, conflict
         backend = _backend(docker, healthz_transport)
         sid = await backend.provision(SandboxSpec(session_id="root-1"))
         run_calls = [c for c in docker.calls if c[:2] == ["run", "-d"]]

@@ -291,3 +291,26 @@ def test_the_old_team_tool_names_still_mean_the_new_tools(old, new) -> None:
 
     message = {"role": "assistant", "tool_calls": [{"function": {"name": old, "arguments": "{}"}}]}
     assert sanitize_response_message(message)["tool_calls"][0]["function"]["name"] == new
+
+
+def test_a_call_to_agent_where_it_is_not_offered_says_to_do_the_part_itself() -> None:
+    # A sub-agent at the depth limit, or a session whose policy leaves agent out: it is told what to do instead,
+    # rather than only that the tool is unknown, which sends it looking for another way to start one.
+    import json
+
+    from surogates.harness.resilience import find_invalid_tool_calls
+
+    call = {"id": "c1", "function": {"name": "agent", "arguments": '{"description": "Next", "prompt": "Go on."}'}}
+    [(_, error)] = find_invalid_tool_calls([call], offered={"read_file", "send_message"}, registered={"agent", "read_file"})
+    said = json.loads(error)["error"]
+    assert "cannot start agents" in said and "Do this part yourself" in said, said
+    other = {"id": "c2", "function": {"name": "nope", "arguments": "{}"}}
+    [(_, error)] = find_invalid_tool_calls([other], offered={"read_file"}, registered={"read_file"})
+    assert json.loads(error)["error"].startswith("Unknown tool: 'nope'")
+
+
+def test_the_rescue_judge_gives_its_reason_before_its_verdict() -> None:
+    # The model writes the fields in schema order: a verdict written first is decided before any reasoning.
+    from surogates.harness.loop_user_action import _UserActionRescueDecision
+
+    assert list(_UserActionRescueDecision.model_json_schema()["properties"])[0] == "reason"

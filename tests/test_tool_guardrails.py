@@ -1,4 +1,8 @@
-"""Tool-call execution blocks repeated failures and no-progress loops."""
+"""Tool-call execution blocks repeated failures and no-progress loops.
+
+The guardrails are the turn's: each response's calls run through a tool
+executor of their own, and a repeat is the next response's call.
+"""
 
 from __future__ import annotations
 
@@ -9,7 +13,7 @@ from uuid import uuid4
 
 import pytest
 
-from surogates.harness.tool_exec import execute_tool_calls
+from surogates.harness.streaming_executor import StreamingToolExecutor
 from surogates.harness.tool_guardrails import (
     ToolGuardrailConfig,
     ToolGuardrails,
@@ -18,8 +22,24 @@ from surogates.session.events import EventType
 from surogates.tools.registry import ToolRegistry, ToolSchema
 
 
+async def _responses(calls: int, tool_call: dict, guardrails: ToolGuardrails, **turn: object) -> list[dict]:
+    """*tool_call* as the only call of *calls* responses in a row, each run as the turn's executor runs it;
+    the turn ends, as the loop ends it, once the guardrails halt it."""
+    results = []
+    for _ in range(calls):
+        if guardrails.halt_decision is not None:
+            break
+        executor = StreamingToolExecutor(
+            interrupt_check=lambda: False, tenant=SimpleNamespace(asset_root="/tmp/test"),
+            tool_guardrails=guardrails, **turn,
+        )
+        executor.add_tool(dict(tool_call))
+        results.extend(await executor.get_all_results())
+    return results
+
+
 @pytest.mark.asyncio
-async def test_execute_tool_calls_blocks_repeated_exact_failure_with_events() -> None:
+async def test_a_turn_blocks_a_repeated_exact_failure_with_events() -> None:
     registry = ToolRegistry()
     handler = AsyncMock(return_value='{"error":"still missing"}')
     registry.register(
@@ -52,16 +72,7 @@ async def test_execute_tool_calls_blocks_repeated_exact_failure_with_events() ->
         "function": {"name": "read_file", "arguments": '{"path":"missing.txt"}'},
     }
 
-    results = await execute_tool_calls(
-        [tool_call, tool_call, tool_call],
-        session=session,
-        lease=lease,
-        store=store,
-        tools=registry,
-        tenant=SimpleNamespace(asset_root="/tmp/test"),
-        interrupt_check=lambda: False,
-        tool_guardrails=guardrails,
-    )
+    results = await _responses(3, tool_call, guardrails, session=session, lease=lease, store=store, tools=registry)
 
     assert handler.await_count == 2
     assert len(results) == 3
@@ -87,7 +98,7 @@ _TERMINAL_OK = '{"exit_code":0,"stdout":"1499 shadow_strike_v3.html"}'
 
 
 @pytest.mark.asyncio
-async def test_execute_tool_calls_blocks_consecutive_no_progress_by_default() -> None:
+async def test_a_turn_blocks_consecutive_no_progress_by_default() -> None:
     """End-to-end: default guardrails stop a successful identical-call loop."""
     registry = ToolRegistry()
     handler = AsyncMock(return_value=_TERMINAL_OK)
@@ -118,18 +129,9 @@ async def test_execute_tool_calls_blocks_consecutive_no_progress_by_default() ->
         },
     }
 
-    results = await execute_tool_calls(
-        [tool_call, tool_call, tool_call, tool_call, tool_call],
-        session=session,
-        lease=lease,
-        store=store,
-        tools=registry,
-        tenant=SimpleNamespace(asset_root="/tmp/test"),
-        interrupt_check=lambda: False,
-        tool_guardrails=guardrails,
-    )
+    results = await _responses(5, tool_call, guardrails, session=session, lease=lease, store=store, tools=registry)
 
-    # 3 executions, 4th blocked, 5th never reached (halt breaks the batch).
+    # 3 executions, 4th blocked, 5th never asked (the halt ends the turn).
     assert handler.await_count == 3
     assert len(results) == 4
     blocked = json.loads(results[3]["content"])

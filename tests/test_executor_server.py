@@ -269,3 +269,28 @@ def test_a_checkpoint_take_is_always_of_the_workspace_a_restore_puts_back(tmp_pa
     ))
     latest = json.loads(executor_server._run_checkpoint({"action": "latest_hash"}, str(workspace)))
     assert taken["hash"] == latest["hash"]
+
+
+async def test_a_call_whose_caller_hangs_up_stops_and_frees_its_slot(fake_registry, mounted_mounts_file):
+    # A stopped agent's call: the harness cancels it, and its connection closes.  The command must not run on to its
+    # own timeout, holding the daemon's only slot meanwhile.
+    app = executor_server.create_app(
+        token="secret-token", workspace="/workspace", mounts_path=mounted_mounts_file, max_concurrency=1,
+    )
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=0, log_level="error"))
+    serve_task = asyncio.create_task(server.serve())
+    try:
+        while not server.started:
+            await asyncio.sleep(0.01)
+        url = f"http://127.0.0.1:{server.servers[0].sockets[0].getsockname()[1]}/execute"
+        async with httpx.AsyncClient() as client:
+            with pytest.raises(httpx.ReadTimeout):
+                await client.post(url, headers=AUTH, json={"name": "slow", "args": {"seconds": 30}}, timeout=0.5)
+        async with httpx.AsyncClient() as client:
+            started = time.monotonic()
+            resp = await client.post(url, headers=AUTH, json={"name": "echo", "args": {"a": 1}}, timeout=20)
+        assert json.loads(resp.text)["ok"] is True
+        assert time.monotonic() - started < 5
+    finally:
+        server.should_exit = True
+        await serve_task

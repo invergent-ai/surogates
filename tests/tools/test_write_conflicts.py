@@ -15,7 +15,6 @@ from pathlib import Path
 import pytest
 
 from surogates.devices.workspace import DeviceWorkspaceIO
-from surogates.harness.tool_exec import should_parallelize
 from surogates.tools.builtin import file_ops
 from surogates.tools.workspace_io import LocalWorkspaceIO
 from tests.fake_laptop import CONFLICT, InProcessRunner
@@ -270,8 +269,6 @@ async def test_two_patches_through_two_spellings_of_one_path_conflict_once(folde
         {"function": {"name": "patch", "arguments": json.dumps({"path": path, "old_string": old, "new_string": new})}}
         for path, old, new in [("./a.py", "one", "1"), ("a.py", "two", "2")]
     ]
-    # The batch runs them side by side: its overlap check compares the paths as they are written.
-    assert should_parallelize(calls)
     kwargs = on_device(HeldWrites(folder, 2))
     # Bounded: a patch that failed before its write would leave the other waiting for ever.
     results = await asyncio.wait_for(

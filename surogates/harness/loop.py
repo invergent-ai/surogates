@@ -55,6 +55,7 @@ from surogates.harness.agent_resolver import (
     apply_agent_def_to_session,
     resolve_agent_def,
 )
+from surogates.harness.auxiliary_llm import without_reasoning
 from surogates.harness.connection_health import cleanup_dead_connections
 from surogates.harness.context import NOOP_STRATEGIES
 from surogates.harness.cost_tracker import SessionCostTracker
@@ -115,7 +116,6 @@ from surogates.harness.tool_exec import (
     _turn_now,
     cancelled_result,
     execute_single_tool,
-    execute_tool_calls,
 )
 from surogates.harness.tool_guardrails import ToolGuardrailConfig, ToolGuardrails
 from surogates.sandbox.copy_files import has_copy, read_copy, writes_to_copy
@@ -4440,6 +4440,13 @@ class AgentHarness(
             # 6. Append assistant message to the in-memory message list.
             messages.append(assistant_message)
 
+            # A turn that did not stream its calls into an executor runs them through one now: a Stop then cuts
+            # short the call under way, as it does a streamed turn's, and records each call it stopped.
+            if not use_streaming_exec:
+                add_tool = _reset_streaming_executor()
+                for tc in tool_calls_raw:
+                    add_tool(tc)
+
             # 7. Execute tool calls.
             # The mark waits while another chat holds the folder: a Stop ends it, and the calls the stream holds.
             # A cloud turn takes no mark, and its early-started calls finish and are recorded before a Stop pauses it.
@@ -4456,55 +4463,44 @@ class AgentHarness(
                             await streaming_executor.get_all_results()
                     await self._abort_iteration_with_pause(session, saga, cost_tracker, lease=lease)
                     return
-            if use_streaming_exec:
-                # ── Streaming executor path ──────────────────────────
-                # Some or all tools started executing during LLM streaming.
-                # Non-concurrent tools (write_file, patch) are still QUEUED
-                # at this point because they are never concurrency-safe.
+            # ── Tool executor ────────────────────────────────────
+            # Some tools may have started executing during LLM streaming.
+            # Non-concurrent tools (write_file, patch) are still QUEUED
+            # at this point because they are never concurrency-safe.
 
-                # Wait for all tools to complete (concurrent ones may
-                # already be done, sequential ones start now). Publish the
-                # executor on the harness so ``interrupt()`` can preempt
-                # in-flight tools (sandbox exec, browser actions) instead
-                # of letting them run to their tool-level timeout.
-                self._active_executor = streaming_executor
-                try:
-                    # The loop waits for its tool calls; they count for the turn meanwhile.
-                    async with turn_joining():
-                        all_results = await streaming_executor.get_all_results()
-                finally:
-                    self._active_executor = None
-
-                # Filter results to match the deduped tool call list.
-                # Dedup is rare but possible — if a tool was deduped,
-                # its result is harmlessly discarded (read-only tools
-                # have no side effects).
-                valid_ids = {tc.get("id") for tc in tool_calls_raw}
-                tool_results = [
-                    r for r in all_results
-                    if r.get("tool_call_id") in valid_ids
-                ]
-
-                # Log streaming executor stats for observability.
-                stats = streaming_executor.stats
-                if stats["overlapped_with_streaming"] > 0:
-                    logger.info(
-                        "Session %s: streaming executor completed — "
-                        "%d/%d tools overlapped with streaming",
-                        session.id,
-                        stats["overlapped_with_streaming"],
-                        stats["total"],
-                    )
-            else:
-                # ── Existing path ────────────────────────────────────
+            # Wait for all tools to complete (concurrent ones may
+            # already be done, sequential ones start now). Publish the
+            # executor on the harness so ``interrupt()`` can preempt
+            # in-flight tools (sandbox exec, browser actions) instead
+            # of letting them run to their tool-level timeout.
+            self._active_executor = streaming_executor
+            try:
+                # The loop waits for its tool calls; they count for the turn meanwhile.
                 async with turn_joining():
-                    tool_results = await execute_tool_calls(
-                        tool_calls_raw,
-                        **self._tool_call_kwargs(
-                            session=session, lease=lease, saga=saga, hint_tracker=hint_tracker,
-                            model_id=model_id, expert_transcript=expert_transcript,
-                        ),
-                    )
+                    all_results = await streaming_executor.get_all_results()
+            finally:
+                self._active_executor = None
+
+            # Filter results to match the deduped tool call list.
+            # Dedup is rare but possible — if a tool was deduped,
+            # its result is harmlessly discarded (read-only tools
+            # have no side effects).
+            valid_ids = {tc.get("id") for tc in tool_calls_raw}
+            tool_results = [
+                r for r in all_results
+                if r.get("tool_call_id") in valid_ids
+            ]
+
+            # Log streaming executor stats for observability.
+            stats = streaming_executor.stats
+            if stats["overlapped_with_streaming"] > 0:
+                logger.info(
+                    "Session %s: streaming executor completed — "
+                    "%d/%d tools overlapped with streaming",
+                    session.id,
+                    stats["overlapped_with_streaming"],
+                    stats["total"],
+                )
 
             dynamic_loop_wait_done = self._dynamic_loop_wait_succeeded(
                 session, tool_calls_raw, tool_results,
@@ -5544,8 +5540,13 @@ class AgentHarness(
                 "content": json.dumps(judge_payload, ensure_ascii=False),
             },
         ]
+        # The cheap summary model judges when there is one: the turn
+        # stays open until the judge answers.
+        llm = self._llm
+        if self._summary_client is not None and self._summary_model:
+            llm, model = without_reasoning(self._summary_client), self._summary_model
         structured = await _generate_user_action_rescue_structured(
-            llm_client=self._llm,
+            llm_client=llm,
             model=model,
             messages=judge_messages,
         )
@@ -5554,7 +5555,7 @@ class AgentHarness(
 
         for attempt in range(2):
             try:
-                response = await self._llm.chat.completions.create(
+                response = await llm.chat.completions.create(
                     model=model,
                     messages=judge_messages,
                     temperature=0,
@@ -6497,8 +6498,14 @@ class AgentHarness(
         """
         from surogates.harness.background_watch import background_watch
 
-        # One that runs a background command the session waits to hear the end of stays up, as at a model's turn end.
-        if self._sandbox_pool is not None and not background_watch.holds(str(session.id)):
+        from surogates.harness.subagents import agents_run_in_its_sandbox
+
+        # One that runs a background command the session waits to hear the end of stays up, as at a model's turn
+        # end, and so does one an agent below it still runs in.
+        if (
+            self._sandbox_pool is not None and not background_watch.holds(str(session.id))
+            and not await agents_run_in_its_sandbox(self._session_factory, session)
+        ):
             try:
                 sandbox_id = await self._sandbox_pool.release_for_session(str(session.id))
             except Exception:

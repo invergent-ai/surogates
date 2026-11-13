@@ -385,13 +385,13 @@ async def _drive_a_turn(monkeypatch: pytest.MonkeyPatch, config: dict, replies: 
         order.append("model")
         return next(script)
 
-    async def fake_execute_tool_calls(tool_calls_raw: list, **_kwargs: Any) -> list[dict]:
+    async def fake_execute_single_tool(call: dict, **_kwargs: Any) -> dict:
         order.append("tools")
-        return [{"role": "tool", "tool_call_id": call["id"], "content": "ok"} for call in tool_calls_raw]
+        return {"role": "tool", "tool_call_id": call["id"], "content": "ok"}
 
     harness._folder_cursor = folder_cursor
     monkeypatch.setattr("surogates.harness.loop.call_llm_with_retry", fake_call_llm_with_retry)
-    monkeypatch.setattr("surogates.harness.loop.execute_tool_calls", fake_execute_tool_calls)
+    monkeypatch.setattr("surogates.harness.tool_exec.execute_single_tool", fake_execute_single_tool)
     session = _make_session()
     session.config.update(config)
     await harness._run_loop(
@@ -619,12 +619,12 @@ async def test_a_stop_while_the_turns_mark_waits_for_its_folder_ends_the_turn_st
     async def fake_call_llm_with_retry(**_kwargs: Any) -> tuple[dict, dict]:
         return _tool_resp("c1")
 
-    async def no_calls(*_args: Any, **_kwargs: Any) -> list[dict]:
+    async def no_calls(*_args: Any, **_kwargs: Any) -> dict:
         raise AssertionError("a stopped turn ran its calls")
 
     harness._folder_cursor = folder_cursor
     monkeypatch.setattr("surogates.harness.loop.call_llm_with_retry", fake_call_llm_with_retry)
-    monkeypatch.setattr("surogates.harness.loop.execute_tool_calls", no_calls)
+    monkeypatch.setattr("surogates.harness.tool_exec.execute_single_tool", no_calls)
     session, tracker = _make_session(), SessionCostTracker()
     session.config.update({"execution": {"kind": "device", "device_id": str(uuid4())}})
     await asyncio.wait_for(harness._run_loop(
@@ -634,10 +634,10 @@ async def test_a_stop_while_the_turns_mark_waits_for_its_folder_ends_the_turn_st
 
     [(args, _)] = harness._abort_iteration_with_pause.await_args_list
     assert (args[0], args[2]) == (session, tracker)
-    # The calls the stream held are discarded with the read, as a Stop discards them while they run,
-    # and have ended, their stopped results recorded, before the turn's pause.
-    assert _StreamedCalls.discarded is streamed
-    assert ended_before_the_pause == [streamed]
+    # The turn's calls, streamed or not, are discarded with the read, as a Stop discards them while they
+    # run, and have ended, their stopped results recorded, before the turn's pause.
+    assert _StreamedCalls.discarded is True
+    assert ended_before_the_pause == [True]
     assert harness._active_executor is None
 
 
@@ -663,12 +663,12 @@ async def test_a_folder_turn_whose_summary_is_ruled_out_takes_no_mark_and_no_sto
         calls += 1
         return _tool_resp("c1") if calls == 1 else _resp("done")
 
-    async def ran(*_args: Any, **_kwargs: Any) -> list[dict]:
-        return [{"role": "tool", "tool_call_id": "c1", "content": "ok"}]
+    async def ran(*_args: Any, **_kwargs: Any) -> dict:
+        return {"role": "tool", "tool_call_id": "c1", "content": "ok"}
 
     harness._unless_stopped = unless_stopped
     monkeypatch.setattr("surogates.harness.loop.call_llm_with_retry", fake_call_llm_with_retry)
-    monkeypatch.setattr("surogates.harness.loop.execute_tool_calls", ran)
+    monkeypatch.setattr("surogates.harness.tool_exec.execute_single_tool", ran)
     session = _make_session()
     session.config.update({"execution": {"kind": "device", "device_id": str(uuid4())}, "active_mission_id": "m1"})
     await asyncio.wait_for(harness._run_loop(

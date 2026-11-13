@@ -71,11 +71,10 @@ async def _drive(harness, responses, monkeypatch, messages=None, session=None):
 
     monkeypatch.setattr("surogates.harness.loop.call_llm_with_retry", fake_call)
 
-    async def fake_exec(tool_calls_raw, **_k):
-        return [{"role": "tool", "tool_call_id": tc["id"], "content": "ok"}
-                for tc in tool_calls_raw]
+    async def fake_exec(tc, **_k):
+        return {"role": "tool", "tool_call_id": tc["id"], "content": "ok"}
 
-    monkeypatch.setattr("surogates.harness.loop.execute_tool_calls", fake_exec)
+    monkeypatch.setattr("surogates.harness.tool_exec.execute_single_tool", fake_exec)
     harness._find_invalid_tool_calls = MagicMock(return_value=[])
     messages = messages if messages is not None else [{"role": "user", "content": "q"}]
     session = session or _make_session()
