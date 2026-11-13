@@ -11,8 +11,9 @@ the api, which has only the session's row, so they hide by the tools the row tel
 A skill that names, or ``requires_tools``, a tool the session can never be sent (its ``excluded_tools``, a tool an
 ``allowed_tools`` list leaves out, one its kind never gets) is hidden too: from the skill index, from ``skills_list``
 and from ``skill_view``.  The model read ``read_file`` in a skill's text and called it, and was refused "Unknown
-tool".  The prompt hides by its narrowed toolset; the worker sets :data:`skill_scope` for the turn's tool calls, so
-the skill tools leave the same skills out whichever way they reach the skills.
+tool".  The worker computes that set once per session and wake (``AgentHarness._narrow_prompt_tools``): the prompt
+hides by it, and :data:`skill_scope`, set from it for the model's tool calls, has the skill tools leave out the same
+skills.  A tool a skill names only where it is there or as not to use is listed in its ``optional_tools``.
 """
 
 from __future__ import annotations
@@ -57,34 +58,44 @@ class SkillScope:
 skill_scope: ContextVar[SkillScope] = ContextVar("surogates_skill_scope", default=SkillScope())
 
 
+# A tool name as a text spells it: ``read_file``, ``mcp__crm__get``, ``office.edit``; never with a trailing dot.
+_NAME_TOKEN_RE = re.compile(r"[A-Za-z0-9_]+(?:[.-][A-Za-z0-9_]+)*")
+
+
 def _tool_name_re(tool: str) -> re.Pattern[str]:
-    """Where a text names *tool*.  A name with ``_``, ``-`` or ``.`` in it is no word of prose: anywhere, as a whole
-    name.  A one-word name (``terminal``, ``process``, ``patch``) is a tool only where the text marks it as code: in
-    backticks, or called (``terminal(``); "the terminal state" names no tool."""
+    """Where a text names *tool*, among the places it is a whole token.  A name with ``_``, ``-`` or ``.`` in it is
+    no word of prose: anywhere.  A one-word name (``terminal``, ``process``, ``patch``) is a tool only where the text
+    marks it as code: in backticks, or called (``terminal(``); "the terminal state" names no tool."""
     escaped = re.escape(tool)
     if re.fullmatch(r"[A-Za-z0-9]+", tool):
         return re.compile(rf"`{escaped}`|(?<![\w.-]){escaped}\(")
-    return re.compile(rf"(?<![\w.-]){escaped}(?![\w-])")
+    return re.compile(rf"(?<![\w.-]){escaped}(?![\w.-]*[\w])")
 
 
 def tools_named(texts: Iterable[str | None], tools: Collection[str]) -> set[str]:
-    """The *tools* the *texts* name (:func:`_tool_name_re`)."""
+    """The *tools* the *texts* name (:func:`_tool_name_re`).  The text is split into name tokens once; only a tool
+    that is one is looked at further, so a session that cannot have a thousand MCP tools costs one pass."""
     joined = "\n".join(text for text in texts if text)
     if not joined:
         return set()
-    return {tool for tool in tools if tool and tool in joined and _tool_name_re(tool).search(joined)}
+    candidates = set(_NAME_TOKEN_RE.findall(joined)) & set(tools)
+    return {tool for tool in candidates if _tool_name_re(tool).search(joined)}
 
 
 def needs_unavailable_tool(skill: Any, unavailable: Collection[str]) -> bool:
     """Whether *skill* (a ``SkillDef`` or its dict) requires or names a tool in *unavailable*: one the session
-    cannot be sent.  An expert is a model consulted, its text that model's prompt: never hidden by it."""
+    cannot be sent.  A tool the skill names only where it is there, or as not to use (its ``optional_tools``), and
+    one it stands in for (its ``fallback_for_tools``), do not count.  An expert is a model consulted, its text that
+    model's prompt: never hidden by it."""
     if not unavailable:
         return False
     get = skill.get if isinstance(skill, dict) else (lambda key, default=None: getattr(skill, key, default))
     if get("type", "skill") == "expert":
         return False
-    if set(get("requires_tools") or ()) & set(unavailable):
+    unavailable = set(unavailable)
+    if set(get("requires_tools") or ()) & unavailable:
         return True
+    unavailable -= set(get("optional_tools") or ()) | set(get("fallback_for_tools") or ())
     return bool(tools_named((get("description"), get("trigger"), get("content")), unavailable))
 
 

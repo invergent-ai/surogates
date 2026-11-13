@@ -2,6 +2,7 @@
 name: office
 description: "Use whenever a Word document (.docx), spreadsheet (.xlsx), slide deck (.pptx) or PDF in the workspace is to be written, filled in, edited or commented on and the office_edit tool is available: the user watches your edits appear live in the file pane, under your name, and may edit beside you. Covers drafting a document section by section, filling and formatting sheets, building slides in the Claude Slides format, and filling, redacting or annotating a PDF."
 requires_tools: [office_edit]
+optional_tools: [write_file, patch]
 ---
 
 # Working on documents live with the user

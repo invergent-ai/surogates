@@ -1120,6 +1120,11 @@ class ContextReplayMixin:
             offered = self._tool_filter_for_session(session)
             if offered is not None:
                 restrict(offered)
+                # The skills naming a tool the session is never sent: left out
+                # of the index here, and of the skill tools (``_scope_skills``).
+                unavailable = getattr(self._prompt, "set_unavailable_tools", None)
+                if unavailable is not None:
+                    unavailable(set(self._tools.tool_names) - set(offered))
             self._prompt_narrowed_for = session.id
 
     async def _build_system_prompt(self, session: Session) -> str:

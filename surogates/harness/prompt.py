@@ -227,10 +227,16 @@ class PromptBuilder:
 
     @property
     def unavailable_tools(self) -> frozenset[str]:
-        """The tools :meth:`restrict_tools` took away: the session is never
-        sent them, and no skill naming one is indexed (or listed, or shown:
-        ``AgentHarness`` scopes the skill tools by the same set)."""
-        return self._restricted_out
+        """The tools the session is never sent (:meth:`set_unavailable_tools`):
+        no skill naming one is indexed, listed or shown."""
+        return getattr(self, "_unavailable_tools", frozenset())
+
+    def set_unavailable_tools(self, tools: set[str] | frozenset[str]) -> None:
+        """Have the skill index leave out every skill that requires or names
+        one of *tools*: the registry's tools the session's filter leaves out
+        (``AgentHarness._narrow_prompt_tools``).  ``AgentHarness`` scopes the
+        skill tools by the same set (``skill_visibility.skill_scope``)."""
+        self._unavailable_tools = frozenset(tools)
 
     def _restricted_away(self, *tools: str) -> bool:
         """Whether, in a builder :meth:`restrict_tools` narrowed, none of
