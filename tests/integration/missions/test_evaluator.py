@@ -522,3 +522,26 @@ async def test_running_work_still_trips_the_budget(
         session_factory=session_factory, mission_store=store,
     )
     assert decision.trigger == "budget_exhausted"
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_the_judge_reads_the_end_of_a_long_report(
+    session_factory, session_store, org_id, user_id, chat_session,
+):
+    # A verifier's counts come last: a report cut to its opening left the judge asking for counts it had been given.
+    from surogates.missions.evaluator import build_evaluator_prompt
+
+    store = MissionStore(session_factory)
+    created = await handle_mission_create(
+        description="d", rubric="Satisfied when a verifier reports 0 failed.",
+        session_id=chat_session.id, user_id=user_id, org_id=org_id, agent_id="orchestrator",
+        session_store=session_store, session_factory=session_factory, mission_store=store,
+    )
+    report = "Checked the files first.\n" + "test_x PASSED\n" * 400 + "Passed: 15, Failed: 0"
+    await a_mission_agent(session_factory, chat_session, created.mission_id, report=report)
+
+    prompt = await build_evaluator_prompt(
+        mission_id=created.mission_id, coordinator_last_response="",
+        session_factory=session_factory, mission_store=store,
+    )
+    assert "Checked the files first." in prompt and "Passed: 15, Failed: 0" in prompt
