@@ -55,7 +55,7 @@ dependencies = [
     "python-docx>=1.1",
     "openpyxl>=3.1",
     "python-pptx>=1.0",
-    "surogate-hub-sdk @ https://github.com/invergent-ai/surogate-hub/releases/download/v2.1.5/surogate_hub_sdk-2.1.5-py3-none-any.whl",
+    "surogate-hub-sdk @ https://github.com/invergent-ai/surogate-hub/releases/download/v2.3.1/surogate_hub_sdk-2.3.1-py3-none-any.whl",
 ]
 scripts = { "surogates" = "surogates.cli.main:cli_main" }
 
