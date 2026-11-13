@@ -545,3 +545,5 @@ async def test_the_judge_reads_the_end_of_a_long_report(
         session_factory=session_factory, mission_store=store,
     )
     assert "Checked the files first." in prompt and "Passed: 15, Failed: 0" in prompt
+    # A judge that does not know the date takes this month for the future.
+    assert datetime.now(timezone.utc).date().isoformat() in prompt

@@ -22,6 +22,7 @@ from uuid import UUID
 
 from sqlalchemy import select
 
+from surogates.harness.outcomes import today_line
 from surogates.session.events import EventType
 
 logger = logging.getLogger(__name__)
@@ -154,11 +155,10 @@ _SYSTEM_PROMPT = dedent("""\
     in the completed mission agents' reports demonstrates the rubric was
     met (typically the report of an agent that verified the work).
 
-    Respond with a single JSON object, no prose around it:
-
-        {"explanation": "<1-3 sentences>",
-         "feedback": "<actionable feedback for the coordinator if needs_revision; empty otherwise>",
-         "result": "satisfied" | "needs_revision" | "blocked" | "failed"}
+    Respond with a single JSON object, no prose around it, with the keys
+    explanation (why, in your own words), feedback (what the coordinator
+    should do next if needs_revision, otherwise empty) and result (one of
+    satisfied, needs_revision, blocked, failed).
 
     Verdict guidance:
     - "satisfied": evidence backs rubric completion.
@@ -181,10 +181,9 @@ _SYSTEM_PROMPT = dedent("""\
     If the completed agents' reports show the rubric is unreachable *as
     written* -- it asks for an artifact the work has demonstrated cannot
     exist, contradicts itself, or names something that was never part of
-    the mission description -- then also return:
-
-        "proposed_rubric": "<a complete replacement rubric>",
-        "refinement_evidence": "<the agent report that shows this>"
+    the mission description -- then also return proposed_rubric (a
+    complete replacement rubric) and refinement_evidence (the agent report
+    that shows this).
 
     Leave both empty in every other case. A rubric the work has not yet
     satisfied is `needs_revision`, not a proposal. Propose only a rubric
@@ -269,8 +268,11 @@ async def build_evaluator_prompt(
         {history_block}
         # Verdict
 
+        {today}
+
         Return JSON only.
     """).format(
+        today=today_line(),
         rubric=mission.rubric,
         response=response_excerpt or "(empty)",
         n_done=len(completed_rows),

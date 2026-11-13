@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from typing import Annotated, Any, Literal
 from uuid import uuid4
 
@@ -19,10 +20,10 @@ from surogates.harness.structured_output import parse_json_object
 DEFAULT_MAX_ITERATIONS = 20
 MAX_MAX_ITERATIONS = 20
 DEFAULT_EVALUATOR_RESPONSE_MAX_CHARS = 16384
-# Reasoning models spend this budget on thinking before they answer. At 500 a
-# verdict could come back cut off, or empty, and the next attempt then ran with
-# no feedback.
-EVALUATOR_MAX_TOKENS = 2000
+# Reasoning models spend this budget on thinking before they answer. At 2000 a
+# flash model checking a mission's numbers thought past it and answered nothing,
+# twice in a row.
+EVALUATOR_MAX_TOKENS = 8000
 DEFAULT_OUTCOME_RUBRIC = (
     "Satisfied when the assistant's latest response shows the requested "
     "work is complete and presents the final deliverable."
@@ -254,6 +255,11 @@ def build_continuation_prompt(state: OutcomeState) -> str:
     )
 
 
+def today_line() -> str:
+    """Today's date for a judge, which otherwise takes the current month for the future."""
+    return f"Today's date: {datetime.now(timezone.utc).date().isoformat()} (UTC)."
+
+
 def build_evaluator_messages(
     state: OutcomeState,
     latest_response: str,
@@ -265,9 +271,10 @@ def build_evaluator_messages(
         f"Outcome:\n{state.description}\n\n"
         f"Rubric:\n{state.rubric}\n\n"
         f"Assistant latest response:\n{(latest_response or '')[:limit]}\n\n"
-        "Return JSON exactly like:\n"
-        '{"explanation":"one sentence","feedback":"revision guidance",'
-        '"result":"satisfied|needs_revision|blocked|failed"}'
+        f"{today_line()}\n\n"
+        "Return one JSON object: explanation (why, in your own words), feedback "
+        "(what the agent should do next, or empty), result (satisfied, "
+        "needs_revision, blocked or failed)."
     )
     return [
         {"role": "system", "content": EVALUATOR_SYSTEM_PROMPT},
