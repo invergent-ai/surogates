@@ -30,7 +30,7 @@ def builder(available_tools: set[str], config: dict) -> PromptBuilder:
 
 
 def test_a_session_offered_agent_reads_how_to_use_it():
-    prompt = builder(available_tools={"agent", "send_message"}, config={}).build()
+    prompt = builder(available_tools={"agent", "send_message", "ask_user_question"}, config={}).build()
     assert fragment("guidance/agents") in prompt and fragment("guidance/sub_agent") not in prompt
 
 
@@ -46,7 +46,9 @@ def test_a_session_without_the_family_reads_neither():
 
 def test_a_sub_agent_that_may_start_agents_reads_both():
     prompt = builder(available_tools={"agent", "send_message"}, config={DISPATCH_KEY: {"mode": "background"}}).build()
-    assert fragment("guidance/agents") in prompt and fragment("guidance/sub_agent") in prompt
+    # A sub-agent has no ask_user_question, so the line telling it to ask the user is left out.
+    rest, asking = fragment("guidance/agents").split("\n\n**Asking the user.**")
+    assert rest in prompt and asking not in prompt and fragment("guidance/sub_agent") in prompt
 
 
 @pytest.mark.parametrize("name", ["guidance/agents", "guidance/sub_agent"])

@@ -307,3 +307,10 @@ def test_a_call_to_agent_where_it_is_not_offered_says_to_do_the_part_itself() ->
     other = {"id": "c2", "function": {"name": "nope", "arguments": "{}"}}
     [(_, error)] = find_invalid_tool_calls([other], offered={"read_file"}, registered={"read_file"})
     assert json.loads(error)["error"].startswith("Unknown tool: 'nope'")
+
+
+def test_the_rescue_judge_gives_its_reason_before_its_verdict() -> None:
+    # The model writes the fields in schema order: a verdict written first is decided before any reasoning.
+    from surogates.harness.loop_user_action import _UserActionRescueDecision
+
+    assert list(_UserActionRescueDecision.model_json_schema()["properties"])[0] == "reason"

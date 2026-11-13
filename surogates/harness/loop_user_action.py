@@ -31,13 +31,17 @@ _USER_ACTION_RESCUE_SYSTEM: str = (
     "offers to continue, and any case where the assistant could simply "
     "stop and wait without losing progress. A polite invitation to "
     "continue is NOT a blocker. Asking 'anything else?' is NOT a blocker. "
-    "Return only JSON with keys: action_kind string, reason string, "
+    "Return only JSON with keys: reason string, action_kind string, "
     "question string, title string, instructions string, context string, "
     "action_type string, target string."
 )
 
 
 class _UserActionRescueDecision(BaseModel):
+    # First, so the judge reasons before it writes a verdict.
+    reason: str = Field(
+        description="Short machine-readable reason for the routing decision.",
+    )
     action_kind: str = Field(
         default="none",
         description="One of none, ask_user_question, or action_required.",
@@ -45,9 +49,6 @@ class _UserActionRescueDecision(BaseModel):
     needs_ask_user_question: bool = Field(
         default=False,
         description="Whether the assistant draft is blocked on user input.",
-    )
-    reason: str = Field(
-        description="Short machine-readable reason for the routing decision.",
     )
     question: str = Field(
         default="",
