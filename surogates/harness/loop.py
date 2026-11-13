@@ -132,6 +132,7 @@ from surogates.tools.builtin.case_item import item_awaiting_report
 from surogates.tools.builtin.case_step import step_awaiting_report, step_given_back
 from surogates.tools.builtin.send_form import SENT as FORM_SENT
 from surogates.tools.builtin.expert_loop import ExpertScope, expert_scope
+from surogates.tools.skill_visibility import SkillScope, needs_unavailable_tool, skill_scope
 from surogates.tools.builtin.media_gen import unwired_media_tools
 from surogates.keel.items import ITEM_NUDGE, is_case_item, item_contract_of
 from surogates.tools.builtin.ask_user_question import DISMISSED, TIMED_OUT
@@ -1958,6 +1959,20 @@ class AgentHarness(
             withheld |= {name for name in names if not gate.runs_unasked(name)}
         expert_scope.set(ExpertScope(withheld=frozenset(withheld), gate=gate))
 
+    def _scope_skills(self, offered: Iterable[str] | None) -> None:
+        """Have ``skills_list`` and ``skill_view`` leave out, for this turn's
+        calls, every skill that requires or names a tool outside *offered*
+        (the session's tool filter after its gates; ``None``: every tool), as
+        the prompt's skill index does (``skill_visibility.skill_scope``)."""
+        unavailable = set() if offered is None else set(self._tools.tool_names) - set(offered)
+        skills = getattr(self._prompt, "skills", None) or ()
+        hidden = frozenset(
+            getattr(skill, "name", None) or (skill.get("name") if isinstance(skill, dict) else None)
+            for skill in skills
+            if needs_unavailable_tool(skill, unavailable)
+        ) - {None}
+        skill_scope.set(SkillScope(hidden=hidden))
+
     def _scope_experts_before_the_turn(self, session: Session) -> None:
         """``_withhold_from_experts`` for an expert run before the turn's tool
         list exists (``/<expert>``), from the same filter and gate."""
@@ -3260,6 +3275,8 @@ class AgentHarness(
         # A consulted expert's model is not sent them, nor what the filter
         # and the policy took away.
         self._withhold_from_experts(usable, tool_filter)
+        # Nor does the skill tools' catalog name a tool the filter took away.
+        self._scope_skills(tool_filter)
         tool_schemas = describe_for_device(tool_schemas, session.config)
         tool_schemas = describe_for_project(tool_schemas, session.config)
         tool_schemas = describe_for_conversation(

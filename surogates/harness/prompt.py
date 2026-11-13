@@ -29,7 +29,7 @@ from surogates.harness.model_metadata import get_model_info
 from surogates.harness.prompt_library import PromptLibrary, default_library
 from surogates.runtime.context import SlashCommandConfig
 from surogates.tools.loader import AGENT_SOURCE_PLATFORM
-from surogates.tools.skill_visibility import fallback_hidden
+from surogates.tools.skill_visibility import fallback_hidden, needs_unavailable_tool
 from surogates.session.execution_context import platform_hint_channel
 from surogates.workstreams import is_project_master, is_project_thread
 
@@ -224,6 +224,13 @@ class PromptBuilder:
         self._available_tools = kept
         # The agents section lists the spawn tools offered: rendered again.
         self._available_agents_section_cache = None
+
+    @property
+    def unavailable_tools(self) -> frozenset[str]:
+        """The tools :meth:`restrict_tools` took away: the session is never
+        sent them, and no skill naming one is indexed (or listed, or shown:
+        ``AgentHarness`` scopes the skill tools by the same set)."""
+        return self._restricted_out
 
     def _restricted_away(self, *tools: str) -> bool:
         """Whether, in a builder :meth:`restrict_tools` narrowed, none of
@@ -748,6 +755,10 @@ class PromptBuilder:
                 if not self._skill_visible(
                     fallback_for_tools, requires_tools, requires_agents,
                 ):
+                    continue
+                # Nor one naming a tool the session is not sent: the model
+                # reads the name and calls it, and is told "Unknown tool".
+                if needs_unavailable_tool(skill, self.unavailable_tools):
                     continue
                 safe_category = self._sanitise(category, f"skill_category:{category}")
                 safe_category_desc = self._sanitise(
