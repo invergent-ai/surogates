@@ -658,9 +658,10 @@ class OutcomeCommandMixin:
         session: Session,
         latest_response: str,
         model: str,
-    ) -> None:
+    ) -> str | None:
         """Bind self's session_factory / store / LLM and dispatch to the
-        module-level :func:`_maybe_run_mission_evaluator`.
+        module-level :func:`_maybe_run_mission_evaluator`, returning the
+        continuation prompt it wrote, if any.
 
         Kept as an instance method so it can pull the configured eval
         model and LLM client; the actual logic (trigger detection,
@@ -669,7 +670,7 @@ class OutcomeCommandMixin:
         constructing a full harness.
         """
         if self._session_factory is None:
-            return
+            return None
         from surogates.missions.store import MissionStore
 
         settings = self._outcome_settings()
@@ -677,7 +678,7 @@ class OutcomeCommandMixin:
         judge = _build_mission_judge(
             llm_client=self._llm, eval_model=eval_model,
         )
-        await _maybe_run_mission_evaluator(
+        return await _maybe_run_mission_evaluator(
             session_id=session.id,
             coordinator_last_response=latest_response,
             session_store=self._store,

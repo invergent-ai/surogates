@@ -35,9 +35,10 @@ async def _maybe_run_mission_evaluator(
     session_factory: Any,
     mission_store: Any,
     judge: Any,
-) -> None:
+) -> str | None:
     """Run the mission evaluator iff the session has an active mission
-    and a trigger condition fires.
+    and a trigger condition fires, and return the continuation prompt a
+    ``needs_revision`` verdict wrote, if any.
 
     ``judge`` is an async callable ``(system_prompt, user_prompt) -> dict``
     that returns the parsed verdict JSON. Tests inject a stub; production
@@ -132,7 +133,7 @@ async def _maybe_run_mission_evaluator(
         verdict, completed_agents=done, total_agents=total,
     )
 
-    await apply_verdict(
+    return await apply_verdict(
         mission_id=active.id,
         verdict=verdict,
         coordinator_session_id=session_id,
