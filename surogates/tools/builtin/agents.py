@@ -23,6 +23,7 @@ does not.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -756,9 +757,9 @@ async def _why_not_resume(session_store: Any, sender: Any, target: Any, session_
             return "it was stopped by its user"
     elif target.status not in ("completed", "failed"):
         return f"it is {target.status}"
-    starting = [(mode, kind) for mode, kind, _ in _STARTING.get(sender.id, [])]
+    starting = [mode for mode, *_ in _STARTING.get(sender.id, [])]
     running = await _running_agents(session_factory, sender.id) if session_factory is not None else []
-    if sum(mode == "background" for mode, _ in running + starting) >= MAX_RUNNING_IN_BACKGROUND:
+    if sum(mode == "background" for mode in [r[0] for r in running] + starting) >= MAX_RUNNING_IN_BACKGROUND:
         return f"{MAX_RUNNING_IN_BACKGROUND} of your agents already run in the background"
     return None
 
@@ -767,7 +768,7 @@ def _error(message: str) -> str:
     return json.dumps({"error": message})
 
 
-def _forget_start(parent_id: UUID, start: tuple[str, str | None, str]) -> None:
+def _forget_start(parent_id: UUID, start: tuple[str, str | None, str, str]) -> None:
     """Count a start no more: its child is in the database, or it never came."""
     starting = _STARTING.get(parent_id)
     if starting and start in starting:
@@ -776,26 +777,34 @@ def _forget_start(parent_id: UUID, start: tuple[str, str | None, str]) -> None:
         _STARTING.pop(parent_id, None)
 
 
-async def _running_agents(session_factory: Any, parent_id: UUID) -> list[tuple[str | None, str | None]]:
-    """The agents *parent_id* started that are running: each one's (mode, agent_type), in one read."""
+async def _running_agents(
+    session_factory: Any, parent_id: UUID,
+) -> list[tuple[str | None, str | None, str | None, UUID]]:
+    """The agents *parent_id* started that are running: each one's (mode, agent_type, brief, id), in one read."""
     from sqlalchemy import select
 
     from surogates.db.models import Session as SessionRow
 
     async with session_factory() as db:
         rows = (await db.execute(
-            select(SessionRow.config).where(
+            select(SessionRow.config, SessionRow.id).where(
                 SessionRow.parent_id == parent_id, SessionRow.status.in_(("active", "processing")),
             ),
-        )).scalars().all()
+        )).all()
     return [
-        ((config.get(DISPATCH_KEY) or {}).get("mode"), config.get("agent_type"))
-        for config in rows if isinstance(config, dict) and isinstance(config.get(DISPATCH_KEY), dict)
+        (config[DISPATCH_KEY].get("mode"), config.get("agent_type"), config[DISPATCH_KEY].get("brief"), sid)
+        for config, sid in rows if isinstance(config, dict) and isinstance(config.get(DISPATCH_KEY), dict)
     ]
 
 
-#: Starts under way in this process, by parent, until their child is in the database: (mode, agent_type, mark).
-_STARTING: dict[UUID, list[tuple[str, str | None, str]]] = {}
+def _brief_mark(prompt: str) -> str:
+    """What two briefs that say the same thing share: a digest of their words."""
+    return hashlib.sha256(" ".join(prompt.split()).encode()).hexdigest()[:16]
+
+
+#: Starts under way in this process, by parent, until their child is in the database:
+#: (mode, agent_type, mark, brief mark).
+_STARTING: dict[UUID, list[tuple[str, str | None, str, str]]] = {}
 #: One lock per parent for its starts and resumes; an entry lives while a call holds or waits for it (a weak map).
 _START_LOCKS: "weakref.WeakValueDictionary[UUID, asyncio.Lock]" = weakref.WeakValueDictionary()
 #: Tokens a sub-agent with a budget has handed to its agents still starting or running in this process, by its id.
@@ -990,9 +999,17 @@ async def _start_agent(
     # for the background that ran in the foreground would report twice.
     async with _start_lock(parent.id):
         # The starts under way first, then the database: one inserted meanwhile is in one of the two.
-        starting = [(mode, kind) for mode, kind, _ in _STARTING.get(parent.id, [])]
+        brief = _brief_mark(prompt)
+        starting = _STARTING.get(parent.id, [])
         running = await _running_agents(kwargs.get("session_factory"), parent.id) if kwargs.get("session_factory") else []
-        under_way = running + starting
+        # A model that means to wait for a report can repeat its last call instead: the same agent again.
+        same = next((str(sid) for _, _, mark, sid in running if mark == brief), None)
+        if same is not None or any(mark == brief for *_, mark in starting):
+            return _error(
+                f"an agent with this brief is already running{f' ({same})' if same else ''}: wait for its "
+                "notification instead of starting it again, and end your turn if you have nothing else to do",
+            )
+        under_way = [(mode, kind) for mode, kind, *_ in running] + [(mode, kind) for mode, kind, *_ in starting]
         if background and sum(mode == "background" for mode, _ in under_way) >= MAX_RUNNING_IN_BACKGROUND:
             if not implicit:
                 return _error(
@@ -1004,7 +1021,7 @@ async def _start_agent(
         if agent_type in delegate._NON_RECURSIVE_AGENT_TYPES and any(kind == agent_type for _, kind in under_way):
             return _error(f"an agent of type {agent_type!r} already runs: one at a time")
         # This start, until its child is in the database: (mode, agent_type, a mark of its own).
-        start = ("background" if background else "foreground", agent_type, uuid4().hex)
+        start = ("background" if background else "foreground", agent_type, uuid4().hex, brief)
         _STARTING.setdefault(parent.id, []).append(start)
 
     dispatch = {
@@ -1013,6 +1030,7 @@ async def _start_agent(
         "fork": fork,
         "tool_call_id": tool_call_id,
         "parent": str(parent.id),
+        "brief": brief,
         **({"name": name} if name else {}),
         # An agent a mission's coordinator starts is the mission's: its judge, budget and cascade read it.
         **({"mission_id": str(parent.config["active_mission_id"])}
