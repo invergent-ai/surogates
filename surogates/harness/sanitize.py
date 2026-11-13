@@ -12,6 +12,8 @@ list before every LLM API call:
 - **Duplicate tool call deduplication** -- removes duplicate (name, arguments)
   pairs from a tool call batch. 
 - **Delegation capping** -- caps the number of ``agent`` calls per turn.
+- **Sendable tool-call arguments** -- every tool call in the history carries
+  its arguments as a JSON object string, which engines require of it.
 """
 
 from __future__ import annotations
@@ -19,10 +21,99 @@ from __future__ import annotations
 import json
 import logging
 import re
+from typing import Any
 
 from surogates.runtime.governance import rename_tool_calls
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Sendable tool-call arguments
+# ---------------------------------------------------------------------------
+
+
+def _no_constant(name: str) -> Any:
+    raise ValueError(f"{name} is not JSON")
+
+
+def _json_object(text: str) -> bool:
+    """Whether *text* is a JSON object a strict parser takes: no NaN or
+    Infinity, no lone surrogate escape."""
+    try:
+        parsed = json.loads(text, parse_constant=_no_constant)
+    except (ValueError, RecursionError):
+        return False
+    if not isinstance(parsed, dict):
+        return False
+    try:
+        json.dumps(parsed, ensure_ascii=False).encode("utf-8")
+    except (UnicodeEncodeError, ValueError, RecursionError):
+        return False
+    return True
+
+
+def sendable_arguments(arguments: Any) -> str:
+    """Tool-call *arguments* as a JSON object string, which an engine takes back.
+
+    Text that is a JSON object is returned as it is, the same string.  No
+    arguments (none, ``""``, blanks) are ``"{}"``; a dict is written as JSON.
+    Anything else -- text that is not JSON, a JSON array, string or number --
+    is ``{"_raw": <the text>}``: the model reads what it wrote, and its result
+    says the call was malformed.  One such call left in a history makes an
+    engine refuse every later request of the session (HTTP 400 "function
+    tool_call arguments must be a JSON object string").  The same arguments
+    always give the same text, so a replayed history stays byte-identical.
+    """
+    if arguments is None:
+        return "{}"
+    if isinstance(arguments, str):
+        if not arguments.strip():
+            return "{}"
+        if _json_object(arguments):
+            return arguments
+        return json.dumps({"_raw": arguments}, ensure_ascii=False)
+    if isinstance(arguments, dict):
+        text = json.dumps(arguments, ensure_ascii=False, default=str)
+        if _json_object(text):
+            return text
+    try:
+        raw = json.dumps(arguments, ensure_ascii=False, default=str)
+    except (ValueError, RecursionError):
+        raw = str(arguments)
+    return json.dumps({"_raw": raw}, ensure_ascii=False)
+
+
+def sendable_tool_arguments(messages: list[dict]) -> list[dict]:
+    """*messages* with every tool call's arguments made sendable (:func:`sendable_arguments`).
+
+    Applied to every request's history, however it was built: the live turn
+    (a model's malformed call stays in it), a history rebuilt from events, a
+    compaction's kept messages, a fork's copy of its parent's.  Messages and
+    calls that need no change are the same objects; the others are copies, so
+    the caller's history and its stored events keep what the model wrote.
+    """
+    out: list[dict] | None = None
+    for index, message in enumerate(messages):
+        calls = message.get("tool_calls") if isinstance(message, dict) else None
+        if not calls or not isinstance(calls, list):
+            continue
+        fixed: list[Any] = []
+        changed = False
+        for call in calls:
+            function = call.get("function") if isinstance(call, dict) else None
+            if isinstance(function, dict):
+                arguments = function.get("arguments")
+                sendable = sendable_arguments(arguments)
+                if sendable is not arguments:
+                    call = {**call, "function": {**function, "arguments": sendable}}
+                    changed = True
+            fixed.append(call)
+        if changed:
+            if out is None:
+                out = list(messages)
+            out[index] = {**message, "tool_calls": fixed}
+    return messages if out is None else out
+
 
 # ---------------------------------------------------------------------------
 # Surrogate character sanitization

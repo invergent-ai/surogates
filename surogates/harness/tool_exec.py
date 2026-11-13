@@ -28,7 +28,7 @@ from surogates.devices.workspace import DeviceOperationError
 from surogates.session.events import EventType
 from surogates.harness.agent_news import starts_notified_work
 from surogates.harness.message_utils import leading_json_object, make_skipped_tool_result
-from surogates.harness.resilience import unknown_tool_error
+from surogates.harness.resilience import json_kind, unknown_tool_error
 from surogates.harness.tool_guardrails import (
     ToolGuardrailDecision,
     canonical_tool_args,
@@ -1076,6 +1076,14 @@ async def _run_single_tool(
         tool_args = json.loads(repaired_args) if repaired_args else {}
     except json.JSONDecodeError as exc:
         parse_error = exc
+        tool_args = {}
+    if not isinstance(tool_args, dict):
+        # JSON, but no tool takes an array, a string or a number: refused
+        # with the model told why, as text that is not JSON is.
+        parse_error = json.JSONDecodeError(
+            f"the arguments must be a JSON object, not a JSON {json_kind(tool_args)}",
+            repaired_args, 0,
+        )
         tool_args = {}
 
     # Coerce argument types to match JSON Schema declarations.

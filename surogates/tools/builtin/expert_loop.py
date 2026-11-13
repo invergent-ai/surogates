@@ -67,6 +67,20 @@ def _generation_kwargs(gen: dict[str, Any] | None) -> tuple[dict[str, Any], dict
     return kwargs, extra
 
 
+def _object_arguments(arguments: Any) -> bool:
+    """Whether tool-call *arguments* are a JSON object (or none at all)."""
+    if arguments is None or isinstance(arguments, dict):
+        return True
+    if not isinstance(arguments, str):
+        return False
+    if not arguments.strip():
+        return True
+    try:
+        return isinstance(json.loads(arguments), dict)
+    except (ValueError, RecursionError):
+        return False
+
+
 class ExpertBudgetExceeded(Exception):
     """Raised when an expert exhausts its iteration budget."""
 
@@ -130,6 +144,7 @@ async def run_expert_loop(
     """
     from openai import AsyncOpenAI
 
+    from surogates.harness.sanitize import sendable_arguments
     from surogates.session.events import EventType
 
     # Build the scoped tool set -- only tools declared in the expert's config,
@@ -195,7 +210,9 @@ async def run_expert_loop(
             if not message.tool_calls:
                 return message.content or "", iteration + 1
 
-            # Append the assistant message (with tool calls) to context.
+            # Append the assistant message (with tool calls) to context, its
+            # calls' arguments as JSON objects: one that is not would make the
+            # endpoint refuse every later request of this consult.
             assistant_msg: dict[str, Any] = {
                 "role": "assistant",
                 "content": message.content,
@@ -205,7 +222,7 @@ async def run_expert_loop(
                         "type": "function",
                         "function": {
                             "name": tc.function.name,
-                            "arguments": tc.function.arguments,
+                            "arguments": sendable_arguments(tc.function.arguments),
                         },
                     }
                     for tc in message.tool_calls
@@ -227,6 +244,12 @@ async def run_expert_loop(
                             if allowed_tools
                             else "It has no tools."
                         ),
+                    })
+                elif not _object_arguments(tc.function.arguments):
+                    # Never run: the expert is told, as the session's own loop tells its model.
+                    result = json.dumps({
+                        "error": "Malformed tool arguments: they must be a JSON object. "
+                                 "Please retry with valid JSON.",
                     })
                 else:
                     result = await tool_router.execute(

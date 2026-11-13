@@ -192,15 +192,35 @@ def find_invalid_tool_calls(
         # Malformed JSON arguments
         if args_raw:
             try:
-                json.loads(args_raw)
+                parsed = json.loads(args_raw)
             except json.JSONDecodeError as e:
                 invalid.append((tc, json.dumps({
                     "error": f"Malformed JSON in tool arguments: {e}. "
                              f"Please fix and retry with valid JSON.",
                 })))
                 continue
+            if not isinstance(parsed, dict):
+                # Valid JSON, but no tool takes an array, a string or a number.
+                invalid.append((tc, json.dumps({
+                    "error": "Malformed tool arguments: they must be a JSON object, "
+                             f"not a JSON {json_kind(parsed)}. Please retry with a JSON object.",
+                })))
+                continue
 
     return invalid
+
+
+def json_kind(value: Any) -> str:
+    """The JSON name of *value*'s type."""
+    if isinstance(value, list):
+        return "array"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, bool):
+        return "boolean"
+    if value is None:
+        return "null"
+    return "number"
 
 
 def get_budget_warning(budget: IterationBudget) -> str | None:
