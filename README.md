@@ -106,39 +106,24 @@ costs nothing. Full surface: **[REST API Reference](docs/appendices/api-referenc
 ### Long-horizon work
 
 <details open>
-<summary><b>Missions, tasks and a DAG that remembers</b></summary>
+<summary><b>Sub-agents and missions</b></summary>
 
 <br />
 
-Tasks are database rows, not in-memory promises. Each wraps zero or more attempt
-sessions with a goal, optional `parents=[...]` for fan-in, structured results,
-and a `todo → ready → running → done/blocked/failed/cancelled` state machine. A
-5-second dispatcher promotes ready tasks, finalises attempts and retries crashes
-up to `max_attempts` — with the prior attempts injected into the retry's context
-so it does not repeat itself.
+An agent starts sub-agents with `agent`: each is a session of its own that works
+on the brief it is given and hands back only its final report. A main session's
+agents run in the background and report as a notification when they end; the
+agent follows one up with `send_message`, lists them with `list_agents` and
+stops one with `stop_agent`. Each agent's session is in the event log like any
+other, so a worker that dies mid-run loses nothing.
 
-**Missions** sit on top: `/mission <description>` plus a written rubric. A
+**Missions** build on them: `/mission <description>` plus a written rubric. A
 coordinator starts agents for the work and a verifier agent, and an LLM judge
 grades the work whenever one of the mission's agents ends: `satisfied`,
 `needs_revision`, `blocked` or `failed`. Pause, resume and cancel without losing
 the agents that run.
 
 → [Missions](docs/missions/index.md)
-
-</details>
-
-<details>
-<summary><b>Research missions — a tree search over ideas</b></summary>
-
-<br />
-
-Turns "improve this benchmark" into a cumulative search. A coordinator grows a
-durable **Idea Tree** of hypotheses; ephemeral executors implement and evaluate
-each one in an isolated git worktree; a verified gain merges into a protected
-trunk **only after an independently re-run held-out evaluation**. Executors
-cannot merge their own claims, so progress cannot be faked.
-
-→ [Research Missions](docs/research-missions/index.md)
 
 </details>
 
@@ -161,10 +146,10 @@ iteration and dangling citations.
 <br />
 
 When a session fans out, the whole tree shares one board of compact, typed
-notes. Workers post what they learn and every member — siblings, retries and the
-coordinator — reads it directly, instead of results dribbling upward one parent
-at a time. A dead end hit by worker 1 becomes a `FAIL` note that worker 2 reads
-*before* repeating it.
+notes. Agents post what they learn and every member — siblings and the agent
+that started them — reads it directly, instead of results dribbling upward one
+parent at a time. A dead end hit by one agent becomes a `FAIL` note that the
+next reads *before* repeating it.
 
 → [Coordination Board](docs/board/index.md)
 
