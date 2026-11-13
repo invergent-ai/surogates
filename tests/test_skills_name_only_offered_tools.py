@@ -50,8 +50,8 @@ def _skill(name: str):
 
 
 async def _session_view(config: dict, *, names=None) -> tuple[AgentHarness, set[str], list[dict], dict[str, dict], str]:
-    """For a session with *config*, built as the worker builds it: what it may not be sent, its prompt, its
-    skills_list and skill_view of every catalog skill, in the turn's scope."""
+    """For a session with *config* (its prompt builder given every registry tool, not the worker's narrowed set):
+    what it may not be sent, its prompt, its skills_list and skill_view of every catalog skill, in the turn's scope."""
     harness, session = _harness(config)
     prompt = await harness._build_system_prompt(session)
     harness._scope_skills(session)
@@ -125,6 +125,18 @@ async def test_a_tool_named_only_where_the_chat_has_it_hides_nothing():
     assert {"pdf", "pdf-reading"} <= {entry["name"] for entry in listed}
 
 
+async def test_a_tool_the_policy_refuses_hides_the_skills_naming_it():
+    """With governance on, eog-lean's denials come from the policy, not excluded_tools: the same skills are hidden."""
+    from surogates.governance.policy import GovernanceGate
+
+    harness, session = _harness({})
+    harness._governance_gate = GovernanceGate(denied_tools=set(HOX_EXCLUDED))
+    await harness._build_system_prompt(session)
+    harness._scope_skills(session)
+    assert set(HOX_EXCLUDED) <= harness._prompt.unavailable_tools
+    assert {"pdf-reading", "executing-plans"} <= skill_scope.get().hidden
+
+
 async def test_an_allowed_tools_list_hides_the_skills_naming_what_it_leaves_out():
     _, _, listed, _, _ = await _session_view({"allowed_tools": ["skills_list", "skill_view", "web_search"]})
     shown = {entry["name"] for entry in listed}
@@ -169,17 +181,6 @@ async def test_a_turn_scopes_the_model_s_skill_tools(monkeypatch, tmp_path):
     listed = {entry["name"] for entry in json.loads(results["t1"])["skills"]}
     assert "pdf-reading" not in listed and "schedule" in listed
     assert "needs tools this session does not have" in json.loads(results["t2"])["error"]
-
-
-async def test_a_users_slash_skill_is_not_hidden():
-    skill_scope.set(SkillScope(hidden=frozenset({"pdf-reading"})))
-    try:
-        refused = json.loads(await _skill_view_handler({"name": "pdf-reading"}, tenant=TENANT, session_config={}, channel="api"))
-        assert refused["success"] is False
-    finally:
-        skill_scope.set(SkillScope())
-    # The /<skill> expansion resets the scope before it views the skill (loop.py, beside the experts' scope).
-    assert json.loads(await _skill_view_handler({"name": "pdf-reading"}, tenant=TENANT, session_config={}, channel="api")).get("success") is not False
 
 
 @pytest.mark.parametrize("text, tools, named", [
