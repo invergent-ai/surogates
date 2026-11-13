@@ -95,8 +95,8 @@ class Engine:
         return {"role": "assistant", "content": "Here is what I found."}, {"finish_reason": "stop"}
 
 
-async def _ask(messages: list[dict], monkeypatch) -> tuple[dict, Engine]:
-    engine = Engine()
+async def _ask(messages: list[dict], monkeypatch, *, engine: Engine | None = None, **more) -> tuple[dict, Engine]:
+    engine = engine or Engine()
     monkeypatch.setattr(llm_call, "call_llm_streaming_inner", engine)
     monkeypatch.setattr(llm_call, "call_llm_non_streaming", AsyncMock(side_effect=AssertionError("no fallback")))
 
@@ -108,7 +108,7 @@ async def _ask(messages: list[dict], monkeypatch) -> tuple[dict, Engine]:
         session=SimpleNamespace(id=uuid4(), config={}), create_kwargs={"model": "m", "messages": messages},
         iteration=1, llm_client=MagicMock(), store=AsyncMock(), streaming_enabled=True,
         interrupt_check=lambda: False, activate_fallback=lambda: False, get_current_model=lambda: None,
-        set_streaming_enabled=lambda _on: None,
+        set_streaming_enabled=lambda _on: None, **more,
     )
     return reply, engine
 
@@ -130,8 +130,29 @@ async def test_the_sessions_stored_history_is_sent_with_its_call_as_an_object_an
 
 
 async def test_every_replay_sends_the_same_bytes(monkeypatch):
-    first, second = sendable_tool_arguments(_rebuilt(STORED_RESPONSE)), sendable_tool_arguments(_rebuilt(STORED_RESPONSE))
+    engine = Engine()
+    for _ in range(2):  # two wakes, each rebuilding the history from the events
+        await _ask(_rebuilt(STORED_RESPONSE), monkeypatch, engine=engine)
+    first, second = engine.sent
     assert json.dumps(first) == json.dumps(second)
+
+
+async def test_a_compressed_retry_is_sent_sendable_too(monkeypatch):
+    """A 413 has the history compressed and asked again: the compressed history goes through the same sanitising."""
+    class Full(Engine):
+        async def __call__(self, *, create_kwargs, **kwargs):
+            if not self.sent:
+                self.sent.append([])
+                request = httpx.Request("POST", "http://engine.test/v1/chat/completions")
+                raise APIStatusError("Error code: 413", response=httpx.Response(413, request=request), body=None)
+            return await super().__call__(create_kwargs=create_kwargs, **kwargs)
+
+    async def compress(_messages):
+        return _rebuilt(STORED_RESPONSE)
+
+    reply, engine = await _ask([{"role": "user", "content": "x"}], monkeypatch, engine=Full(), compress_context=compress)
+    assert reply["content"] == "Here is what I found."
+    assert json.loads(_sent_arguments(engine)[0]) == {"_raw": STORED_RESPONSE["tool_calls"][0]["function"]["arguments"]}
 
 
 def test_redaction_keeps_the_written_arguments_json_and_masks_the_token():
@@ -166,6 +187,38 @@ def test_redaction_still_masks_what_it_masked_when_it_must_write_the_arguments_a
     assert parsed["command"].startswith("curl -H \"Authorization: Bearer ")
 
 
+# Text masking broke JSON in each of these, so each reaches the value-by-value fallback.
+_BREAKER = 'curl -H "Authorization: Bearer $TOKEN" x'
+_PEM = "-----BEGIN RSA PRIVATE KEY-----", "MIIEowIBAAKCAQEA7x9Qz5u3T1tW0mFbYQ", "-----END RSA PRIVATE KEY-----"
+
+
+def _stored(arguments: dict | str) -> str:
+    text = arguments if isinstance(arguments, str) else json.dumps(arguments)
+    return redact_sensitive_data({"name": "terminal", "arguments": text}, phones=False)["arguments"]
+
+
+@pytest.mark.parametrize("arguments", [
+    {"lines": list(_PEM), "command": _BREAKER},
+    {"a": [_PEM[0] + "\n" + _PEM[1]], "c": _PEM[2]},
+], ids=["across strings", "across depths"])
+def test_a_private_key_spread_over_strings_stays_masked_as_on_master(arguments):
+    stored = _stored(arguments)
+    assert _PEM[1] not in stored and "REDACTED PRIVATE KEY" in stored
+
+
+def test_a_prefixed_key_under_a_secret_named_field_is_masked_whole():
+    secret = "sk-" + "a1b2c3d4e5" * 4
+    stored = json.loads(_stored({"command": _BREAKER, "api_key": secret}))
+    assert stored["api_key"] == "***"
+
+
+def test_the_fallback_never_stores_what_no_store_takes():
+    stored = _stored('{"command": "curl -H \\"Authorization: Bearer $TOKEN\\" x", "a": "\\ud800"}')
+    stored.encode("utf-8")  # a lone surrogate escape is kept as text
+    deep = '{"command": "curl -H \\"Authorization: Bearer $TOKEN\\" x", "d": ' + "[" * 3000 + "]" * 3000 + "}"
+    assert isinstance(_stored(deep), str)  # no RecursionError: the event is written
+
+
 def test_arguments_that_redaction_leaves_json_are_stored_as_before():
     text = '{"query":"weather in Paris","limit":3}'
     assert redact_sensitive_data({"arguments": text, "name": "web_search"}, phones=False)["arguments"] == text
@@ -180,6 +233,7 @@ def test_arguments_that_redaction_leaves_json_are_stored_as_before():
     ("", "{}"),
     ("   ", "{}"),
     (None, "{}"),
+    ("null", "{}"),
     ({"a": 1}, '{"a": 1}'),
     ('{"command": "ls', '{"_raw": "{\\"command\\": \\"ls"}'),
     ("[1, 2]", '{"_raw": "[1, 2]"}'),
@@ -216,15 +270,16 @@ async def test_a_live_turn_with_one_malformed_call_beside_good_ones_is_sent_too(
     assert _sent_arguments(engine) == ['{"batch_id": "OCT-26"}', json.dumps({"_raw": '{"batch_id": "SEP-26"'})]
 
 
-@pytest.mark.parametrize("arguments, kind", [("[1, 2]", "array"), ('"x"', "string"), ("7", "number"), ("null", "null")])
+@pytest.mark.parametrize("arguments, kind", [("[1, 2]", "array"), ('"x"', "string"), ("7", "number"), ("true", "boolean")])
 def test_json_that_is_not_an_object_is_refused_with_the_model_told_why(arguments, kind):
     call = {"id": "c", "type": "function", "function": {"name": "get_batch", "arguments": arguments}}
     [(_, error)] = find_invalid_tool_calls([call], {"get_batch"}, {"get_batch"})
     assert f"must be a JSON object, not a JSON {kind}" in json.loads(error)["error"]
 
 
-def test_an_object_is_not_refused():
-    call = {"id": "c", "type": "function", "function": {"name": "get_batch", "arguments": '{"batch_id": "x"}'}}
+@pytest.mark.parametrize("arguments", ['{"batch_id": "x"}', "null", ""])
+def test_an_object_or_no_arguments_is_not_refused(arguments):
+    call = {"id": "c", "type": "function", "function": {"name": "get_batch", "arguments": arguments}}
     assert find_invalid_tool_calls([call], {"get_batch"}, {"get_batch"}) == []
 
 

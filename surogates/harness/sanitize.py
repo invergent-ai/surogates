@@ -36,7 +36,7 @@ def _no_constant(name: str) -> Any:
     raise ValueError(f"{name} is not JSON")
 
 
-def _json_object(text: str) -> bool:
+def is_json_object_text(text: str) -> bool:
     """Whether *text* is a JSON object a strict parser takes: no NaN or
     Infinity, no lone surrogate escape."""
     try:
@@ -46,7 +46,8 @@ def _json_object(text: str) -> bool:
     if not isinstance(parsed, dict):
         return False
     try:
-        json.dumps(parsed, ensure_ascii=False).encode("utf-8")
+        # A number too large for a double (1e400) is read as infinity.
+        json.dumps(parsed, ensure_ascii=False, allow_nan=False).encode("utf-8")
     except (UnicodeEncodeError, ValueError, RecursionError):
         return False
     return True
@@ -56,10 +57,11 @@ def sendable_arguments(arguments: Any) -> str:
     """Tool-call *arguments* as a JSON object string, which an engine takes back.
 
     Text that is a JSON object is returned as it is, the same string.  No
-    arguments (none, ``""``, blanks) are ``"{}"``; a dict is written as JSON.
-    Anything else -- text that is not JSON, a JSON array, string or number --
-    is ``{"_raw": <the text>}``: the model reads what it wrote, and its result
-    says the call was malformed.  One such call left in a history makes an
+    arguments (none, ``""``, blanks, ``null``) are ``"{}"``; a dict is
+    written as JSON.  Anything else -- text that is not JSON, a JSON array,
+    string or number -- is ``{"_raw": <the text>}``: the model reads what it
+    wrote.  (Its result says the call was malformed, unless the harness
+    repaired the text and ran it.)  One such call left in a history makes an
     engine refuse every later request of the session (HTTP 400 "function
     tool_call arguments must be a JSON object string").  The same arguments
     always give the same text, so a replayed history stays byte-identical.
@@ -67,14 +69,14 @@ def sendable_arguments(arguments: Any) -> str:
     if arguments is None:
         return "{}"
     if isinstance(arguments, str):
-        if not arguments.strip():
+        if not arguments.strip() or arguments.strip() == "null":
             return "{}"
-        if _json_object(arguments):
+        if is_json_object_text(arguments):
             return arguments
         return json.dumps({"_raw": arguments}, ensure_ascii=False)
     if isinstance(arguments, dict):
         text = json.dumps(arguments, ensure_ascii=False, default=str)
-        if _json_object(text):
+        if is_json_object_text(text):
             return text
     try:
         raw = json.dumps(arguments, ensure_ascii=False, default=str)

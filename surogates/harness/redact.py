@@ -414,7 +414,8 @@ def _redact_json_value(value: Any, *, phones: bool) -> Any:
         out: dict[Any, Any] = {}
         for key, item in value.items():
             if isinstance(key, str) and _JSON_KEY_NAME_RE.fullmatch(key) and isinstance(item, str) and item:
-                item = _mask_token(item)
+                # Redacted first, then masked, as the text's patterns run in turn.
+                item = _mask_token(redact_sensitive_text(item, phones=phones))
             new_key = redact_sensitive_text(key, phones=phones) if isinstance(key, str) else key
             out[new_key] = _redact_json_value(item, phones=phones)
         return out
@@ -428,7 +429,10 @@ def _redact_arguments_text(text: str, *, phones: bool) -> str:
     own escapes -- ``Bearer $TOKEN\\"`` masked through its escaped quote --
     the arguments are no longer JSON, and a history rebuilt from the event
     sends text an engine refuses.  Then the parsed arguments are redacted
-    value by value and written anew instead.
+    value by value and written anew instead, unless that would show anything
+    the text's mask hid (a private key spread over several strings) or could
+    not be stored: then the text's mask stands, and a request sends it as
+    ``{"_raw": ...}`` (:func:`surogates.harness.sanitize.sendable_arguments`).
     """
     redacted = redact_sensitive_text(text, phones=phones)
     if redacted == text:
@@ -442,7 +446,16 @@ def _redact_arguments_text(text: str, *, phones: bool) -> str:
         return redacted
     except (ValueError, RecursionError):
         pass
-    return json.dumps(_redact_json_value(parsed, phones=phones), ensure_ascii=False)
+    try:
+        out = json.dumps(_redact_json_value(parsed, phones=phones), ensure_ascii=False)
+        out.encode("utf-8")  # a lone surrogate escape decodes to text no store takes
+    except (RecursionError, UnicodeEncodeError, ValueError):
+        return redacted
+    # A private key masked across the text's strings (its BEGIN in one, its
+    # END in another) is seen by no single value: the text's mask stands.
+    if _PRIVATE_KEY_RE.search(out):
+        return redacted
+    return out
 
 
 def redact_sensitive_data(data: Any, *, phones: bool = True) -> Any:

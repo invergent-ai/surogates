@@ -68,17 +68,17 @@ def _generation_kwargs(gen: dict[str, Any] | None) -> tuple[dict[str, Any], dict
 
 
 def _object_arguments(arguments: Any) -> bool:
-    """Whether tool-call *arguments* are a JSON object (or none at all)."""
+    """Whether tool-call *arguments* are a JSON object, or none at all: what
+    the expert's history sends unchanged (``sendable_arguments``)."""
+    from surogates.harness.sanitize import is_json_object_text
+
     if arguments is None or isinstance(arguments, dict):
         return True
     if not isinstance(arguments, str):
         return False
-    if not arguments.strip():
+    if not arguments.strip() or arguments.strip() == "null":
         return True
-    try:
-        return isinstance(json.loads(arguments), dict)
-    except (ValueError, RecursionError):
-        return False
+    return is_json_object_text(arguments)
 
 
 class ExpertBudgetExceeded(Exception):
@@ -254,7 +254,8 @@ async def run_expert_loop(
                 else:
                     result = await tool_router.execute(
                         name=tool_name,
-                        arguments=tc.function.arguments,
+                        # As its history has them: no arguments ("", null) are {}.
+                        arguments=sendable_arguments(tc.function.arguments),
                         tenant=tenant,
                         session_id=session_id,
                         # A simulation's expert is simulated too: the MCP proxy reads it from here.

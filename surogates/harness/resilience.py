@@ -199,8 +199,9 @@ def find_invalid_tool_calls(
                              f"Please fix and retry with valid JSON.",
                 })))
                 continue
-            if not isinstance(parsed, dict):
-                # Valid JSON, but no tool takes an array, a string or a number.
+            if parsed is not None and not isinstance(parsed, dict):
+                # Valid JSON, but no tool takes an array, a string or a number
+                # (``null`` is no arguments, as an empty text is).
                 invalid.append((tc, json.dumps({
                     "error": "Malformed tool arguments: they must be a JSON object, "
                              f"not a JSON {json_kind(parsed)}. Please retry with a JSON object.",

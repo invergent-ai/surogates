@@ -1077,6 +1077,8 @@ async def _run_single_tool(
     except json.JSONDecodeError as exc:
         parse_error = exc
         tool_args = {}
+    if tool_args is None:
+        tool_args = {}  # ``null``: no arguments, as an empty text is
     if not isinstance(tool_args, dict):
         # JSON, but no tool takes an array, a string or a number: refused
         # with the model told why, as text that is not JSON is.
