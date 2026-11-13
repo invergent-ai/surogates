@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import hmac
 import json
 import logging
@@ -59,6 +60,8 @@ logger = logging.getLogger("tool-executor")
 DEFAULT_PORT = 8071
 DEFAULT_TIMEOUT = 300
 MAX_CONCURRENCY = 8
+# How often a running call looks whether its caller has hung up.
+_DISCONNECT_POLL_S = 0.5
 
 # Fork context: children inherit the warm registry copy-on-write.  The
 # spawn context would re-import everything and defeat the daemon.
@@ -610,16 +613,29 @@ def create_app(
             # worker's watch is answered while long calls fill them.
             result = drain_background(args)
             return Response(content=result, media_type="application/json")
-        async with sem:
-            if runs_in_daemon(name, args):
-                try:
-                    result = await asyncio.wait_for(
-                        asyncio.to_thread(run_tool, name, args, workspace, None, history), timeout,
-                    )
-                except TimeoutError:
-                    result = _timed_out_result()
-            else:
-                result = await execute_in_child(name, args, workspace, timeout, history)
+        async def run() -> str:
+            async with sem:
+                if runs_in_daemon(name, args):
+                    try:
+                        return await asyncio.wait_for(
+                            asyncio.to_thread(run_tool, name, args, workspace, None, history), timeout,
+                        )
+                    except TimeoutError:
+                        return _timed_out_result()
+                return await execute_in_child(name, args, workspace, timeout, history)
+
+        # A caller that hangs up (a stopped agent's call, cancelled) wants no result: the call stops, its child
+        # killed, and frees its slot, instead of running on to its own timeout.
+        work = asyncio.ensure_future(run())
+        while not work.done():
+            await asyncio.wait({work}, timeout=_DISCONNECT_POLL_S)
+            if not work.done() and await request.is_disconnected():
+                work.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await work
+                logger.info("× %s: its caller hung up", name)
+                return Response(status_code=499)
+        result = work.result()
         logger.info("← %s (%d bytes)", name, len(result))
         return Response(content=result, media_type="application/json")
 
