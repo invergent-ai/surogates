@@ -131,7 +131,7 @@ class SandboxPool:
 
         The session lock is held only while resolving the sandbox id —
         not across the backend call.  The harness already decides which
-        tool batches may run concurrently (``should_parallelize``), so
+        tool calls may run concurrently (``StreamingToolExecutor``), so
         holding the lock here would serialize them for no benefit.  A
         ``destroy_for_session`` racing an in-flight call makes that call
         fail exactly like a pod dying mid-execution, which the caller

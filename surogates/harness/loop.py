@@ -116,7 +116,6 @@ from surogates.harness.tool_exec import (
     _turn_now,
     cancelled_result,
     execute_single_tool,
-    execute_tool_calls,
 )
 from surogates.harness.tool_guardrails import ToolGuardrailConfig, ToolGuardrails
 from surogates.sandbox.copy_files import has_copy, read_copy, writes_to_copy
@@ -4441,6 +4440,13 @@ class AgentHarness(
             # 6. Append assistant message to the in-memory message list.
             messages.append(assistant_message)
 
+            # A turn that did not stream its calls into an executor runs them through one now: a Stop then cuts
+            # short the call under way, as it does a streamed turn's, and records each call it stopped.
+            if not use_streaming_exec:
+                add_tool = _reset_streaming_executor()
+                for tc in tool_calls_raw:
+                    add_tool(tc)
+
             # 7. Execute tool calls.
             # The mark waits while another chat holds the folder: a Stop ends it, and the calls the stream holds.
             # A cloud turn takes no mark, and its early-started calls finish and are recorded before a Stop pauses it.
@@ -4457,55 +4463,44 @@ class AgentHarness(
                             await streaming_executor.get_all_results()
                     await self._abort_iteration_with_pause(session, saga, cost_tracker, lease=lease)
                     return
-            if use_streaming_exec:
-                # ── Streaming executor path ──────────────────────────
-                # Some or all tools started executing during LLM streaming.
-                # Non-concurrent tools (write_file, patch) are still QUEUED
-                # at this point because they are never concurrency-safe.
+            # ── Tool executor ────────────────────────────────────
+            # Some tools may have started executing during LLM streaming.
+            # Non-concurrent tools (write_file, patch) are still QUEUED
+            # at this point because they are never concurrency-safe.
 
-                # Wait for all tools to complete (concurrent ones may
-                # already be done, sequential ones start now). Publish the
-                # executor on the harness so ``interrupt()`` can preempt
-                # in-flight tools (sandbox exec, browser actions) instead
-                # of letting them run to their tool-level timeout.
-                self._active_executor = streaming_executor
-                try:
-                    # The loop waits for its tool calls; they count for the turn meanwhile.
-                    async with turn_joining():
-                        all_results = await streaming_executor.get_all_results()
-                finally:
-                    self._active_executor = None
-
-                # Filter results to match the deduped tool call list.
-                # Dedup is rare but possible — if a tool was deduped,
-                # its result is harmlessly discarded (read-only tools
-                # have no side effects).
-                valid_ids = {tc.get("id") for tc in tool_calls_raw}
-                tool_results = [
-                    r for r in all_results
-                    if r.get("tool_call_id") in valid_ids
-                ]
-
-                # Log streaming executor stats for observability.
-                stats = streaming_executor.stats
-                if stats["overlapped_with_streaming"] > 0:
-                    logger.info(
-                        "Session %s: streaming executor completed — "
-                        "%d/%d tools overlapped with streaming",
-                        session.id,
-                        stats["overlapped_with_streaming"],
-                        stats["total"],
-                    )
-            else:
-                # ── Existing path ────────────────────────────────────
+            # Wait for all tools to complete (concurrent ones may
+            # already be done, sequential ones start now). Publish the
+            # executor on the harness so ``interrupt()`` can preempt
+            # in-flight tools (sandbox exec, browser actions) instead
+            # of letting them run to their tool-level timeout.
+            self._active_executor = streaming_executor
+            try:
+                # The loop waits for its tool calls; they count for the turn meanwhile.
                 async with turn_joining():
-                    tool_results = await execute_tool_calls(
-                        tool_calls_raw,
-                        **self._tool_call_kwargs(
-                            session=session, lease=lease, saga=saga, hint_tracker=hint_tracker,
-                            model_id=model_id, expert_transcript=expert_transcript,
-                        ),
-                    )
+                    all_results = await streaming_executor.get_all_results()
+            finally:
+                self._active_executor = None
+
+            # Filter results to match the deduped tool call list.
+            # Dedup is rare but possible — if a tool was deduped,
+            # its result is harmlessly discarded (read-only tools
+            # have no side effects).
+            valid_ids = {tc.get("id") for tc in tool_calls_raw}
+            tool_results = [
+                r for r in all_results
+                if r.get("tool_call_id") in valid_ids
+            ]
+
+            # Log streaming executor stats for observability.
+            stats = streaming_executor.stats
+            if stats["overlapped_with_streaming"] > 0:
+                logger.info(
+                    "Session %s: streaming executor completed — "
+                    "%d/%d tools overlapped with streaming",
+                    session.id,
+                    stats["overlapped_with_streaming"],
+                    stats["total"],
+                )
 
             dynamic_loop_wait_done = self._dynamic_loop_wait_succeeded(
                 session, tool_calls_raw, tool_results,

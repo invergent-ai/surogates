@@ -257,3 +257,24 @@ async def test_an_agents_stop_counts_for_the_run_until_the_session_is_resumed():
     assert await stopped_by_an_agent_this_run(Store([agents_stop, users_pause]), None)
     assert not await stopped_by_an_agent_this_run(Store([agents_stop, resume, users_pause]), None)
     assert not await stopped_by_an_agent_this_run(Store([users_pause]), None)
+
+
+async def test_stopping_an_agent_cuts_short_the_tool_call_it_is_running(chats):  # noqa: F811
+    chat = await a_chat(chats)
+    child = await a_background_agent(chats, chat)
+    ran_on: list[bool] = []
+
+    async def stopped_while_its_command_runs():
+        assert (await stop(chats, chat, child.id))["status"] == "stopped"
+        chats.harnesses[child.id].interrupt("stopped by agent")
+        # A long command: the stop ends it, not its own end.
+        await asyncio.sleep(30)
+        ran_on.append(True)
+
+    chats.during_the_tool_call = stopped_while_its_command_runs
+    chats.replies = [TODO_CALL, _final_response("never asked")]
+    await asyncio.wait_for(chats.wake(child.id), 10)
+    assert ran_on == []
+    [result] = await chats.store.get_events(child.id, types=[EventType.TOOL_RESULT])
+    assert result.data["content"] == "[skipped due to interrupt]", result.data
+    assert await chats.status(child.id) == "paused"

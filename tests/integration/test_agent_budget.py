@@ -148,8 +148,11 @@ async def test_agents_started_at_once_share_what_their_parent_has_left(chats, mo
 async def test_the_iteration_cap_of_an_agent_without_a_token_budget_is_no_budget_stop(chats):  # noqa: F811
     chat = await a_chat(chats, {})
     child = await a_background_agent(chats, chat)
-    # The test worker's iteration budget is 10: the eleventh step asks for a summary and ends there.
-    chats.replies = [TODO_CALL] * 10 + [_final_response("Two items so far.")]
+    # The test worker's iteration budget is 10: the eleventh step asks for a summary and ends there.  Each step reads
+    # a part of its own, so no loop guard ends the turn first.
+    chats.replies = [calling("read_file", f"call_{n}", path=f"part{n}.md") for n in range(10)] + [
+        _final_response("Two items so far."),
+    ]
     await chats.wake(child.id)
     [end] = await chats.store.get_events(child.id, types=[EventType.SESSION_COMPLETE])
     assert end.data["reason"] == "budget_exhausted"

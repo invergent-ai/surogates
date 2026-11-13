@@ -99,12 +99,7 @@ from surogates.harness.sanitize import (
 )
 from surogates.harness.tool_exec import (
     execute_single_tool,
-    execute_tool_calls,
-    execute_tool_calls_concurrent,
-    execute_tool_calls_sequential,
     is_destructive_command,
-    paths_do_not_overlap,
-    should_parallelize,
 )
 
 
@@ -149,9 +144,6 @@ __all__ = [
     "estimate_cost",
     "estimate_tokens",
     "execute_single_tool",
-    "execute_tool_calls",
-    "execute_tool_calls_concurrent",
-    "execute_tool_calls_sequential",
     "extract_api_error_context",
     "extract_reasoning",
     "extract_retry_after",
@@ -180,7 +172,6 @@ __all__ = [
     "load_soul_md",
     "make_skipped_tool_result",
     "message_to_dict",
-    "paths_do_not_overlap",
     "probe_dead_connections",
     "reconstruct_message_from_deltas",
     "repair_tool_name",
@@ -188,7 +179,6 @@ __all__ = [
     "sanitize_surrogates",
     "scan_context_content",
     "sanitize_tool_pairs",
-    "should_parallelize",
     "summarize_api_error",
     "truncate_context",
     "strip_budget_warnings",

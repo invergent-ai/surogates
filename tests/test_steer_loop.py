@@ -150,11 +150,14 @@ def _final_response(text: str):
 
 
 def _patch_tool_exec(monkeypatch, tool_results):
-    """Patch the module-level execute_tool_calls the non-streaming path uses."""
-    async def fake_execute_tool_calls(tool_calls_raw, **_kwargs):
-        return list(tool_results)
+    """Patch the one-call runner the turn's tool executor uses: each call answers with its result in *tool_results*."""
+    async def fake_execute_single_tool(tc, **_kwargs):
+        return next(
+            (dict(r) for r in tool_results if r.get("tool_call_id") == tc.get("id")),
+            {"role": "tool", "tool_call_id": tc.get("id", ""), "content": "ok"},
+        )
     monkeypatch.setattr(
-        "surogates.harness.loop.execute_tool_calls", fake_execute_tool_calls,
+        "surogates.harness.tool_exec.execute_single_tool", fake_execute_single_tool,
     )
 
 
