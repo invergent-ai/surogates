@@ -141,6 +141,15 @@ def repair_tool_name(
 
 def unknown_tool_error(tool_name: str, offered: Collection[str]) -> str:
     """The result of a call to a tool this turn's model was not offered."""
+    if tool_name == "agent":
+        # A sub-agent at the depth limit, or a session its policy leaves agent out of: told what to do instead, as
+        # "unknown" alone sends it looking for another way to start one.
+        return json.dumps({
+            "error": (
+                "agent is not offered here: this session cannot start agents (a sub-agent at the depth limit, or a "
+                "policy leaves it out). Do this part yourself, or say in your report that it needs another agent."
+            ),
+        })
     available = ", ".join(sorted(offered))
     return json.dumps({
         "error": f"Unknown tool: {tool_name!r}. Available tools: {available}",
