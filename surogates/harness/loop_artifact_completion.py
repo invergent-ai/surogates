@@ -1264,9 +1264,15 @@ class ArtifactCompletionMixin:
         prunes: str | None = None
         from surogates.harness.background_watch import background_watch
 
+        from surogates.harness.subagents import agents_run_in_its_sandbox
+
         # A sandbox that runs a background command the session waits to hear
-        # the end of stays up: the watch lets it go once the command ends.
-        if self._sandbox_pool is not None and not background_watch.holds(str(session.id)):
+        # the end of stays up: the watch lets it go once the command ends.  So
+        # does one an agent below it still runs in: a later turn end lets it go.
+        if (
+            self._sandbox_pool is not None and not background_watch.holds(str(session.id))
+            and not await agents_run_in_its_sandbox(self._session_factory, session)
+        ):
             try:
                 sandbox_id = await self._sandbox_pool.release_for_session(
                     str(session.id),

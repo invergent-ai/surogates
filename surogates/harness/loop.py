@@ -6497,8 +6497,14 @@ class AgentHarness(
         """
         from surogates.harness.background_watch import background_watch
 
-        # One that runs a background command the session waits to hear the end of stays up, as at a model's turn end.
-        if self._sandbox_pool is not None and not background_watch.holds(str(session.id)):
+        from surogates.harness.subagents import agents_run_in_its_sandbox
+
+        # One that runs a background command the session waits to hear the end of stays up, as at a model's turn
+        # end, and so does one an agent below it still runs in.
+        if (
+            self._sandbox_pool is not None and not background_watch.holds(str(session.id))
+            and not await agents_run_in_its_sandbox(self._session_factory, session)
+        ):
             try:
                 sandbox_id = await self._sandbox_pool.release_for_session(str(session.id))
             except Exception:

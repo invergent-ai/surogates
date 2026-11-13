@@ -188,3 +188,13 @@ async def test_a_master_starts_more_than_five_threads_in_one_response(api, monke
     starts = [("agent", {"description": f"Draft part {n}", "prompt": f"Draft part {n}."}) for n in range(7)]
     await one_response(api, monkeypatch, master, starts, streamed=streamed)
     assert len(await events_of(api, master.id, EventType.WORKER_SPAWNED)) == 7
+
+
+async def test_a_masters_threads_hold_no_sandbox_of_the_masters(api):
+    # Each thread works in a sandbox of its own: the master's turn end lets the master's go however many run.
+    from surogates.harness.subagents import agents_run_in_its_sandbox
+
+    master = await master_of(api, await create(api))
+    thread = await a_thread(api, master)
+    assert (await api.app.state.session_store.get_session(thread.id)).status == "active"
+    assert await agents_run_in_its_sandbox(api.app.state.session_factory, master) is False

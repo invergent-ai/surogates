@@ -424,3 +424,51 @@ async def test_a_sixth_agent_without_the_flag_runs_in_the_foreground(chats, monk
     assert (await tool_result(chats, chat, "call_b")).startswith("The last line is OK.")
     assert [n for n in await chats.store.get_events(chat, types=[EventType.AGENT_NOTIFICATION])
             if n.data["agent_id"] == str(second.id)] == []
+
+
+async def test_a_chat_keeps_its_sandbox_while_an_agent_it_started_runs(chats):
+    from types import SimpleNamespace
+
+    from .test_send_message import a_background_agent
+
+    released: list[str] = []
+
+    async def release_for_session(session_id, **_):
+        released.append(session_id)
+
+    chats.sandbox_pool = SimpleNamespace(release_for_session=release_for_session)
+    chat = await a_chat(chats)
+    child = await a_background_agent(chats, chat)
+    # The agent works in the chat's sandbox, and past the turn that started it: the chat lets go of nothing.
+    assert released == []
+    # Its agent ended, the chat's next turn end lets its sandbox go.
+    await chats.store.update_session_status(child.id, "completed")
+    chats.replies = [_final_response("Noted.")]
+    await chats.says(chat, "Thanks.")
+    await chats.wake(chat)
+    assert released == [str(chat)]
+
+
+async def test_stopping_a_chat_stops_the_agent_its_call_waits_for(chats):
+    chat = await a_chat(chats)
+    chats.replies = [
+        calling("agent", "call_fg", description="Count rows", prompt="Count the rows.", run_in_background=False),
+        _final_response("never asked"),
+    ]
+    await chats.says(chat, "Count the rows and tell me.")
+    turn = asyncio.create_task(chats.wake(chat))
+    for _ in range(100):
+        found = await children(chats, chat)
+        if found:
+            break
+        await asyncio.sleep(0.05)
+    [child] = found
+    # Its user stops the chat while its call waits for the agent.
+    paused = await chats.api.client.post(f"/v1/sessions/{chat}/pause", headers=chats.api.auth())
+    assert paused.status_code == 200, paused.text
+    chats.harnesses[chat].interrupt("paused by user")
+    await asyncio.wait_for(turn, 10)
+    # The agent stops with the call that waited for it: no report would reach anyone.
+    assert await chats.status(child.id) == "paused"
+    [stop] = [e.data for e in await chats.store.get_events(child.id, types=[EventType.SESSION_PAUSE])][:1]
+    assert stop["stopped_by"] == str(chat), stop
