@@ -599,7 +599,7 @@ def widen_for_channel(schema: dict[str, Any], channel: str | None) -> dict[str, 
         "for an open-ended question."
     )
     function["description"] = function["description"].replace(
-        "up to 4 labeled options", f"up to {MAX_CHANNEL_CHOICES_PER_QUESTION} labeled options",
+        f"(up to {MAX_CHOICES_PER_QUESTION};", f"(up to {MAX_CHANNEL_CHOICES_PER_QUESTION};",
     )
     return schema
 

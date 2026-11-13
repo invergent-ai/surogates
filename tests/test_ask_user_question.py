@@ -620,7 +620,8 @@ def test_the_channel_schema_offers_ten_choices_without_touching_the_original():
     assert ask_user_question.widen_for_channel(schema, "web") is schema
     choices = lambda s: s["function"]["parameters"]["properties"]["questions"]["items"]["properties"]["choices"]  # noqa: E731
     assert choices(wide)["maxItems"] == 10 and choices(schema)["maxItems"] == 4
-    assert "up to 10 labeled options" in wide["function"]["description"]
+    said = wide["function"]["description"]
+    assert "up to 10" in said and "up to 4" not in said, said
 
 
 class _JudgeClient:
