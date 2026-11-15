@@ -27,6 +27,26 @@ storage:
   secret_key: "..."
 ```
 
+### Local backend: file permissions
+
+The local backend creates every stored file with mode `0660`, less the process umask. The owner (the runtime's user) and the file's group can read and write the file, and other users get no access. A stored file is never readable or writable by other users, even under umask `0`.
+
+A sandbox that runs as a different user than the runtime cannot read these files unless the operator grants it access. The docker sandbox is one such case: it runs commands as uid 1000 in a session workspace bind-mounted from the local bucket. Grant access in one of two ways:
+
+- **Default ACL (recommended).** Give the sandbox user an ACL on the storage root and a default ACL that new folders and files inherit:
+
+  ```sh
+  setfacl -R -m u:1000:rwX <base_path>
+  setfacl -R -d -m u:1000:rwX <base_path>
+  ```
+
+  A stored file created under this ACL gets an ACL mask of `rw-`. The sandbox user can therefore read the file and change it in place, for example with `>>`, by saving a spreadsheet over an uploaded one, or by writing to an uploaded SQLite database. Under a default ACL the kernel ignores the umask: the ACL decides the new file's permissions, capped by the mode it is created with (`0660`).
+
+  On many hosts uid 1000 is a person's login, and an ACL for uid 1000 gives that person the stored files too. Grant a uid that only the sandbox uses instead. You can confirm that no account on the host has uid 1000. Or you can run Docker with user-namespace remapping (`userns-remap`), which maps the container's uid 1000 to a subordinate host uid, and grant the ACL to that host uid. For example, the host uid is 101000 when the subordinate range starts at 100000.
+- **Shared group.** Give the storage root a group that the sandbox user is in (inside the container: the same gid). Set the setgid bit on the root's folders so new files and folders inherit that group. Under the usual umask `022`, a new file is `0640`, so the group can only read it. If the sandbox should also write the files and folders the runtime creates, run the runtime with umask `002`.
+
+The `/tmp/surogates/tenant-assets` base used in the example above is not private on a shared host. Any local user can create folders under `/tmp`, and could create this one first and own it. Outside single-user development, set `storage.base_path` to a folder that only the runtime's user (and the sandbox's user) can reach.
+
 ## Tenant Asset Buckets
 
 Each organization gets a Garage bucket containing asset directories:

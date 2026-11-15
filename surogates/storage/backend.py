@@ -23,7 +23,6 @@ import logging
 import os
 import shutil
 import stat
-import tempfile
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
@@ -212,6 +211,18 @@ class LocalBackend:
     This preserves the directory layout used by ``ResourceLoader``,
     ``MemoryStore``, and workspace file APIs, so existing code works
     unmodified during development.
+
+    A stored file is made mode 0660, less the umask: never readable or
+    writable by other users.  Where a sandbox runs as another user than
+    this process (the docker sandbox's uid 1000, in a workspace
+    bind-mounted from here), the operator grants it access: a default ACL
+    for that user on the storage root (``setfacl -d -m u:1000:rwX``),
+    which new folders and files inherit (a file's ACL mask is ``rw-``, so
+    the user reads and writes it in place; under a default ACL the kernel
+    ignores the umask), or a group both users share.  On a host where uid
+    1000 is a person's login, grant a uid that is the sandbox's alone
+    (docker ``userns-remap`` maps the container's 1000 to one).  A base
+    under ``/tmp`` on a shared host is not private.
     """
 
     def __init__(self, base_path: str) -> None:
@@ -963,16 +974,29 @@ def _no_object(exc: OSError) -> bool:
     return isinstance(exc, (FileNotFoundError, NotADirectoryError)) or _is_link_refusal(exc)
 
 
+#: The mode a stored file is made with, less the umask: its owner and its
+#: group read and write it, no one else does.  A sandbox that runs as another
+#: user (the docker sandbox's, in a workspace bind-mounted from a local
+#: bucket) reads and writes it in place (``>>``, a spreadsheet saved over an
+#: upload, an uploaded .db) through a default ACL of the storage root, whose
+#: mask a file made so gets as ``rw-``, or through a group it shares.  Made
+#: 0600 (as ``tempfile.mkstemp`` makes a file), the mask was ``---``: that
+#: user could read nothing even where the ACL named it.  The mode is given at
+#: creation, never by a chmod after, which would override the folder's
+#: default ACL.
+_FILE_MODE = 0o660
+
+
 def _replace_in(folder: int, name: str, src: Any, if_tag: str | None, if_absent: bool) -> None:
     """Make *name* in the folder *folder* a copy of the stream *src*: a new
-    temporary file beside it (O_EXCL | O_NOFOLLOW, mode 0600), synced, then
+    temporary file beside it (O_EXCL | O_NOFOLLOW, mode :data:`_FILE_MODE`), synced, then
     renamed over it; a link at the name is replaced, never followed.  With
     *if_tag* or *if_absent*, only where *name* is still the plain file of
     that tag, or still none, as it is looked at right before the rename:
     :class:`Changed` otherwise, and nothing written."""
     tmp = f".{name}.tmp.{os.urandom(4).hex()}"  # as long as mkstemp's names
     fd = os.open(
-        tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0), 0o600,
+        tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0), _FILE_MODE,
         dir_fd=folder,
     )
     try:
@@ -1019,9 +1043,18 @@ def _remove_empty_parents_by_path(bucket_root: Path, path: Path) -> None:
         parent = parent.parent
 
 
+def _new_beside(path: Path) -> tuple[int, str]:
+    """A new temporary file beside *path*, named as ``tempfile.mkstemp``
+    names one, made mode :data:`_FILE_MODE` (O_EXCL | O_NOFOLLOW): its
+    descriptor, open to write, and its path."""
+    tmp = str(path.parent / f".{path.name}.tmp.{os.urandom(4).hex()}")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    return os.open(tmp, flags, _FILE_MODE), tmp
+
+
 def _atomic_write_bytes(path: Path, data: bytes) -> None:
     """Atomically write *data* to *path* using temp file + os.replace."""
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.tmp.")
+    fd, tmp = _new_beside(path)
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(data)
@@ -1134,7 +1167,7 @@ def _atomic_copy(source: Path, path: Path, if_tag: str | None = None, if_absent:
     """
     with open(source, "rb") as src:
         path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.tmp.")
+        fd, tmp = _new_beside(path)
         try:
             with os.fdopen(fd, "wb") as out:
                 shutil.copyfileobj(src, out, _CHUNK)
