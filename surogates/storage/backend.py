@@ -212,14 +212,17 @@ class LocalBackend:
     ``MemoryStore``, and workspace file APIs, so existing code works
     unmodified during development.
 
-    A stored file is made mode 0640, less the umask: never readable or
+    A stored file is made mode 0660, less the umask: never readable or
     writable by other users.  Where a sandbox runs as another user than
     this process (the docker sandbox's uid 1000, in a workspace
     bind-mounted from here), the operator grants it access: a default ACL
     for that user on the storage root (``setfacl -d -m u:1000:rwX``),
-    which new folders and files inherit (a file's ACL mask is ``r--``, so
-    the user reads it), or a group both users share.  A base under
-    ``/tmp`` on a shared host is not private.
+    which new folders and files inherit (a file's ACL mask is ``rw-``, so
+    the user reads and writes it in place; under a default ACL the kernel
+    ignores the umask), or a group both users share.  On a host where uid
+    1000 is a person's login, grant a uid that is the sandbox's alone
+    (docker ``userns-remap`` maps the container's 1000 to one).  A base
+    under ``/tmp`` on a shared host is not private.
     """
 
     def __init__(self, base_path: str) -> None:
@@ -971,15 +974,17 @@ def _no_object(exc: OSError) -> bool:
     return isinstance(exc, (FileNotFoundError, NotADirectoryError)) or _is_link_refusal(exc)
 
 
-#: The mode a stored file is made with, less the umask: its owner reads and
-#: writes it, its group reads it, no one else does.  A sandbox that runs as
-#: another user (the docker sandbox's, in a workspace bind-mounted from a local
-#: bucket) reads it through a default ACL of the storage root, whose mask a
-#: file made so gets as ``r--``, or through a group it shares.  Made 0600 (as
-#: ``tempfile.mkstemp`` makes a file), the mask was ``---``: that user could
-#: read nothing even where the ACL named it.  The mode is given at creation,
-#: never by a chmod after, which would override the folder's default ACL.
-_FILE_MODE = 0o640
+#: The mode a stored file is made with, less the umask: its owner and its
+#: group read and write it, no one else does.  A sandbox that runs as another
+#: user (the docker sandbox's, in a workspace bind-mounted from a local
+#: bucket) reads and writes it in place (``>>``, a spreadsheet saved over an
+#: upload, an uploaded .db) through a default ACL of the storage root, whose
+#: mask a file made so gets as ``rw-``, or through a group it shares.  Made
+#: 0600 (as ``tempfile.mkstemp`` makes a file), the mask was ``---``: that
+#: user could read nothing even where the ACL named it.  The mode is given at
+#: creation, never by a chmod after, which would override the folder's
+#: default ACL.
+_FILE_MODE = 0o660
 
 
 def _replace_in(folder: int, name: str, src: Any, if_tag: str | None, if_absent: bool) -> None:
