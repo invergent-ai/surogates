@@ -963,9 +963,23 @@ def _no_object(exc: OSError) -> bool:
     return isinstance(exc, (FileNotFoundError, NotADirectoryError)) or _is_link_refusal(exc)
 
 
+def _process_umask() -> int:
+    mask = os.umask(0)
+    os.umask(mask)
+    return mask
+
+
+# The mode ``open()`` gives a new file under this process's umask, read once at import
+# (os.umask is process-wide).  ``tempfile.mkstemp`` always creates 0600; after the rename
+# every stored file would be unreadable to anyone but this process's user -- e.g. to the
+# docker sandbox's non-root user that bind-mounts a local-backend workspace.
+_PLAIN_FILE_MODE = 0o666 & ~_process_umask()
+
+
 def _replace_in(folder: int, name: str, src: Any, if_tag: str | None, if_absent: bool) -> None:
     """Make *name* in the folder *folder* a copy of the stream *src*: a new
-    temporary file beside it (O_EXCL | O_NOFOLLOW, mode 0600), synced, then
+    temporary file beside it (O_EXCL | O_NOFOLLOW, made mode 0600, given
+    :data:`_PLAIN_FILE_MODE` before it is written), synced, then
     renamed over it; a link at the name is replaced, never followed.  With
     *if_tag* or *if_absent*, only where *name* is still the plain file of
     that tag, or still none, as it is looked at right before the rename:
@@ -977,6 +991,7 @@ def _replace_in(folder: int, name: str, src: Any, if_tag: str | None, if_absent:
     )
     try:
         with os.fdopen(fd, "wb") as out:
+            os.fchmod(out.fileno(), _PLAIN_FILE_MODE)
             shutil.copyfileobj(src, out, _CHUNK)
             out.flush()
             os.fsync(out.fileno())
@@ -1024,6 +1039,7 @@ def _atomic_write_bytes(path: Path, data: bytes) -> None:
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.tmp.")
     try:
         with os.fdopen(fd, "wb") as f:
+            os.fchmod(f.fileno(), _PLAIN_FILE_MODE)
             f.write(data)
             f.flush()
             os.fsync(f.fileno())
@@ -1137,6 +1153,7 @@ def _atomic_copy(source: Path, path: Path, if_tag: str | None = None, if_absent:
         fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.tmp.")
         try:
             with os.fdopen(fd, "wb") as out:
+                os.fchmod(out.fileno(), _PLAIN_FILE_MODE)
                 shutil.copyfileobj(src, out, _CHUNK)
                 out.flush()
                 os.fsync(out.fileno())
