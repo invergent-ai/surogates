@@ -23,7 +23,6 @@ import logging
 import os
 import shutil
 import stat
-import tempfile
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
@@ -212,6 +211,15 @@ class LocalBackend:
     This preserves the directory layout used by ``ResourceLoader``,
     ``MemoryStore``, and workspace file APIs, so existing code works
     unmodified during development.
+
+    A stored file is made mode 0640, less the umask: never readable or
+    writable by other users.  Where a sandbox runs as another user than
+    this process (the docker sandbox's uid 1000, in a workspace
+    bind-mounted from here), the operator grants it access: a default ACL
+    for that user on the storage root (``setfacl -d -m u:1000:rwX``),
+    which new folders and files inherit (a file's ACL mask is ``r--``, so
+    the user reads it), or a group both users share.  A base under
+    ``/tmp`` on a shared host is not private.
     """
 
     def __init__(self, base_path: str) -> None:
@@ -963,35 +971,31 @@ def _no_object(exc: OSError) -> bool:
     return isinstance(exc, (FileNotFoundError, NotADirectoryError)) or _is_link_refusal(exc)
 
 
-def _process_umask() -> int:
-    mask = os.umask(0)
-    os.umask(mask)
-    return mask
-
-
-# The mode ``open()`` gives a new file under this process's umask, read once at import
-# (os.umask is process-wide).  ``tempfile.mkstemp`` always creates 0600; after the rename
-# every stored file would be unreadable to anyone but this process's user -- e.g. to the
-# docker sandbox's non-root user that bind-mounts a local-backend workspace.
-_PLAIN_FILE_MODE = 0o666 & ~_process_umask()
+#: The mode a stored file is made with, less the umask: its owner reads and
+#: writes it, its group reads it, no one else does.  A sandbox that runs as
+#: another user (the docker sandbox's, in a workspace bind-mounted from a local
+#: bucket) reads it through a default ACL of the storage root, whose mask a
+#: file made so gets as ``r--``, or through a group it shares.  Made 0600 (as
+#: ``tempfile.mkstemp`` makes a file), the mask was ``---``: that user could
+#: read nothing even where the ACL named it.  The mode is given at creation,
+#: never by a chmod after, which would override the folder's default ACL.
+_FILE_MODE = 0o640
 
 
 def _replace_in(folder: int, name: str, src: Any, if_tag: str | None, if_absent: bool) -> None:
     """Make *name* in the folder *folder* a copy of the stream *src*: a new
-    temporary file beside it (O_EXCL | O_NOFOLLOW, made mode 0600, given
-    :data:`_PLAIN_FILE_MODE` before it is written), synced, then
+    temporary file beside it (O_EXCL | O_NOFOLLOW, mode :data:`_FILE_MODE`), synced, then
     renamed over it; a link at the name is replaced, never followed.  With
     *if_tag* or *if_absent*, only where *name* is still the plain file of
     that tag, or still none, as it is looked at right before the rename:
     :class:`Changed` otherwise, and nothing written."""
     tmp = f".{name}.tmp.{os.urandom(4).hex()}"  # as long as mkstemp's names
     fd = os.open(
-        tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0), 0o600,
+        tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0), _FILE_MODE,
         dir_fd=folder,
     )
     try:
         with os.fdopen(fd, "wb") as out:
-            os.fchmod(out.fileno(), _PLAIN_FILE_MODE)
             shutil.copyfileobj(src, out, _CHUNK)
             out.flush()
             os.fsync(out.fileno())
@@ -1034,12 +1038,20 @@ def _remove_empty_parents_by_path(bucket_root: Path, path: Path) -> None:
         parent = parent.parent
 
 
+def _new_beside(path: Path) -> tuple[int, str]:
+    """A new temporary file beside *path*, named as ``tempfile.mkstemp``
+    names one, made mode :data:`_FILE_MODE` (O_EXCL | O_NOFOLLOW): its
+    descriptor, open to write, and its path."""
+    tmp = str(path.parent / f".{path.name}.tmp.{os.urandom(4).hex()}")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    return os.open(tmp, flags, _FILE_MODE), tmp
+
+
 def _atomic_write_bytes(path: Path, data: bytes) -> None:
     """Atomically write *data* to *path* using temp file + os.replace."""
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.tmp.")
+    fd, tmp = _new_beside(path)
     try:
         with os.fdopen(fd, "wb") as f:
-            os.fchmod(f.fileno(), _PLAIN_FILE_MODE)
             f.write(data)
             f.flush()
             os.fsync(f.fileno())
@@ -1150,10 +1162,9 @@ def _atomic_copy(source: Path, path: Path, if_tag: str | None = None, if_absent:
     """
     with open(source, "rb") as src:
         path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.tmp.")
+        fd, tmp = _new_beside(path)
         try:
             with os.fdopen(fd, "wb") as out:
-                os.fchmod(out.fileno(), _PLAIN_FILE_MODE)
                 shutil.copyfileobj(src, out, _CHUNK)
                 out.flush()
                 os.fsync(out.fileno())
