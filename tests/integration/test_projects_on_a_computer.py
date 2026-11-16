@@ -347,7 +347,7 @@ async def test_a_computer_projects_prompt_has_it_work_in_its_folder_and_start_it
     ) in said
     assert (
         "Give a thread's work to a thread on the project's folder with `agent`: the `description` is the thread's "
-        "title, the `prompt` its goal."
+        "title, the `prompt` its goal, naming the files it works on by their paths from the folder's top."
     ) in said
     assert "A thread starts once that computer sets up its copy: at once while the computer is online, or when it is back." in said
     # It is never told of a thread in the cloud, or of proposing one.

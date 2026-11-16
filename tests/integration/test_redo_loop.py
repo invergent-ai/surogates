@@ -230,9 +230,9 @@ async def test_your_edit_then_a_landing_tells_the_thread_to_redo_and_the_redo_la
     # The master hears the file is being redone: not finished.
     [report] = await reports(api, master)
     assert {f["ref"]: f["landing"] for f in report["files"]} == {"Report.docx": "redoing", "a.md": "landed"}
-    assert heard_as(EventType.WORKER_COMPLETE.value, report)["files"].endswith(
-        "Files: a.md\nBeing redone: Report.docx"
-    )
+    heard = heard_as(EventType.WORKER_COMPLETE.value, report)["files"]
+    # Told to wait for the redo's report: a master that was not polled the folder while the thread redid its change.
+    assert "Files: a.md\nBeing redone: Report.docx." in heard and "wait for that report" in heard
     # The redo turn starts on the landing, with your version, and lands its edit on it.
     await a_turn(api, monkeypatch, thread, [
         calling(("terminal", {"command": "printf ' by A' >> Report.docx"})),

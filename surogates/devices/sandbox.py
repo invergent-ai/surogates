@@ -23,7 +23,7 @@ from surogates.devices.binding import device_owners as _owners
 from surogates.devices.operations import DeviceOperations, JournalRunner
 from surogates.devices.workspace import DeviceOperationError, DeviceWorkspaceIO
 from surogates.sandbox.pool import sandbox_session_key
-from surogates.tools.builtin.file_ops import forget_read_tracker, patch_targets
+from surogates.tools.builtin.file_ops import forget_read_tracker, notify_other_tool_call, patch_targets
 from surogates.tools.utils.tool_result_storage import HARNESS_FOLDER_REFUSAL, in_harness_folder
 from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
 
@@ -165,7 +165,7 @@ class DeviceCall:
         return await self._run("write_file", {"path": path, "content": content}, self._harness_tool_tracker_id)
 
     async def _run(self, name: str, args: dict[str, Any] | str, read_tracker_id: str) -> str:
-        return await self._tools.dispatch(
+        result = await self._tools.dispatch(
             name,
             args,
             workspace_io=self._workspace_io,
@@ -178,6 +178,11 @@ class DeviceCall:
             read_tracker_id=read_tracker_id,
             tools=self._tools,
         )
+        # Its reads live on in this process, unlike a cloud call's: any other tool between two reads of a file
+        # makes the second a fresh one, not one more of a loop.
+        if name not in ("read_file", "search_files"):
+            notify_other_tool_call(read_tracker_id)
+        return result
 
     async def ensure(self, session_id: str, spec: Any) -> str:
         return DEVICE_SANDBOX_ID

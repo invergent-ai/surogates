@@ -178,7 +178,7 @@ async def test_two_threads_change_one_docx_and_the_second_leaves_it_to_the_first
         ("Budget.xlsx", "landed", None), ("Report.docx", "redoing", "changed"),
     ]
     # The master reads that B is redoing its docx: not finished.
-    assert heard_as(EventType.WORKER_COMPLETE.value, b)["files"].endswith("Files: Budget.xlsx\nBeing redone: Report.docx")
+    assert "Files: Budget.xlsx\nBeing redone: Report.docx." in heard_as(EventType.WORKER_COMPLETE.value, b)["files"]
     # B is told who changed it.
     [redo] = await api.app.state.session_store.get_events(second.id, types=[EventType.HISTORY_REDO])
     assert redo.data["files"] == [

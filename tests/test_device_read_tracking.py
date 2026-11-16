@@ -79,6 +79,16 @@ async def test_each_session_counts_its_own_repeated_reads(folder):
     assert first["content"] == "alpha\n" and "_warning" not in first
 
 
+async def test_a_read_after_a_change_starts_the_count_again(folder):
+    # A thread read its file, patched it and read it back, twice: the fourth read was refused as a loop, though
+    # the file had changed in between.
+    call = call_of(folder, ROOT)
+    for word in ("beta", "gamma", "delta", "epsilon"):
+        read = await run(call, "read_file", path="a.txt")
+        assert "error" not in read and "_warning" not in read, read
+        await run(call, "write_file", path="a.txt", content=f"{word}\n")
+
+
 async def test_a_sub_agent_reads_a_file_before_it_overwrites_it(folder):
     child, root = call_of(folder, CHILD), call_of(folder, ROOT)
     await run(root, "read_file", path="a.txt")
