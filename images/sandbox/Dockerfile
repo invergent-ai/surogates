@@ -23,7 +23,7 @@
 # directly. 6.8.0-146 fails every kernel read of an uncached virtiofs file with EFAULT,
 # exec's first read among them, so no program in a chat's folder could run. Its .debs
 # come from Launchpad, which keeps every published version, and are checked by hash.
-ARG KERNEL=7.0.0-42-generic
+ARG KERNEL=7.0.0-43-generic
 # The guest's revision, in the text images/guest/inputs.sh hashes: raise it to publish a new
 # image with what its unpinned bases (python:3.12-slim, ubuntu:24.04, uv), apt, pip and npm
 # give today, since an image is published once for its key and never rebuilt otherwise.
@@ -193,24 +193,24 @@ ENV PATH="/home/sandbox/.npm-global/bin:/home/sandbox/.local/bin:/opt/venv/bin:$
 # guest-kernel rule. Each arch's .debs are in a stage of its own, kernel-<arch>, which only that
 # arch's build reads, and images/guest/inputs.sh keys each arch's image without the other's.
 FROM python:3.12-slim AS kernel-amd64
-ADD --checksum=sha256:92a0665c03d1906c40fdb3a373c95e28e33e0d2b56201f8a0af43ce132d2d72c \
-    https://launchpad.net/ubuntu/+archive/primary/+files/linux-image-7.0.0-42-generic_7.0.0-42.42~24.04.1_amd64.deb /tmp/image.deb
-ADD --checksum=sha256:c59cd39101398113ca84a813f43c21058f17a2fc0810ccb7f0fd15c804ffd3a0 \
-    https://launchpad.net/ubuntu/+archive/primary/+files/linux-modules-7.0.0-42-generic_7.0.0-42.42~24.04.1_amd64.deb /tmp/modules.deb
-ADD --checksum=sha256:f5f9e97c525b1a5b4ee7f05d0aa0d2893844780f14d8012da884759520f6d276 \
-    https://launchpad.net/ubuntu/+archive/primary/+files/linux-tools-7.0.0-42-generic_7.0.0-42.42~24.04.1_amd64.deb /tmp/tools.deb
-ADD --checksum=sha256:a8959643398b69b82cd164ae05041cc5211f32b00b834268c0650a968d2b12c6 \
-    https://launchpad.net/ubuntu/+archive/primary/+files/linux-hwe-7.0-tools-7.0.0-42_7.0.0-42.42~24.04.1_amd64.deb /tmp/hwe-tools.deb
+ADD --checksum=sha256:b38d981cab20da80b19cb84fe093a380551939cdfbdd57d85d0843e13ecd209f \
+    https://launchpad.net/ubuntu/+archive/primary/+files/linux-image-7.0.0-43-generic_7.0.0-43.43~24.04.1_amd64.deb /tmp/image.deb
+ADD --checksum=sha256:e4ee6578c9279c3886233da1b28907b5597ccc7fd3dd54fe633aa86c8e9c31ff \
+    https://launchpad.net/ubuntu/+archive/primary/+files/linux-modules-7.0.0-43-generic_7.0.0-43.43~24.04.1_amd64.deb /tmp/modules.deb
+ADD --checksum=sha256:7b9d0f12a17cd8fa449cdc541b0090f215fe2434ce44e4f73b1d9289cce1daff \
+    https://launchpad.net/ubuntu/+archive/primary/+files/linux-tools-7.0.0-43-generic_7.0.0-43.43~24.04.1_amd64.deb /tmp/tools.deb
+ADD --checksum=sha256:e73a4d5bbfb72d744a08a8a6beca7219e468a050144993063da1c216e7e69c1d \
+    https://launchpad.net/ubuntu/+archive/primary/+files/linux-hwe-7.0-tools-7.0.0-43_7.0.0-43.43~24.04.1_amd64.deb /tmp/hwe-tools.deb
 
 FROM python:3.12-slim AS kernel-arm64
-ADD --checksum=sha256:571f814b1cafdab56d16d759b04eb6f275efb130730f1ec1d91b1426efdf8752 \
-    https://launchpad.net/ubuntu/+archive/primary/+files/linux-image-7.0.0-42-generic_7.0.0-42.42~24.04.1_arm64.deb /tmp/image.deb
-ADD --checksum=sha256:a398dd687d613ae9c59af3859946b1b4a57b8d506c683b6bdb0ce1c88cfc8613 \
-    https://launchpad.net/ubuntu/+archive/primary/+files/linux-modules-7.0.0-42-generic_7.0.0-42.42~24.04.1_arm64.deb /tmp/modules.deb
-ADD --checksum=sha256:dd3954727791ba7de666adf603cf5aa45e156e505c825b8342c49a4f9491d104 \
-    https://launchpad.net/ubuntu/+archive/primary/+files/linux-tools-7.0.0-42-generic_7.0.0-42.42~24.04.1_arm64.deb /tmp/tools.deb
-ADD --checksum=sha256:52ca8d4687d02076a88fa35c6d23cb147a89fedf94427368d81e35c07dfa6dd7 \
-    https://launchpad.net/ubuntu/+archive/primary/+files/linux-hwe-7.0-tools-7.0.0-42_7.0.0-42.42~24.04.1_arm64.deb /tmp/hwe-tools.deb
+ADD --checksum=sha256:39c09aa20a59ee05c21dde607396bdac3e4140350b1ff2ebff3f7a4b61460bb9 \
+    https://launchpad.net/ubuntu/+archive/primary/+files/linux-image-7.0.0-43-generic_7.0.0-43.43~24.04.1_arm64.deb /tmp/image.deb
+ADD --checksum=sha256:52c14234db9f657074361d17535b41f9bef43fa69495eade8db028a3366f2f6c \
+    https://launchpad.net/ubuntu/+archive/primary/+files/linux-modules-7.0.0-43-generic_7.0.0-43.43~24.04.1_arm64.deb /tmp/modules.deb
+ADD --checksum=sha256:1cf3205eb98d68ee9980376f3a5db17c5d91add3c1719d3c6ff06ca462ff6543 \
+    https://launchpad.net/ubuntu/+archive/primary/+files/linux-tools-7.0.0-43-generic_7.0.0-43.43~24.04.1_arm64.deb /tmp/tools.deb
+ADD --checksum=sha256:a046e898a19bc916f37b89bc51a9832d75b8f82adabbadfa90c660ca8b06c2b0 \
+    https://launchpad.net/ubuntu/+archive/primary/+files/linux-hwe-7.0-tools-7.0.0-43_7.0.0-43.43~24.04.1_arm64.deb /tmp/hwe-tools.deb
 
 # On virtio the kernel boots without an initrd: kernel-config.sh fails the build on one that does not
 # build in what that needs, and what Hyper-V's initrd and vm/init load there.
