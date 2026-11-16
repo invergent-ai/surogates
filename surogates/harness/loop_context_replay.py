@@ -304,7 +304,10 @@ def _landing_lines(data: dict, kept: list, deleted: list, redoing: list) -> str:
     lines = f"\nDeleted: {_listed(deleted)}" if deleted else ""
     if redoing:
         # Not finished: the thread is redoing its change on the newer file, and reports again.
-        lines += f"\nBeing redone: {_listed(redoing)}"
+        lines += (
+            f"\nBeing redone: {_listed(redoing)}. The thread redoes its change on the newer version and reports "
+            "again: wait for that report, and end your turn if you have nothing else to do."
+        )
     if data.get("landing") in _NOT_LANDED:
         # A file no landing writes is not the thread's work that did not land: said apart, as a landing that landed says it.
         never = [f for f in kept if f.get("reason") in _NEVER_LANDS]
