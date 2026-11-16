@@ -25,7 +25,7 @@ class AgentDisabledError(RuntimeError):
     The session must not be processed; the worker requeues / fails it
     according to the dispatcher's policy.  Distinct from
     :class:`LookupError` (agent missing entirely) so the dispatcher
-    can pick its strategy (back off for disabled, drop for missing).
+    can pick its strategy (fail at once for disabled, drop for missing).
     """
 
 

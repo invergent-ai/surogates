@@ -326,3 +326,28 @@ async def test_deleted_session_is_dropped_not_retried() -> None:
     assert store.emitted == []
     assert store.statuses == []
     assert f"{_CRASH_LOOP_KEY_PREFIX}{session_id}" not in redis.data
+
+
+async def test_stopped_agent_fails_once_with_a_clear_reason() -> None:
+    """An admin-stopped agent can't run; retrying only reported a crash loop."""
+    from surogates.runtime.worker_resolver import AgentDisabledError
+
+    session_id = uuid4()
+    redis = FakeRedis()
+    store = FakeStore()
+    builds: list[int] = []
+
+    async def stopped_agent(_sid):
+        builds.append(1)
+        raise AgentDisabledError("agent a1 is administratively stopped")
+
+    orchestrator = _make_orchestrator(redis, store, stopped_agent)
+    await orchestrator._process(session_id)
+
+    assert len(builds) == 1
+    fails = _session_fails(store)
+    assert len(fails) == 1
+    assert fails[0]["reason"] == "agent_disabled"
+    assert fails[0]["retryable"] is False
+    assert (session_id, "failed") in store.statuses
+    assert f"{_CRASH_LOOP_KEY_PREFIX}{session_id}" not in redis.data
