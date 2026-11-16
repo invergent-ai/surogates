@@ -37,6 +37,7 @@ from surogates.runtime.pubsub import listen_forever
 from surogates.runtime.turn_slots import TurnSlots, current_turn
 from surogates.session.events import MESSAGE_TYPES, EventType
 from surogates.session.store import SessionNotFoundError
+from surogates.runtime.worker_resolver import AgentDisabledError
 
 if TYPE_CHECKING:
     from redis.asyncio import Redis
@@ -788,6 +789,30 @@ class Orchestrator:
             )
             self._rewake_pending.discard(session_id)
             await self._clear_crash_loop_state(session_id)
+            return
+        except AgentDisabledError as exc:
+            # An admin stopped the agent.  Retrying can't help, and the
+            # crash-loop breaker would report it as a crash with a
+            # traceback; say what happened instead, once.
+            logger.info("Session %s: %s; failing without retry", session_id, exc)
+            self._rewake_pending.discard(session_id)
+            try:
+                await self.session_store.emit_event(
+                    session_id,
+                    EventType.SESSION_FAIL,
+                    {
+                        "reason": "agent_disabled",
+                        "error": str(exc),
+                        "error_title": "Agent stopped",
+                        "error_detail": "This agent is stopped. Start it again to use it.",
+                        "retryable": False,
+                    },
+                )
+                await self.session_store.update_session_status(session_id, "failed")
+            except Exception:
+                logger.exception("Failed to emit SESSION_FAIL for session %s", session_id)
+            await self._clear_crash_loop_state(session_id)
+            await self._report_failure(session_id, code="agent_disabled", error=str(exc))
             return
         except Exception as exc:
             logger.exception(
