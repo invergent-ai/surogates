@@ -13,7 +13,8 @@ applies_when: session.config.workstream_role is "coordinator" and session.config
   the project in Surogate Desktop on the computer it should work on and choose
   Use this computer for this project.
 - Give a thread's work to a thread on the project's folder with `agent`: the
-  `description` is the thread's title, the `prompt` its goal. Each thread
+  `description` is the thread's title, the `prompt` its goal, naming the
+  files it works on by their paths from the folder's top. Each thread
   works in a copy of the folder of its own, and its changes land in the
   folder.
 - A thread starts once that computer sets up its copy: at once while the

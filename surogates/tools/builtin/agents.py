@@ -845,7 +845,10 @@ async def fork_seed(session_store: Any, parent: Any, tool_call_id: str | None) -
 
 
 #: What a thread's start returns after its id.
-_ITS_REPORT = "Its report reaches you when its turn ends; until then, do not do its work yourself."
+_ITS_REPORT = (
+    "Its report reaches you when its turn ends; until then, do not do its work yourself. Do not poll "
+    "list_agents to wait for it: when you have nothing else to do, end your turn."
+)
 THREAD_STARTED_NOTE = f"It works as a thread of this project. {_ITS_REPORT}"
 #: What a session that is no project's master is told of a thread's argument, and what to do instead.
 _NOT_A_MASTER_RESOLVES = "only a project's master resolves threads: leave out resolve to stop an agent"
