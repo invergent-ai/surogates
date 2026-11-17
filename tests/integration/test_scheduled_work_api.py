@@ -415,13 +415,14 @@ async def test_a_schedule_may_run_with_a_login_its_agent_may_load_through_sharin
         profiles = await _profiles(app, session_factory)
         state = {"cookies": [{"name": "SID", "domain": ".x.com"}], "origins": []}
 
+        async def share(p, shared_with):
+            await profiles.update(p.id, org_id, user_id=lender, service_account_id=None, shared_with_agents=shared_with)
+
         async def login(name, shared_with, *, saved=True):
             p = await profiles.create(org_id, user_id=lender, service_account_id=None, name=name)
             if saved:
                 await profiles.save_capture(p.id, org_id, user_id=lender, service_account_id=None, storage_state=state)
-            await profiles.set_shared_with_agents(
-                p.id, org_id, user_id=lender, service_account_id=None, agent_ids=shared_with,
-            )
+            await share(p, shared_with)
             return p
 
         lent = await login("Lent", [agent_id])
@@ -448,7 +449,7 @@ async def test_a_schedule_may_run_with_a_login_its_agent_may_load_through_sharin
         }
 
         # Unshared: the schedule says its runs will start logged out.
-        await profiles.set_shared_with_agents(lent.id, org_id, user_id=lender, service_account_id=None, agent_ids=[])
+        await share(lent, [])
         item = (await client.get(f"/v1/scheduled-work/{made.json()['id']}", headers=auth)).json()
         assert (item["runs_logged_in_as"]["owner"], item["runs_logged_in_as"]["missing"]) == ("shared", True)
     finally:

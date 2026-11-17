@@ -238,31 +238,24 @@ async def _items(
     if agent_sa is not None and any(row.id not in bound for row in rows):
         found = await profiles.used_in_channel(org_id, service_account_id=agent_sa, channel="scheduled")
     wanted = set(bound.values()) | ({found} if found is not None else set())
-    owners = await profiles.owners(org_id, list(wanted)) if profiles and wanted else {}
-    agent_login = owners.get(found) if found is not None else None
-    # A bound login neither the schedule's owner's nor the agent's runs only as one shared with the agent.
-    shared = {
-        pid for row in rows if (pid := bound.get(row.id)) in owners
-        and owners[pid][1:] != (row.user_id, row.service_account_id) and owners[pid][2] != agent_sa
-    }
-    loadable = await profiles.lent_to_agent(org_id, list(shared), agent_sa=agent_sa) if agent_sa and shared else set()
+    relations = await profiles.relations(org_id, list(wanted), agent_sa=agent_sa) if profiles and wanted else {}
+    agent_login = relations.get(found) if found is not None else None
     items = []
     for row in rows:
         login: RunsLoggedInAs | None = None
         pid = bound.get(row.id)
         if pid is not None:
-            owner = owners.get(pid)
+            rel = relations.get(pid)
+            # Neither the agent's, the owner's nor still lent: a share since withdrawn.
+            kind = rel.kind((row.user_id, row.service_account_id)) if rel else None
             login = RunsLoggedInAs(
                 profile_id=pid,
-                name=owner[0].name if owner else None,
-                owner=(
-                    "shared" if pid in shared
-                    else "agent" if owner and agent_sa is not None and owner[2] == agent_sa else "me"
-                ),
-                missing=owner is None or not owner[0].has_state or (pid in shared and pid not in loadable),
+                name=rel.row.name if rel else None,
+                owner=kind or ("shared" if rel else "me"),
+                missing=kind is None or not rel.row.has_state,
             )
         elif agent_login is not None:
-            login = RunsLoggedInAs(profile_id=agent_login[0].id, name=agent_login[0].name, owner="agent")
+            login = RunsLoggedInAs(profile_id=agent_login.row.id, name=agent_login.row.name, owner="agent")
         items.append(_item(row, login).model_copy(update={
             "owner_user_name": user_names.get(row.user_id),
             "owner_service_account_name": account_names.get(row.service_account_id),
@@ -310,19 +303,13 @@ async def _check_profile(
     profiles = _profile_store(request)
     if profiles is None:
         raise HTTPException(status_code=503, detail="Browser profiles unavailable.")
-    found = (await profiles.owners(tenant.org_id, [profile_id])).get(profile_id)
-    if found is not None:
-        _row, user_id, sa_id = found
-        if (user_id, sa_id) == (owner["user_id"], owner["service_account_id"]):
-            return
-        agent_sa = await _agent_principal_id(request, tenant.org_id, agent_id)
-        # A login shared with the agent, by the rule its runs load it under.
-        if agent_sa is not None and profile_id in await profiles.lent_to_agent(
-            tenant.org_id, [profile_id], agent_sa=agent_sa,
-        ):
-            return
-        if operator and sa_id is not None and sa_id == agent_sa:
-            return
+    agent_sa = await _agent_principal_id(request, tenant.org_id, agent_id)
+    rel = (await profiles.relations(tenant.org_id, [profile_id], agent_sa=agent_sa)).get(profile_id)
+    # A login shared with the agent counts by the rule its runs load it under.
+    if rel is not None and (
+        rel.owned_by((owner["user_id"], owner["service_account_id"])) or rel.lent or (operator and rel.of_agent)
+    ):
+        return
     raise _unprocessable(ValueError("That browser profile is not one this schedule may use."))
 
 

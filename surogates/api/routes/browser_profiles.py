@@ -16,7 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field, StringConstraints
 from sqlalchemy.exc import IntegrityError
 
-from surogates.api.routes._admin_auth import is_admin_principal
+from surogates.api.routes._admin_auth import require_admin_principal
 from surogates.api.routes.browser import reaches_its_browser
 from surogates.browser.base import BrowserCreditsExhaustedError
 from surogates.browser.client import KernelBrowserClient
@@ -104,12 +104,8 @@ def _principal(tenant: TenantContext) -> tuple[UUID | None, UUID | None]:
     )
 
 
-async def _owner_principal(
-    request: Request, tenant: TenantContext, owner: Owner,
-) -> tuple[UUID | None, UUID | None]:
-    """The principal that owns the profiles *owner* names for this caller."""
-    if owner == "me":
-        return _principal(tenant)
+async def _operators_agent(request: Request, tenant: TenantContext) -> str:
+    """The agent an operator's Studio chat names; nobody else names one."""
     if not await is_ops_chat_service_account(
         request.app.state.session_store, tenant.service_account_id,
     ):
@@ -119,6 +115,16 @@ async def _owner_principal(
     agent_id = await resolve_agent_id_soft(request)
     if not agent_id:
         raise HTTPException(status_code=400, detail="no agent_id in request")
+    return agent_id
+
+
+async def _owner_principal(
+    request: Request, tenant: TenantContext, owner: Owner,
+) -> tuple[UUID | None, UUID | None]:
+    """The principal that owns the profiles *owner* names for this caller."""
+    if owner == "me":
+        return _principal(tenant)
+    agent_id = await _operators_agent(request, tenant)
     principal = await find_agent_principal(request.app.state.session_factory, tenant.org_id, agent_id)
     if principal is None:
         raise HTTPException(
@@ -166,54 +172,34 @@ async def list_usable_profiles(
 
     An agent-bound API key asks for its agent; a person's Studio chat for the agent it names.
     """
-    agent_id = tenant.service_account_agent_id
-    if agent_id is None:
-        if not await is_ops_chat_service_account(request.app.state.session_store, tenant.service_account_id):
-            raise HTTPException(status_code=403, detail="Only an agent's key or its operators list its logins.")
-        agent_id = await resolve_agent_id_soft(request)
-        if not agent_id:
-            raise HTTPException(status_code=400, detail="no agent_id in request")
+    agent_id = tenant.service_account_agent_id or await _operators_agent(request, tenant)
     principal = await find_agent_principal(request.app.state.session_factory, tenant.org_id, agent_id)
     if principal is None:
         return []
-    rows = await _store(request).usable_by_agent(tenant.org_id, agent_sa=principal.id, agent_id=agent_id)
+    # Only these fields: an API key's holder is not told whom else a login is shared with.
+    fields = set(UsableProfileOut.model_fields) - {"kind"}
     return [
-        UsableProfileOut(
-            id=str(row.id), name=row.name, cookie_domains=row.cookie_domains, has_state=row.has_state,
-            kind=kind, last_used_at=row.last_used_at.isoformat() if row.last_used_at else None,
-        )
-        for row, kind in rows
+        UsableProfileOut(**BrowserProfileOut.of(row).model_dump(include=fields), kind=kind)
+        for row, kind in await _store(request).usable_by_agent(tenant.org_id, agent_sa=principal.id)
     ]
 
 
-class SharedProfileOut(BaseModel):
-    id: str
-    name: str
-    cookie_domains: list[str]
-    owner_user_id: str | None
-    owner_service_account_id: str | None
-    shared_with_agents: list[str]
-    last_used_at: str | None
-    last_used_by: str | None
+class SharedProfileOut(BrowserProfileOut):
+    owner_user_id: str | None = None
+    owner_service_account_id: str | None = None
 
 
 @router.get("/browser-profiles/shared")
 async def list_shared_profiles(
     request: Request,
-    tenant: TenantContext = Depends(get_current_tenant),
+    tenant: TenantContext = Depends(require_admin_principal),
 ) -> list[SharedProfileOut]:
     """For an org admin: every login shared with agents in the org, and who last used it. Never its state."""
-    if not is_admin_principal(tenant):
-        raise HTTPException(status_code=403, detail="This endpoint requires the 'admin' permission.")
     return [
-        SharedProfileOut(
-            id=str(row.id), name=row.name, cookie_domains=row.cookie_domains,
-            owner_user_id=str(user_id) if user_id else None,
-            owner_service_account_id=str(sa_id) if sa_id else None,
-            shared_with_agents=row.shared_with_agents,
-            last_used_at=row.last_used_at.isoformat() if row.last_used_at else None,
-            last_used_by=row.last_used_by,
-        )
+        SharedProfileOut.of(row).model_copy(update={
+            "owner_user_id": str(user_id) if user_id else None,
+            "owner_service_account_id": str(sa_id) if sa_id else None,
+        })
         for row, user_id, sa_id in await _store(request).shared_in_org(tenant.org_id)
     ]
 

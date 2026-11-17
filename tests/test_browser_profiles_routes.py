@@ -14,6 +14,8 @@ from surogates.tenant.context import TenantContext
 class _FakeStore:
     def __init__(self):
         self.rows = []
+        self.channels = {}
+        self.shared = {}
 
     async def list(self, org_id, *, user_id, service_account_id):
         return list(self.rows)
@@ -30,26 +32,30 @@ class _FakeStore:
         self.rows.append(row)
         return row
 
-    async def rename(self, profile_id, org_id, *, user_id, service_account_id, name):
-        for i, row in enumerate(self.rows):
-            if row.id == profile_id:
-                self.rows[i] = replace(row, name=name)
-                return True
-        return False
+    def _owns(self, profile_id, user_id, service_account_id):
+        return any(r.id == profile_id for r in self.rows)
+
+    def _lends(self, user_id, service_account_id):
+        return True
 
     async def update(self, profile_id, org_id, *, user_id, service_account_id,
                      name=None, use_in_channels=None, shared_with_agents=None):
-        owner = dict(user_id=user_id, service_account_id=service_account_id)
-        ok = True
+        """All or nothing, as the real store's one statement."""
+        if not self._owns(profile_id, user_id, service_account_id):
+            return False
+        if shared_with_agents is not None and not self._lends(user_id, service_account_id):
+            return False
+        if name is not None and any(r.name == name and r.id != profile_id for r in self.rows):
+            from sqlalchemy.exc import IntegrityError
+
+            raise IntegrityError("UPDATE", {}, Exception("unique violation"))
         if use_in_channels is not None:
-            ok = await self.set_use_in_channels(
-                profile_id, org_id, service_account_id=service_account_id, channels=use_in_channels,
-            )
-        if ok and shared_with_agents is not None:
-            ok = await self.set_shared_with_agents(profile_id, org_id, agent_ids=shared_with_agents, **owner)
-        if ok and name is not None:
-            ok = await self.rename(profile_id, org_id, name=name, **owner)
-        return ok
+            self.channels[profile_id] = sorted(set(use_in_channels))
+        if shared_with_agents is not None:
+            self.shared[profile_id] = sorted(set(shared_with_agents))
+        if name is not None:
+            self.rows = [replace(r, name=name) if r.id == profile_id else r for r in self.rows]
+        return True
 
     async def delete(self, profile_id, org_id, *, user_id, service_account_id):
         before = len(self.rows)
@@ -457,25 +463,28 @@ class _OwnerStore(_FakeStore):
 
     def __init__(self):
         super().__init__()
-        self.by_owner = {}
-        self.channels = {}
+        self.owner_of = {}
 
     async def list(self, org_id, *, user_id, service_account_id):
-        return list(self.by_owner.get(service_account_id or user_id, []))
+        return [r for r in self.rows if self.owner_of[r.id] == (service_account_id or user_id)]
+
+    @property
+    def by_owner(self):
+        owned = {}
+        for r in self.rows:
+            owned.setdefault(self.owner_of[r.id], []).append(r)
+        return owned
 
     async def create(self, org_id, *, user_id, service_account_id, name):
         row = BrowserProfileRow(
             uuid.uuid4(), name, "manual_vnc", [], datetime.now(timezone.utc), None, False,
         )
-        self.by_owner.setdefault(service_account_id or user_id, []).append(row)
+        self.owner_of[row.id] = service_account_id or user_id
         self.rows.append(row)
         return row
 
-    async def set_use_in_channels(self, profile_id, org_id, *, service_account_id, channels):
-        if not any(r.id == profile_id for r in self.by_owner.get(service_account_id, [])):
-            return False
-        self.channels[profile_id] = sorted(set(channels))
-        return True
+    def _owns(self, profile_id, user_id, service_account_id):
+        return self.owner_of.get(profile_id) == (service_account_id or user_id)
 
 
 def _agent_app(monkeypatch, store, *, operator=True, principal=True):
@@ -544,20 +553,15 @@ class _SharingStore(_OwnerStore):
 
     def __init__(self, agent_owned=()):
         super().__init__()
-        self.shared = {}
         self.agent_owned = set(agent_owned)
         self.usable = {}
         self.in_org = []
 
-    async def set_shared_with_agents(self, profile_id, org_id, *, user_id, service_account_id, agent_ids):
-        owner = service_account_id or user_id
-        if owner in self.agent_owned or not any(r.id == profile_id for r in self.by_owner.get(owner, [])):
-            return False
-        self.shared[profile_id] = sorted(set(agent_ids))
-        return True
+    def _lends(self, user_id, service_account_id):
+        return (service_account_id or user_id) not in self.agent_owned
 
-    async def usable_by_agent(self, org_id, *, agent_sa, agent_id):
-        return self.usable.get((agent_sa, agent_id), [])
+    async def usable_by_agent(self, org_id, *, agent_sa):
+        return self.usable.get(agent_sa, [])
 
     async def shared_in_org(self, org_id):
         return self.in_org
@@ -641,7 +645,7 @@ def test_an_agent_key_sees_its_own_and_shared_logins_and_nothing_of_another_agen
     store = _SharingStore()
     sa_1, sa_2 = uuid.uuid4(), uuid.uuid4()
     own, lent, others = _row("Own"), _row("Lent"), _row("Other's")
-    store.usable = {(sa_1, "agent-1"): [(own, "agent"), (lent, "shared")], (sa_2, "agent-2"): [(others, "agent")]}
+    store.usable = {sa_1: [(own, "agent"), (lent, "shared")], sa_2: [(others, "agent")]}
     client = _keyed_app(store, monkeypatch, bound_agent="agent-1", principals={"agent-1": sa_1, "agent-2": sa_2})
 
     usable = client.get("/browser-profiles/usable")
@@ -655,7 +659,7 @@ def test_an_agent_key_sees_its_own_and_shared_logins_and_nothing_of_another_agen
 def test_a_studio_chat_lists_what_the_agent_it_names_can_use(monkeypatch):
     store = _SharingStore()
     sa_2 = uuid.uuid4()
-    store.usable = {(sa_2, "agent-2"): [(_row("Other's"), "agent")]}
+    store.usable = {sa_2: [(_row("Other's"), "agent")]}
     client = _keyed_app(store, monkeypatch, operator=True, principals={"agent-2": sa_2})
     assert [p["name"] for p in client.get("/browser-profiles/usable?agent_id=agent-2").json()] == ["Other's"]
     assert client.get("/browser-profiles/usable").status_code == 400
@@ -687,16 +691,16 @@ def test_only_an_org_admin_lists_the_shared_logins():
     assert listed.status_code == 200
     [item] = listed.json()
     assert item == {
-        "id": str(row.id), "name": "Lent", "cookie_domains": ["x.com"], "owner_user_id": str(owner),
-        "owner_service_account_id": None, "shared_with_agents": ["agent-1"], "last_used_at": None,
-        "last_used_by": "agent-1",
+        **bp.BrowserProfileOut.of(row).model_dump(), "owner_user_id": str(owner), "owner_service_account_id": None,
     }
+    assert (item["shared_with_agents"], item["last_used_by"]) == (["agent-1"], "agent-1")
+    assert "storage_state_enc" not in item
 
 
 def test_a_studio_chat_names_the_agent_as_every_other_route_resolves_it(monkeypatch):
     store = _SharingStore()
     sa_2 = uuid.uuid4()
-    store.usable = {(sa_2, "agent-2"): [(_row("Other's"), "agent")]}
+    store.usable = {sa_2: [(_row("Other's"), "agent")]}
     client = _keyed_app(store, monkeypatch, operator=True, principals={"agent-2": sa_2})
 
     async def by_host(request):
@@ -706,16 +710,12 @@ def test_a_studio_chat_names_the_agent_as_every_other_route_resolves_it(monkeypa
     assert [p["name"] for p in client.get("/browser-profiles/usable").json()] == ["Other's"]
 
 
-def test_a_rename_to_a_taken_name_is_409_and_shares_nothing(monkeypatch):
-    from sqlalchemy.exc import IntegrityError
-
-    class _Store(_SharingStore):
-        async def update(self, profile_id, org_id, *, user_id, service_account_id, **changes):
-            raise IntegrityError("UPDATE", {}, Exception("unique violation"))
-
-    store = _Store()
+def test_a_rename_to_a_taken_name_is_409_and_shares_nothing():
+    store = _SharingStore()
     client = TestClient(_app(store))
     pid = client.post("/browser-profiles", json={"name": "Mine"}).json()["id"]
+    client.post("/browser-profiles", json={"name": "Taken"})
     refused = client.patch(f"/browser-profiles/{pid}", json={"name": "Taken", "shared_with_agents": ["agent-1"]})
     assert refused.status_code == 409
     assert store.shared == {}
+    assert [r.name for r in store.rows] == ["Mine", "Taken"]

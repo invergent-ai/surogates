@@ -124,11 +124,11 @@ async def test_an_agent_profile_is_used_only_on_the_channels_it_was_granted(sess
         storage_state={"cookies": [{"name": "auth", "domain": ".x.com"}], "origins": []},
     )
     for profile in (empty, x):
-        assert await store.set_use_in_channels(
-            profile.id, org, service_account_id=agent_sa, channels=["slack", "scheduled", "slack"],
+        assert await store.update(
+            profile.id, org, user_id=None, service_account_id=agent_sa, use_in_channels=["slack", "scheduled", "slack"],
         )
-    assert not await store.set_use_in_channels(
-        x.id, org, service_account_id=other_sa, channels=["web"],
+    assert not await store.update(
+        x.id, org, user_id=None, service_account_id=other_sa, use_in_channels=["web"],
     )
 
     assert await store.used_in_channel(org, service_account_id=agent_sa, channel="slack") == x.id
@@ -151,10 +151,15 @@ async def _agent(session_factory, org):
 _STATE = {"cookies": [{"name": "SID", "domain": ".x.com"}], "origins": []}
 
 
-async def _personal_login(store, session_factory, org):
+async def _personal_login(store, session_factory, org, *, shared_with=(), saved=True):
     person = (await issue_service_account_token(session_factory, org, name="ops-chat-me")).id
     p = await store.create(org, user_id=None, service_account_id=person, name="Mine")
-    await store.save_capture(p.id, org, user_id=None, service_account_id=person, storage_state=_STATE)
+    if saved:
+        await store.save_capture(p.id, org, user_id=None, service_account_id=person, storage_state=_STATE)
+    if shared_with:
+        assert await store.update(
+            p.id, org, user_id=None, service_account_id=person, shared_with_agents=list(shared_with),
+        )
     return p.id, person
 
 
@@ -177,12 +182,12 @@ async def test_a_shared_login_loads_for_a_listed_agent_only(session_factory):
     unlisted_sa, _ = await _agent(session_factory, org)
     stranger = (await issue_service_account_token(session_factory, org, name="other")).id
 
-    assert await store.set_shared_with_agents(
-        pid, org, user_id=None, service_account_id=person, agent_ids=[listed, listed],
+    assert await store.update(
+        pid, org, user_id=None, service_account_id=person, shared_with_agents=[listed, listed],
     )
     # Only the owner sets it.
-    assert not await store.set_shared_with_agents(
-        pid, org, user_id=None, service_account_id=stranger, agent_ids=["x"],
+    assert not await store.update(
+        pid, org, user_id=None, service_account_id=stranger, shared_with_agents=["x"],
     )
 
     assert await store.shared_state_for(pid, org, agent_sa=listed_sa) == _STATE
@@ -199,9 +204,8 @@ async def test_a_shared_login_loads_for_a_listed_agent_only(session_factory):
 async def test_a_shared_login_never_loads_for_an_agent_of_another_org(session_factory):
     store = _store(session_factory)
     org, elsewhere = await create_org(session_factory), await create_org(session_factory)
-    pid, person = await _personal_login(store, session_factory, org)
     foreign_sa, foreign = await _agent(session_factory, elsewhere)
-    await store.set_shared_with_agents(pid, org, user_id=None, service_account_id=person, agent_ids=[foreign])
+    pid, _ = await _personal_login(store, session_factory, org, shared_with=[foreign])
 
     assert await store.shared_state_for(pid, org, agent_sa=foreign_sa) is None
     assert await store.shared_state_for(pid, elsewhere, agent_sa=foreign_sa) is None
@@ -215,8 +219,8 @@ async def test_an_agents_own_login_cannot_be_shared(session_factory):
     p = await store.create(org, user_id=None, service_account_id=agent_sa, name="Agent's")
     await store.save_capture(p.id, org, user_id=None, service_account_id=agent_sa, storage_state=_STATE)
 
-    assert not await store.set_shared_with_agents(
-        p.id, org, user_id=None, service_account_id=agent_sa, agent_ids=[other],
+    assert not await store.update(
+        p.id, org, user_id=None, service_account_id=agent_sa, shared_with_agents=[other],
     )
     # Even written behind the store's back, it is never loaded for another agent.
     async with session_factory() as s:
@@ -232,9 +236,8 @@ async def test_a_revoked_agent_account_loses_the_share(session_factory):
 
     store = _store(session_factory)
     org = await create_org(session_factory)
-    pid, person = await _personal_login(store, session_factory, org)
     agent_sa, agent = await _agent(session_factory, org)
-    await store.set_shared_with_agents(pid, org, user_id=None, service_account_id=person, agent_ids=[agent])
+    pid, _ = await _personal_login(store, session_factory, org, shared_with=[agent])
 
     assert await ServiceAccountStore(session_factory).revoke(service_account_id=agent_sa, org_id=org)
     assert await store.shared_state_for(pid, org, agent_sa=agent_sa) is None
@@ -243,28 +246,35 @@ async def test_a_revoked_agent_account_loses_the_share(session_factory):
 async def test_an_agent_can_use_its_own_and_shared_logins_and_nothing_of_another_agent(session_factory):
     store = _store(session_factory)
     org = await create_org(session_factory)
-    pid, person = await _personal_login(store, session_factory, org)
     agent_sa, agent = await _agent(session_factory, org)
-    other_sa, other = await _agent(session_factory, org)
+    other_sa, _ = await _agent(session_factory, org)
+    pid, person = await _personal_login(store, session_factory, org, shared_with=[agent])
     own = await store.create(org, user_id=None, service_account_id=agent_sa, name="Own")
     await store.create(org, user_id=None, service_account_id=other_sa, name="Other's")
     unshared = await store.create(org, user_id=None, service_account_id=person, name="Unshared")
-    await store.set_shared_with_agents(pid, org, user_id=None, service_account_id=person, agent_ids=[agent])
 
-    usable = await store.usable_by_agent(org, agent_sa=agent_sa, agent_id=agent)
-    assert {(r.id, kind) for r, kind in usable} == {(own.id, "agent"), (pid, "shared")}
+    usable = await store.usable_by_agent(org, agent_sa=agent_sa)
+    assert {(r.id, kind, r.has_state) for r, kind in usable} == {(own.id, "agent", False), (pid, "shared", True)}
     assert unshared.id not in {r.id for r, _ in usable}
-    assert await store.usable_by_agent(org, agent_sa=other_sa, agent_id=other) != []
-    assert pid not in {r.id for r, _ in await store.usable_by_agent(org, agent_sa=other_sa, agent_id=other)}
+    assert await store.usable_by_agent(org, agent_sa=other_sa) != []
+    assert pid not in {r.id for r, _ in await store.usable_by_agent(org, agent_sa=other_sa)}
+
+
+async def test_a_login_shared_with_an_agent_but_never_saved_is_not_usable_by_it(session_factory):
+    store = _store(session_factory)
+    org = await create_org(session_factory)
+    agent_sa, agent = await _agent(session_factory, org)
+    pid, _ = await _personal_login(store, session_factory, org, shared_with=[agent], saved=False)
+
+    assert pid not in {r.id for r, _ in await store.usable_by_agent(org, agent_sa=agent_sa)}
 
 
 async def test_the_orgs_shared_logins_are_listed_with_their_owner(session_factory):
     store = _store(session_factory)
     org = await create_org(session_factory)
-    pid, person = await _personal_login(store, session_factory, org)
-    await store.create(org, user_id=None, service_account_id=person, name="Unshared")
     _, agent = await _agent(session_factory, org)
-    await store.set_shared_with_agents(pid, org, user_id=None, service_account_id=person, agent_ids=[agent])
+    pid, person = await _personal_login(store, session_factory, org, shared_with=[agent])
+    await store.create(org, user_id=None, service_account_id=person, name="Unshared")
 
     [(row, user_id, sa_id)] = await store.shared_in_org(org)
     assert (row.id, row.shared_with_agents, user_id, sa_id) == (pid, [agent], None, person)
@@ -273,9 +283,8 @@ async def test_the_orgs_shared_logins_are_listed_with_their_owner(session_factor
 async def test_a_shared_login_that_cannot_be_decrypted_is_not_recorded_as_used(session_factory):
     store = _store(session_factory)
     org = await create_org(session_factory)
-    pid, person = await _personal_login(store, session_factory, org)
     agent_sa, agent = await _agent(session_factory, org)
-    await store.set_shared_with_agents(pid, org, user_id=None, service_account_id=person, agent_ids=[agent])
+    pid, person = await _personal_login(store, session_factory, org, shared_with=[agent])
     async with session_factory() as s:
         async with s.begin():
             await s.execute(update(BrowserProfile).where(BrowserProfile.id == pid).values(storage_state_enc=b"junk"))

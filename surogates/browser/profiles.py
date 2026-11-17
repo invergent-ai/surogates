@@ -5,12 +5,14 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import Literal
 from uuid import UUID
 
 from cryptography.fernet import Fernet, InvalidToken
 from sqlalchemy import delete as sa_delete
-from sqlalchemy import any_, exists, func, or_, select, update
+from sqlalchemy import and_, any_, exists, false, func, or_, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy.orm import defer
 
 from surogates.db.models import BrowserProfile, ServiceAccount
 from surogates.tenant.auth.service_account import KIND_AGENT_PRINCIPAL
@@ -30,7 +32,8 @@ class BrowserProfileRow:
     last_used_by: str | None = None
 
 
-def _row(p: BrowserProfile) -> BrowserProfileRow:
+def _row(p: BrowserProfile, has_state: bool | None = None) -> BrowserProfileRow:
+    """*has_state* is given when the state itself was not loaded (a metadata query)."""
     return BrowserProfileRow(
         id=p.id,
         name=p.name,
@@ -38,7 +41,7 @@ def _row(p: BrowserProfile) -> BrowserProfileRow:
         cookie_domains=list(p.cookie_domains or []),
         created_at=p.created_at,
         last_used_at=p.last_used_at,
-        has_state=p.storage_state_enc is not None,
+        has_state=p.storage_state_enc is not None if has_state is None else has_state,
         use_in_channels=list(p.use_in_channels or []),
         shared_with_agents=list(p.shared_with_agents or []),
         last_used_by=p.last_used_by,
@@ -53,6 +56,44 @@ _NOT_AGENT_OWNED = or_(
         ServiceAccount.kind == KIND_AGENT_PRINCIPAL,
     ),
 )
+
+
+_HAS_STATE = BrowserProfile.storage_state_enc.is_not(None)
+
+
+def _metadata(*columns):
+    """Profiles without their encrypted state, which a listing never needs: each row
+    is ``(profile, has_state, *columns)``."""
+    return (
+        select(BrowserProfile, _HAS_STATE, *columns)
+        .options(defer(BrowserProfile.storage_state_enc))
+        .order_by(BrowserProfile.created_at.asc())
+    )
+
+
+@dataclass(slots=True)
+class ProfileRelation:
+    """A profile, its owner, and what it is to one agent."""
+
+    row: BrowserProfileRow
+    user_id: UUID | None
+    service_account_id: UUID | None
+    #: Owned by the agent's own principal.
+    of_agent: bool
+    #: A person's login the agent may load through sharing right now.
+    lent: bool
+
+    def kind(self, owner: tuple[UUID | None, UUID | None]) -> Literal["me", "agent", "shared"] | None:
+        """What it is to *owner* ``(user_id, service_account_id)`` running as the agent:
+        the agent's own login, *owner*'s, one lent to the agent, or none of these."""
+        if self.of_agent:
+            return "agent"
+        if self.owned_by(owner):
+            return "me"
+        return "shared" if self.lent else None
+
+    def owned_by(self, owner: tuple[UUID | None, UUID | None]) -> bool:
+        return (self.user_id, self.service_account_id) == owner
 
 
 def _cookie_domains(storage_state: dict) -> list[str]:
@@ -178,27 +219,6 @@ class BrowserProfileStore:
                 result = await s.execute(update(BrowserProfile).where(*where).values(**values))
         return result.rowcount > 0
 
-    async def rename(self, profile_id, org_id, *, user_id, service_account_id, name) -> bool:
-        return await self.update(
-            profile_id, org_id, user_id=user_id, service_account_id=service_account_id, name=name,
-        )
-
-    async def set_use_in_channels(
-        self, profile_id, org_id, *, service_account_id, channels: list[str]
-    ) -> bool:
-        return await self.update(
-            profile_id, org_id, user_id=None, service_account_id=service_account_id, use_in_channels=channels,
-        )
-
-    async def set_shared_with_agents(
-        self, profile_id, org_id, *, user_id, service_account_id, agent_ids: list[str]
-    ) -> bool:
-        """Lend the owner's login to *agent_ids*; False when it is not theirs or is an agent's."""
-        return await self.update(
-            profile_id, org_id, user_id=user_id, service_account_id=service_account_id,
-            shared_with_agents=agent_ids,
-        )
-
     @staticmethod
     def _lent_to(org_id, agent_sa: UUID):
         """``(agent id, conditions)``: a person's login with a state, in the org, lent to the
@@ -214,26 +234,13 @@ class BrowserProfileStore:
             )
             .scalar_subquery()
         )
-        return agent, (
-            BrowserProfile.org_id == org_id,
-            BrowserProfile.storage_state_enc.is_not(None),
-            _NOT_AGENT_OWNED,
-            agent.is_not(None),
-        )
+        return agent, (BrowserProfile.org_id == org_id, _HAS_STATE, _NOT_AGENT_OWNED, agent.is_not(None))
 
-    async def lent_to_agent(self, org_id, profile_ids: list[UUID], *, agent_sa: UUID) -> set[UUID]:
-        """Which of *profile_ids* the agent may load through sharing right now (no state read)."""
-        if not profile_ids:
-            return set()
-        _, lent = self._lent_to(org_id, agent_sa)
-        async with self._session_factory() as s:
-            return set(
-                (
-                    await s.execute(
-                        select(BrowserProfile.id).where(BrowserProfile.id.in_(profile_ids), *lent)
-                    )
-                ).scalars()
-            )
+    def _decrypt(self, raw: bytes) -> dict:
+        try:
+            return json.loads(self._fernet.decrypt(raw).decode("utf-8"))
+        except InvalidToken:
+            raise ValueError("failed to decrypt browser profile state")
 
     async def shared_state_for(self, profile_id, org_id, *, agent_sa: UUID) -> dict | None:
         """The state of a person's login lent to the agent whose live principal is *agent_sa*.
@@ -245,46 +252,35 @@ class BrowserProfileStore:
         """
         agent, lent = self._lent_to(org_id, agent_sa)
         async with self._session_factory() as s:
-            found = (
-                await s.execute(
-                    select(BrowserProfile.storage_state_enc, agent).where(BrowserProfile.id == profile_id, *lent)
-                )
-            ).one_or_none()
-        if found is None:
-            return None
-        raw, agent_id = found
-        try:
-            state = json.loads(self._fernet.decrypt(raw).decode("utf-8"))
-        except InvalidToken:
-            raise ValueError("failed to decrypt browser profile state")
-        async with self._session_factory() as s:
             async with s.begin():
+                found = (
+                    await s.execute(
+                        select(BrowserProfile.storage_state_enc, agent).where(BrowserProfile.id == profile_id, *lent)
+                    )
+                ).one_or_none()
+                if found is None:
+                    return None
+                state = self._decrypt(found[0])
                 await s.execute(
                     update(BrowserProfile)
                     .where(BrowserProfile.id == profile_id, BrowserProfile.org_id == org_id)
-                    .values(last_used_at=func.now(), last_used_by=agent_id)
+                    .values(last_used_at=func.now(), last_used_by=found[1])
                 )
         return state
 
-    async def usable_by_agent(
-        self, org_id, *, agent_sa: UUID, agent_id: str
-    ) -> list[tuple[BrowserProfileRow, str]]:
-        """The agent's own logins (``agent``) and those lent to it (``shared``), oldest first."""
+    async def usable_by_agent(self, org_id, *, agent_sa: UUID) -> list[tuple[BrowserProfileRow, str]]:
+        """The agent's own logins (``agent``) and those it may load through sharing (``shared``), oldest first."""
+        _, lent = self._lent_to(org_id, agent_sa)
         async with self._session_factory() as s:
             rows = (
                 await s.execute(
-                    select(BrowserProfile)
-                    .where(
+                    _metadata().where(
                         BrowserProfile.org_id == org_id,
-                        or_(
-                            BrowserProfile.service_account_id == agent_sa,
-                            (agent_id == any_(BrowserProfile.shared_with_agents)) & _NOT_AGENT_OWNED,
-                        ),
+                        or_(BrowserProfile.service_account_id == agent_sa, and_(*lent)),
                     )
-                    .order_by(BrowserProfile.created_at.asc())
                 )
-            ).scalars().all()
-        return [(_row(p), "agent" if p.service_account_id == agent_sa else "shared") for p in rows]
+            ).all()
+        return [(_row(p, has), "agent" if p.service_account_id == agent_sa else "shared") for p, has in rows]
 
     async def shared_in_org(
         self, org_id
@@ -293,15 +289,36 @@ class BrowserProfileStore:
         async with self._session_factory() as s:
             rows = (
                 await s.execute(
-                    select(BrowserProfile)
-                    .where(
+                    _metadata().where(
                         BrowserProfile.org_id == org_id,
                         func.cardinality(BrowserProfile.shared_with_agents) > 0,
                     )
-                    .order_by(BrowserProfile.created_at.asc())
                 )
-            ).scalars().all()
-        return [(_row(p), p.user_id, p.service_account_id) for p in rows]
+            ).all()
+        return [(_row(p, has), p.user_id, p.service_account_id) for p, has in rows]
+
+    async def relations(
+        self, org_id: UUID, profile_ids: list[UUID], *, agent_sa: UUID | None,
+    ) -> dict[UUID, ProfileRelation]:
+        """Each of *profile_ids* in the org, its owner and what it is to the agent whose
+        principal is *agent_sa*, in one query; for callers that decide who may bind a
+        profile and whose login a schedule runs with."""
+        if not profile_ids:
+            return {}
+        lent = and_(*self._lent_to(org_id, agent_sa)[1]) if agent_sa is not None else false()
+        async with self._session_factory() as s:
+            rows = (
+                await s.execute(
+                    _metadata(lent).where(BrowserProfile.org_id == org_id, BrowserProfile.id.in_(profile_ids))
+                )
+            ).all()
+        return {
+            p.id: ProfileRelation(
+                _row(p, has), p.user_id, p.service_account_id,
+                of_agent=agent_sa is not None and p.service_account_id == agent_sa, lent=bool(is_lent),
+            )
+            for p, has, is_lent in rows
+        }
 
     async def used_in_channel(
         self, org_id, *, service_account_id, channel: str
@@ -324,25 +341,6 @@ class BrowserProfileStore:
                     .limit(1)
                 )
             ).scalar_one_or_none()
-
-    async def owners(
-        self, org_id: UUID, profile_ids: list[UUID],
-    ) -> dict[UUID, tuple[BrowserProfileRow, UUID | None, UUID | None]]:
-        """Each of *profile_ids* in the org with its ``(user_id,
-        service_account_id)`` owner; for callers that check the owner
-        themselves (who may bind a profile, whose login a schedule uses)."""
-        if not profile_ids:
-            return {}
-        async with self._session_factory() as s:
-            rows = (
-                await s.execute(
-                    select(BrowserProfile).where(
-                        BrowserProfile.org_id == org_id,
-                        BrowserProfile.id.in_(profile_ids),
-                    )
-                )
-            ).scalars().all()
-        return {p.id: (_row(p), p.user_id, p.service_account_id) for p in rows}
 
     async def delete(
         self, profile_id, org_id, *, user_id, service_account_id
@@ -392,10 +390,7 @@ class BrowserProfileStore:
             if profile is None or profile.storage_state_enc is None:
                 return None
             raw = profile.storage_state_enc
-        try:
-            return json.loads(self._fernet.decrypt(raw).decode("utf-8"))
-        except InvalidToken:
-            raise ValueError("failed to decrypt browser profile state")
+        return self._decrypt(raw)
 
     async def touch_last_used(
         self, profile_id, org_id, *, user_id, service_account_id
