@@ -51,7 +51,8 @@ class RenameProfileRequest(BaseModel):
     name: str | None = None
     # Only an agent-owned profile: the channels whose sessions use it unbound.
     use_in_channels: list[str] | None = Field(default=None, max_length=32)
-    # Only a personal profile: the agents (ids) a run of which may name it.
+    # Only a personal profile: the agents (ids) any run of which may name it,
+    # whoever starts the run. Removing one applies from the next browser start.
     shared_with_agents: list[AgentId] | None = Field(default=None, max_length=64)
 
 
