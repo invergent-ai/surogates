@@ -268,3 +268,19 @@ async def test_the_orgs_shared_logins_are_listed_with_their_owner(session_factor
 
     [(row, user_id, sa_id)] = await store.shared_in_org(org)
     assert (row.id, row.shared_with_agents, user_id, sa_id) == (pid, [agent], None, person)
+
+
+async def test_a_shared_login_that_cannot_be_decrypted_is_not_recorded_as_used(session_factory):
+    store = _store(session_factory)
+    org = await create_org(session_factory)
+    pid, person = await _personal_login(store, session_factory, org)
+    agent_sa, agent = await _agent(session_factory, org)
+    await store.set_shared_with_agents(pid, org, user_id=None, service_account_id=person, agent_ids=[agent])
+    async with session_factory() as s:
+        async with s.begin():
+            await s.execute(update(BrowserProfile).where(BrowserProfile.id == pid).values(storage_state_enc=b"junk"))
+
+    with pytest.raises(ValueError):
+        await store.shared_state_for(pid, org, agent_sa=agent_sa)
+    [row] = await store.list(org, user_id=None, service_account_id=person)
+    assert (row.last_used_at, row.last_used_by) == (None, None)

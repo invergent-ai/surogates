@@ -196,11 +196,10 @@ class BrowserProfileStore:
                 )
         return result.rowcount > 0
 
-    async def shared_state_for(self, profile_id, org_id, *, agent_sa: UUID) -> dict | None:
-        """The state of a person's login lent to the agent whose live principal is *agent_sa*.
-
-        Records the use (``last_used_by`` = the agent) as it loads it.
-        """
+    @staticmethod
+    def _lent_to(org_id, agent_sa: UUID):
+        """``(agent id, conditions)``: a person's login with a state, in the org, lent to the
+        agent whose live principal is *agent_sa*.  The one rule every use of a share follows."""
         agent = (
             select(ServiceAccount.agent_id)
             .where(
@@ -212,28 +211,57 @@ class BrowserProfileStore:
             )
             .scalar_subquery()
         )
+        return agent, (
+            BrowserProfile.org_id == org_id,
+            BrowserProfile.storage_state_enc.is_not(None),
+            _NOT_AGENT_OWNED,
+            agent.is_not(None),
+        )
+
+    async def lent_to_agent(self, org_id, profile_ids: list[UUID], *, agent_sa: UUID) -> set[UUID]:
+        """Which of *profile_ids* the agent may load through sharing right now (no state read)."""
+        if not profile_ids:
+            return set()
+        _, lent = self._lent_to(org_id, agent_sa)
         async with self._session_factory() as s:
-            async with s.begin():
-                raw = (
+            return set(
+                (
                     await s.execute(
-                        update(BrowserProfile)
-                        .where(
-                            BrowserProfile.id == profile_id,
-                            BrowserProfile.org_id == org_id,
-                            BrowserProfile.storage_state_enc.is_not(None),
-                            _NOT_AGENT_OWNED,
-                            agent.is_not(None),
-                        )
-                        .values(last_used_at=func.now(), last_used_by=agent)
-                        .returning(BrowserProfile.storage_state_enc)
+                        select(BrowserProfile.id).where(BrowserProfile.id.in_(profile_ids), *lent)
                     )
-                ).scalar_one_or_none()
-        if raw is None:
+                ).scalars()
+            )
+
+    async def shared_state_for(self, profile_id, org_id, *, agent_sa: UUID) -> dict | None:
+        """The state of a person's login lent to the agent whose live principal is *agent_sa*.
+
+        Any run of that agent may load it, whoever started the run.  Unsharing
+        applies from the next browser start: one already running keeps its
+        cookies until it ends.  A load is recorded (``last_used_by`` = the agent)
+        once the state has been decrypted.
+        """
+        agent, lent = self._lent_to(org_id, agent_sa)
+        async with self._session_factory() as s:
+            found = (
+                await s.execute(
+                    select(BrowserProfile.storage_state_enc, agent).where(BrowserProfile.id == profile_id, *lent)
+                )
+            ).one_or_none()
+        if found is None:
             return None
+        raw, agent_id = found
         try:
-            return json.loads(self._fernet.decrypt(raw).decode("utf-8"))
+            state = json.loads(self._fernet.decrypt(raw).decode("utf-8"))
         except InvalidToken:
             raise ValueError("failed to decrypt browser profile state")
+        async with self._session_factory() as s:
+            async with s.begin():
+                await s.execute(
+                    update(BrowserProfile)
+                    .where(BrowserProfile.id == profile_id, BrowserProfile.org_id == org_id)
+                    .values(last_used_at=func.now(), last_used_by=agent_id)
+                )
+        return state
 
     async def usable_by_agent(
         self, org_id, *, agent_sa: UUID, agent_id: str
