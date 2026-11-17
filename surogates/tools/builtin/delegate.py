@@ -229,7 +229,9 @@ async def _run_single_delegation(
 
     child_config: dict[str, Any] = {
         "max_iterations": iterations,
-        "streaming": False,
+        # Streamed, so a long call is never a request silent for minutes (a gateway drops those), but writes no
+        # llm.delta events: nobody watches a sub-agent's text as it comes.
+        "live_deltas": False,
         "delegation_depth": child_depth,
         "delegation_role": role,
     }

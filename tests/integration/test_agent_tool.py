@@ -195,6 +195,31 @@ async def test_a_foreground_agent_returns_its_report_and_its_id(chats):
     assert await chats.store.get_events(chat, types=[EventType.AGENT_NOTIFICATION]) == []
 
 
+async def test_a_sub_agent_streams_its_calls_but_writes_no_deltas(chats, monkeypatch):
+    # A long report sent whole is a request silent for minutes, which a gateway drops (a 502 from a CDN).
+    calls = {}
+    model = loop_module.call_llm_with_retry
+
+    async def recorded(**kwargs):
+        calls[kwargs["session"].id] = (kwargs["streaming_enabled"], kwargs["delta_policy"].enabled)
+        return await model(**kwargs)
+
+    monkeypatch.setattr(loop_module, "call_llm_with_retry", recorded)
+    chat = await a_chat(chats)
+    chats.replies = [
+        calling("agent", "call_agent", description="Read the tracker", prompt="Report the open items.",
+                run_in_background=True),
+        _final_response("An agent is reading it."),
+    ]
+    await chats.says(chat, "What is open?")
+    await chats.wake(chat)
+    [child] = await children(chats, chat)
+    chats.replies = [_final_response("Open: A.")]
+    await chats.wake(child.id)
+    assert calls[child.id] == (True, False)
+    assert await chats.store.get_events(child.id, types=[EventType.LLM_DELTA]) == []
+
+
 async def test_a_fork_starts_from_its_parents_conversation_up_to_the_call(chats):
     chat = await a_chat(chats)
     await chats.says(chat, "The tracker is tracker.md; we agreed to skip archived items.")
