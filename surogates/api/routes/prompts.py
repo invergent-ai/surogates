@@ -95,8 +95,9 @@ class PromptRequest(BaseModel):
     idempotency_key: str | None = Field(default=None, max_length=200)
     metadata: dict | None = None
     skill_overrides: dict[str, SkillOverride] | None = None
-    # A saved browser login the session starts logged in with: the agent's own, or the
-    # caller's. Whose it is is checked when the browser starts; another's is never loaded.
+    # A saved browser login the session starts logged in with: the agent's own, the
+    # caller's, or a person's shared with the agent. Whose it is is checked when the
+    # browser starts; one that is none of these is never loaded.
     browser_profile_id: UUID | None = None
 
 
