@@ -294,15 +294,19 @@ async def _check_profile(
     request: Request, tenant: TenantContext, agent_id: str, profile_id: UUID,
     *, owner: dict[str, UUID | None], operator: bool,
 ) -> None:
-    """A schedule may run as its owner's own profile or, when an operator
-    sets it, the agent's.  Anyone else's login is never borrowed."""
+    """A schedule may run as its owner's own profile, a person's login shared
+    with the agent or, when an operator sets it, the agent's.  Anyone else's
+    login is never borrowed."""
     profiles = _profile_store(request)
     if profiles is None:
         raise HTTPException(status_code=503, detail="Browser profiles unavailable.")
     found = (await profiles.owners(tenant.org_id, [profile_id])).get(profile_id)
     if found is not None:
-        _row, user_id, sa_id = found
+        row, user_id, sa_id = found
         if (user_id, sa_id) == (owner["user_id"], owner["service_account_id"]):
+            return
+        # The store lends only a person's login, never an agent's own.
+        if agent_id in row.shared_with_agents:
             return
         if operator and sa_id is not None and sa_id == await _agent_principal_id(
             request, tenant.org_id, agent_id,

@@ -395,6 +395,30 @@ async def test_operator_creates_with_context_and_the_agents_login(app, client: A
     assert (await ScheduledSessionStore(session_factory).get(UUID(item["id"]))).ended_by == "ops_user:ana"
 
 
+async def test_a_schedule_may_run_with_a_login_shared_with_its_agent(app, client: AsyncClient, session_factory):
+    org_id, user_id, token = await _tenant(session_factory)
+    auth = {"Authorization": f"Bearer {token}"}
+    lender = await create_user(session_factory, org_id)
+    profiles = await _profiles(app, session_factory)
+    lent = await profiles.create(org_id, user_id=lender, service_account_id=None, name="Lent")
+    kept = await profiles.create(org_id, user_id=lender, service_account_id=None, name="Kept")
+    elsewhere = await profiles.create(org_id, user_id=lender, service_account_id=None, name="Elsewhere")
+    assert await profiles.set_shared_with_agents(
+        lent.id, org_id, user_id=lender, service_account_id=None, agent_ids=[_AGENT_ID],
+    )
+    assert await profiles.set_shared_with_agents(
+        elsewhere.id, org_id, user_id=lender, service_account_id=None, agent_ids=["another-agent"],
+    )
+
+    body = {"prompt": "check the inbox", "cadence": {"kind": "interval", "seconds": 3600}}
+    for refused in (kept, elsewhere):
+        made = await client.post("/v1/scheduled-work", headers=auth, json={**body, "browser_profile_id": str(refused.id)})
+        assert made.status_code == 422, made.text
+    made = await client.post("/v1/scheduled-work", headers=auth, json={**body, "browser_profile_id": str(lent.id)})
+    assert made.status_code == 201, made.text
+    assert made.json()["browser_profile_id"] == str(lent.id)
+
+
 async def test_cancel_stops_the_running_run_at_once(client: AsyncClient, session_factory, session_store):
     org_id, user_id, token = await _tenant(session_factory)
     auth = {"Authorization": f"Bearer {token}"}
