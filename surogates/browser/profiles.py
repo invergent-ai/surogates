@@ -143,58 +143,61 @@ class BrowserProfileStore:
             )
         ).scalar_one_or_none()
 
-    async def rename(
-        self, profile_id, org_id, *, user_id, service_account_id, name
+    async def update(
+        self,
+        profile_id,
+        org_id,
+        *,
+        user_id,
+        service_account_id,
+        name: str | None = None,
+        use_in_channels: list[str] | None = None,
+        shared_with_agents: list[str] | None = None,
     ) -> bool:
+        """Apply the given changes to the owner's profile in one statement: all or none.
+
+        False when it is not the owner's, or when sharing is asked of an agent's
+        own login (never lent).  A name already taken raises ``IntegrityError``.
+        """
         clause = self._principal_clause(user_id, service_account_id)
+        values: dict = {}
+        if name is not None:
+            values["name"] = name
+        if use_in_channels is not None:
+            values["use_in_channels"] = sorted(set(use_in_channels))
+        if shared_with_agents is not None:
+            values["shared_with_agents"] = sorted(set(shared_with_agents))
+        where = [BrowserProfile.id == profile_id, BrowserProfile.org_id == org_id, clause]
+        if shared_with_agents is not None:
+            where.append(_NOT_AGENT_OWNED)
         async with self._session_factory() as s:
             async with s.begin():
-                result = await s.execute(
-                    update(BrowserProfile)
-                    .where(
-                        BrowserProfile.id == profile_id,
-                        BrowserProfile.org_id == org_id,
-                        clause,
-                    )
-                    .values(name=name)
-                )
+                if not values:
+                    found = await s.execute(select(BrowserProfile.id).where(*where))
+                    return found.first() is not None
+                result = await s.execute(update(BrowserProfile).where(*where).values(**values))
         return result.rowcount > 0
+
+    async def rename(self, profile_id, org_id, *, user_id, service_account_id, name) -> bool:
+        return await self.update(
+            profile_id, org_id, user_id=user_id, service_account_id=service_account_id, name=name,
+        )
 
     async def set_use_in_channels(
         self, profile_id, org_id, *, service_account_id, channels: list[str]
     ) -> bool:
-        clause = self._principal_clause(None, service_account_id)
-        async with self._session_factory() as s:
-            async with s.begin():
-                result = await s.execute(
-                    update(BrowserProfile)
-                    .where(
-                        BrowserProfile.id == profile_id,
-                        BrowserProfile.org_id == org_id,
-                        clause,
-                    )
-                    .values(use_in_channels=sorted(set(channels)))
-                )
-        return result.rowcount > 0
+        return await self.update(
+            profile_id, org_id, user_id=None, service_account_id=service_account_id, use_in_channels=channels,
+        )
 
     async def set_shared_with_agents(
         self, profile_id, org_id, *, user_id, service_account_id, agent_ids: list[str]
     ) -> bool:
         """Lend the owner's login to *agent_ids*; False when it is not theirs or is an agent's."""
-        clause = self._principal_clause(user_id, service_account_id)
-        async with self._session_factory() as s:
-            async with s.begin():
-                result = await s.execute(
-                    update(BrowserProfile)
-                    .where(
-                        BrowserProfile.id == profile_id,
-                        BrowserProfile.org_id == org_id,
-                        clause,
-                        _NOT_AGENT_OWNED,
-                    )
-                    .values(shared_with_agents=sorted(set(agent_ids)))
-                )
-        return result.rowcount > 0
+        return await self.update(
+            profile_id, org_id, user_id=user_id, service_account_id=service_account_id,
+            shared_with_agents=agent_ids,
+        )
 
     @staticmethod
     def _lent_to(org_id, agent_sa: UUID):

@@ -248,7 +248,7 @@ async def update_profile(
     owner: Owner = Query("me"),
 ) -> dict[str, bool]:
     user_id, sa_id = await _owner_principal(request, tenant, owner)
-    store = _store(request)
+    channels = None
     if body.use_in_channels is not None:
         if owner != "agent":
             raise HTTPException(
@@ -258,28 +258,19 @@ async def update_profile(
         channels = [c.strip() for c in body.use_in_channels]
         if any(not c or len(c) > 32 or not c.replace("_", "").isalpha() for c in channels):
             raise HTTPException(status_code=422, detail="Channels are names like slack, whatsapp or scheduled.")
-        if not await store.set_use_in_channels(
-            profile_id, tenant.org_id, service_account_id=sa_id, channels=channels,
-        ):
-            raise HTTPException(status_code=404, detail="Profile not found")
-    if body.shared_with_agents is not None:
-        if owner != "me":
-            raise HTTPException(status_code=422, detail="An agent's own login is never shared with another agent.")
-        if not await store.set_shared_with_agents(
+    if body.shared_with_agents is not None and owner != "me":
+        raise HTTPException(status_code=422, detail="An agent's own login is never shared with another agent.")
+    # All the changes or none: a taken name leaves the sharing and channels as they were.
+    try:
+        ok = await _store(request).update(
             profile_id, tenant.org_id, user_id=user_id, service_account_id=sa_id,
-            agent_ids=body.shared_with_agents,
-        ):
-            raise HTTPException(status_code=404, detail="Profile not found")
-    if body.name is not None:
-        ok = await store.rename(
-            profile_id,
-            tenant.org_id,
-            user_id=user_id,
-            service_account_id=sa_id,
-            name=body.name.strip(),
+            name=body.name.strip() if body.name is not None else None,
+            use_in_channels=channels, shared_with_agents=body.shared_with_agents,
         )
-        if not ok:
-            raise HTTPException(status_code=404, detail="Profile not found")
+    except IntegrityError as exc:
+        raise HTTPException(status_code=409, detail="A profile with that name already exists.") from exc
+    if not ok:
+        raise HTTPException(status_code=404, detail="Profile not found")
     return {"renamed": body.name is not None, "updated": True}
 
 

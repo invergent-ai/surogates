@@ -284,3 +284,19 @@ async def test_a_shared_login_that_cannot_be_decrypted_is_not_recorded_as_used(s
         await store.shared_state_for(pid, org, agent_sa=agent_sa)
     [row] = await store.list(org, user_id=None, service_account_id=person)
     assert (row.last_used_at, row.last_used_by) == (None, None)
+
+
+async def test_an_update_whose_new_name_is_taken_changes_nothing(session_factory):
+    from sqlalchemy.exc import IntegrityError
+
+    store = _store(session_factory)
+    org = await create_org(session_factory)
+    pid, person = await _personal_login(store, session_factory, org)
+    await store.create(org, user_id=None, service_account_id=person, name="Taken")
+
+    with pytest.raises(IntegrityError):
+        await store.update(
+            pid, org, user_id=None, service_account_id=person, name="Taken", shared_with_agents=["agent-1"],
+        )
+    [row] = [r for r in await store.list(org, user_id=None, service_account_id=person) if r.id == pid]
+    assert (row.name, row.shared_with_agents) == ("Mine", [])

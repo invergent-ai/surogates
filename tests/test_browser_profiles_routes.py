@@ -37,6 +37,20 @@ class _FakeStore:
                 return True
         return False
 
+    async def update(self, profile_id, org_id, *, user_id, service_account_id,
+                     name=None, use_in_channels=None, shared_with_agents=None):
+        owner = dict(user_id=user_id, service_account_id=service_account_id)
+        ok = True
+        if use_in_channels is not None:
+            ok = await self.set_use_in_channels(
+                profile_id, org_id, service_account_id=service_account_id, channels=use_in_channels,
+            )
+        if ok and shared_with_agents is not None:
+            ok = await self.set_shared_with_agents(profile_id, org_id, agent_ids=shared_with_agents, **owner)
+        if ok and name is not None:
+            ok = await self.rename(profile_id, org_id, name=name, **owner)
+        return ok
+
     async def delete(self, profile_id, org_id, *, user_id, service_account_id):
         before = len(self.rows)
         self.rows = [r for r in self.rows if r.id != profile_id]
@@ -690,3 +704,18 @@ def test_a_studio_chat_names_the_agent_as_every_other_route_resolves_it(monkeypa
 
     monkeypatch.setattr(bp, "resolve_agent_id_soft", by_host)
     assert [p["name"] for p in client.get("/browser-profiles/usable").json()] == ["Other's"]
+
+
+def test_a_rename_to_a_taken_name_is_409_and_shares_nothing(monkeypatch):
+    from sqlalchemy.exc import IntegrityError
+
+    class _Store(_SharingStore):
+        async def update(self, profile_id, org_id, *, user_id, service_account_id, **changes):
+            raise IntegrityError("UPDATE", {}, Exception("unique violation"))
+
+    store = _Store()
+    client = TestClient(_app(store))
+    pid = client.post("/browser-profiles", json={"name": "Mine"}).json()["id"]
+    refused = client.patch(f"/browser-profiles/{pid}", json={"name": "Taken", "shared_with_agents": ["agent-1"]})
+    assert refused.status_code == 409
+    assert store.shared == {}
