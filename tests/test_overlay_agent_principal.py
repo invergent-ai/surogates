@@ -31,3 +31,9 @@ def test_the_agents_service_account_is_stamped_without_ssh_targets() -> None:
 def test_with_nothing_to_overlay_the_session_is_unchanged() -> None:
     original = Session(config={})
     assert harness(None)._overlay_repos(original) is original
+
+
+def test_an_agent_account_a_client_put_in_the_config_is_dropped_when_the_agent_has_none() -> None:
+    # Saved logins lent to an agent load under this id, so only the worker names it.
+    session = harness(None)._overlay_repos(Session(config={"agent_service_account_id": "forged"}))
+    assert session.config == {}

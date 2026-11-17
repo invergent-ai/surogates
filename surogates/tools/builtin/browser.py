@@ -116,9 +116,10 @@ async def _saved_login(
     """The login a session's browser starts with: (profile id, its state, why it could not be loaded).
 
     A profile bound to the session is its principal's own or, failing that,
-    the agent's.  With none bound, the agent's profile its operator granted
-    to this channel.  A personal profile never answers another principal, so
-    one person's routine cannot drive another's login.
+    the agent's, or else a person's login they shared with the agent.  With
+    none bound, the agent's profile its operator granted to this channel.  A
+    personal profile never answers another principal it was not shared with,
+    so one person's routine cannot drive another's login.
     """
     config = session_config or {}
     org_id = getattr(tenant, "org_id", None)
@@ -132,8 +133,9 @@ async def _saved_login(
         )
         if found is None:
             return None, None, None
-        profile_id, owners = str(found), [(None, agent_sa)]
+        profile_id, owners, lent = str(found), [(None, agent_sa)], False
     else:
+        lent = agent_sa is not None
         # The session's own principal: its service account (the ops-chat one in
         # Studio, the agent's on a managed channel), else its user.
         sa_id = getattr(tenant, "service_account_id", None) or _as_uuid(config.get("service_account_id"))
@@ -145,9 +147,15 @@ async def _saved_login(
         logger.warning("Session is bound to browser profile %s but the worker has no profile store", profile_id)
         return profile_id, None, "cannot be loaded here (saved logins are not configured on this worker)"
     pid = _as_uuid(profile_id)
-    for user_id, sa_id in owners if pid is not None and org_id is not None else []:
+    # Last, a named profile may be a person's login lent to the session's agent (an
+    # unnamed one never is): the agent is the worker-stamped account, not the caller.
+    candidates = [*owners, *([None] if lent else [])]
+    for owner in candidates if pid is not None and org_id is not None else []:
         try:
-            state = await store.storage_state_for(pid, org_id, user_id=user_id, service_account_id=sa_id)
+            if owner is None:  # records the agent's use as it loads
+                state = await store.shared_state_for(pid, org_id, agent_sa=agent_sa)
+            else:
+                state = await store.storage_state_for(pid, org_id, user_id=owner[0], service_account_id=owner[1])
         except ValueError:
             logger.warning("Could not decrypt browser profile %s", profile_id, exc_info=True)
             return profile_id, None, "could not be decrypted; it has to be saved again"
@@ -155,7 +163,8 @@ async def _saved_login(
             logger.warning("Could not load browser profile %s", profile_id, exc_info=True)
             return profile_id, None, "could not be loaded"
         if state is not None:
-            await store.touch_last_used(pid, org_id, user_id=user_id, service_account_id=sa_id)
+            if owner is not None:
+                await store.touch_last_used(pid, org_id, user_id=owner[0], service_account_id=owner[1])
             return profile_id, state, None
     logger.warning(
         "Browser profile %s is not one this session may use (org=%s owners=%s)", profile_id, org_id, owners,

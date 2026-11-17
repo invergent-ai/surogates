@@ -2047,9 +2047,13 @@ class AgentHarness(
         if (
             not self._coding_repos and not self._ssh_targets and not self._whatsapp_forms
             and not self._agent_service_account_id
+            and "agent_service_account_id" not in (session.config or {})
         ):
             return session
         config = dict(session.config or {})
+        # Only the worker names it: logins shared with an agent load under it, so
+        # one a client wrote into the session's config is never kept.
+        config.pop("agent_service_account_id", None)
         if self._agent_service_account_id:
             config["agent_service_account_id"] = self._agent_service_account_id
         if self._whatsapp_forms:
