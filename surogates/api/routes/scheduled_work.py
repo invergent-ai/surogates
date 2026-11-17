@@ -56,7 +56,8 @@ class Cadence(BaseModel):
 class RunsLoggedInAs(BaseModel):
     profile_id: UUID
     name: str | None = None
-    owner: Literal["me", "agent"]
+    #: ``shared``: a person's login shared with the agent; ``missing`` once the agent may no longer load it.
+    owner: Literal["me", "agent", "shared"]
     missing: bool = False
 
 
@@ -239,6 +240,12 @@ async def _items(
     wanted = set(bound.values()) | ({found} if found is not None else set())
     owners = await profiles.owners(org_id, list(wanted)) if profiles and wanted else {}
     agent_login = owners.get(found) if found is not None else None
+    # A bound login neither the schedule's owner's nor the agent's runs only as one shared with the agent.
+    shared = {
+        pid for row in rows if (pid := bound.get(row.id)) in owners
+        and owners[pid][1:] != (row.user_id, row.service_account_id) and owners[pid][2] != agent_sa
+    }
+    loadable = await profiles.lent_to_agent(org_id, list(shared), agent_sa=agent_sa) if agent_sa and shared else set()
     items = []
     for row in rows:
         login: RunsLoggedInAs | None = None
@@ -248,8 +255,11 @@ async def _items(
             login = RunsLoggedInAs(
                 profile_id=pid,
                 name=owner[0].name if owner else None,
-                owner="agent" if owner and agent_sa is not None and owner[2] == agent_sa else "me",
-                missing=owner is None or not owner[0].has_state,
+                owner=(
+                    "shared" if pid in shared
+                    else "agent" if owner and agent_sa is not None and owner[2] == agent_sa else "me"
+                ),
+                missing=owner is None or not owner[0].has_state or (pid in shared and pid not in loadable),
             )
         elif agent_login is not None:
             login = RunsLoggedInAs(profile_id=agent_login[0].id, name=agent_login[0].name, owner="agent")
@@ -302,15 +312,16 @@ async def _check_profile(
         raise HTTPException(status_code=503, detail="Browser profiles unavailable.")
     found = (await profiles.owners(tenant.org_id, [profile_id])).get(profile_id)
     if found is not None:
-        row, user_id, sa_id = found
+        _row, user_id, sa_id = found
         if (user_id, sa_id) == (owner["user_id"], owner["service_account_id"]):
             return
-        # The store lends only a person's login, never an agent's own.
-        if agent_id in row.shared_with_agents:
-            return
-        if operator and sa_id is not None and sa_id == await _agent_principal_id(
-            request, tenant.org_id, agent_id,
+        agent_sa = await _agent_principal_id(request, tenant.org_id, agent_id)
+        # A login shared with the agent, by the rule its runs load it under.
+        if agent_sa is not None and profile_id in await profiles.lent_to_agent(
+            tenant.org_id, [profile_id], agent_sa=agent_sa,
         ):
+            return
+        if operator and sa_id is not None and sa_id == agent_sa:
             return
     raise _unprocessable(ValueError("That browser profile is not one this schedule may use."))
 
