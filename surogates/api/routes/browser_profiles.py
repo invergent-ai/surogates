@@ -9,13 +9,14 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StringConstraints
 from sqlalchemy.exc import IntegrityError
 
+from surogates.api.routes._admin_auth import is_admin_principal
 from surogates.api.routes.browser import reaches_its_browser
 from surogates.browser.base import BrowserCreditsExhaustedError
 from surogates.browser.client import KernelBrowserClient
@@ -43,10 +44,15 @@ class CreateProfileRequest(BaseModel):
     name: str | None = None
 
 
+AgentId = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")]
+
+
 class RenameProfileRequest(BaseModel):
     name: str | None = None
     # Only an agent-owned profile: the channels whose sessions use it unbound.
     use_in_channels: list[str] | None = Field(default=None, max_length=32)
+    # Only a personal profile: the agents (ids) a run of which may name it.
+    shared_with_agents: list[AgentId] | None = Field(default=None, max_length=64)
 
 
 #: ``me``: the caller's own login.  ``agent``: one the agent owns, usable by
@@ -64,6 +70,8 @@ class BrowserProfileOut(BaseModel):
     has_state: bool
     owner: Owner = "me"
     use_in_channels: list[str] = []
+    shared_with_agents: list[str] = []
+    last_used_by: str | None = None
 
     @classmethod
     def of(cls, row: BrowserProfileRow, owner: Owner = "me") -> "BrowserProfileOut":
@@ -79,6 +87,8 @@ class BrowserProfileOut(BaseModel):
             has_state=row.has_state,
             owner=owner,
             use_in_channels=row.use_in_channels,
+            shared_with_agents=row.shared_with_agents,
+            last_used_by=row.last_used_by,
         )
 
 
@@ -136,6 +146,77 @@ async def list_profiles(
     return [BrowserProfileOut.of(r, owner) for r in rows]
 
 
+class UsableProfileOut(BaseModel):
+    id: str
+    name: str
+    cookie_domains: list[str]
+    has_state: bool
+    #: ``agent``: the agent's own login.  ``shared``: a person's, lent to the agent.
+    kind: Literal["agent", "shared"]
+    last_used_at: str | None
+
+
+@router.get("/browser-profiles/usable")
+async def list_usable_profiles(
+    request: Request,
+    tenant: TenantContext = Depends(get_current_tenant),
+) -> list[UsableProfileOut]:
+    """The logins a run of the agent may name: its own and those shared with it. Never their state.
+
+    An agent-bound API key asks for its agent; a person's Studio chat for the agent it names.
+    """
+    agent_id = tenant.service_account_agent_id
+    if agent_id is None:
+        if not await is_ops_chat_service_account(request.app.state.session_store, tenant.service_account_id):
+            raise HTTPException(status_code=403, detail="Only an agent's key or its operators list its logins.")
+        agent_id = request.query_params.get("agent_id")
+        if not agent_id:
+            raise HTTPException(status_code=400, detail="no agent_id in request")
+    principal = await find_agent_principal(request.app.state.session_factory, tenant.org_id, agent_id)
+    if principal is None:
+        return []
+    rows = await _store(request).usable_by_agent(tenant.org_id, agent_sa=principal.id, agent_id=agent_id)
+    return [
+        UsableProfileOut(
+            id=str(row.id), name=row.name, cookie_domains=row.cookie_domains, has_state=row.has_state,
+            kind=kind, last_used_at=row.last_used_at.isoformat() if row.last_used_at else None,
+        )
+        for row, kind in rows
+    ]
+
+
+class SharedProfileOut(BaseModel):
+    id: str
+    name: str
+    cookie_domains: list[str]
+    owner_user_id: str | None
+    owner_service_account_id: str | None
+    shared_with_agents: list[str]
+    last_used_at: str | None
+    last_used_by: str | None
+
+
+@router.get("/browser-profiles/shared")
+async def list_shared_profiles(
+    request: Request,
+    tenant: TenantContext = Depends(get_current_tenant),
+) -> list[SharedProfileOut]:
+    """For an org admin: every login shared with agents in the org, and who last used it. Never its state."""
+    if not is_admin_principal(tenant):
+        raise HTTPException(status_code=403, detail="This endpoint requires the 'admin' permission.")
+    return [
+        SharedProfileOut(
+            id=str(row.id), name=row.name, cookie_domains=row.cookie_domains,
+            owner_user_id=str(user_id) if user_id else None,
+            owner_service_account_id=str(sa_id) if sa_id else None,
+            shared_with_agents=row.shared_with_agents,
+            last_used_at=row.last_used_at.isoformat() if row.last_used_at else None,
+            last_used_by=row.last_used_by,
+        )
+        for row, user_id, sa_id in await _store(request).shared_in_org(tenant.org_id)
+    ]
+
+
 @router.post("/browser-profiles", status_code=201)
 async def create_profile(
     body: CreateProfileRequest,
@@ -179,6 +260,14 @@ async def update_profile(
             raise HTTPException(status_code=422, detail="Channels are names like slack, whatsapp or scheduled.")
         if not await store.set_use_in_channels(
             profile_id, tenant.org_id, service_account_id=sa_id, channels=channels,
+        ):
+            raise HTTPException(status_code=404, detail="Profile not found")
+    if body.shared_with_agents is not None:
+        if owner != "me":
+            raise HTTPException(status_code=422, detail="An agent's own login is never shared with another agent.")
+        if not await store.set_shared_with_agents(
+            profile_id, tenant.org_id, user_id=user_id, service_account_id=sa_id,
+            agent_ids=body.shared_with_agents,
         ):
             raise HTTPException(status_code=404, detail="Profile not found")
     if body.name is not None:

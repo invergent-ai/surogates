@@ -523,3 +523,157 @@ def test_a_personal_login_is_never_granted_to_channels(monkeypatch):
     refused = client.patch(f"/browser-profiles/{pid}", json={"use_in_channels": ["slack"]})
     assert refused.status_code == 422
     assert store.channels == {}
+
+
+class _SharingStore(_OwnerStore):
+    """Adds sharing, as the real store keeps it: only the owner sets it, never on an agent's own."""
+
+    def __init__(self, agent_owned=()):
+        super().__init__()
+        self.shared = {}
+        self.agent_owned = set(agent_owned)
+        self.usable = {}
+        self.in_org = []
+
+    async def set_shared_with_agents(self, profile_id, org_id, *, user_id, service_account_id, agent_ids):
+        owner = service_account_id or user_id
+        if owner in self.agent_owned or not any(r.id == profile_id for r in self.by_owner.get(owner, [])):
+            return False
+        self.shared[profile_id] = sorted(set(agent_ids))
+        return True
+
+    async def usable_by_agent(self, org_id, *, agent_sa, agent_id):
+        return self.usable.get((agent_sa, agent_id), [])
+
+    async def shared_in_org(self, org_id):
+        return self.in_org
+
+
+def test_an_owner_shares_their_login_with_chosen_agents(monkeypatch):
+    store = _SharingStore()
+    app, _ = _agent_app(monkeypatch, store)
+    client = TestClient(app)
+    pid = client.post("/browser-profiles", json={"name": "Mine"}).json()["id"]
+
+    shared = client.patch(f"/browser-profiles/{pid}", json={"shared_with_agents": ["agent-1", "sales_bot"]})
+    assert shared.status_code == 200
+    assert store.shared[uuid.UUID(pid)] == ["agent-1", "sales_bot"]
+    # Unsharing is the empty list.
+    assert client.patch(f"/browser-profiles/{pid}", json={"shared_with_agents": []}).status_code == 200
+    assert store.shared[uuid.UUID(pid)] == []
+
+
+def test_sharing_takes_only_agent_ids_and_at_most_64(monkeypatch):
+    store = _SharingStore()
+    app, _ = _agent_app(monkeypatch, store)
+    client = TestClient(app)
+    pid = client.post("/browser-profiles", json={"name": "Mine"}).json()["id"]
+    for bad in (["*"], ["a b"], [""], [f"a{i}" for i in range(65)]):
+        assert client.patch(f"/browser-profiles/{pid}", json={"shared_with_agents": bad}).status_code == 422
+    assert store.shared == {}
+
+
+def test_an_agents_own_login_is_never_shared(monkeypatch):
+    store = _SharingStore()
+    app, agent_sa = _agent_app(monkeypatch, store)
+    store.agent_owned.add(agent_sa)
+    client = TestClient(app)
+    pid = client.post("/browser-profiles?owner=agent&agent_id=agent-1", json={"name": "X"}).json()["id"]
+    refused = client.patch(
+        f"/browser-profiles/{pid}?owner=agent&agent_id=agent-1", json={"shared_with_agents": ["agent-2"]},
+    )
+    assert refused.status_code == 422
+    assert store.shared == {}
+
+
+def test_another_member_cannot_share_my_login():
+    store = _SharingStore()
+    org = uuid.uuid4()
+    mine = TestClient(_app(store, user_id=uuid.uuid4(), sa_id=None, org_id=org))
+    pid = mine.post("/browser-profiles", json={"name": "Mine"}).json()["id"]
+    theirs = TestClient(_app(store, user_id=uuid.uuid4(), sa_id=None, org_id=org))
+
+    refused = theirs.patch(f"/browser-profiles/{pid}", json={"shared_with_agents": ["agent-1"]})
+    assert refused.status_code == 404
+    assert store.shared == {}
+
+
+def _row(name):
+    return BrowserProfileRow(uuid.uuid4(), name, "manual_vnc", ["x.com"], datetime.now(timezone.utc), None, True)
+
+
+def _keyed_app(store, monkeypatch, *, bound_agent=None, operator=False, principals=None):
+    app = _app(store)
+    app.dependency_overrides[bp.get_current_tenant] = lambda: TenantContext(
+        org_id=uuid.uuid4(), user_id=None, org_config={}, user_preferences={}, permissions=frozenset(),
+        asset_root="/tmp", service_account_id=uuid.uuid4(), service_account_agent_id=bound_agent,
+    )
+    app.state.session_store = object()
+    app.state.session_factory = object()
+
+    async def is_operator(session_store, sa_id):
+        return operator
+
+    async def find(session_factory, org_id, agent_id):
+        sa = (principals or {}).get(agent_id)
+        return type("P", (), {"id": sa})() if sa else None
+
+    monkeypatch.setattr(bp, "is_ops_chat_service_account", is_operator)
+    monkeypatch.setattr(bp, "find_agent_principal", find)
+    return TestClient(app)
+
+
+def test_an_agent_key_sees_its_own_and_shared_logins_and_nothing_of_another_agent(monkeypatch):
+    store = _SharingStore()
+    sa_1, sa_2 = uuid.uuid4(), uuid.uuid4()
+    own, lent, others = _row("Own"), _row("Lent"), _row("Other's")
+    store.usable = {(sa_1, "agent-1"): [(own, "agent"), (lent, "shared")], (sa_2, "agent-2"): [(others, "agent")]}
+    client = _keyed_app(store, monkeypatch, bound_agent="agent-1", principals={"agent-1": sa_1, "agent-2": sa_2})
+
+    usable = client.get("/browser-profiles/usable")
+    assert usable.status_code == 200
+    assert [(p["name"], p["kind"]) for p in usable.json()] == [("Own", "agent"), ("Lent", "shared")]
+    assert set(usable.json()[0]) == {"id", "name", "cookie_domains", "has_state", "kind", "last_used_at"}
+    # A key bound to one agent never names another.
+    assert [p["name"] for p in client.get("/browser-profiles/usable?agent_id=agent-2").json()] == ["Own", "Lent"]
+
+
+def test_a_studio_chat_lists_what_the_agent_it_names_can_use(monkeypatch):
+    store = _SharingStore()
+    sa_2 = uuid.uuid4()
+    store.usable = {(sa_2, "agent-2"): [(_row("Other's"), "agent")]}
+    client = _keyed_app(store, monkeypatch, operator=True, principals={"agent-2": sa_2})
+    assert [p["name"] for p in client.get("/browser-profiles/usable?agent_id=agent-2").json()] == ["Other's"]
+    assert client.get("/browser-profiles/usable").status_code == 400
+
+
+def test_anyone_else_is_refused_the_usable_list(monkeypatch):
+    client = _keyed_app(_SharingStore(), monkeypatch)
+    assert client.get("/browser-profiles/usable?agent_id=agent-1").status_code == 403
+
+
+def test_only_an_org_admin_lists_the_shared_logins():
+    store = _SharingStore()
+    row = replace(_row("Lent"), shared_with_agents=["agent-1"], last_used_by="agent-1")
+    owner = uuid.uuid4()
+    store.in_org = [(row, owner, None)]
+
+    def client(permissions):
+        app = _app(store, user_id=uuid.uuid4(), sa_id=None)
+        tenant = app.dependency_overrides[bp.get_current_tenant]
+
+        async def _tenant():
+            return replace(await tenant(), service_account_id=None, permissions=frozenset(permissions))
+
+        app.dependency_overrides[bp.get_current_tenant] = _tenant
+        return TestClient(app)
+
+    assert client([]).get("/browser-profiles/shared").status_code == 403
+    listed = client(["admin"]).get("/browser-profiles/shared")
+    assert listed.status_code == 200
+    [item] = listed.json()
+    assert item == {
+        "id": str(row.id), "name": "Lent", "cookie_domains": ["x.com"], "owner_user_id": str(owner),
+        "owner_service_account_id": None, "shared_with_agents": ["agent-1"], "last_used_at": None,
+        "last_used_by": "agent-1",
+    }
