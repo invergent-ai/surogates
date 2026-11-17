@@ -1431,3 +1431,9 @@ DROP TABLE IF EXISTS research_runs;
 ALTER TABLE sessions DROP COLUMN IF EXISTS task_id;
 DROP TABLE IF EXISTS task_links;
 DROP TABLE IF EXISTS tasks;
+
+-- A person's browser login lent to chosen agents, and which agent last used it.
+ALTER TABLE browser_profiles
+    ADD COLUMN IF NOT EXISTS shared_with_agents text[] NOT NULL DEFAULT '{}'::text[];
+ALTER TABLE browser_profiles
+    ADD COLUMN IF NOT EXISTS last_used_by text;

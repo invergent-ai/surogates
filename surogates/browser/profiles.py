@@ -9,10 +9,11 @@ from uuid import UUID
 
 from cryptography.fernet import Fernet, InvalidToken
 from sqlalchemy import delete as sa_delete
-from sqlalchemy import any_, func, select, update
+from sqlalchemy import any_, exists, func, or_, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from surogates.db.models import BrowserProfile
+from surogates.db.models import BrowserProfile, ServiceAccount
+from surogates.tenant.auth.service_account import KIND_AGENT_PRINCIPAL
 
 
 @dataclass(slots=True)
@@ -25,6 +26,8 @@ class BrowserProfileRow:
     last_used_at: datetime | None
     has_state: bool
     use_in_channels: list[str] = field(default_factory=list)
+    shared_with_agents: list[str] = field(default_factory=list)
+    last_used_by: str | None = None
 
 
 def _row(p: BrowserProfile) -> BrowserProfileRow:
@@ -37,7 +40,19 @@ def _row(p: BrowserProfile) -> BrowserProfileRow:
         last_used_at=p.last_used_at,
         has_state=p.storage_state_enc is not None,
         use_in_channels=list(p.use_in_channels or []),
+        shared_with_agents=list(p.shared_with_agents or []),
+        last_used_by=p.last_used_by,
     )
+
+
+#: The profile is a person's, not an agent's: an agent's login is never lent.
+_NOT_AGENT_OWNED = or_(
+    BrowserProfile.service_account_id.is_(None),
+    ~exists().where(
+        ServiceAccount.id == BrowserProfile.service_account_id,
+        ServiceAccount.kind == KIND_AGENT_PRINCIPAL,
+    ),
+)
 
 
 def _cookie_domains(storage_state: dict) -> list[str]:
@@ -162,6 +177,101 @@ class BrowserProfileStore:
                 )
         return result.rowcount > 0
 
+    async def set_shared_with_agents(
+        self, profile_id, org_id, *, user_id, service_account_id, agent_ids: list[str]
+    ) -> bool:
+        """Lend the owner's login to *agent_ids*; False when it is not theirs or is an agent's."""
+        clause = self._principal_clause(user_id, service_account_id)
+        async with self._session_factory() as s:
+            async with s.begin():
+                result = await s.execute(
+                    update(BrowserProfile)
+                    .where(
+                        BrowserProfile.id == profile_id,
+                        BrowserProfile.org_id == org_id,
+                        clause,
+                        _NOT_AGENT_OWNED,
+                    )
+                    .values(shared_with_agents=sorted(set(agent_ids)))
+                )
+        return result.rowcount > 0
+
+    async def shared_state_for(self, profile_id, org_id, *, agent_sa: UUID) -> dict | None:
+        """The state of a person's login lent to the agent whose live principal is *agent_sa*.
+
+        Records the use (``last_used_by`` = the agent) as it loads it.
+        """
+        agent = (
+            select(ServiceAccount.agent_id)
+            .where(
+                ServiceAccount.id == agent_sa,
+                ServiceAccount.org_id == org_id,
+                ServiceAccount.kind == KIND_AGENT_PRINCIPAL,
+                ServiceAccount.revoked_at.is_(None),
+                ServiceAccount.agent_id == any_(BrowserProfile.shared_with_agents),
+            )
+            .scalar_subquery()
+        )
+        async with self._session_factory() as s:
+            async with s.begin():
+                raw = (
+                    await s.execute(
+                        update(BrowserProfile)
+                        .where(
+                            BrowserProfile.id == profile_id,
+                            BrowserProfile.org_id == org_id,
+                            BrowserProfile.storage_state_enc.is_not(None),
+                            _NOT_AGENT_OWNED,
+                            agent.is_not(None),
+                        )
+                        .values(last_used_at=func.now(), last_used_by=agent)
+                        .returning(BrowserProfile.storage_state_enc)
+                    )
+                ).scalar_one_or_none()
+        if raw is None:
+            return None
+        try:
+            return json.loads(self._fernet.decrypt(raw).decode("utf-8"))
+        except InvalidToken:
+            raise ValueError("failed to decrypt browser profile state")
+
+    async def usable_by_agent(
+        self, org_id, *, agent_sa: UUID, agent_id: str
+    ) -> list[tuple[BrowserProfileRow, str]]:
+        """The agent's own logins (``agent``) and those lent to it (``shared``), oldest first."""
+        async with self._session_factory() as s:
+            rows = (
+                await s.execute(
+                    select(BrowserProfile)
+                    .where(
+                        BrowserProfile.org_id == org_id,
+                        or_(
+                            BrowserProfile.service_account_id == agent_sa,
+                            (agent_id == any_(BrowserProfile.shared_with_agents)) & _NOT_AGENT_OWNED,
+                        ),
+                    )
+                    .order_by(BrowserProfile.created_at.asc())
+                )
+            ).scalars().all()
+        return [(_row(p), "agent" if p.service_account_id == agent_sa else "shared") for p in rows]
+
+    async def shared_in_org(
+        self, org_id
+    ) -> list[tuple[BrowserProfileRow, UUID | None, UUID | None]]:
+        """Every login lent to an agent in the org, with its ``(user_id, service_account_id)`` owner."""
+        async with self._session_factory() as s:
+            rows = (
+                await s.execute(
+                    select(BrowserProfile)
+                    .where(
+                        BrowserProfile.org_id == org_id,
+                        func.cardinality(BrowserProfile.shared_with_agents) > 0,
+                    )
+                    .order_by(BrowserProfile.created_at.asc())
+                )
+            ).scalars().all()
+        return [(_row(p), p.user_id, p.service_account_id) for p in rows]
+
     async def used_in_channel(
         self, org_id, *, service_account_id, channel: str
     ) -> UUID | None:
@@ -275,5 +385,5 @@ class BrowserProfileStore:
                     # (asyncpg raises "can't subtract offset-naive and
                     # offset-aware datetimes"). Use the server clock, matching
                     # ``created_at``'s ``server_default=func.now()``.
-                    .values(last_used_at=func.now())
+                    .values(last_used_at=func.now(), last_used_by=None)
                 )
