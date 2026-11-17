@@ -106,6 +106,18 @@ def _as_uuid(raw: Any) -> UUID | None:
         return None
 
 
+async def _load_state(profile_id: str, load: Any) -> tuple[dict | None, str | None]:
+    """Await a profile store's *load*: (its state, or why it could not be loaded)."""
+    try:
+        return await load, None
+    except ValueError:
+        logger.warning("Could not decrypt browser profile %s", profile_id, exc_info=True)
+        return None, "could not be decrypted; it has to be saved again"
+    except Exception:
+        logger.warning("Could not load browser profile %s", profile_id, exc_info=True)
+        return None, "could not be loaded"
+
+
 async def _saved_login(
     store: Any,
     *,
@@ -151,30 +163,21 @@ async def _saved_login(
     pid = _as_uuid(profile_id)
     loadable = pid is not None and org_id is not None
     for user_id, sa_id in owners if loadable else []:
-        try:
-            state = await store.storage_state_for(pid, org_id, user_id=user_id, service_account_id=sa_id)
-        except ValueError:
-            logger.warning("Could not decrypt browser profile %s", profile_id, exc_info=True)
-            return profile_id, None, "could not be decrypted; it has to be saved again"
-        except Exception:
-            logger.warning("Could not load browser profile %s", profile_id, exc_info=True)
-            return profile_id, None, "could not be loaded"
+        state, problem = await _load_state(
+            profile_id, store.storage_state_for(pid, org_id, user_id=user_id, service_account_id=sa_id),
+        )
+        if problem is not None:
+            return profile_id, None, problem
         if state is not None:
             await store.touch_last_used(pid, org_id, user_id=user_id, service_account_id=sa_id)
             return profile_id, state, None
     # A named profile may be a person's login shared with the session's agent (an
     # unnamed one never is): the agent is the worker-stamped account, not the caller.
+    # The store records the agent's use as it loads it.
     if named and agent_sa is not None and loadable:
-        try:
-            state = await store.shared_state_for(pid, org_id, agent_sa=agent_sa)
-        except ValueError:
-            logger.warning("Could not decrypt browser profile %s", profile_id, exc_info=True)
-            return profile_id, None, "could not be decrypted; it has to be saved again"
-        except Exception:
-            logger.warning("Could not load browser profile %s", profile_id, exc_info=True)
-            return profile_id, None, "could not be loaded"
-        if state is not None:
-            return profile_id, state, None
+        state, problem = await _load_state(profile_id, store.shared_state_for(pid, org_id, agent_sa=agent_sa))
+        if problem is not None or state is not None:
+            return profile_id, state, problem
     logger.warning(
         "Browser profile %s is not one this session may use (org=%s owners=%s)", profile_id, org_id, owners,
     )
