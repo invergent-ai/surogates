@@ -703,6 +703,9 @@ def apply_eval_isolation(
     A case's step or item contract, its scope and a person's case agent go
     too, on every channel: only the Keel link stamps them, and a client naming
     them would make its session a case's step, work item or case agent.
+   
+    So do ``service_account_id`` and ``agent_service_account_id``: saved
+    browser logins load under them, so only the server writes them.
     """
     resolved = dict(config)
     resolved.pop("memory_boundary", None)
@@ -722,6 +725,11 @@ def apply_eval_isolation(
     resolved.pop(CASE_ITEM_KEY, None)
     resolved.pop(CASE_SCOPE_KEY, None)
     resolved.pop(CASE_AGENT_KEY, None)
+    # The accounts a session's saved browser logins load under: provisioning
+    # stamps the caller's own, the worker the agent's. A client naming either
+    # would start logged in as someone else's login.
+    resolved.pop("service_account_id", None)
+    resolved.pop("agent_service_account_id", None)
     if channel not in (API_CHANNEL, BUY_PAGE_CHANNEL):
         return resolved
     if (

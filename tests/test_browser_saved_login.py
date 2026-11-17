@@ -204,3 +204,38 @@ async def test_a_lost_login_is_an_event_and_one_note_on_the_next_tool_result():
     assert events == [("browser.profile_unavailable", {"session_id": "s1", "profile_id": "p1", "reason": "was not found"})]
     assert "started logged out" in first["browser_profile"]
     assert "browser_profile" not in second
+
+
+async def _web_session_config(config: dict) -> tuple[dict, SimpleNamespace]:
+    """The config a web user's session is created with, through the real /sessions route."""
+    from fastapi import Response
+
+    from surogates.api.routes import sessions as sessions_route
+    from tests.test_eval_session_seeding import _route_fixtures
+
+    store, request, tenant, agent_runtime = _route_fixtures("/v1/sessions", service_account=False)
+    await sessions_route.create_session(
+        sessions_route.CreateSessionRequest(config=config), request, Response(), tenant, agent_runtime,
+    )
+    worker_tenant = SimpleNamespace(org_id=ORG, user_id=tenant.user_id, service_account_id=None)
+    return store.created[0]["config"], worker_tenant
+
+
+async def test_a_user_session_with_a_forged_service_account_never_loads_that_accounts_profile():
+    pid = uuid4()
+    store = _Store({(pid, OTHER_SA): STATE})
+    config, tenant = await _web_session_config(
+        {"service_account_id": str(OTHER_SA), "browser": {"profile_id": str(pid)}},
+    )
+    _, state, _ = await _saved_login(store, tenant=tenant, session_config=config, channel="web")
+    assert state is None and "service_account_id" not in config
+
+
+async def test_a_user_session_with_a_forged_agent_account_never_loads_a_login_shared_with_that_agent():
+    pid = uuid4()
+    store = _Store({(pid, OTHER_SA): STATE}, shared={(pid, AGENT_SA): STATE})
+    config, tenant = await _web_session_config(
+        {"agent_service_account_id": str(AGENT_SA), "browser": {"profile_id": str(pid)}},
+    )
+    _, state, _ = await _saved_login(store, tenant=tenant, session_config=config, channel="web")
+    assert state is None and "agent_service_account_id" not in config
