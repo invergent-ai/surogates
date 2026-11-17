@@ -677,3 +677,16 @@ def test_only_an_org_admin_lists_the_shared_logins():
         "owner_service_account_id": None, "shared_with_agents": ["agent-1"], "last_used_at": None,
         "last_used_by": "agent-1",
     }
+
+
+def test_a_studio_chat_names_the_agent_as_every_other_route_resolves_it(monkeypatch):
+    store = _SharingStore()
+    sa_2 = uuid.uuid4()
+    store.usable = {(sa_2, "agent-2"): [(_row("Other's"), "agent")]}
+    client = _keyed_app(store, monkeypatch, operator=True, principals={"agent-2": sa_2})
+
+    async def by_host(request):
+        return "agent-2"
+
+    monkeypatch.setattr(bp, "resolve_agent_id_soft", by_host)
+    assert [p["name"] for p in client.get("/browser-profiles/usable").json()] == ["Other's"]

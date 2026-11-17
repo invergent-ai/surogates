@@ -169,7 +169,7 @@ async def list_usable_profiles(
     if agent_id is None:
         if not await is_ops_chat_service_account(request.app.state.session_store, tenant.service_account_id):
             raise HTTPException(status_code=403, detail="Only an agent's key or its operators list its logins.")
-        agent_id = request.query_params.get("agent_id")
+        agent_id = await resolve_agent_id_soft(request)
         if not agent_id:
             raise HTTPException(status_code=400, detail="no agent_id in request")
     principal = await find_agent_principal(request.app.state.session_factory, tenant.org_id, agent_id)
