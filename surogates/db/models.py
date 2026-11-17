@@ -1732,10 +1732,19 @@ class BrowserProfile(Base):
     use_in_channels: Mapped[list[str]] = mapped_column(
         ARRAY(Text), nullable=False, server_default=text("'{}'::text[]")
     )
+    # A person's own login shared with these agents (ids): any run of one of
+    # them that names it may load it, whoever started the run. Unsharing applies
+    # from the next browser start; a live browser keeps its cookies until it
+    # ends. Never set on an agent-owned profile.
+    shared_with_agents: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, server_default=text("'{}'::text[]")
+    )
     created_at: Mapped[datetime] = mapped_column(
         nullable=False, server_default=func.now()
     )
     last_used_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
+    # The agent that last used it through sharing; NULL when its owner did.
+    last_used_by: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
 
 # ---------------------------------------------------------------------------

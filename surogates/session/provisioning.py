@@ -192,6 +192,10 @@ async def create_agent_session(
         # The computer's name rides with it, so every list of chats names the computer.
         merged_config["execution"] = {"kind": "device", "device_id": str(device_id), "device_name": device_name}
         merged_config["workspace_path"] = folder
+    # The accounts a session's saved browser logins load under: the caller's own,
+    # stamped here, and the agent's, stamped by the worker.  Never from *config*.
+    merged_config.pop("service_account_id", None)
+    merged_config.pop("agent_service_account_id", None)
     if service_account_id is not None:
         merged_config["service_account_id"] = str(service_account_id)
 
@@ -323,6 +327,8 @@ async def create_child_session(
         if service_account_id is not None
         else parent.service_account_id
     )
+    merged_config.pop("service_account_id", None)
+    merged_config.pop("agent_service_account_id", None)
     if effective_service_account_id is not None:
         merged_config["service_account_id"] = str(effective_service_account_id)
 

@@ -395,6 +395,67 @@ async def test_operator_creates_with_context_and_the_agents_login(app, client: A
     assert (await ScheduledSessionStore(session_factory).get(UUID(item["id"]))).ended_by == "ops_user:ana"
 
 
+async def test_a_schedule_may_run_with_a_login_its_agent_may_load_through_sharing(
+    app, client: AsyncClient, session_factory,
+):
+    from surogates.runtime import agent_runtime_context_dep, build_agent_runtime_context
+    from surogates.tenant.auth.service_account import KIND_AGENT_PRINCIPAL, ServiceAccountStore
+
+    # An agent of its own: an agent's principal is unique across orgs.
+    agent_id = f"sharing-agent-{uuid.uuid4().hex[:8]}"
+    pinned = app.dependency_overrides[agent_runtime_context_dep]
+    app.dependency_overrides[agent_runtime_context_dep] = lambda: build_agent_runtime_context({
+        "agent_id": agent_id, "org_id": "00000000-0000-0000-0000-000000000000",
+        "project_id": "test-project", "enabled": True, "version": 1, "storage_key_prefix": "",
+    })
+    try:
+        org_id, user_id, token = await _tenant(session_factory)
+        auth = {"Authorization": f"Bearer {token}"}
+        lender = await create_user(session_factory, org_id)
+        profiles = await _profiles(app, session_factory)
+        state = {"cookies": [{"name": "SID", "domain": ".x.com"}], "origins": []}
+
+        async def share(p, shared_with):
+            await profiles.update(p.id, org_id, user_id=lender, service_account_id=None, shared_with_agents=shared_with)
+
+        async def login(name, shared_with, *, saved=True):
+            p = await profiles.create(org_id, user_id=lender, service_account_id=None, name=name)
+            if saved:
+                await profiles.save_capture(p.id, org_id, user_id=lender, service_account_id=None, storage_state=state)
+            await share(p, shared_with)
+            return p
+
+        lent = await login("Lent", [agent_id])
+        refused = [
+            await login("Kept", []),
+            await login("Elsewhere", ["another-agent"]),
+            await login("Never saved", [agent_id], saved=False),
+        ]
+        body = {"prompt": "check the inbox", "cadence": {"kind": "interval", "seconds": 3600}}
+        # The agent has no live identity of its own yet: nothing could load a share for it.
+        made = await client.post("/v1/scheduled-work", headers=auth, json={**body, "browser_profile_id": str(lent.id)})
+        assert made.status_code == 422, made.text
+        await ServiceAccountStore(session_factory).create(
+            org_id=org_id, name=agent_id, agent_id=agent_id, kind=KIND_AGENT_PRINCIPAL,
+        )
+        for p in refused:
+            made = await client.post("/v1/scheduled-work", headers=auth, json={**body, "browser_profile_id": str(p.id)})
+            assert made.status_code == 422, (p.name, made.text)
+
+        made = await client.post("/v1/scheduled-work", headers=auth, json={**body, "browser_profile_id": str(lent.id)})
+        assert made.status_code == 201, made.text
+        assert made.json()["runs_logged_in_as"] == {
+            "profile_id": str(lent.id), "name": "Lent", "owner": "shared", "missing": False,
+        }
+
+        # Unshared: the schedule says its runs will start logged out.
+        await share(lent, [])
+        item = (await client.get(f"/v1/scheduled-work/{made.json()['id']}", headers=auth)).json()
+        assert (item["runs_logged_in_as"]["owner"], item["runs_logged_in_as"]["missing"]) == ("shared", True)
+    finally:
+        app.dependency_overrides[agent_runtime_context_dep] = pinned
+
+
 async def test_cancel_stops_the_running_run_at_once(client: AsyncClient, session_factory, session_store):
     org_id, user_id, token = await _tenant(session_factory)
     auth = {"Authorization": f"Bearer {token}"}

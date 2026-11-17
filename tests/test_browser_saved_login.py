@@ -26,10 +26,12 @@ STATE = {"cookies": [{"name": "SID"}], "origins": []}
 class _Store:
     """Profiles keyed by (id, owner service account); one may fail to decrypt."""
 
-    def __init__(self, profiles, *, undecryptable=frozenset(), granted=None):
+    def __init__(self, profiles, *, undecryptable=frozenset(), granted=None, shared=None):
         self.profiles = profiles
         self.undecryptable = undecryptable
         self.granted = granted or {}
+        # (profile id, agent service account) -> state: a person's login lent to that agent.
+        self.shared = shared or {}
         self.touched = []
 
     async def storage_state_for(self, profile_id, org_id, *, user_id, service_account_id):
@@ -42,6 +44,12 @@ class _Store:
 
     async def used_in_channel(self, org_id, *, service_account_id, channel):
         return self.granted.get((service_account_id, channel))
+
+    async def shared_state_for(self, profile_id, org_id, *, agent_sa):
+        state = self.shared.get((profile_id, agent_sa))
+        if state is not None:
+            self.touched.append((profile_id, f"shared:{agent_sa}"))
+        return state
 
 
 def _tenant(sa=PERSON_SA):
@@ -112,6 +120,48 @@ async def test_a_helper_browses_with_the_login_granted_to_its_parents_channel():
         ) == (str(pid), STATE, None)
 
 
+async def test_a_named_shared_profile_loads_for_the_agent_it_was_shared_with():
+    pid = uuid4()
+    store = _Store({(pid, OTHER_SA): STATE}, shared={(pid, AGENT_SA): STATE})
+    assert await _saved_login(store, tenant=_tenant(), session_config=_config(pid), channel="api") == (
+        str(pid), STATE, None,
+    )
+    assert store.touched == [(pid, f"shared:{AGENT_SA}")]
+
+
+async def test_a_personal_profile_not_shared_never_loads_for_an_agent():
+    pid = uuid4()
+    store = _Store({(pid, OTHER_SA): STATE}, shared={(pid, uuid4()): STATE})
+    _, state, problem = await _saved_login(store, tenant=_tenant(), session_config=_config(pid), channel="api")
+    assert state is None and "someone else" in problem
+
+
+async def test_a_login_unshared_stops_loading_at_the_next_run():
+    pid = uuid4()
+    store = _Store({(pid, OTHER_SA): STATE}, shared={(pid, AGENT_SA): STATE})
+    assert (await _saved_login(store, tenant=_tenant(), session_config=_config(pid), channel="api"))[1] == STATE
+    store.shared.clear()
+    assert (await _saved_login(store, tenant=_tenant(), session_config=_config(pid), channel="api"))[1] is None
+
+
+async def test_a_shared_profile_is_never_used_unnamed_on_a_channel():
+    pid = uuid4()
+    store = _Store({(pid, OTHER_SA): STATE}, shared={(pid, AGENT_SA): STATE})
+    assert await _saved_login(store, tenant=_tenant(AGENT_SA), session_config=_config(), channel="slack") == (
+        None, None, None,
+    )
+
+
+async def test_a_shared_profile_needs_the_agent_account_of_the_session_config():
+    pid = uuid4()
+    store = _Store({(pid, OTHER_SA): STATE}, shared={(pid, AGENT_SA): STATE})
+    # The tenant is the agent's account, but the worker stamped no agent on the session.
+    _, state, _ = await _saved_login(
+        store, tenant=_tenant(AGENT_SA), session_config=_config(pid, agent_sa=None), channel="api",
+    )
+    assert state is None
+
+
 async def test_a_bound_profile_without_a_store_is_reported():
     pid = uuid4()
     _, state, problem = await _saved_login(None, tenant=_tenant(), session_config=_config(pid), channel="studio")
@@ -154,3 +204,38 @@ async def test_a_lost_login_is_an_event_and_one_note_on_the_next_tool_result():
     assert events == [("browser.profile_unavailable", {"session_id": "s1", "profile_id": "p1", "reason": "was not found"})]
     assert "started logged out" in first["browser_profile"]
     assert "browser_profile" not in second
+
+
+async def _web_session_config(config: dict) -> tuple[dict, SimpleNamespace]:
+    """The config a web user's session is created with, through the real /sessions route."""
+    from fastapi import Response
+
+    from surogates.api.routes import sessions as sessions_route
+    from tests.test_eval_session_seeding import _route_fixtures
+
+    store, request, tenant, agent_runtime = _route_fixtures("/v1/sessions", service_account=False)
+    await sessions_route.create_session(
+        sessions_route.CreateSessionRequest(config=config), request, Response(), tenant, agent_runtime,
+    )
+    worker_tenant = SimpleNamespace(org_id=ORG, user_id=tenant.user_id, service_account_id=None)
+    return store.created[0]["config"], worker_tenant
+
+
+async def test_a_user_session_with_a_forged_service_account_never_loads_that_accounts_profile():
+    pid = uuid4()
+    store = _Store({(pid, OTHER_SA): STATE})
+    config, tenant = await _web_session_config(
+        {"service_account_id": str(OTHER_SA), "browser": {"profile_id": str(pid)}},
+    )
+    _, state, _ = await _saved_login(store, tenant=tenant, session_config=config, channel="web")
+    assert state is None and "service_account_id" not in config
+
+
+async def test_a_user_session_with_a_forged_agent_account_never_loads_a_login_shared_with_that_agent():
+    pid = uuid4()
+    store = _Store({(pid, OTHER_SA): STATE}, shared={(pid, AGENT_SA): STATE})
+    config, tenant = await _web_session_config(
+        {"agent_service_account_id": str(AGENT_SA), "browser": {"profile_id": str(pid)}},
+    )
+    _, state, _ = await _saved_login(store, tenant=tenant, session_config=config, channel="web")
+    assert state is None and "agent_service_account_id" not in config

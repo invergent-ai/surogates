@@ -106,6 +106,18 @@ def _as_uuid(raw: Any) -> UUID | None:
         return None
 
 
+async def _load_state(profile_id: str, load: Any) -> tuple[dict | None, str | None]:
+    """Await a profile store's *load*: (its state, or why it could not be loaded)."""
+    try:
+        return await load, None
+    except ValueError:
+        logger.warning("Could not decrypt browser profile %s", profile_id, exc_info=True)
+        return None, "could not be decrypted; it has to be saved again"
+    except Exception:
+        logger.warning("Could not load browser profile %s", profile_id, exc_info=True)
+        return None, "could not be loaded"
+
+
 async def _saved_login(
     store: Any,
     *,
@@ -116,14 +128,18 @@ async def _saved_login(
     """The login a session's browser starts with: (profile id, its state, why it could not be loaded).
 
     A profile bound to the session is its principal's own or, failing that,
-    the agent's.  With none bound, the agent's profile its operator granted
-    to this channel.  A personal profile never answers another principal, so
-    one person's routine cannot drive another's login.
+    the agent's, or else a person's login they shared with the agent (any run
+    of that agent may load it, whoever started the run; unsharing applies from
+    the next browser start).  With none bound, the agent's profile its operator
+    granted to this channel.  A personal profile never answers another
+    principal it was not shared with, so one person's routine cannot drive
+    another's login.
     """
     config = session_config or {}
     org_id = getattr(tenant, "org_id", None)
     agent_sa = _as_uuid(config.get("agent_service_account_id"))
     profile_id = (config.get("browser") or {}).get("profile_id")
+    named = bool(profile_id)
     if not profile_id:
         if store is None or agent_sa is None or org_id is None or not channel:
             return None, None, None
@@ -145,18 +161,23 @@ async def _saved_login(
         logger.warning("Session is bound to browser profile %s but the worker has no profile store", profile_id)
         return profile_id, None, "cannot be loaded here (saved logins are not configured on this worker)"
     pid = _as_uuid(profile_id)
-    for user_id, sa_id in owners if pid is not None and org_id is not None else []:
-        try:
-            state = await store.storage_state_for(pid, org_id, user_id=user_id, service_account_id=sa_id)
-        except ValueError:
-            logger.warning("Could not decrypt browser profile %s", profile_id, exc_info=True)
-            return profile_id, None, "could not be decrypted; it has to be saved again"
-        except Exception:
-            logger.warning("Could not load browser profile %s", profile_id, exc_info=True)
-            return profile_id, None, "could not be loaded"
+    loadable = pid is not None and org_id is not None
+    for user_id, sa_id in owners if loadable else []:
+        state, problem = await _load_state(
+            profile_id, store.storage_state_for(pid, org_id, user_id=user_id, service_account_id=sa_id),
+        )
+        if problem is not None:
+            return profile_id, None, problem
         if state is not None:
             await store.touch_last_used(pid, org_id, user_id=user_id, service_account_id=sa_id)
             return profile_id, state, None
+    # A named profile may be a person's login shared with the session's agent (an
+    # unnamed one never is): the agent is the worker-stamped account, not the caller.
+    # The store records the agent's use as it loads it.
+    if named and agent_sa is not None and loadable:
+        state, problem = await _load_state(profile_id, store.shared_state_for(pid, org_id, agent_sa=agent_sa))
+        if problem is not None or state is not None:
+            return profile_id, state, problem
     logger.warning(
         "Browser profile %s is not one this session may use (org=%s owners=%s)", profile_id, org_id, owners,
     )
