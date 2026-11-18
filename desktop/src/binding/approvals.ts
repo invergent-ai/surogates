@@ -16,9 +16,11 @@ import { posix } from "node:path";
 
 import { chatPortOf, SANDBOX_PORTS } from "../browser/ports.js";
 import { THREAD_KINDS } from "../history/kinds.js";
+import { inside } from "../files/paths.js";
 import { FOLDER_UNAVAILABLE, type NetworkAnswer, type NetworkAsk } from "../hosts/messages.js";
 import type { Binding, Bindings } from "../journal/bindings.js";
 import type { Operation, Outcome } from "../link/protocol.js";
+import { BIN } from "../platform.js";
 import { report } from "../report.js";
 import { hostPathOf } from "../session-path.js";
 
@@ -59,11 +61,12 @@ const acts = ({ kind, args }: Operation): boolean => !BROWSER_READS.has(kind) &&
 // asking. The reads ask nothing here: the layer lets them only within a folder its user granted. A project's
 // thread has none of them: it works in a copy of the chat's folder, and the rest of the computer is the main chat's.
 const OUTSIDE = "outside.";
-const OUTSIDE_READS: ReadonlySet<string> = new Set([
+export const OUTSIDE_READS: ReadonlySet<string> = new Set([
   "outside.resolve", "outside.stat", "outside.read", "outside.read_lines", "outside.list_dir", "outside.walk",
 ]);
 const outsideDenied = (message: string): Outcome => ({ error: { type: "denied", message } });
 const SAID_NO = outsideDenied("The user said no.");
+const KEPT = outsideDenied(`The user kept the originals; nothing went to the ${BIN}. Any copies already made stay.`);
 const IN_A_THREAD = outsideDenied("Files outside the chat's folder can be used from the main chat, not from a project's thread.");
 const NOT_ANSWERED = outsideDenied("Nobody answered on this computer in time, so nothing was done.");
 const UNKNOWN = (kind: string): Outcome => outsideDenied(`This computer does not know '${kind}'.`);
@@ -539,7 +542,10 @@ export class Approvals {
     if (OUTSIDE_READS.has(kind)) return null;
     const checked = this.outsideArgs(kind, args, root);
     if ("refused" in checked) return checked.refused;
-    return this.inLine(root, signal, SAID_NO, async () => {
+    // A folder a grant of this chat's holds already is not asked about again: the layer answers it as granted.
+    if (kind === "outside.grant" && this.options.bindings.reads(root).some((grant) => inside(checked.folder, grant))) return null;
+    const no = kind === "outside.trash" ? KEPT : SAID_NO;
+    return this.inLine(root, signal, no, async () => {
       // Unbound while it waited its turn: asked nothing.
       const binding = bound();
       if (!("root" in binding)) return binding;
@@ -551,7 +557,7 @@ export class Approvals {
       else if (kind === "outside.put_back") request = { kind: "put_back", chat, copy: String(args.copy), original: String(args.original) };
       else {
         const sizes = await settled(sizesOf(files), signal);
-        if (signal.aborted || !sizes) return SAID_NO;
+        if (signal.aborted || !sizes) return no;
         request = { kind: "copy", chat, to: String(args.to), files: files.map((from, at) => ({ from, size: sizes[at]! })) };
       }
       let reply: PromptReply | undefined;
@@ -562,10 +568,10 @@ export class Approvals {
         return outsideDenied(couldNotAsk(error));
       }
       // A dismissed window's answer is not its user's.
-      if (signal.aborted || !reply) return SAID_NO;
+      if (signal.aborted || !reply) return no;
       if (reply.answer === "timeout") return NOT_ANSWERED;
       // Every other answer, "stop_asking" among them, is one these windows do not offer.
-      if (reply.answer !== (kind === "outside.trash" ? "trash" : "allow")) return SAID_NO;
+      if (reply.answer !== (kind === "outside.trash" ? "trash" : "allow")) return no;
       if (kind === "outside.grant") {
         try {
           this.options.bindings.grantRead(root, folder);
@@ -578,7 +584,7 @@ export class Approvals {
       if (kind === "outside.copy" || kind === "outside.trash") {
         // Only what the window listed: a ticked file it did not show is not the user's choice.
         const ticked = files.filter((file) => reply.checked.includes(file));
-        if (ticked.length === 0) return SAID_NO;
+        if (ticked.length === 0) return no;
         this.chosen.set(operation.id, ticked);
       }
       return null;

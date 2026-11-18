@@ -424,6 +424,7 @@ describe("the windows for files outside the chat's folder", () => {
     expect(c.lead).toBe(`2 files will be removed from where they are and moved to the ${bin}, where you can restore them.`);
     expect(c.checks?.items.map((i) => i.value)).toEqual(["/home/me/docs/a.txt", "/home/me/docs/b.txt"]);
     expect(c.buttons.map((b) => [b.id, b.label])).toEqual([["keep", "Keep them"], ["trash", `Move to the ${bin}`]]);
+    expect(approval({ kind: "trash", chat: CHAT, files: ["/home/me/docs/a.txt"] }).buttons[0]!.label).toBe("Keep it");
   });
 
   it("warns before changes go back over the original", () => {

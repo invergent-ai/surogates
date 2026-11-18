@@ -15,14 +15,16 @@ import { createHash, randomUUID } from "node:crypto";
 import { type BigIntStats, closeSync, constants, fchmodSync, readSync, writeSync } from "node:fs";
 import { extname } from "node:path";
 
-import type { Approvals } from "../binding/approvals.js";
+import { type Approvals, OUTSIDE_READS as READS } from "../binding/approvals.js";
 import type { FolderGuards } from "../binding/folder.js";
 import { Failure, FOLDER_UNAVAILABLE, fromNode, io, MAX_MESSAGE_CHARS, READ_TOO_LARGE } from "../files/answers.js";
 import type { FdPaths, Where } from "../files/fd-paths.js";
 import { FLAGS } from "../files/flags.js";
 import { linesFrom, listed, readFrom, revisionOf, statOf, walkFrom } from "../files/operations.js";
 import { type Identity, identityOf, sameFile } from "../files/identity.js";
+import { fileOs } from "../files/os.js";
 import { inside } from "../files/paths.js";
+import { explorerRefusal } from "../files/protect.js";
 import type { Bindings } from "../journal/bindings.js";
 import type { Operation, Outcome } from "../link/protocol.js";
 import { BIN } from "../platform.js";
@@ -31,15 +33,15 @@ import type { ToolLayer } from "../shell/device-stack.js";
 import { grantable, KNOWN_FOLDERS, knownFolder, withinGrant } from "./places.js";
 
 const OUTSIDE = "outside.";
-const READS: ReadonlySet<string> = new Set([
-  "outside.resolve", "outside.stat", "outside.read", "outside.read_lines", "outside.list_dir", "outside.walk",
-]);
 
 const noPermission = (path: string): Outcome => ({
   error: { type: "sandbox", message: `No permission to read ${path}: ask for it first with request_folder_access.` },
 });
 const denied = (message: string): Outcome => ({ error: { type: "denied", message } });
-const unsupported = (kind: string): Outcome => ({ error: { type: "unsupported", message: `This computer cannot do '${kind}' yet` } });
+// Not "unsupported", which the server reads as an app too old for files outside the folder: this app knows them, not this one.
+const unknown = (kind: string): Outcome => denied(`This computer does not know '${kind}'.`);
+// A file the window listed that its user left unticked: said, so the agent never takes it for done.
+const UNTICKED = "not ticked by the user";
 const byAnotherName = (path: string) => `${path} is in this chat's folder by another name: use its path in the chat's folder.`;
 const chatsOwn = (path: string): Outcome => denied(`${path} is this chat's folder, in it, or holds it: the chat's own files are deleted with its own tools.`);
 const notDestination = (to: string): Outcome => denied(`The destination ${to} is neither this chat's folder nor a folder it may read.`);
@@ -64,6 +66,10 @@ export function numberedName(name: string, n: number): string {
   const extension = extname(name);
   return `${name.slice(0, name.length - extension.length)} (${n})${extension}`;
 }
+
+// The files *requested* named that its user left unticked, once each.
+const unticked = (requested: unknown, ticked: string[]): string[] =>
+  Array.isArray(requested) ? [...new Set(requested.filter((file): file is string => typeof file === "string" && !ticked.includes(file)))] : [];
 
 // What a copy read: the file's bytes, base64, and, for one from a grant, its revision as read.
 type Source = { data: string; revision?: string };
@@ -168,12 +174,14 @@ export class Outside implements ToolLayer {
       if (typeof args.folder !== "string") return denied("'folder' must be a folder's name or an absolute path.");
       const resolved = this.resolveFolder(args.folder, root);
       if ("refused" in resolved) return denied(resolved.refused);
-      return this.options.bindings.reads(root).includes(resolved.folder) ? { ok: { folder: resolved.folder } } : noPermission(resolved.folder);
+      // Answered as granted where a grant of this chat's holds it, as the approvals let it through unasked.
+      const held = this.options.bindings.reads(root).includes(resolved.folder) || this.grantOf(root, resolved.folder) !== null;
+      return held ? { ok: { folder: resolved.folder } } : noPermission(resolved.folder);
     }
     if (kind === "outside.copy") return this.copy(operation, signal);
     if (kind === "outside.trash") return this.trash(operation, signal);
     if (kind === "outside.put_back") return this.putBack(operation, signal);
-    if (!READS.has(kind)) return unsupported(kind);
+    if (!READS.has(kind)) return unknown(kind);
     // Checked again: an operation reaches here without its refusal asked, as one taken up again after a restart.
     const key = pathOf(operation);
     if (typeof key !== "string") return key;
@@ -261,10 +269,11 @@ export class Outside implements ToolLayer {
         }
         done.copied.push({ from, to: key });
       } catch (error) {
-        const said = error instanceof Failure ? error.refusal.message : error instanceof Error ? error.message : String(error);
-        done.skipped.push({ from, reason: said === READ_TOO_LARGE ? TOO_LARGE : said });
+        const reason = said(error);
+        done.skipped.push({ from, reason: reason === READ_TOO_LARGE ? TOO_LARGE : reason });
       }
     }
+    for (const from of unticked(args.files, ticked)) done.skipped.push({ from, reason: UNTICKED });
     return { ok: done };
   }
 
@@ -298,6 +307,8 @@ export class Outside implements ToolLayer {
     const bytes = Buffer.from(data, "base64");
     for (let n = 0; n <= NAMES; n += 1) {
       const key = join(to, numberedName(name, n));
+      // As the folder's own tools refuse it in the chat's folder (protect.ts, writeRefusal).
+      if (fileOs.explorer(key)) throw new Failure({ type: "denied", message: explorerRefusal(key) });
       const made = this.within(root, grant, key, (where) => {
         let file: number;
         try {
@@ -398,6 +409,7 @@ export class Outside implements ToolLayer {
         done.kept.push({ file, reason: said(error) });
       }
     }
+    for (const file of unticked(operation.args.files, ticked)) done.kept.push({ file, reason: UNTICKED });
     return { ok: done };
   }
 

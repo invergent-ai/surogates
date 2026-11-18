@@ -9,6 +9,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BOOT_ID, type FolderGuards } from "../src/binding/folder.js";
 import { MAX_READ_BYTES } from "../src/files/answers.js";
 import { type FdPaths, fdPaths, type Where } from "../src/files/fd-paths.js";
+import { fileOs } from "../src/files/os.js";
+import { explorerRefusal } from "../src/files/protect.js";
 import { perform } from "../src/files/operations.js";
 import { OperationJournal } from "../src/journal/journal.js";
 import type { Operation, Outcome } from "../src/link/protocol.js";
@@ -94,7 +96,14 @@ describe("Outside", () => {
     // The approvals granted it, on its user's allow.
     journal.bindings.grantRead(ROOT, desktop);
     expect(await outside.run(op("outside.grant", { folder: "Desktop" }), never())).toEqual({ ok: { folder: desktop } });
+    // A folder in a grant is granted already: answered as asked, with nobody asked again.
+    expect(await outside.run(op("outside.grant", { folder: join(desktop, "Scan") }), never())).toEqual({ ok: { folder: join(desktop, "Scan") } });
+    expect(await outside.run(op("outside.grant", { folder: join(base, "elsewhere") }), never())).toEqual(noPermission(join(base, "elsewhere")));
     expect(tools.ran).toEqual([]);
+  });
+
+  it("answers a kind it does not know in its own words, not as an old app", async () => {
+    expect(await layer().run(op("outside.fly", {}), never())).toEqual({ error: { type: "denied", message: "This computer does not know 'outside.fly'." } });
   });
 
   it("refuses reading a folder it was never granted, before anyone is asked", async () => {
@@ -253,7 +262,11 @@ describe("outside.copy", () => {
     writeFileSync(unticked, "other");
     const revision = ((await perform("stat", { key: note }, { folder: desktop, home: join(base, "home"), env: {} }, never())) as { ok: { revision: string } }).ok.revision;
     expect(await copy([note, cerere, unticked], work, [note, cerere])).toEqual({
-      ok: { copied: [{ from: note, to: join(work, "note.txt") }, { from: cerere, to: join(work, "cerere.pdf") }], skipped: [] },
+      ok: {
+        copied: [{ from: note, to: join(work, "note.txt") }, { from: cerere, to: join(work, "cerere.pdf") }],
+        // Said, so a move never trashes an original that was not copied.
+        skipped: [{ from: unticked, reason: "not ticked by the user" }],
+      },
     });
     expect(readFileSync(join(work, "note.txt"), "utf8")).toBe("first\nsecond\n");
     expect(readFileSync(join(work, "cerere.pdf"), "utf8")).toBe("pdf");
@@ -264,6 +277,21 @@ describe("outside.copy", () => {
     expect(tools.ran.filter((ran) => ran.kind === "write").map((ran) => ran.args.create)).toEqual([true, true]);
     // The originals stay as they were.
     expect(readFileSync(note, "utf8")).toBe("first\nsecond\n");
+  });
+
+  it("refuses a copy into a grant under a name Explorer acts on, as the folder's own tools do", async () => {
+    folderTools();
+    journal.bindings.grantRead(ROOT, desktop);
+    writeFileSync(join(work, "x.lnk"), "link");
+    const explorer = vi.spyOn(fileOs, "explorer").mockImplementation((key) => key.endsWith(".lnk"));
+    try {
+      expect(await copy([join(work, "x.lnk")], desktop)).toEqual({
+        ok: { copied: [], skipped: [{ from: join(work, "x.lnk"), reason: explorerRefusal(join(desktop, "x.lnk")) }] },
+      });
+    } finally {
+      explorer.mockRestore();
+    }
+    expect(existsSync(join(desktop, "x.lnk"))).toBe(false);
   });
 
   it("copies from one granted folder into another, and never through the chat's folder", async () => {
@@ -476,7 +504,9 @@ describe("outside.trash and outside.put_back", () => {
     const other = join(desktop, "other.txt");
     writeFileSync(other, "other");
     expect(layer().refusal(op("outside.trash", { files: [note, cerere, other] }))).toBeNull();
-    expect(await trashOf([note, cerere, other], [note, cerere])).toEqual({ ok: { trashed: [note, cerere], kept: [] } });
+    expect(await trashOf([note, cerere, other], [note, cerere])).toEqual({
+      ok: { trashed: [note, cerere], kept: [{ file: other, reason: "not ticked by the user" }] },
+    });
     expect(readdirSync(bin).sort()).toEqual(["cerere.pdf", "note.txt"]);
     expect(readFileSync(other, "utf8")).toBe("other");
     // Taken up again after a restart, its user's ticks are gone: nothing is trashed that nobody chose.

@@ -17,6 +17,7 @@ import { OperationJournal } from "../src/journal/journal.js";
 import type { DeviceLink } from "../src/link/client.js";
 import type { Operation, Outcome } from "../src/link/protocol.js";
 import { APP_CLOSED, type Executor, type OperationRunner } from "../src/operations/runner.js";
+import { BIN } from "../src/platform.js";
 import { FakeLinkServer } from "./fake-server.js";
 
 const ROOT = "44444444-4444-4444-8444-444444444444";
@@ -1718,6 +1719,9 @@ describe("the browser on this computer", () => {
 
 describe("files outside the chat's folder", () => {
   const SAID_NO = { error: { type: "denied", message: "The user said no." } };
+  const KEPT = { error: { type: "denied", message: `The user kept the originals; nothing went to the ${BIN}. Any copies already made stay.` } };
+  // A trash said no to is said as its originals kept.
+  const no = (operation: Operation) => (operation.kind === "outside.trash" ? KEPT : SAID_NO);
   const THREAD = { error: { type: "denied", message: "Files outside the chat's folder can be used from the main chat, not from a project's thread." } };
   const READS = [
     op("outside.resolve", { path: "/home/me/Desktop" }), op("outside.stat", { key: "/home/me/Desktop/a.txt" }),
@@ -1735,7 +1739,7 @@ describe("files outside the chat's folder", () => {
   it("asks for outside kinds even when the chat works freely", async () => {
     bind(ROOT, "free");
     user.auto = "deny";
-    for (const operation of asked()) expect(await approvals.admit(operation, never())).toEqual(SAID_NO);
+    for (const operation of asked()) expect(await approvals.admit(operation, never())).toEqual(no(operation));
     expect(user.asked.map((request) => request.kind)).toEqual(["read_folder", "copy", "trash", "put_back"]);
     // Read kinds pass unasked: the layer checks the grant.
     for (const operation of READS) expect(await approvals.admit(operation, never())).toBeNull();
@@ -1765,6 +1769,14 @@ describe("files outside the chat's folder", () => {
     expect(await approvals.admit(op("outside.grant", { folder: "/home/me/Desktop" }), never())).toBeNull();
     expect(journal.bindings.reads(ROOT)).toEqual(["/home/me/Desktop"]);
     expect(user.asked[1]).toEqual({ kind: "read_folder", chat: chat(), folder: "/home/me/Desktop" });
+    // Granted already, itself or by a folder that holds it: nobody is asked again.
+    for (const folder of ["/home/me/Desktop", "/home/me/Desktop/Scan"]) expect(await approvals.admit(op("outside.grant", { folder }), never())).toBeNull();
+    expect(user.asked).toHaveLength(2);
+    expect(journal.bindings.reads(ROOT)).toEqual(["/home/me/Desktop"]);
+    // A sibling that only begins like it is another folder.
+    user.auto = "deny";
+    expect(await approvals.admit(op("outside.grant", { folder: "/home/me/Desktop2" }), never())).toEqual(SAID_NO);
+    expect(user.asked).toHaveLength(3);
   });
 
   it("admits only the ticked files of a copy", async () => {
@@ -1794,7 +1806,7 @@ describe("files outside the chat's folder", () => {
     for (const answer of ["allow", "keep", "stop_asking", "allow_session"] as const) {
       user.auto = answer;
       const trash = op("outside.trash", { files });
-      expect(await approvals.admit(trash, never())).toEqual(SAID_NO);
+      expect(await approvals.admit(trash, never())).toEqual(KEPT);
       expect(approvals.chosenFor(trash.id)).toBeUndefined();
     }
     user.auto = "trash";
@@ -1808,7 +1820,7 @@ describe("files outside the chat's folder", () => {
     bind(ROOT, "ask");
     user.auto = "stop_asking";
     user.ticks = ["/home/me/Desktop/a.txt"];
-    for (const operation of asked()) expect(await approvals.admit(operation, never())).toEqual(SAID_NO);
+    for (const operation of asked()) expect(await approvals.admit(operation, never())).toEqual(no(operation));
     expect(journal.bindings.get(ROOT)?.mode).toBe("ask");
     expect(journal.bindings.reads(ROOT)).toEqual([]);
   });

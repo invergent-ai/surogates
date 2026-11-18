@@ -287,7 +287,7 @@ function outsidePrompt(request: Exclude<ApprovalRequest, { kind: "command" | "ch
       ...base, danger: true, focus: "keep", cancel: "keep", title: `Move to the ${BIN}?`,
       lead: `${files(request.files.length)} will be removed from where ${request.files.length === 1 ? "it is" : "they are"} and moved to the ${BIN}, where you can restore ${request.files.length === 1 ? "it" : "them"}.`,
       checks: list("Files", request.files.map((f) => ({ value: f, label: named(f), detail: shownPath(posix.dirname(f)) }))),
-      buttons: [button("keep", "Keep them"), button("trash", `Move to the ${BIN}`, true)], height: 420,
+      buttons: [button("keep", request.files.length === 1 ? "Keep it" : "Keep them"), button("trash", `Move to the ${BIN}`, true)], height: 420,
     };
   }
   return {
