@@ -213,9 +213,12 @@ async def _via_chat(
     if not url:
         raise ImageRequestError("The image model returned no image")
     data = await _image_bytes(url)
+    # The reply text is relayed to the model: drop inline images, a
+    # base64 image there would flood its context.
+    _, text = _split_markdown_images(_extract_response_content(response))
     # Decoding a multi-megapixel image is CPU work: off the event loop.
     return await asyncio.to_thread(
-        inspect, data, text=_extract_response_content(response),
+        inspect, data, text=text,
         model=str(getattr(response, "model", "") or model), cost_cents=_reported_cents(response),
     )
 
@@ -329,7 +332,8 @@ def _first_message(response: Any) -> Any:
 
 
 def _first_image_url(response: Any) -> str:
-    """OpenRouter's ``message.images[]``, else an image part of the content."""
+    """OpenRouter's ``message.images[]``, else an image part of the content,
+    else a markdown image in text content."""
     message = _first_message(response)
     if message is None:
         return ""
@@ -344,7 +348,30 @@ def _first_image_url(response: Any) -> str:
         url = str(((item.get("image_url") or {}).get("url")) or "")
         if url:
             return url
+    if isinstance(content, str):
+        urls, _ = _split_markdown_images(content)
+        return next((url for url in urls if url.startswith(("data:", "https://"))), "")
     return ""
+
+
+def _split_markdown_images(text: str) -> tuple[list[str], str]:
+    """The ``![alt](url)`` links in ``text``, and ``text`` without them.
+
+    A forward scan with ``str.find``, never a regex: the base64 inside a
+    data URL runs to megabytes."""
+    urls: list[str] = []
+    kept: list[str] = []
+    pos = 0
+    while (start := text.find("![", pos)) != -1:
+        middle = text.find("](", start + 2)
+        end = text.find(")", middle + 2) if middle != -1 else -1
+        if end == -1:
+            break
+        urls.append(text[middle + 2:end].strip())
+        kept.append(text[pos:start])
+        pos = end + 1
+    kept.append(text[pos:])
+    return urls, "".join(kept).strip()
 
 
 def _part_type(part: Any) -> str:

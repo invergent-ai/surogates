@@ -87,6 +87,15 @@ MODEL_CATALOG: dict[str, ModelInfo] = {
         output_cost_per_1k=0.025,
         supports_vision=True,
     ),
+    # What ``base_llm_model`` resolves the ``surogate`` tier to (via openlux).
+    "anthropic/claude-opus-5-5": ModelInfo(
+        id="anthropic/claude-opus-5-5",
+        context_window=1_000_000,
+        max_output_tokens=128_000,
+        input_cost_per_1k=0.004,
+        output_cost_per_1k=0.02,
+        supports_vision=True,
+    ),
     # --- DeepSeek ----------------------------------------------------------
     "deepseek/deepseek-v4-pro": ModelInfo(
         id="deepseek/deepseek-v4-pro",
@@ -343,6 +352,7 @@ _ALIASES: dict[str, str] = {
     "anthropic/claude-sonnet-5-20260630": "anthropic/claude-sonnet-5",
     "claude-opus-5": "anthropic/claude-opus-5",
     "anthropic/claude-opus-5-20260723": "anthropic/claude-opus-5",
+    "claude-opus-5-5": "anthropic/claude-opus-5-5",
     "deepseek-v4-pro": "deepseek/deepseek-v4-pro",
     "deepseek/deepseek-v4-pro-20260423": "deepseek/deepseek-v4-pro",
     "deepseek-ai/DeepSeek-V4-Pro": "deepseek/deepseek-v4-pro",
