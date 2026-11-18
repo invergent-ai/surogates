@@ -164,6 +164,21 @@ async def test_an_image_only_model_falls_back_to_the_images_api(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_an_image_written_as_markdown_in_the_reply_is_saved_and_kept_out_of_the_text(tmp_path):
+    # Some gateways return the image inside the text: "![image](data:image/jpeg;base64,...)".
+    def chat(kwargs):
+        text = f"Here it is ![image]({_data_url(_png(1344, 768))}) enjoy"
+        message = SimpleNamespace(content=text, role="assistant")
+        message.model_dump = lambda **_: {"content": text}
+        return SimpleNamespace(choices=[SimpleNamespace(message=message)], model=MODEL, usage=None)
+
+    result = await _run(_Provider(chat=chat), {}, tmp_path)
+    assert "error" not in result
+    assert (result["width"], result["height"]) == (1344, 768)
+    assert result["text"] == "Here it is  enjoy"
+
+
+@pytest.mark.asyncio
 async def test_a_gateway_that_serves_its_own_sizes_gets_the_ratio_not_an_openai_size(tmp_path):
     # llm.buzz admits an Images request by the model's declared sizes: Gemini
     # serves 1344x768 for 16:9 and refuses 1536x1024.
