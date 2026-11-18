@@ -16,7 +16,8 @@ id or path under a name we do not know); numbers and booleans pass.
 STATE_TOOLS: builtin tools that write durable platform state (or reach people) outside the
 chat.  In a test chat they return ``fake_result`` and record ``would_have``; their handler
 never runs.  Unclear effects are included (fail closed).  ``STATE_TOOLS_WHY`` says, per
-tool, what state it writes.
+tool, what state it writes.  Every other builtin is in CHAT_LOCAL_OR_READ_TOOLS with why it
+is left real; a test fails while a registered builtin is in neither list.
 """
 
 from __future__ import annotations
@@ -75,6 +76,78 @@ STATE_TOOLS_WHY: dict[str, str] = {
     "draft_dry_run": "runs a Keel draft (effect unclear); included",
 }
 STATE_TOOLS = frozenset(STATE_TOOLS_WHY)
+# Every other builtin, reviewed as a read or as acting only inside the chat, and left real.
+# A test builds the full builtin registry and fails until a new tool is put in one list.
+CHAT_LOCAL_OR_READ_WHY: dict[str, str] = {
+    "agent": "starts a sub-agent of this chat (it inherits test mode)",
+    "send_message": "messages this chat's own sub-agent",
+    "stop_agent": "stops this chat's own sub-agent or monitor",
+    "list_agents": "lists this chat's sub-agents",
+    "monitor": "watches a command in the chat's own workspace",
+    "consult_expert": "asks an expert; its loop withholds STATE_TOOLS in a test chat",
+    "ask_user_question": "asks the person in this chat",
+    "todo": "the chat's own task list",
+    "load_tools": "offers held-back tools to this chat",
+    "skill_step": "records a procedure step as a chat event",
+    "skill_view": "reads a skill",
+    "skills_list": "reads the skill list",
+    "loop_wait": "pauses this chat's own loop",
+    "loop_complete": "ends this chat's own loop",
+    "terminal": "runs in the chat's own sandbox workspace",
+    "process": "manages the chat's own sandbox processes",
+    "read_file": "reads the chat's workspace",
+    "write_file": "writes the chat's own workspace",
+    "patch": "edits the chat's own workspace",
+    "list_files": "reads the chat's workspace",
+    "search_files": "reads the chat's workspace",
+    "office_read": "reads a document in the chat's workspace",
+    "office_edit": "edits a document in the chat's own workspace",
+    "create_artifact": "creates a file in the chat's own workspace",
+    "whiteboard_draw": "draws on this chat's canvas",
+    "generate_image": "creates media in the chat's workspace",
+    "generate_video": "creates media in the chat's workspace",
+    "vision_analyze": "reads an image",
+    "web_search": "reads the web",
+    "web_extract": "reads a web page",
+    "browser_navigate": "opens a page (a GET; reviewed and left real)",
+    "browser_get_state": "reads the open page",
+    "browser_screenshot": "reads the open page",
+    "browser_scroll": "scrolls the open page",
+    "browser_wait": "waits on the open page",
+    "browser_close": "closes this chat's browser",
+    "end_call": "ends this chat's own phone call",
+    "share_note": "posts to this chat's context-group board (reviewed and left real)",
+    "read_board": "reads the coordination board",
+    "expand_note": "reads a board note",
+    "mate_ambient_post": "posts only from an ambient turn, gated by the session's channel (reviewed and left real)",
+    "kb_list_pages": "reads the knowledge base",
+    "kb_read_page": "reads the knowledge base",
+    "kb_search_pages": "reads the knowledge base",
+    "session_search": "reads past sessions",
+    "user_reports": "reads operator reports",
+    "fetch_channel_file": "reads a shared channel file",
+    "fetch_channel_messages": "reads channel messages",
+    "cron_get": "reads a schedule",
+    "cron_list": "reads schedules",
+    "followup_contacts": "reads follow-up contacts",
+    "followup_status": "reads a follow-up record",
+    "team_overview": "reads the team",
+    "case_read": "reads a Keel case",
+    "case_history": "reads a Keel case",
+    "case_files": "reads a Keel case",
+    "case_file_read": "reads a Keel case file",
+    "process_read": "reads a Keel process",
+    "process_history": "reads a Keel process",
+    "process_waits": "reads a Keel process",
+    "process_move_check": "checks a Keel move without making it",
+    "draft_files": "reads a Keel draft",
+    "draft_read": "reads a Keel draft",
+    "draft_main": "reads a Keel draft",
+    "draft_process_read": "reads a Keel draft process",
+    "draft_process_check": "checks a Keel draft process",
+    "draft_process_reference": "reads Keel's reference",
+}
+CHAT_LOCAL_OR_READ_TOOLS = frozenset(CHAT_LOCAL_OR_READ_WHY)
 _DRIVE_KEYS = frozenset({"drive_id", "driveId", "parentReference.driveId"})
 REFERENCE_KEYS = _DRIVE_KEYS | frozenset({
     "item_id", "itemId", "folder_item_id", "parent_folder", "folder", "folder_path",

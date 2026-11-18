@@ -346,3 +346,23 @@ def test_a_test_chats_boundary_is_memory_only():
     session = SimpleNamespace(id="s1", channel="api", config={"memory_boundary": boundary})
     assert session_memory_boundary(session) == boundary  # memory stays partitioned per run and chat
     assert workspace_boundary(session) is None  # the workspace stays the per-session one
+
+
+def test_every_builtin_tool_is_classified_once(monkeypatch):
+    from types import SimpleNamespace
+
+    from surogates.simulation import scratch
+    from surogates.tools.builtin import office
+    from surogates.tools.registry import ToolRegistry
+    from surogates.tools.runtime import ToolRuntime
+
+    # office_* register only with live editing on; build the full set.
+    monkeypatch.setattr(office, "load_settings", lambda: SimpleNamespace(office=SimpleNamespace(agent_editing=True)))
+    registry = ToolRegistry()
+    ToolRuntime(registry).register_builtins()
+    registered = set(registry.tool_names)
+    local = getattr(scratch, "CHAT_LOCAL_OR_READ_TOOLS", frozenset())
+    assert {"memory", "office_edit", "terminal"} <= registered  # the registry really is the full one
+    assert not scratch.STATE_TOOLS & local, "a tool is in both STATE_TOOLS and CHAT_LOCAL_OR_READ_TOOLS"
+    assert registered - scratch.STATE_TOOLS - local == set(), "new builtin: classify it in simulation/scratch.py"
+    assert (scratch.STATE_TOOLS | local) - registered == set(), "a classified tool is no longer registered"
