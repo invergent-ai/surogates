@@ -9,7 +9,7 @@
 // download is saved (browser/downloads.ts), and into a grant by a create-only open at the end of the same walk down.
 
 import { createHash, randomUUID } from "node:crypto";
-import { closeSync, constants, readSync, writeSync } from "node:fs";
+import { type BigIntStats, closeSync, constants, readSync, writeSync } from "node:fs";
 import { extname } from "node:path";
 
 import type { Approvals } from "../binding/approvals.js";
@@ -18,6 +18,7 @@ import { Failure, FOLDER_UNAVAILABLE, fromNode, io, MAX_MESSAGE_CHARS, READ_TOO_
 import type { FdPaths, Where } from "../files/fd-paths.js";
 import { FLAGS } from "../files/flags.js";
 import { linesFrom, listed, readFrom, revisionOf, statOf, walkFrom } from "../files/operations.js";
+import { sameFile } from "../files/identity.js";
 import { inside } from "../files/paths.js";
 import type { Bindings } from "../journal/bindings.js";
 import type { Operation, Outcome } from "../link/protocol.js";
@@ -124,8 +125,8 @@ export class Outside implements ToolLayer {
       // Malformed ones are the approvals' to refuse, in their words. A copy may take from the chat's folder too.
       const out = args.files.find((file) => typeof file === "string" && this.sourceOf(root, file, kind === "outside.copy") === null) as string | undefined;
       if (out !== undefined) return noPermission(out);
-      if (kind === "outside.copy" && typeof args.to === "string" && this.destinationOf(root, args.to) === null) return notDestination(args.to);
     }
+    if (kind === "outside.copy" && typeof args.to === "string" && this.destinationOf(root, args.to) === null) return notDestination(args.to);
     return null;
   }
 
@@ -178,11 +179,13 @@ export class Outside implements ToolLayer {
     return this.grantOf(root, file);
   }
 
-  // Where a copy may go: the chat's folder itself ("chat"), or a folder in a grant, by that grant; null for anywhere else.
-  private destinationOf(root: string, to: string): "chat" | string | null {
+  // Where a copy may go, as the folder it goes in: the chat's folder or one in it (grant null), written by its own
+  // tools even where a grant holds the chat's folder too; or a folder in a grant, by that grant. Null for anywhere else.
+  private destinationOf(root: string, to: string): { dir: string; grant: string | null } | null {
     const folder = this.options.bindings.get(root)?.folder;
-    if (to === "." || to === folder) return "chat";
-    return this.grantOf(root, to);
+    if (folder !== undefined && (to === "." || inside(to, folder))) return { dir: to === "." ? folder : to, grant: null };
+    const grant = this.grantOf(root, to);
+    return grant === null ? null : { dir: to, grant };
   }
 
   // The files its user ticked, each copied on its own: one that cannot be is said, and the rest are copied all the same.
@@ -190,7 +193,6 @@ export class Outside implements ToolLayer {
     const { args, sessionId: root } = operation;
     // Let go before anything else: a copy refused here is not done later with them.
     const ticked = this.options.approvals.chosenFor(operation.id);
-    const folder = this.options.bindings.get(root)!.folder;
     if (typeof args.to !== "string") return { error: { type: "value", message: "'to' must be a string" } };
     // Checked again: an operation reaches here without its refusal asked, as one taken up again after a restart.
     const to = this.destinationOf(root, args.to);
@@ -223,8 +225,12 @@ export class Outside implements ToolLayer {
           }));
         }
         const name = basename(from);
-        const key = to === "chat" ? await this.intoChat(folder, name, read.data, inner) : this.intoGrant(to, args.to, name, read.data);
-        if (to === "chat" && source !== "chat") this.options.bindings.recordCopy(root, key, from, read.revision!);
+        const key = to.grant === null ? await this.intoChat(to.dir, name, read.data, inner) : this.intoGrant(to.grant, to.dir, name, read.data);
+        // A copy of an outside file is remembered for its put back; any other made at a key once a copy's is no copy.
+        if (to.grant === null) {
+          if (source === "chat") this.options.bindings.forgetCopy(root, key);
+          else this.options.bindings.recordCopy(root, key, from, read.revision!);
+        }
         done.copied.push({ from, to: key });
       } catch (error) {
         const said = error instanceof Failure ? error.refusal.message : error instanceof Error ? error.message : String(error);
@@ -234,7 +240,7 @@ export class Outside implements ToolLayer {
     return { ok: done };
   }
 
-  // *data* as a new file *name* in the chat's folder, by its own tools, as a download is saved: a name that resolves
+  // *data* as a new file *name* in *folder*, the chat's folder or one in it, by its own tools, as a download is saved: a name that resolves
   // elsewhere, or holds anything, is passed over for the next, and the write itself only creates. Its key, or throws.
   private async intoChat(folder: string, name: string, data: string, inner: (kind: string, args: Record<string, unknown>) => Promise<Outcome>): Promise<string> {
     let refused: string | null = null;
@@ -274,7 +280,9 @@ export class Outside implements ToolLayer {
           throw fromNode(error, key);
         }
         let failed: unknown = null;
+        let made: BigIntStats | null = null;
         try {
+          made = fd.fstat(file, { bigint: true });
           for (let written = 0; written < bytes.length;) written += writeSync(file, bytes, written, bytes.length - written, written);
           const back = Buffer.alloc(bytes.length + 1);
           let got = 0;
@@ -288,9 +296,10 @@ export class Outside implements ToolLayer {
           closeSync(file);
         }
         if (failed !== null) {
-          // ponytail: removed by its name once closed (Windows removes no open file); a file put at that name in between would go.
+          // Removed by its name once closed (Windows removes no open file), and only while that name is still this
+          // copy's own file: one put there since is left alone.
           try {
-            fd.unlink(where);
+            if (made !== null && sameFile(made, fd.lstat(where))) fd.unlink(where);
           } catch {
             // Gone already.
           }

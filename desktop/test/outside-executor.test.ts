@@ -1,6 +1,6 @@
 // The Outside layer: a chat's grants of folders outside its own, and its reads in them, done by the app itself.
 
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, truncateSync, writeFileSync, writeSync } from "node:fs";
+import { constants, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, truncateSync, writeFileSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -311,13 +311,15 @@ describe("outside.copy", () => {
     journal.bindings.grantRead(ROOT, desktop);
     const note = join(desktop, "note.txt");
     const outside = layer();
-    for (const to of [join(base, "elsewhere"), join(work, "sub"), join(base, "home")]) {
+    for (const to of [join(base, "elsewhere"), join(base, "home")]) {
       const refused = { error: { type: "denied", message: `The destination ${to} is neither this chat's folder nor a folder it may read.` } };
       expect(outside.refusal(op("outside.copy", { files: [note], to })), to).toEqual(refused);
       // Run as well, for an operation that came without the question.
       chosenFor.mockReturnValueOnce([note]);
       expect(await outside.run(op("outside.copy", { files: [note], to }), never()), to).toEqual(refused);
     }
+    // Whatever its files, malformed ones the approvals' to refuse.
+    expect(outside.refusal(op("outside.copy", { files: "note.txt", to: join(base, "elsewhere") }))).toMatchObject({ error: { type: "denied" } });
     // A source in the chat's folder is the chat's to copy; one elsewhere is not.
     expect(outside.refusal(op("outside.copy", { files: [join(work, "a.txt")], to: desktop }))).toBeNull();
     expect(outside.refusal(op("outside.copy", { files: [join(base, "elsewhere", "secret.txt")], to: work })))
@@ -348,6 +350,49 @@ describe("outside.copy", () => {
     expect(readdirSync(work)).toEqual(["cerere.pdf"]);
   });
 
+  it("copies into a folder in the chat's folder by its own tools, even where a grant holds the chat's folder", async () => {
+    folderTools();
+    // A grant that holds the chat's folder: its subfolder is still the chat's, written by its tools, never by the app.
+    journal.bindings.grantRead(ROOT, base);
+    const sub = join(work, "sub");
+    mkdirSync(sub);
+    const note = join(desktop, "note.txt");
+    expect(layer().refusal(op("outside.copy", { files: [note], to: sub }))).toBeNull();
+    expect(await copy([note], sub)).toEqual({ ok: { copied: [{ from: note, to: join(sub, "note.txt") }], skipped: [] } });
+    expect(tools.ran.filter((ran) => ran.kind === "write").map((ran) => ran.args.key)).toEqual([join(sub, "note.txt")]);
+    expect(journal.bindings.copyOf(ROOT, join(sub, "note.txt"))).toMatchObject({ original: note });
+  });
+
+  it("forgets a copy's record at a key a file of the chat's own is copied to", async () => {
+    folderTools();
+    // Recorded once, and its file deleted since, without its record.
+    journal.bindings.recordCopy(ROOT, join(work, "raport.txt"), join(desktop, "raport.txt"), "1:2:3:4:5");
+    mkdirSync(join(work, "drafts"));
+    writeFileSync(join(work, "drafts", "raport.txt"), "draft");
+    expect(await copy([join(work, "drafts", "raport.txt")], work)).toMatchObject({ ok: { copied: [{ to: join(work, "raport.txt") }] } });
+    expect(journal.bindings.copyOf(ROOT, join(work, "raport.txt"))).toBeUndefined();
+  });
+
+  it("takes the next name in the chat's folder when one is made there after its look", async () => {
+    folderTools();
+    journal.bindings.grantRead(ROOT, desktop);
+    const below = tools.run;
+    let looked = false;
+    // The first look at the name finds nothing; a file is there by the write.
+    tools.run = async (operation, signal) => {
+      if (operation.kind === "stat" && operation.args.key === join(work, "note.txt") && !looked) {
+        looked = true;
+        writeFileSync(join(work, "note.txt"), "made meanwhile");
+        tools.ran.push(operation);
+        return { ok: null };
+      }
+      return below(operation, signal);
+    };
+    const note = join(desktop, "note.txt");
+    expect(await copy([note], work)).toMatchObject({ ok: { copied: [{ from: note, to: join(work, "note (1).txt") }], skipped: [] } });
+    expect(readFileSync(join(work, "note.txt"), "utf8")).toBe("made meanwhile");
+  });
+
   it("removes a copy made outside that does not check out", async () => {
     journal.bindings.grantRead(ROOT, desktop);
     const cerere = join(desktop, "Scan", "cerere.pdf");
@@ -356,7 +401,7 @@ describe("outside.copy", () => {
       ...fdPaths,
       open: (where, flags, mode) => {
         const file = fdPaths.open(where, flags, mode);
-        if (flags & 0o100) writeSync(file, "longer than the original");
+        if (flags & constants.O_CREAT) writeSync(file, "longer than the original");
         return file;
       },
     };
@@ -366,5 +411,31 @@ describe("outside.copy", () => {
       ok: { copied: [], skipped: [{ from: cerere, reason: expect.stringContaining("check") }] },
     });
     expect(readdirSync(desktop).sort()).toEqual(["Scan", "note.txt"]);
+    // A file put at the name after the copy was made is not the copy's: it is left alone.
+    let created = false;
+    const swapping: FdPaths = {
+      ...meddling,
+      open: (where, flags, mode) => {
+        created ||= (flags & constants.O_CREAT) !== 0;
+        return meddling.open(where, flags, mode);
+      },
+      lstat: (where) => {
+        // Only the copy's own name, once it was made: the original's look before its read is let be.
+        if (created && typeof where !== "string" && where.name === "cerere.pdf") {
+          // Made beside it first, then moved over it: a new file of its own, not one reusing the copy's freed inode.
+          writeFileSync(join(desktop, "user.tmp"), "the user's");
+          renameSync(join(desktop, "user.tmp"), join(desktop, "cerere.pdf"));
+        }
+        return fdPaths.lstat(where);
+      },
+    };
+    chosenFor.mockReturnValueOnce([cerere]);
+    const again = new Outside({ tools, bindings: journal.bindings, approvals: { chosenFor }, fd: swapping, getPath });
+    expect(await again.run(op("outside.copy", { files: [cerere], to: desktop }), never())).toEqual({
+      ok: { copied: [], skipped: [{ from: cerere, reason: expect.stringContaining("check") }] },
+    });
+    expect(created).toBe(true);
+    expect(readFileSync(cerere, "utf8")).toBe("pdf");
+    expect(readFileSync(join(desktop, "cerere.pdf"), "utf8")).toBe("the user's");
   });
 });
