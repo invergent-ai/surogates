@@ -12,19 +12,20 @@
 // and gives them its name by a link, which fails where a name is taken, so no file made there meanwhile is replaced.
 
 import { createHash, randomUUID } from "node:crypto";
-import { type BigIntStats, closeSync, constants, readSync, writeSync } from "node:fs";
+import { type BigIntStats, closeSync, constants, fchmodSync, readSync, writeSync } from "node:fs";
 import { extname } from "node:path";
 
 import type { Approvals } from "../binding/approvals.js";
-import type { FolderGuards } from "../binding/folder.js";
+import { confirmedFolder, type FolderGuards } from "../binding/folder.js";
 import { Failure, FOLDER_UNAVAILABLE, fromNode, io, MAX_MESSAGE_CHARS, READ_TOO_LARGE } from "../files/answers.js";
 import type { FdPaths, Where } from "../files/fd-paths.js";
 import { FLAGS } from "../files/flags.js";
 import { linesFrom, listed, readFrom, revisionOf, statOf, walkFrom } from "../files/operations.js";
-import { sameFile } from "../files/identity.js";
+import { identityOf, sameFile } from "../files/identity.js";
 import { inside } from "../files/paths.js";
-import type { Bindings } from "../journal/bindings.js";
+import type { Binding, Bindings } from "../journal/bindings.js";
 import type { Operation, Outcome } from "../link/protocol.js";
+import { BIN } from "../platform.js";
 import { basename, hostPathOf, isAbsolute, join, resolve } from "../session-path.js";
 import type { ToolLayer } from "../shell/device-stack.js";
 import { grantable, KNOWN_FOLDERS, knownFolder, withinGrant } from "./places.js";
@@ -39,6 +40,7 @@ const noPermission = (path: string): Outcome => ({
 });
 const denied = (message: string): Outcome => ({ error: { type: "denied", message } });
 const unsupported = (kind: string): Outcome => ({ error: { type: "unsupported", message: `This computer cannot do '${kind}' yet` } });
+const byAnotherName = (path: string) => `${path} is in this chat's folder by another name: use its path in the chat's folder.`;
 const chatsOwn = (path: string): Outcome => denied(`${path} is this chat's folder, in it, or holds it: the chat's own files are deleted with its own tools.`);
 const notDestination = (to: string): Outcome => denied(`The destination ${to} is neither this chat's folder nor a folder it may read.`);
 // How many numbered names a copy tries past its own, as a download does.
@@ -67,7 +69,7 @@ export interface OutsideOptions {
   approvals: Pick<Approvals, "chosenFor">;
   fd: FdPaths;
   getPath: (name: "desktop" | "downloads" | "documents" | "pictures") => string;
-  /** The file at this computer's own *hostPath* moved to its Recycle Bin (Electron's shell.trashItem); rejects if not. */
+  /** The file at this computer's own *hostPath* moved to its BIN (Electron's shell.trashItem); rejects if not. */
   trash: (hostPath: string) => Promise<void>;
 }
 
@@ -137,6 +139,11 @@ export class Outside implements ToolLayer {
       if (own !== undefined) return chatsOwn(own);
     }
     if (kind === "outside.put_back") return typeof args.copy === "string" && typeof args.original === "string" ? this.putBackRefusal(root, args.copy, args.original) : null;
+    if (kind === "outside.copy") {
+      // A path to the chat's folder by another name is no grant's, and the chat's own tools know it by its own.
+      const named = [...(Array.isArray(args.files) ? args.files : []), args.to].find((path) => typeof path === "string" && this.reachesChat(root, path));
+      if (typeof named === "string") return denied(byAnotherName(named));
+    }
     if ((kind === "outside.copy" || kind === "outside.trash") && Array.isArray(args.files)) {
       // Malformed ones are the approvals' to refuse, in their words. A copy may take from the chat's folder too.
       const out = args.files.find((file) => typeof file === "string" && this.sourceOf(root, file, kind === "outside.copy") === null) as string | undefined;
@@ -166,7 +173,7 @@ export class Outside implements ToolLayer {
     if (typeof key !== "string") return key;
     const grant = this.grantOf(root, key);
     if (grant === null) return noPermission(key);
-    return this.answer(kind, () => this.read(kind, args, grant, key));
+    return this.answer(kind, () => this.read(root, kind, args, grant, key));
   }
 
   // The grant of *root*'s that holds *path*, no link on its way; null for none. On Windows a folder is looked at only
@@ -189,7 +196,7 @@ export class Outside implements ToolLayer {
   private sourceOf(root: string, file: string, chat = true): "chat" | string | null {
     const folder = this.options.bindings.get(root)?.folder;
     if (chat && folder !== undefined && file !== folder && inside(file, folder)) return "chat";
-    return this.grantOf(root, file);
+    return this.reachesChat(root, file) ? null : this.grantOf(root, file);
   }
 
   // Where a copy may go, as the folder it goes in: the chat's folder or one in it (grant null), written by its own
@@ -197,7 +204,7 @@ export class Outside implements ToolLayer {
   private destinationOf(root: string, to: string): { dir: string; grant: string | null } | null {
     const folder = this.options.bindings.get(root)?.folder;
     if (folder !== undefined && (to === "." || inside(to, folder))) return { dir: to === "." ? folder : to, grant: null };
-    const grant = this.grantOf(root, to);
+    const grant = this.reachesChat(root, to) ? null : this.grantOf(root, to);
     return grant === null ? null : { dir: to, grant };
   }
 
@@ -208,6 +215,7 @@ export class Outside implements ToolLayer {
     const ticked = this.options.approvals.chosenFor(operation.id);
     if (typeof args.to !== "string") return { error: { type: "value", message: "'to' must be a string" } };
     // Checked again: an operation reaches here without its refusal asked, as one taken up again after a restart.
+    if (this.reachesChat(root, args.to)) return denied(byAnotherName(args.to));
     const to = this.destinationOf(root, args.to);
     if (to === null) return notDestination(args.to);
     // Taken up again after a restart, its user's ticks are gone: nothing is copied that nobody chose.
@@ -222,6 +230,7 @@ export class Outside implements ToolLayer {
         continue;
       }
       try {
+        if (this.reachesChat(root, from)) throw new Failure({ type: "denied", message: byAnotherName(from) });
         const source = this.sourceOf(root, from);
         if (source === null) throw new Failure((noPermission(from) as { error: { type: string; message: string } }).error);
         let read: Source;
@@ -230,7 +239,7 @@ export class Outside implements ToolLayer {
           if ("error" in outcome) throw new Failure(outcome.error);
           read = { data: outcome.ok as string };
         } else {
-          read = this.within(source, from, (where) => ({
+          read = this.within(root, source, from, (where) => ({
             // Looked at before the read: a change in between makes the revision older than the bytes, and a put back
             // then finds the original changed, and refuses; never the other way round.
             revision: revisionOf(io(from, () => this.options.fd.lstat(where))),
@@ -238,7 +247,7 @@ export class Outside implements ToolLayer {
           }));
         }
         const name = basename(from);
-        const key = to.grant === null ? await this.intoChat(to.dir, name, read.data, inner) : this.intoGrant(to.grant, to.dir, name, read.data);
+        const key = to.grant === null ? await this.intoChat(to.dir, name, read.data, inner) : this.intoGrant(root, to.grant, to.dir, name, read.data);
         // A copy of an outside file is remembered for its put back; any other made at a key once a copy's is no copy.
         if (to.grant === null) {
           if (source === "chat") this.options.bindings.forgetCopy(root, key);
@@ -278,12 +287,12 @@ export class Outside implements ToolLayer {
   // *data* as a new file *name* in *to*, a folder in *grant*: reached a name at a time without following a link,
   // opened create-only (a file, folder or link at the name is a name taken), then read back and checked by size and
   // sha256. One that does not check out is removed: it is this copy's own, never a file that was there. Its key, or throws.
-  private intoGrant(grant: string, to: string, name: string, data: string): string {
+  private intoGrant(root: string, grant: string, to: string, name: string, data: string): string {
     const { fd } = this.options;
     const bytes = Buffer.from(data, "base64");
     for (let n = 0; n <= NAMES; n += 1) {
       const key = join(to, numberedName(name, n));
-      const made = this.within(grant, key, (where) => {
+      const made = this.within(root, grant, key, (where) => {
         let file: number;
         try {
           file = fd.open(where, constants.O_RDWR | constants.O_CREAT | constants.O_EXCL | FLAGS.NOFOLLOW, 0o666);
@@ -321,7 +330,25 @@ export class Outside implements ToolLayer {
   // Whether *path* is the chat's folder, in it, or holds it: its own tools' to delete, never this layer's.
   private chatOwns(root: string, path: string): boolean {
     const folder = this.options.bindings.get(root)?.folder;
-    return folder !== undefined && (inside(path, folder) || inside(folder, path));
+    return folder !== undefined && (inside(path, folder) || inside(folder, path) || this.reachesChat(root, path));
+  }
+
+  // Whether *path* reaches the chat's folder by a spelling of its own: on a drive that ignores case, or knows a short
+  // name (WORK~1), a grant above the chat's folder spells it many ways, and only its identity tells. Each name from the
+  // grant down is looked at, none followed; reach() checks the folders it holds again, as it uses them.
+  private reachesChat(root: string, path: string): boolean {
+    const binding = this.options.bindings.get(root);
+    // Spelled as its own, it is the chat's by its path, as every caller tells first.
+    const grant = binding === undefined || inside(path, binding.folder) ? null : this.grantOf(root, path);
+    if (grant === null) return false;
+    for (let at = path; ; at = at.slice(0, at.lastIndexOf("/"))) {
+      try {
+        if (isChat(binding!, this.options.fd.lstat(at))) return true;
+      } catch {
+        // Not there: nothing it is.
+      }
+      if (at === grant) return false;
+    }
   }
 
   // Why *copy* may not be put back over *original*, or null: the original a grant's file, not the chat's, and the copy
@@ -341,7 +368,7 @@ export class Outside implements ToolLayer {
     // Let go before anything else: a trash refused here is not done later with them.
     const ticked = this.options.approvals.chosenFor(operation.id);
     // Taken up again after a restart, its user's ticks are gone: nothing goes that nobody chose.
-    if (ticked === undefined) return denied("Nothing was moved to the Recycle Bin: the files its user chose are not known any more. Ask again.");
+    if (ticked === undefined) return denied(`Nothing was moved to the ${BIN}: the files its user chose are not known any more. Ask again.`);
     const done: { trashed: string[]; kept: Array<{ file: string; reason: string }> } = { trashed: [], kept: [] };
     for (const file of ticked) {
       try {
@@ -350,8 +377,11 @@ export class Outside implements ToolLayer {
         if (this.chatOwns(root, file)) throw new Failure((chatsOwn(file) as { error: { type: string; message: string } }).error);
         const grant = this.grantOf(root, file);
         if (grant === null) throw new Failure((noPermission(file) as { error: { type: string; message: string } }).error);
-        this.within(grant, file, (where) => {
-          if (io(file, () => this.options.fd.lstat(where)).isSymbolicLink()) throw osFailure(`${file} is a link now, not the file its user chose`);
+        this.within(root, grant, file, (where) => {
+          const st = io(file, () => this.options.fd.lstat(where));
+          if (st.isSymbolicLink()) throw osFailure(`${file} is a link now, not the file its user chose`);
+          // A folder, the grant's own among them, is no file its user was asked about.
+          if (!st.isFile()) throw osFailure("not a file");
         });
         // ponytail: the bin takes a path, so a link swapped in after the look above and before the move is moved itself
         // (a link is moved, never followed); held by a handle once the OS's trash takes one.
@@ -379,53 +409,65 @@ export class Outside implements ToolLayer {
     const { fd } = this.options;
     const conflict: Outcome = { error: { type: "conflict", message: `${original} changed since it was copied. Nothing was replaced; the changes are in ${copy}.` } };
     const notReplaced = (cause: string): Outcome => ({ error: { type: "os", message: `${original} was not replaced: ${cause}. Nothing was changed; the changes are still in ${copy}.` } });
-    const inBin: Outcome = { error: { type: "os", message: `The old version is in the Recycle Bin; the changes are still in ${copy}.` } };
+    const inBin: Outcome = { error: { type: "os", message: `The old version is in the ${BIN}; the changes are still in ${copy}.` } };
+    const gone: Outcome = { error: { type: "conflict", message: `${original} is no longer there; the old version may already be in the ${BIN}. The changes are in ${copy}.` } };
     const inner = (kind: string, opArgs: Record<string, unknown>): Promise<Outcome> => this.options.tools.run({
       ...operation, id: `outside-put-back-${randomUUID()}`, kind, args: opArgs, digest: "",
     }, signal);
-    const unchanged = (where: Where) => {
-      const st = io(original, () => fd.lstat(where));
-      return !st.isSymbolicLink() && revisionOf(st) === revision;
+    // The original as it is now, if it is still the file copied; null for one changed since.
+    const unchanged = (where: Where): BigIntStats | null => {
+      const st = fd.lstat(where);
+      return !st.isSymbolicLink() && revisionOf(st) === revision ? st : null;
     };
     let reached: { where: Where; release: () => void };
     try {
-      reached = this.reach(grant, original);
+      reached = this.reach(root, grant, original);
     } catch (error) {
+      // The chat's folder by another name is refused as such.
+      if (error instanceof Failure && error.refusal.type === "denied") return { error: error.refusal };
       return notReplaced(said(error));
     }
     const { where, release } = reached;
     try {
       if (typeof where === "string") return notReplaced(`${original} is a folder`);
       const { dir, name } = where;
+      let before: BigIntStats | null;
       try {
-        if (!unchanged(where)) return conflict;
-      } catch {
-        return conflict; // gone, or no longer the file it was
+        before = unchanged(where);
+      } catch (error) {
+        // Gone: maybe a put back that stopped between the bin and the rename.
+        return (error as NodeJS.ErrnoException).code === "ENOENT" ? gone : conflict;
       }
+      if (before === null) return conflict;
       const read = await inner("read", { key: copy, max_bytes: null });
       if ("error" in read) return notReplaced(read.error.message);
       const bytes = Buffer.from(read.ok as string, "base64");
       const temporary = { dir, name: `.${name}.surogate-put-back-${randomUUID().slice(0, 8)}` };
       let made: BigIntStats | null = null;
-      // The temporary file goes on every way out but the one that gives it the original's name; only while it is still this put back's own.
+      let opened = false;
+      // The temporary file's name goes on every way out, the one that put it in place too: only while it is still this
+      // put back's own, or, where its identity could not be read, as just made by a create-only open.
       const removeTemporary = () => {
         try {
-          if (made !== null && sameFile(made, fd.lstat(temporary))) fd.unlink(temporary);
+          if (made !== null ? sameFile(made, fd.lstat(temporary)) : opened) fd.unlink(temporary);
         } catch {
           // Gone already.
         }
       };
       try {
         const file = fd.open(temporary, constants.O_RDWR | constants.O_CREAT | constants.O_EXCL | FLAGS.NOFOLLOW, 0o666);
+        opened = true;
         try {
           made = fd.fstat(file, { bigint: true });
+          // The original's permissions, where the OS keeps them (Windows keeps one read-only bit, its own to set).
+          if (process.platform !== "win32") fchmodSync(file, Number(before.mode) & 0o777);
           this.writeChecked(file, bytes, "the changes did not check out once written");
         } finally {
           closeSync(file);
         }
         // Looked at again just before the bin: an edit saved while the changes were written is not sent there.
         if (signal.aborted) throw osFailure("it was stopped");
-        if (!unchanged(where)) {
+        if (unchanged(where) === null) {
           removeTemporary();
           return conflict;
         }
@@ -439,7 +481,7 @@ export class Outside implements ToolLayer {
         await this.options.trash(hostPathOf(original));
       } catch (error) {
         removeTemporary();
-        return { error: { type: "os", message: `${original} could not be moved to the Recycle Bin: ${causeOf(error)}. Nothing was replaced; the changes are still in ${copy}.` } };
+        return { error: { type: "os", message: `${original} could not be moved to the ${BIN}: ${causeOf(error)}. Nothing was replaced; the changes are still in ${copy}.` } };
       }
       try {
         this.renamed(temporary, where, made!);
@@ -454,6 +496,8 @@ export class Outside implements ToolLayer {
         removeTemporary();
         return inBin;
       }
+      // A second name of the file now in place, where the rename's own removal of it failed.
+      removeTemporary();
       // In place and checked: the working copy goes, by the chat's folder's own tools, and its record with it.
       const deleted = await inner("delete", { key: copy });
       this.options.bindings.forgetCopy(root, copy);
@@ -502,11 +546,11 @@ export class Outside implements ToolLayer {
     try {
       fd.unlink(from);
     } catch {
-      // A second name of the file put back, harmless; the caller's cleanup tries it again.
+      // Left as a second name of the file put back: the caller removes it once the file checks out.
     }
   }
 
-  private read(kind: string, args: Record<string, unknown>, grant: string, key: string): unknown {
+  private read(root: string, kind: string, args: Record<string, unknown>, grant: string, key: string): unknown {
     const { fd } = this.options;
     const opener = (where: Where) => (flags: number) => fd.open(where, flags);
     switch (kind) {
@@ -515,7 +559,7 @@ export class Outside implements ToolLayer {
       case "outside.stat":
         try {
           // A link put there since is no file of the grant's: answered as nothing there, as a stat that fails is.
-          return this.within(grant, key, (where) => {
+          return this.within(root, grant, key, (where) => {
             const st = fd.lstat(where);
             return st.isSymbolicLink() ? null : statOf(st);
           });
@@ -523,11 +567,11 @@ export class Outside implements ToolLayer {
           return null;
         }
       case "outside.read":
-        return this.within(grant, key, (where) => readFrom(args, key, opener(where)));
+        return this.within(root, grant, key, (where) => readFrom(args, key, opener(where)));
       case "outside.read_lines":
-        return this.within(grant, key, (where) => linesFrom(args, key, opener(where)));
+        return this.within(root, grant, key, (where) => linesFrom(args, key, opener(where)));
       case "outside.list_dir":
-        return this.within(grant, key, (where) => {
+        return this.within(root, grant, key, (where) => {
           const held = io(key, () => fd.hold(where));
           try {
             return listed(io(key, () => fd.readdir({ dir: held })));
@@ -536,14 +580,14 @@ export class Outside implements ToolLayer {
           }
         });
       default: // outside.walk
-        return this.within(grant, key, (where) => walkFrom(args, key, opener(where), fd));
+        return this.within(root, grant, key, (where) => walkFrom(args, key, opener(where), fd));
     }
   }
 
   // *use* given *key* as reached from *grant*: the grant's own folder by its path, which withinGrant checked; anything
   // in it by its name in its folder, held open, each folder from the grant down held in turn and never through a link.
-  private within<T>(grant: string, key: string, use: (where: Where) => T): T {
-    const { where, release } = this.reach(grant, key);
+  private within<T>(root: string, grant: string, key: string, use: (where: Where) => T): T {
+    const { where, release } = this.reach(root, grant, key);
     try {
       return use(where);
     } finally {
@@ -551,18 +595,37 @@ export class Outside implements ToolLayer {
     }
   }
 
-  // *key* as within reaches it, its folder held until *release*: for a use that waits on something in between.
-  private reach(grant: string, key: string): { where: Where; release: () => void } {
+  // *key* as within reaches it, its folder held until *release*: for a use that waits on something in between. Each
+  // folder held on the way, and *key* itself, is checked not to be *root*'s chat's folder by its identity: by another
+  // spelling of its path (case, a short name) that is the chat's own, its tools' to touch, never this layer's.
+  private reach(root: string, grant: string, key: string): { where: Where; release: () => void } {
     const { fd } = this.options;
-    if (key === grant) return { where: grant, release: () => {} };
+    const binding = this.options.bindings.get(root);
+    const notChat = (stats: () => BigIntStats) => {
+      let st: BigIntStats;
+      try {
+        st = stats();
+      } catch {
+        return; // nothing there yet, as a copy's new name: no folder of the chat's
+      }
+      if (binding !== undefined && isChat(binding, st)) throw new Failure({ type: "denied", message: byAnotherName(key) });
+    };
+    if (key === grant) {
+      notChat(() => fd.lstat(grant));
+      return { where: grant, release: () => {} };
+    }
     const names = key.slice(grant.length + 1).split("/");
     let dir = io(key, () => fd.hold(grant));
     try {
+      notChat(() => fd.fstat(dir, { bigint: true }));
       for (const name of names.slice(0, -1)) {
         const next = io(key, () => fd.hold({ dir, name }));
         closeSync(dir);
         dir = next;
+        notChat(() => fd.fstat(dir, { bigint: true }));
       }
+      const last = { dir, name: names.at(-1)! };
+      notChat(() => fd.lstat(last));
     } catch (error) {
       closeSync(dir);
       throw error;
@@ -601,6 +664,12 @@ export class Outside implements ToolLayer {
   stop(): Promise<void> {
     return this.options.tools.stop();
   }
+}
+
+// Whether *stats* are of *binding*'s folder: its identity as the binder confirmed it, through the file host's walk.
+function isChat(binding: Binding, stats: BigIntStats): boolean {
+  const { dev, ino } = identityOf(stats);
+  return confirmedFolder(binding, { dev: Number(dev), ino: Number(ino) });
 }
 
 // The path a read kind names: resolve's as the agent wrote it, made plain, which must be absolute; every other's key,

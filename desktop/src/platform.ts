@@ -50,6 +50,9 @@ export function forThisOs<T>(rows: Partial<Record<NodeJS.Platform, T>>, platform
   return rows[platform] ?? null;
 }
 
+/** Where a file this computer deletes goes, by the name its windows give it: shown in a window, and said to the agent alike. */
+export const BIN = forThisOs({ darwin: "Trash" }) ?? "Recycle Bin";
+
 /** Each OS by the name a person knows it by, where that is not the name Node gives it (files/os-names.ts keeps a copy). */
 export const OS_NAMES: Readonly<Partial<Record<NodeJS.Platform, string>>> = { darwin: "macOS", win32: "Windows" };
 

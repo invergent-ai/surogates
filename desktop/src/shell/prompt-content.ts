@@ -7,7 +7,7 @@ import { posix } from "node:path";
 import { type ApprovalRequest, type BrowserAction, type ChatLabel, PREVIEW_BYTES } from "../binding/approvals.js";
 import type { FolderSheet } from "../binding/binder.js";
 import type { LinkSummary } from "../binding/links.js";
-import { forThisOs } from "../platform.js";
+import { BIN } from "../platform.js";
 import { shownName, shownPath, shownWithin } from "../session-path.js";
 
 export interface PromptButton {
@@ -261,7 +261,6 @@ export function approval(request: ApprovalRequest): PromptContent {
   };
 }
 
-const BIN = forThisOs({ darwin: "Trash" }) ?? "Recycle Bin";
 const files = (n: number) => `${n} ${n === 1 ? "file" : "files"}`;
 // The prompts of the files outside the chat's folder: Deny is focused and what Escape answers, and none offers to stop asking.
 function outsidePrompt(request: Exclude<ApprovalRequest, { kind: "command" | "change" | "input" | "network" | "browser" }>): PromptContent {

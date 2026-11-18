@@ -1,6 +1,6 @@
 // The Outside layer: a chat's grants of folders outside its own, and its reads in them, done by the app itself.
 
-import { constants, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, truncateSync, writeFileSync, writeSync } from "node:fs";
+import { chmodSync, constants, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, truncateSync, writeFileSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 
@@ -8,11 +8,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { BOOT_ID, type FolderGuards } from "../src/binding/folder.js";
 import { MAX_READ_BYTES } from "../src/files/answers.js";
-import { type FdPaths, fdPaths } from "../src/files/fd-paths.js";
+import { type FdPaths, fdPaths, type Where } from "../src/files/fd-paths.js";
 import { perform } from "../src/files/operations.js";
 import { OperationJournal } from "../src/journal/journal.js";
 import type { Operation, Outcome } from "../src/link/protocol.js";
 import { numberedName, Outside } from "../src/outside/executor.js";
+import { BIN } from "../src/platform.js";
 import type { ToolLayer } from "../src/shell/device-stack.js";
 
 const ROOT = "root-1";
@@ -48,7 +49,9 @@ beforeEach(() => {
   writeFileSync(join(base, "elsewhere", "secret.txt"), "secret");
   guards = { home: join(base, "home"), dataDir: join(base, "data"), cacheDir: join(base, "home", ".cache", "surogate"), appDirs: [join(base, "app")] };
   journal = new OperationJournal(join(base, "journal.sqlite"));
-  journal.bindings.add({ root: ROOT, nonce: "n", folder: work, dev: 1, ino: 1, boot: BOOT_ID, mode: "free", boundAt: 1 });
+  // The chat's folder's own identity, as the binder confirms it: the layer tells the chat's folder by it.
+  const { dev, ino } = statSync(work);
+  journal.bindings.add({ root: ROOT, nonce: "n", folder: work, dev, ino, boot: BOOT_ID, mode: "free", boundAt: 1 });
   const ran: Operation[] = [];
   tools = {
     ran,
@@ -490,8 +493,16 @@ describe("outside.trash and outside.put_back", () => {
     rmSync(note);
     symlinkSync(secret, note);
     rmSync(join(desktop, "Scan"), { recursive: true });
-    expect(await trashOf([note, cerere])).toEqual({
-      ok: { trashed: [], kept: [{ file: note, reason: expect.any(String) }, { file: cerere, reason: expect.any(String) }] },
+    mkdirSync(join(desktop, "Folder"));
+    // A folder, the grant's own too, is no file: the windows ask about files.
+    expect(await trashOf([note, cerere, join(desktop, "Folder"), desktop])).toEqual({
+      ok: {
+        trashed: [],
+        kept: [
+          { file: note, reason: expect.any(String) }, { file: cerere, reason: expect.any(String) },
+          { file: join(desktop, "Folder"), reason: "not a file" }, { file: desktop, reason: "not a file" },
+        ],
+      },
     });
     expect(readdirSync(bin)).toEqual([]);
     expect(readFileSync(secret, "utf8")).toBe("secret");
@@ -501,14 +512,12 @@ describe("outside.trash and outside.put_back", () => {
     const swapping: FdPaths = {
       ...fdPaths,
       lstat: (where) => {
-        try {
-          return fdPaths.lstat(where);
-        } finally {
-          if (where === plain && !existsSync(`${plain}.moved`)) {
-            renameSync(plain, `${plain}.moved`);
-            symlinkSync(secret, plain);
-          }
+        // Swapped as the walk reaches it: after every look by its path.
+        if (typeof where !== "string" && where.name === "plain.txt" && !existsSync(`${plain}.moved`)) {
+          renameSync(plain, `${plain}.moved`);
+          symlinkSync(secret, plain);
         }
+        return fdPaths.lstat(where);
       },
     };
     chosenFor.mockReturnValueOnce([plain]);
@@ -602,7 +611,7 @@ describe("outside.trash and outside.put_back", () => {
       writeFileSync(path, "saved meanwhile");
     };
     expect(await putBack(copy, note)).toEqual({
-      error: { type: "os", message: `The old version is in the Recycle Bin; the changes are still in ${copy}.` },
+      error: { type: "os", message: `The old version is in the ${BIN}; the changes are still in ${copy}.` },
     });
     expect(readFileSync(note, "utf8")).toBe("saved meanwhile");
     expect(readFileSync(copy, "utf8")).toBe("changed\n");
@@ -624,5 +633,165 @@ describe("outside.trash and outside.put_back", () => {
     expect(readFileSync(note, "utf8")).toBe("first\nsecond\n");
     expect(readdirSync(bin)).toEqual([]);
     expect(tools.ran.map((ran) => ran.kind)).not.toContain("delete");
+  });
+});
+
+describe("outside put back's edges, and the chat's folder by another name", () => {
+  const folderTools = () => {
+    tools.run = async (operation) => {
+      tools.ran.push(operation);
+      return perform(operation.kind, operation.args, { folder: work, home: join(base, "home"), env: {} }, never());
+    };
+  };
+  const copied = async (file: string) => {
+    chosenFor.mockReturnValueOnce([file]);
+    const outcome = await layer().run(op("outside.copy", { files: [file], to: work }), never());
+    return (outcome as { ok: { copied: Array<{ to: string }> } }).ok.copied[0]!.to;
+  };
+  const temporaries = () => readdirSync(desktop).filter((name) => name.includes("surogate-put-back"));
+  // A drive that ignores case, as Windows's and macOS's do: "WORK" is the chat's folder "work". *paths* false spells it
+  // so only by a held folder's name, as a look by path finds nothing and the folder is swapped in after.
+  const caseless = (paths = true): FdPaths => {
+    const plain = (where: Where): Where => typeof where === "string"
+      ? (paths ? where.replace(/\/WORK(?=\/|$)/, "/work") : where)
+      : where.name === "WORK" ? { ...where, name: "work" } : where;
+    return {
+      ...fdPaths,
+      hold: (where) => fdPaths.hold(plain(where)),
+      lstat: (where) => fdPaths.lstat(plain(where)),
+      open: (where, flags, mode) => fdPaths.open(plain(where), flags, mode),
+      unlink: (where) => fdPaths.unlink(plain(where)),
+      link: (from, to) => fdPaths.link(plain(from), plain(to)),
+    };
+  };
+
+  it("keeps the original's permissions", async () => {
+    folderTools();
+    journal.bindings.grantRead(ROOT, desktop);
+    const note = join(desktop, "note.txt");
+    chmodSync(note, 0o600);
+    const copy = await copied(note);
+    writeFileSync(copy, "changed\n");
+    expect(await layer().run(op("outside.put_back", { copy, original: note }), never())).toEqual({ ok: { original: note, copyDeleted: true } });
+    expect(statSync(note).mode & 0o777).toBe(0o600);
+  });
+
+  it("leaves no second name of the file put back when the rename could not remove it", async () => {
+    folderTools();
+    journal.bindings.grantRead(ROOT, desktop);
+    const note = join(desktop, "note.txt");
+    const copy = await copied(note);
+    writeFileSync(copy, "changed\n");
+    let refused = false;
+    const sticky: FdPaths = {
+      ...fdPaths,
+      unlink: (where) => {
+        if (!refused && typeof where !== "string" && where.name?.includes("surogate-put-back")) {
+          refused = true;
+          throw Object.assign(new Error("EBUSY: resource busy or locked"), { code: "EBUSY" });
+        }
+        fdPaths.unlink(where);
+      },
+    };
+    expect(await layer(sticky).run(op("outside.put_back", { copy, original: note }), never())).toEqual({ ok: { original: note, copyDeleted: true } });
+    expect(refused).toBe(true);
+    expect(temporaries()).toEqual([]);
+    expect(readFileSync(note, "utf8")).toBe("changed\n");
+  });
+
+  it("removes its temporary file when its identity cannot be read", async () => {
+    folderTools();
+    journal.bindings.grantRead(ROOT, desktop);
+    const note = join(desktop, "note.txt");
+    const copy = await copied(note);
+    let made = -1;
+    const blind: FdPaths = {
+      ...fdPaths,
+      open: (where, flags, mode) => {
+        const file = fdPaths.open(where, flags, mode);
+        if (typeof where !== "string" && where.name?.includes("surogate-put-back")) made = file;
+        return file;
+      },
+      fstat: ((file: number, options?: { bigint: true }) => {
+        if (file === made) throw Object.assign(new Error("EIO: i/o error"), { code: "EIO", errno: -5 });
+        return options ? fdPaths.fstat(file, options) : fdPaths.fstat(file);
+      }) as FdPaths["fstat"],
+    };
+    expect(await layer(blind).run(op("outside.put_back", { copy, original: note }), never())).toMatchObject({ error: { type: "os" } });
+    expect(temporaries()).toEqual([]);
+    expect(readFileSync(note, "utf8")).toBe("first\nsecond\n");
+    expect(readdirSync(bin)).toEqual([]);
+  });
+
+  it("says an original that is gone is gone, and keeps the copy", async () => {
+    folderTools();
+    journal.bindings.grantRead(ROOT, desktop);
+    const note = join(desktop, "note.txt");
+    const copy = await copied(note);
+    rmSync(note);
+    expect(await layer().run(op("outside.put_back", { copy, original: note }), never())).toEqual({
+      error: { type: "conflict", message: `${note} is no longer there; the old version may already be in the ${BIN}. The changes are in ${copy}.` },
+    });
+    expect(existsSync(copy)).toBe(true);
+  });
+
+  it("says when the working copy could not be deleted, and forgets it all the same", async () => {
+    folderTools();
+    journal.bindings.grantRead(ROOT, desktop);
+    const note = join(desktop, "note.txt");
+    const copy = await copied(note);
+    const below = tools.run;
+    tools.run = async (operation, signal) => operation.kind === "delete" ? { error: { type: "os", message: "busy" } } : below(operation, signal);
+    expect(await layer().run(op("outside.put_back", { copy, original: note }), never())).toEqual({ ok: { original: note, copyDeleted: false } });
+    expect(journal.bindings.copyOf(ROOT, copy)).toBeUndefined();
+  });
+
+  it("tells the chat's folder by its identity, whatever its path's spelling", async () => {
+    folderTools();
+    journal.bindings.grantRead(ROOT, base);
+    writeFileSync(join(work, "a.txt"), "mine");
+    const other = join(base, "WORK", "a.txt");
+    const note = join(desktop, "note.txt");
+    const outside = layer(caseless());
+    const refused = { error: { type: "denied", message: expect.stringContaining("chat's folder") } };
+    // Trash.
+    expect(outside.refusal(op("outside.trash", { files: [other] }))).toMatchObject(refused);
+    chosenFor.mockReturnValueOnce([other]);
+    expect(await outside.run(op("outside.trash", { files: [other] }), never())).toEqual({
+      ok: { trashed: [], kept: [{ file: other, reason: expect.stringContaining("chat's folder") }] },
+    });
+    // Copy, from it and into it.
+    expect(outside.refusal(op("outside.copy", { files: [other], to: desktop }))).toMatchObject(refused);
+    chosenFor.mockReturnValueOnce([other]);
+    expect(await outside.run(op("outside.copy", { files: [other], to: desktop }), never())).toEqual({
+      ok: { copied: [], skipped: [{ from: other, reason: expect.stringContaining("another name") }] },
+    });
+    expect(outside.refusal(op("outside.copy", { files: [note], to: join(base, "WORK") }))).toMatchObject(refused);
+    chosenFor.mockReturnValueOnce([note]);
+    expect(await outside.run(op("outside.copy", { files: [note], to: join(base, "WORK") }), never())).toMatchObject(refused);
+    // Put back over it.
+    journal.bindings.recordCopy(ROOT, join(work, "b.txt"), other, "1:2:3:4:5");
+    writeFileSync(join(work, "b.txt"), "changes");
+    expect(outside.refusal(op("outside.put_back", { copy: join(work, "b.txt"), original: other }))).toMatchObject(refused);
+    expect(await outside.run(op("outside.put_back", { copy: join(work, "b.txt"), original: other }), never())).toMatchObject(refused);
+    // Spelled so only once its folder is held, as one swapped in after the look: the walk itself refuses it.
+    const late = layer(caseless(false));
+    chosenFor.mockReturnValueOnce([other]);
+    expect(await late.run(op("outside.trash", { files: [other] }), never())).toEqual({
+      ok: { trashed: [], kept: [{ file: other, reason: expect.stringContaining("another name") }] },
+    });
+    chosenFor.mockReturnValueOnce([other]);
+    expect(await late.run(op("outside.copy", { files: [other], to: desktop }), never())).toMatchObject({
+      ok: { copied: [], skipped: [{ from: other, reason: expect.stringContaining("another name") }] },
+    });
+    chosenFor.mockReturnValueOnce([note]);
+    expect(await late.run(op("outside.copy", { files: [note], to: join(base, "WORK") }), never())).toMatchObject({
+      ok: { copied: [], skipped: [{ from: note, reason: expect.stringContaining("another name") }] },
+    });
+    expect(await late.run(op("outside.put_back", { copy: join(work, "b.txt"), original: other }), never())).toMatchObject(refused);
+    expect(readFileSync(join(work, "a.txt"), "utf8")).toBe("mine");
+    expect(readdirSync(work).sort()).toEqual(["a.txt", "b.txt"]);
+    expect(readdirSync(bin)).toEqual([]);
+    expect(tools.ran.map((ran) => ran.kind).filter((kind) => kind === "write" || kind === "delete")).toEqual([]);
   });
 });
