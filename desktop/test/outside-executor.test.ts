@@ -1,17 +1,18 @@
 // The Outside layer: a chat's grants of folders outside its own, and its reads in them, done by the app itself.
 
-import { mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, truncateSync, writeFileSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { BOOT_ID, type FolderGuards } from "../src/binding/folder.js";
+import { MAX_READ_BYTES } from "../src/files/answers.js";
 import { type FdPaths, fdPaths } from "../src/files/fd-paths.js";
 import { perform } from "../src/files/operations.js";
 import { OperationJournal } from "../src/journal/journal.js";
 import type { Operation, Outcome } from "../src/link/protocol.js";
-import { Outside } from "../src/outside/executor.js";
+import { numberedName, Outside } from "../src/outside/executor.js";
 import type { ToolLayer } from "../src/shell/device-stack.js";
 
 const ROOT = "root-1";
@@ -205,11 +206,165 @@ describe("Outside", () => {
     // An optional member is there where the tools below have it, and only there.
     expect(outside.takeOver?.(ROOT)).toBe(true);
     expect(outside.show).toBeUndefined();
-    // A copy or a trash is not done here yet: its ticked files are let go all the same.
+    // A trash is not done here yet: its ticked files are let go all the same.
     journal.bindings.grantRead(ROOT, desktop);
-    const copy = op("outside.copy", { files: [join(desktop, "note.txt")], to: work });
-    expect(await outside.run(copy, never())).toEqual({ error: { type: "unsupported", message: "This computer cannot do 'outside.copy' yet" } });
-    expect(chosenFor).toHaveBeenCalledWith(copy.id);
+    const trash = op("outside.trash", { files: [join(desktop, "note.txt")] });
+    expect(await outside.run(trash, never())).toEqual({ error: { type: "unsupported", message: "This computer cannot do 'outside.trash' yet" } });
+    expect(chosenFor).toHaveBeenCalledWith(trash.id);
     expect(tools.ran).toEqual([read]);
+  });
+});
+
+describe("outside.copy", () => {
+  // The tools below as the chat's folder's own file helper: each operation done in *work*.
+  const folderTools = () => {
+    tools.run = async (operation) => {
+      tools.ran.push(operation);
+      return perform(operation.kind, operation.args, { folder: work, home: join(base, "home"), env: {} }, never());
+    };
+  };
+  const copy = async (files: string[], to: string, ticked = files) => {
+    chosenFor.mockReturnValueOnce(ticked);
+    const operation = op("outside.copy", { files, to });
+    const outside = layer();
+    expect(outside.refusal(operation)).toBeNull();
+    const outcome = await outside.run(operation, never());
+    expect(chosenFor).toHaveBeenCalledWith(operation.id);
+    return outcome;
+  };
+
+  it("numbers a name as name (n).ext", () => {
+    expect(numberedName("cerere.pdf", 0)).toBe("cerere.pdf");
+    expect(numberedName("cerere.pdf", 1)).toBe("cerere (1).pdf");
+    expect(numberedName("raport.final.xlsx", 2)).toBe("raport.final (2).xlsx");
+    expect(numberedName(".env", 3)).toBe(".env (3)");
+    expect(numberedName("Makefile", 100)).toBe("Makefile (100)");
+  });
+
+  it("copies the ticked files into the chat's folder and remembers their originals", async () => {
+    folderTools();
+    journal.bindings.grantRead(ROOT, desktop);
+    const note = join(desktop, "note.txt");
+    const cerere = join(desktop, "Scan", "cerere.pdf");
+    const unticked = join(desktop, "Scan", "other.pdf");
+    writeFileSync(unticked, "other");
+    const revision = ((await perform("stat", { key: note }, { folder: desktop, home: join(base, "home"), env: {} }, never())) as { ok: { revision: string } }).ok.revision;
+    expect(await copy([note, cerere, unticked], work, [note, cerere])).toEqual({
+      ok: { copied: [{ from: note, to: join(work, "note.txt") }, { from: cerere, to: join(work, "cerere.pdf") }], skipped: [] },
+    });
+    expect(readFileSync(join(work, "note.txt"), "utf8")).toBe("first\nsecond\n");
+    expect(readFileSync(join(work, "cerere.pdf"), "utf8")).toBe("pdf");
+    expect(existsSync(join(work, "other.pdf"))).toBe(false);
+    expect(journal.bindings.copyOf(ROOT, join(work, "note.txt"))).toEqual({ original: note, revision });
+    expect(journal.bindings.copyOf(ROOT, join(work, "cerere.pdf"))).toMatchObject({ original: cerere });
+    // Written by the folder's own tools, as creates only, never asked again.
+    expect(tools.ran.filter((ran) => ran.kind === "write").map((ran) => ran.args.create)).toEqual([true, true]);
+    // The originals stay as they were.
+    expect(readFileSync(note, "utf8")).toBe("first\nsecond\n");
+  });
+
+  it("copies from one granted folder into another, and never through the chat's folder", async () => {
+    folderTools();
+    const documents = join(base, "home", "Documents");
+    mkdirSync(join(documents, "PONTAJE"), { recursive: true });
+    journal.bindings.grantRead(ROOT, desktop);
+    journal.bindings.grantRead(ROOT, documents);
+    const cerere = join(desktop, "Scan", "cerere.pdf");
+    expect(await copy([cerere], join(documents, "PONTAJE"))).toEqual({
+      ok: { copied: [{ from: cerere, to: join(documents, "PONTAJE", "cerere.pdf") }], skipped: [] },
+    });
+    expect(readFileSync(join(documents, "PONTAJE", "cerere.pdf"), "utf8")).toBe("pdf");
+    expect(readFileSync(cerere, "utf8")).toBe("pdf");
+    expect(tools.ran).toEqual([]);
+    expect(readdirSync(work)).toEqual([]);
+    // And out of the chat's folder: read by its own tools, written by the app.
+    writeFileSync(join(work, "raport.txt"), "raport");
+    expect(await copy([join(work, "raport.txt")], desktop)).toEqual({
+      ok: { copied: [{ from: join(work, "raport.txt"), to: join(desktop, "raport.txt") }], skipped: [] },
+    });
+    expect(readFileSync(join(desktop, "raport.txt"), "utf8")).toBe("raport");
+    expect(tools.ran.map((ran) => ran.kind)).not.toContain("write");
+  });
+
+  it("numbers a copy whose name is taken instead of overwriting", async () => {
+    folderTools();
+    journal.bindings.grantRead(ROOT, desktop);
+    const note = join(desktop, "note.txt");
+    writeFileSync(join(work, "note.txt"), "mine");
+    writeFileSync(join(work, "note (1).txt"), "mine too");
+    expect(await copy([note], work)).toMatchObject({ ok: { copied: [{ from: note, to: join(work, "note (2).txt") }] } });
+    expect(readFileSync(join(work, "note.txt"), "utf8")).toBe("mine");
+    expect(readFileSync(join(work, "note (1).txt"), "utf8")).toBe("mine too");
+    expect(readFileSync(join(work, "note (2).txt"), "utf8")).toBe("first\nsecond\n");
+    // Onto itself: a numbered copy beside it.
+    expect(await copy([note], desktop)).toMatchObject({ ok: { copied: [{ from: note, to: join(desktop, "note (1).txt") }] } });
+    expect(readFileSync(note, "utf8")).toBe("first\nsecond\n");
+    // A link at the name is a name taken: nothing is written through it.
+    symlinkSync(join(base, "elsewhere", "secret.txt"), join(desktop, "cerere.pdf"));
+    const cerere = join(desktop, "Scan", "cerere.pdf");
+    expect(await copy([cerere], desktop)).toMatchObject({ ok: { copied: [{ from: cerere, to: join(desktop, "cerere (1).pdf") }] } });
+    expect(readFileSync(join(base, "elsewhere", "secret.txt"), "utf8")).toBe("secret");
+  });
+
+  it("refuses a destination that is neither the chat's folder nor granted", async () => {
+    folderTools();
+    journal.bindings.grantRead(ROOT, desktop);
+    const note = join(desktop, "note.txt");
+    const outside = layer();
+    for (const to of [join(base, "elsewhere"), join(work, "sub"), join(base, "home")]) {
+      const refused = { error: { type: "denied", message: `The destination ${to} is neither this chat's folder nor a folder it may read.` } };
+      expect(outside.refusal(op("outside.copy", { files: [note], to })), to).toEqual(refused);
+      // Run as well, for an operation that came without the question.
+      chosenFor.mockReturnValueOnce([note]);
+      expect(await outside.run(op("outside.copy", { files: [note], to }), never()), to).toEqual(refused);
+    }
+    // A source in the chat's folder is the chat's to copy; one elsewhere is not.
+    expect(outside.refusal(op("outside.copy", { files: [join(work, "a.txt")], to: desktop }))).toBeNull();
+    expect(outside.refusal(op("outside.copy", { files: [join(base, "elsewhere", "secret.txt")], to: work })))
+      .toEqual(noPermission(join(base, "elsewhere", "secret.txt")));
+    expect(readdirSync(join(base, "elsewhere"))).toEqual(["secret.txt"]);
+    expect(tools.ran).toEqual([]);
+  });
+
+  it("reports a file that vanished before the copy as skipped, and copies the rest", async () => {
+    folderTools();
+    journal.bindings.grantRead(ROOT, desktop);
+    const note = join(desktop, "note.txt");
+    const cerere = join(desktop, "Scan", "cerere.pdf");
+    const large = join(desktop, "large.bin");
+    writeFileSync(large, "");
+    truncateSync(large, MAX_READ_BYTES + 1);
+    const outside = layer();
+    const operation = op("outside.copy", { files: [note, large, cerere], to: work });
+    expect(outside.refusal(operation)).toBeNull();
+    rmSync(note);
+    chosenFor.mockReturnValueOnce([note, large, cerere]);
+    expect(await outside.run(operation, never())).toEqual({
+      ok: {
+        copied: [{ from: cerere, to: join(work, "cerere.pdf") }],
+        skipped: [{ from: note, reason: expect.stringContaining("No such file") }, { from: large, reason: "too large" }],
+      },
+    });
+    expect(readdirSync(work)).toEqual(["cerere.pdf"]);
+  });
+
+  it("removes a copy made outside that does not check out", async () => {
+    journal.bindings.grantRead(ROOT, desktop);
+    const cerere = join(desktop, "Scan", "cerere.pdf");
+    // Something else writes into the new file as it is made: its size is then not the original's.
+    const meddling: FdPaths = {
+      ...fdPaths,
+      open: (where, flags, mode) => {
+        const file = fdPaths.open(where, flags, mode);
+        if (flags & 0o100) writeSync(file, "longer than the original");
+        return file;
+      },
+    };
+    chosenFor.mockReturnValueOnce([cerere]);
+    const outside = new Outside({ tools, bindings: journal.bindings, approvals: { chosenFor }, fd: meddling, getPath });
+    expect(await outside.run(op("outside.copy", { files: [cerere], to: desktop }), never())).toEqual({
+      ok: { copied: [], skipped: [{ from: cerere, reason: expect.stringContaining("check") }] },
+    });
+    expect(readdirSync(desktop).sort()).toEqual(["Scan", "note.txt"]);
   });
 });
