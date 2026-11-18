@@ -1,18 +1,19 @@
 // Whom the guest's roots run for, this computer's user, by its OS (host-user.ts): on Linux and macOS, the user's own
-// uid, gid, name and home, as the app has always given them; on Windows, which has no uid, Linux's first user's, the
-// user's name made one a Linux user can have, and the home's path in the guest.
+// uid, gid and name; on Windows, which has no uid, Linux's first user's, the
+// user's name made one a Linux user can have; the home is the root's private one at a fixed path on every OS.
 
-import { homedir, userInfo } from "node:os";
+import { userInfo } from "node:os";
 
 import { describe, expect, it, vi } from "vitest";
 
+import { GUEST_HOME } from "../src/host-user.js";
 import { importedOn } from "./platforms.js";
 
 it("is this computer's user as the OS names them on Linux and macOS", async () => {
   const { uid, gid, username } = userInfo();
   for (const os of ["linux", "darwin"] as const) {
     const { hostUser } = await importedOn(os, () => import("../src/host-user.js"));
-    expect(hostUser(), os).toEqual({ uid, gid, name: username, home: homedir() });
+    expect(hostUser(), os).toEqual({ uid, gid, name: username, home: GUEST_HOME });
   }
 });
 
@@ -31,9 +32,9 @@ describe("this computer's user on Windows", () => {
     }
   }
 
-  it("is uid and gid 1000, the user's name in small letters, and the profile's path in the guest", async () => {
-    expect(await windowsUser("Ana", "C:\\Users\\Ana")).toEqual({ uid: 1000, gid: 1000, name: "ana", home: "/mnt/c/Users/Ana" });
-    expect(await windowsUser("ana.lopez", "D:\\Profiles\\ana.lopez")).toEqual({ uid: 1000, gid: 1000, name: "ana.lopez", home: "/mnt/d/Profiles/ana.lopez" });
+  it("is uid and gid 1000, the user's name in small letters, and the private home", async () => {
+    expect(await windowsUser("Ana", "C:\\Users\\Ana")).toEqual({ uid: 1000, gid: 1000, name: "ana", home: GUEST_HOME });
+    expect(await windowsUser("ana.lopez", "D:\\Profiles\\ana.lopez")).toEqual({ uid: 1000, gid: 1000, name: "ana.lopez", home: GUEST_HOME });
   });
 
   it("has each character a Linux user name cannot hold in its name made _, and is user where none of its own is left", async () => {
