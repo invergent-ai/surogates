@@ -334,3 +334,15 @@ def test_composio_nested_upload_with_an_unknown_key_is_faked():
     assert not inside_scratch("ONE_DRIVE_ONEDRIVE_UPLOAD_FILE", up, SCOPE)
     up = {**_UP, "file": {"name": "a.pdf", "mimetype": "application/pdf", "s3key": "k", "parent": "ORIG"}}
     assert not inside_scratch("ONE_DRIVE_ONEDRIVE_UPLOAD_FILE", up, SCOPE)
+
+
+def test_a_test_chats_boundary_is_memory_only():
+    from types import SimpleNamespace
+
+    from surogates.channels.memory_boundary import SKILLOPT_BOUNDARY_PREFIX, session_memory_boundary
+    from surogates.storage.tenant import workspace_boundary
+
+    boundary = f"{SKILLOPT_BOUNDARY_PREFIX}8f1c2d3e-4b5a-4c6d-8e7f-901234567890:s1"
+    session = SimpleNamespace(id="s1", channel="api", config={"memory_boundary": boundary})
+    assert session_memory_boundary(session) == boundary  # memory stays partitioned per run and chat
+    assert workspace_boundary(session) is None  # the workspace stays the per-session one

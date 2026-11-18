@@ -185,6 +185,13 @@ def _require_service_account(tenant: TenantContext) -> UUID:
     return tenant.service_account_id
 
 
+def _is_canonical_uuid(value: object) -> bool:
+    try:
+        return isinstance(value, str) and str(UUID(value)) == value
+    except ValueError:
+        return False
+
+
 def _refuse_a_case_session(existing: Session) -> None:
     """409 ``key-in-use`` for a key that names a Keel case's session.
 
@@ -270,10 +277,11 @@ async def _submit_one(
     session_id = uuid4()
     if body.test_mode is not None:
         run_id = (body.metadata or {}).get("skillopt_run_id")
-        if not run_id:
+        if not _is_canonical_uuid(run_id):
+            # It becomes part of the memory boundary (a storage key), so only a UUID.
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail="test_mode requires metadata.skillopt_run_id.",
+                detail="test_mode requires metadata.skillopt_run_id to be a UUID.",
             )
         config["test_mode"] = body.test_mode.model_dump()
         config["memory_boundary"] = f"{SKILLOPT_BOUNDARY_PREFIX}{run_id}:{session_id}"

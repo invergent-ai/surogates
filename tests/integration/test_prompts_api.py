@@ -786,14 +786,31 @@ async def test_test_mode_stored_on_session(
     token = await _issue_token(session_factory, org_id)
     resp = await client.post(
         "/v1/api/prompts",
-        json={"prompt": "hi", "metadata": {"skillopt_run_id": "run-1"}, "test_mode": _TEST_MODE},
+        json={"prompt": "hi", "metadata": {"skillopt_run_id": _RUN}, "test_mode": _TEST_MODE},
         headers={"Authorization": f"Bearer {token}"},
     )
     assert resp.status_code == 202, resp.text
     sid = UUID(resp.json()["session_id"])
     session = await session_store.get_session(sid)
     assert session.config["test_mode"]["scratch"]["root_id"] == "R1"
-    assert session.config["memory_boundary"] == f"skillopt:run-1:{sid}"
+    assert session.config["memory_boundary"] == f"skillopt:{_RUN}:{sid}"
+
+
+_RUN = "8f1c2d3e-4b5a-4c6d-8e7f-901234567890"
+
+
+@pytest.mark.parametrize("run_id", ["run-1", "../../x", "a/b", "", 7, {"x": 1}, _RUN + "/.."])
+async def test_test_mode_refuses_a_run_id_that_is_not_a_uuid(
+    client: AsyncClient, session_factory, run_id
+):
+    org_id = await create_org(session_factory)
+    token = await _issue_token(session_factory, org_id)
+    resp = await client.post(
+        "/v1/api/prompts",
+        json={"prompt": "hi", "metadata": {"skillopt_run_id": run_id}, "test_mode": _TEST_MODE},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 422, resp.text
 
 
 async def test_submit_batch_accepts_multiple_prompts(
