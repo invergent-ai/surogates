@@ -13,6 +13,9 @@ export const KNOWN_FOLDERS = ["Desktop", "Downloads", "Documents", "Pictures"] a
 
 type KnownName = "desktop" | "downloads" | "documents" | "pictures";
 
+/** Whether *name* is one of KNOWN_FOLDERS, in whatever case the agent writes it. */
+export const isKnownName = (name: string): boolean => KNOWN_FOLDERS.some((folder) => folder.toLowerCase() === name.toLowerCase());
+
 /**
  * The guest path of the known folder *name*, in whatever case the agent writes it, as the OS places it; null for any
  * other name, or for one the OS keeps on no drive (a Desktop redirected to a network share), which no guest path names.
@@ -28,12 +31,12 @@ export function knownFolder(name: string, getPath: (name: KnownName) => string):
 }
 
 /**
- * The folder *folder* as it resolves, if a chat working in *chatFolder* may be granted to read it: refused wherever
- * checkFolder refuses a chat's folder, and for the chat's own folder or one in it, which the chat reads already and
+ * The folder *folder* as it resolves, if a chat working in *chatFolder* may be granted to read it: refused, in a
+ * grant's words, wherever checkFolder refuses a chat's folder, and for the chat's own folder or one in it, which the chat reads already and
  * its commands can write: a link they put on the way would lead the grant anywhere.
  */
 export function grantable(folder: string, guards: FolderGuards, chatFolder: string): { ok: true; folder: string } | { ok: false; message: string } {
-  const checked = checkFolder(folder, guards);
+  const checked = checkFolder(folder, guards, undefined, "read");
   if (!checked.ok) return { ok: false, message: checked.message };
   if (checked.path === chatFolder) return { ok: false, message: "That is this chat's folder already." };
   if (inside(checked.path, chatFolder)) return { ok: false, message: "That folder is in this chat's folder, which the chat reads already." };

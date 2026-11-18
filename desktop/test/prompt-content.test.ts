@@ -381,7 +381,7 @@ describe("a prompt with a list to tick", () => {
   const content = { ...base, buttons: [{ id: "deny", label: "Deny", allows: false }, { id: "allow", label: "Allow", allows: true }], choice: null };
 
   it("keeps existing content with no list and no warning style", () => {
-    expect([folderSheet(SHEET), approval({ kind: "command", chat: CHAT, command: "ls", workdir: "/home/me/notes", background: false })].map((c) => [c.checks, c.danger])).toEqual([[null, false], [null, false]]);
+    expect([folderSheet(SHEET), approval({ kind: "command", chat: CHAT, command: "ls", workdir: "/home/me/notes", background: false })].map((c) => [c.checks ?? null, c.danger ?? false])).toEqual([[null, false], [null, false]]);
   });
 
   it("returns the ticked items with the answer, and nothing it did not show", () => {
@@ -403,7 +403,7 @@ describe("the windows for files outside the chat's folder", () => {
     const c = approval({ kind: "read_folder", chat: CHAT, folder: "/home/me/docs" });
     expect([c.title, c.lead]).toEqual(["Let acme.surogate.ai read a folder?", "acme.surogate.ai asks to read /home/me/docs and its subfolders for this chat. It can list and read files there, and change nothing."]);
     expect(c.buttons.map((b) => [b.id, b.label])).toEqual([["deny", "Deny"], ["allow", "Allow for this chat"]]);
-    expect([c.focus, c.danger, c.checks]).toEqual(["deny", false, null]);
+    expect([c.focus, c.danger ?? false, c.checks ?? null]).toEqual(["deny", false, null]);
   });
 
   it("lists each file to copy, ticked by its path, with its folder and size", () => {

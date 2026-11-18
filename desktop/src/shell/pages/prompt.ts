@@ -16,8 +16,8 @@ interface Content {
   details: Array<{ label: string; value: string; code: boolean; keep: string }>;
   notes: string[];
   choice: { legend: string; options: Array<{ value: string; label: string; description: string }>; value: string } | null;
-  checks: { legend: string; items: Array<{ value: string; label: string; detail: string }> } | null;
-  danger: boolean;
+  checks?: { legend: string; items: Array<{ value: string; label: string; detail: string }> } | null;
+  danger?: boolean;
   buttons: Array<{ id: string; label: string; allows: boolean }>;
   focus: string;
   cancel: string;
@@ -183,9 +183,9 @@ function draw(state: State): void {
       return row;
     }));
   }
-  document.querySelector(".prompt")?.classList.toggle("danger", content.danger);
+  document.querySelector(".prompt")?.classList.toggle("danger", content.danger === true);
   const checks = byId("prompt-checks");
-  checks.hidden = content.checks === null;
+  checks.hidden = !content.checks;
   if (content.checks) {
     showText(byId("prompt-checks-legend"), content.checks.legend);
     checks.append(...content.checks.items.map((item, index) => {

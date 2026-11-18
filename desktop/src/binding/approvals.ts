@@ -16,6 +16,7 @@ import { posix } from "node:path";
 
 import { chatPortOf, SANDBOX_PORTS } from "../browser/ports.js";
 import { THREAD_KINDS } from "../history/kinds.js";
+import { whole } from "../files/edge.js";
 import { inside } from "../files/paths.js";
 import { FOLDER_UNAVAILABLE, type NetworkAnswer, type NetworkAsk } from "../hosts/messages.js";
 import type { Binding, Bindings } from "../journal/bindings.js";
@@ -60,51 +61,43 @@ const acts = ({ kind, args }: Operation): boolean => !BROWSER_READS.has(kind) &&
 // was let loose in its own folder, not in the rest of the computer, and none of these windows offers to stop
 // asking. The reads ask nothing here: the layer lets them only within a folder its user granted. A project's
 // thread has none of them: it works in a copy of the chat's folder, and the rest of the computer is the main chat's.
-const OUTSIDE = "outside.";
+export const OUTSIDE = "outside.";
 export const OUTSIDE_READS: ReadonlySet<string> = new Set([
   "outside.resolve", "outside.stat", "outside.read", "outside.read_lines", "outside.list_dir", "outside.walk",
 ]);
-const outsideDenied = (message: string): Outcome => ({ error: { type: "denied", message } });
+export const outsideDenied = (message: string): Outcome => ({ error: { type: "denied", message } });
 const SAID_NO = outsideDenied("The user said no.");
 const KEPT = outsideDenied(`The user kept the originals; nothing went to the ${BIN}. Any copies already made stay.`);
 const IN_A_THREAD = outsideDenied("Files outside the chat's folder can be used from the main chat, not from a project's thread.");
 const NOT_ANSWERED = outsideDenied("Nobody answered on this computer in time, so nothing was done.");
-const UNKNOWN = (kind: string): Outcome => outsideDenied(`This computer does not know '${kind}'.`);
+// Not "unsupported", which the server reads as an app too old for files outside the folder: this app knows them, not this one.
+export const UNKNOWN = (kind: string): Outcome => outsideDenied(`This computer does not know '${kind}'.`);
 // A path the agent gave that is not one whole guest path: refused before any window, which would show it as it came.
 const NOT_A_PATH = (name: string): Outcome => outsideDenied(
   `'${name}' must be an absolute path, with no '.' or '..' parts and no slash at its end.`,
 );
 const NO_FILES = outsideDenied("'files' must list at least one file.");
-const isPath = (value: unknown): value is string =>
-  typeof value === "string" && posix.isAbsolute(value) && posix.normalize(value) === value && !value.endsWith("/");
+const isPath = (value: unknown): value is string => typeof value === "string" && whole(value);
 
-// The copy window's sizes, display only: the copy itself checks every file again. Each is looked at off the main
-// thread, one after another, within one budget for them all; past it, or past the first SIZED, a file shows 0. A
-// look that does not answer (a mount gone stale, a network drive) holds one of libuv's threads, not the app.
-// ponytail: one stalled look per window can stay stuck in the thread pool; a worker of its own if that ever bites.
+// The copy window's sizes, display only: the copy itself checks every file again. The first SIZED are looked at
+// together, off the main thread, within one budget for them all; one not in by then, past the first SIZED, or that
+// cannot be read, shows 0. A look that does not answer (a mount gone stale, a network drive) holds one of libuv's
+// threads, not the app.
+// ponytail: stalled looks per window can stay stuck in the thread pool; a worker of their own if that ever bites.
 const SIZED = 50;
 const SIZES_MS = 500;
 async function sizesOf(files: string[]): Promise<number[]> {
   const sizes = files.map(() => 0);
-  const deadline = performance.now() + SIZES_MS;
-  for (let at = 0; at < Math.min(files.length, SIZED); at++) {
-    const left = deadline - performance.now();
-    if (left <= 0) break;
-    let timer: NodeJS.Timeout | undefined;
-    const late = new Promise<"late">((resolve) => {
-      timer = setTimeout(() => resolve("late"), left);
-    });
-    try {
-      const size = await Promise.race([Promise.resolve().then(() => stat(hostPathOf(files[at]!))).then((info) => info.size), late]);
-      if (size === "late") break;
-      sizes[at] = size;
-    } catch {
-      // Unreadable: shown as 0.
-    } finally {
-      clearTimeout(timer);
-    }
-  }
-  return sizes;
+  const looks = files.slice(0, SIZED).map((file, at) =>
+    Promise.resolve().then(() => stat(hostPathOf(file))).then((info) => { sizes[at] = info.size; }, () => {}));
+  let timer: NodeJS.Timeout | undefined;
+  const late = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, SIZES_MS);
+  });
+  await Promise.race([Promise.all(looks), late]);
+  clearTimeout(timer);
+  // Those in by the budget's end, and no later: a late one would change what the window was given.
+  return [...sizes];
 }
 
 // Whose download a write saves (browser/downloads.ts): one a page of the agent's browser started, or

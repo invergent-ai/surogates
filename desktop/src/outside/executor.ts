@@ -11,13 +11,13 @@
 // files are its tools' to delete. A put back sends the original to the bin only once the changes sit checked beside it,
 // and gives them its name by a link, which fails where a name is taken, so no file made there meanwhile is replaced.
 
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { type BigIntStats, closeSync, constants, fchmodSync, readSync, writeSync } from "node:fs";
 import { extname } from "node:path";
 
-import { type Approvals, OUTSIDE_READS as READS } from "../binding/approvals.js";
+import { type Approvals, OUTSIDE, outsideDenied as denied, OUTSIDE_READS as READS, UNKNOWN as unknown } from "../binding/approvals.js";
 import type { FolderGuards } from "../binding/folder.js";
-import { Failure, FOLDER_UNAVAILABLE, fromNode, io, MAX_MESSAGE_CHARS, READ_TOO_LARGE } from "../files/answers.js";
+import { Failure, FOLDER_UNAVAILABLE, fromNode, io, MAX_MESSAGE_CHARS, READ_TOO_LARGE, type Refusal } from "../files/answers.js";
 import type { FdPaths, Where } from "../files/fd-paths.js";
 import { FLAGS } from "../files/flags.js";
 import { linesFrom, listed, readFrom, revisionOf, statOf, walkFrom } from "../files/operations.js";
@@ -30,16 +30,11 @@ import type { Operation, Outcome } from "../link/protocol.js";
 import { BIN } from "../platform.js";
 import { basename, hostPathOf, isAbsolute, join, resolve } from "../session-path.js";
 import type { ToolLayer } from "../shell/device-stack.js";
-import { grantable, KNOWN_FOLDERS, knownFolder, withinGrant } from "./places.js";
-
-const OUTSIDE = "outside.";
+import { grantable, isKnownName, knownFolder, withinGrant } from "./places.js";
 
 const noPermission = (path: string): Outcome => ({
   error: { type: "sandbox", message: `No permission to read ${path}: ask for it first with request_folder_access.` },
 });
-const denied = (message: string): Outcome => ({ error: { type: "denied", message } });
-// Not "unsupported", which the server reads as an app too old for files outside the folder: this app knows them, not this one.
-const unknown = (kind: string): Outcome => denied(`This computer does not know '${kind}'.`);
 // A file the window listed that its user left unticked: said, so the agent never takes it for done.
 const UNTICKED = "not ticked by the user";
 const byAnotherName = (path: string) => `${path} is in this chat's folder by another name: use its path in the chat's folder.`;
@@ -48,9 +43,14 @@ const notDestination = (to: string): Outcome => denied(`The destination ${to} is
 // How many numbered names a copy tries past its own, as a download does.
 const NAMES = 100;
 const TOO_LARGE = "too large";
-const sha256 = (buffer: Buffer) => createHash("sha256").update(buffer).digest("hex");
 const said = (error: unknown) => error instanceof Failure ? error.refusal.message : error instanceof Error ? error.message : String(error);
 const osFailure = (message: string) => new Failure({ type: "os", message });
+// An outcome's refusal, thrown: for one known to be refused.
+const failureOf = (outcome: Outcome) => new Failure((outcome as { error: Refusal }).error);
+// A file operation of the chat's folder's own tools, run as one of an outside kind's steps.
+type Inner = (kind: string, args: Record<string, unknown>) => Promise<Outcome>;
+// What a create-only open left behind: whether it opened, and the identity of the file it made, once read.
+type Made = { opened: boolean; made: BigIntStats | null };
 /**
  * Why the bin refused a file, in words its user can act on. Electron's shell.trashItem says it in an Error of its own
  * words, with no code: on Windows, which refuses to move a file open in another program, that may be why; elsewhere an
@@ -113,8 +113,8 @@ export class Outside implements ToolLayer {
    */
   resolveFolder(folder: string, root: string): { folder: string } | { refused: string } {
     const binding = this.options.bindings.get(root);
-    if (!binding) return { refused: (FOLDER_UNAVAILABLE as { error: { message: string } }).error.message };
-    const known = KNOWN_FOLDERS.some((name) => name.toLowerCase() === folder.toLowerCase());
+    if (!binding) return { refused: failureOf(FOLDER_UNAVAILABLE).refusal.message };
+    const known = isKnownName(folder);
     const path = known ? knownFolder(folder, this.options.getPath) : isAbsolute(folder) ? folder : null;
     if (path === null) {
       return {
@@ -124,10 +124,7 @@ export class Outside implements ToolLayer {
       };
     }
     const granted = grantable(path, this.options.tools.guards(), binding.folder);
-    if (granted.ok) return { folder: granted.folder };
-    // checkFolder's words are a chat folder's, and start small: said of a grant to read instead.
-    const { message } = granted;
-    return { refused: /^[a-z]/.test(message) ? `Surogate cannot read ${path}: ${message.replace(/cannot be a chat's$/, "cannot be read")}` : message };
+    return granted.ok ? { folder: granted.folder } : { refused: granted.message };
   }
 
   refusal(operation: Operation): Outcome | null {
@@ -210,7 +207,8 @@ export class Outside implements ToolLayer {
   private sourceOf(root: string, file: string, chat = true): "chat" | string | null {
     const folder = this.options.bindings.get(root)?.folder;
     if (chat && folder !== undefined && file !== folder && inside(file, folder)) return "chat";
-    return this.reachesChat(root, file) ? null : this.grantOf(root, file);
+    const grant = this.grantOf(root, file);
+    return this.reachesChat(root, file, grant) ? null : grant;
   }
 
   // Where a copy may go, as the folder it goes in: the chat's folder or one in it (grant null), written by its own
@@ -218,8 +216,13 @@ export class Outside implements ToolLayer {
   private destinationOf(root: string, to: string): { dir: string; grant: string | null } | null {
     const folder = this.options.bindings.get(root)?.folder;
     if (folder !== undefined && (to === "." || inside(to, folder))) return { dir: to === "." ? folder : to, grant: null };
-    const grant = this.reachesChat(root, to) ? null : this.grantOf(root, to);
-    return grant === null ? null : { dir: to, grant };
+    const grant = this.grantOf(root, to);
+    return grant === null || this.reachesChat(root, to, grant) ? null : { dir: to, grant };
+  }
+
+  // *operation*'s own steps by the chat's folder's tools, each an operation of its own, named *prefix* and a new id.
+  private inner(operation: Operation, prefix: string, signal: AbortSignal): Inner {
+    return (kind, args) => this.options.tools.run({ ...operation, id: `${prefix}-${randomUUID()}`, kind, args, digest: "" }, signal);
   }
 
   // The files its user ticked, each copied on its own: one that cannot be is said, and the rest are copied all the same.
@@ -235,9 +238,7 @@ export class Outside implements ToolLayer {
     // Taken up again after a restart, its user's ticks are gone: nothing is copied that nobody chose.
     if (ticked === undefined) return denied("Nothing was copied: the files its user chose are not known any more. Ask again.");
     const done: Copied = { copied: [], skipped: [] };
-    const inner = (kind: string, opArgs: Record<string, unknown>): Promise<Outcome> => this.options.tools.run({
-      ...operation, id: `outside-copy-${randomUUID()}`, kind, args: opArgs, digest: "",
-    }, signal);
+    const inner = this.inner(operation, "outside-copy", signal);
     for (const from of ticked) {
       if (signal.aborted) {
         done.skipped.push({ from, reason: "stopped" });
@@ -246,7 +247,7 @@ export class Outside implements ToolLayer {
       try {
         if (this.reachesChat(root, from)) throw new Failure({ type: "denied", message: byAnotherName(from) });
         const source = this.sourceOf(root, from);
-        if (source === null) throw new Failure((noPermission(from) as { error: { type: string; message: string } }).error);
+        if (source === null) throw failureOf(noPermission(from));
         let read: Source;
         if (source === "chat") {
           const outcome = await inner("read", { key: from, max_bytes: null });
@@ -279,7 +280,7 @@ export class Outside implements ToolLayer {
 
   // *data* as a new file *name* in *folder*, the chat's folder or one in it, by its own tools, as a download is saved: a name that resolves
   // elsewhere, or holds anything, is passed over for the next, and the write itself only creates. Its key, or throws.
-  private async intoChat(folder: string, name: string, data: string, inner: (kind: string, args: Record<string, unknown>) => Promise<Outcome>): Promise<string> {
+  private async intoChat(folder: string, name: string, data: string, inner: Inner): Promise<string> {
     let refused: string | null = null;
     for (let n = 0; n <= NAMES; n += 1) {
       const key = join(folder, numberedName(name, n));
@@ -301,7 +302,7 @@ export class Outside implements ToolLayer {
 
   // *data* as a new file *name* in *to*, a folder in *grant*: reached a name at a time without following a link,
   // opened create-only (a file, folder or link at the name is a name taken), then read back and checked by size and
-  // sha256. One that does not check out is removed: it is this copy's own, never a file that was there. Its key, or throws.
+  // byte by byte. One that does not check out is removed: it is this copy's own, never a file that was there. Its key, or throws.
   private intoGrant(root: string, grant: string, to: string, name: string, data: string): string {
     const { fd } = this.options;
     const bytes = Buffer.from(data, "base64");
@@ -310,31 +311,18 @@ export class Outside implements ToolLayer {
       // As the folder's own tools refuse it in the chat's folder (protect.ts, writeRefusal).
       if (fileOs.explorer(key)) throw new Failure({ type: "denied", message: explorerRefusal(key) });
       const made = this.within(root, grant, key, (where) => {
-        let file: number;
+        const left: Made = { opened: false, made: null };
         try {
-          file = fd.open(where, constants.O_RDWR | constants.O_CREAT | constants.O_EXCL | FLAGS.NOFOLLOW, 0o666);
+          this.createNew(where, bytes, "the copy did not check out against the original, so it was removed", left);
         } catch (error) {
-          if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
-          throw fromNode(error, key);
-        }
-        let failed: unknown = null;
-        let made: BigIntStats | null = null;
-        try {
-          made = fd.fstat(file, { bigint: true });
-          this.writeChecked(file, bytes, "the copy did not check out against the original, so it was removed");
-        } catch (error) {
-          failed = fromNode(error, key);
-        } finally {
-          closeSync(file);
-        }
-        if (failed !== null) {
+          if (!left.opened) {
+            if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
+            throw fromNode(error, key);
+          }
+          const failed = fromNode(error, key);
           // Removed by its name once closed (Windows removes no open file), and only while that name is still this
           // copy's own file: one put there since is left alone.
-          try {
-            if (made !== null && sameFile(made, fd.lstat(where))) fd.unlink(where);
-          } catch {
-            // Gone already.
-          }
+          this.removeIfMine(where, left.made);
           throw failed;
         }
         return true;
@@ -344,19 +332,21 @@ export class Outside implements ToolLayer {
     throw new Failure({ type: "os", message: `${to} has ${NAMES} files of that name already` });
   }
 
-  // Whether *path* is the chat's folder, in it, or holds it: its own tools' to delete, never this layer's.
-  private chatOwns(root: string, path: string): boolean {
+  // Whether *path* is the chat's folder, in it, or holds it: its own tools' to delete, never this layer's. *grant* is
+  // the grant holding *path* (grantOf), where its caller has it already.
+  private chatOwns(root: string, path: string, grant?: string | null): boolean {
     const folder = this.options.bindings.get(root)?.folder;
-    return folder !== undefined && (inside(path, folder) || inside(folder, path) || this.reachesChat(root, path));
+    return folder !== undefined && (inside(path, folder) || inside(folder, path) || this.reachesChat(root, path, grant));
   }
 
   // Whether *path* reaches the chat's folder by a spelling of its own: on a drive that ignores case, or knows a short
   // name (WORK~1), a grant above the chat's folder spells it many ways, and only its identity tells. Each name from the
-  // grant down is looked at, none followed; reach() checks the folders it holds again, as it uses them.
-  private reachesChat(root: string, path: string): boolean {
+  // grant down is looked at, none followed; reach() checks the folders it holds again, as it uses them. *held* is the
+  // grant holding *path* (grantOf), where its caller has it already: looked for here otherwise.
+  private reachesChat(root: string, path: string, held?: string | null): boolean {
     const binding = this.options.bindings.get(root);
     // Spelled as its own, it is the chat's by its path, as every caller tells first.
-    const grant = binding === undefined || inside(path, binding.folder) ? null : this.grantOf(root, path);
+    const grant = binding === undefined || inside(path, binding.folder) ? null : held === undefined ? this.grantOf(root, path) : held;
     if (grant === null) return false;
     const ids = this.chatIds(root);
     for (let at = path; ; at = at.slice(0, at.lastIndexOf("/"))) {
@@ -372,8 +362,9 @@ export class Outside implements ToolLayer {
   // Why *copy* may not be put back over *original*, or null: the original a grant's file, not the chat's, and the copy
   // one this chat made of it.
   private putBackRefusal(root: string, copy: string, original: string): Outcome | null {
-    if (this.chatOwns(root, original)) return chatsOwn(original);
-    if (this.grantOf(root, original) === null) return noPermission(original);
+    const grant = this.grantOf(root, original);
+    if (this.chatOwns(root, original, grant)) return chatsOwn(original);
+    if (grant === null) return noPermission(original);
     if (this.options.bindings.copyOf(root, copy)?.original !== original) {
       return denied(`${copy} is not a copy of ${original} made in this chat, so it cannot be put back there.`);
     }
@@ -392,9 +383,9 @@ export class Outside implements ToolLayer {
       try {
         if (signal.aborted) throw osFailure("stopped");
         // Checked again, as a read is: the chat's own, a file now in no grant, and a link put at its name since stay.
-        if (this.chatOwns(root, file)) throw new Failure((chatsOwn(file) as { error: { type: string; message: string } }).error);
         const grant = this.grantOf(root, file);
-        if (grant === null) throw new Failure((noPermission(file) as { error: { type: string; message: string } }).error);
+        if (this.chatOwns(root, file, grant)) throw failureOf(chatsOwn(file));
+        if (grant === null) throw failureOf(noPermission(file));
         this.within(root, grant, file, (where) => {
           const st = io(file, () => this.options.fd.lstat(where));
           if (st.isSymbolicLink()) throw osFailure(`${file} is a link now, not the file its user chose`);
@@ -430,9 +421,7 @@ export class Outside implements ToolLayer {
     const notReplaced = (cause: string): Outcome => ({ error: { type: "os", message: `${original} was not replaced: ${cause}. Nothing was changed; the changes are still in ${copy}.` } });
     const inBin: Outcome = { error: { type: "os", message: `The old version is in the ${BIN}; the changes are still in ${copy}.` } };
     const gone: Outcome = { error: { type: "conflict", message: `${original} is no longer there; the old version may already be in the ${BIN}. The changes are in ${copy}.` } };
-    const inner = (kind: string, opArgs: Record<string, unknown>): Promise<Outcome> => this.options.tools.run({
-      ...operation, id: `outside-put-back-${randomUUID()}`, kind, args: opArgs, digest: "",
-    }, signal);
+    const inner = this.inner(operation, "outside-put-back", signal);
     // The original as it is now, if it is still the file copied; null for one changed since.
     const unchanged = (where: Where): BigIntStats | null => {
       const st = fd.lstat(where);
@@ -462,22 +451,12 @@ export class Outside implements ToolLayer {
       if ("error" in read) return notReplaced(read.error.message);
       const bytes = Buffer.from(read.ok as string, "base64");
       const temporary = { dir, name: `.${name}.surogate-put-back-${randomUUID().slice(0, 8)}` };
-      let made: BigIntStats | null = null;
-      let opened = false;
+      const left: Made = { opened: false, made: null };
       // The temporary file's name goes on every way out, the one that put it in place too: only while it is still this
       // put back's own, or, where its identity could not be read, as just made by a create-only open.
-      const removeTemporary = () => {
-        try {
-          if (made !== null ? sameFile(made, fd.lstat(temporary)) : opened) fd.unlink(temporary);
-        } catch {
-          // Gone already.
-        }
-      };
+      const removeTemporary = () => this.removeIfMine(temporary, left.made, left.opened);
       try {
-        const file = fd.open(temporary, constants.O_RDWR | constants.O_CREAT | constants.O_EXCL | FLAGS.NOFOLLOW, 0o666);
-        opened = true;
-        try {
-          made = fd.fstat(file, { bigint: true });
+        this.createNew(temporary, bytes, "the changes did not check out once written", left, (file) => {
           // The original's permissions, where the OS keeps them (Windows keeps one read-only bit, its own to set).
           if (process.platform !== "win32") {
             try {
@@ -486,10 +465,7 @@ export class Outside implements ToolLayer {
               // A drive that keeps no permissions (FAT, exFAT, some shares) refuses: the file keeps the drive's own.
             }
           }
-          this.writeChecked(file, bytes, "the changes did not check out once written");
-        } finally {
-          closeSync(file);
-        }
+        });
         // Looked at again just before the bin: an edit saved while the changes were written is not sent there.
         if (signal.aborted) throw osFailure("it was stopped");
         if (unchanged(where) === null) {
@@ -509,11 +485,11 @@ export class Outside implements ToolLayer {
         return { error: { type: "os", message: `${original} could not be moved to the ${BIN}: ${said(error)}. Nothing was replaced; the changes are still in ${copy}.` } };
       }
       try {
-        this.renamed(temporary, where, made!);
+        this.renamed(temporary, where, left.made!);
         // Checked from the file now at the original's name, held open: the changes, whole, in this put back's own file.
         const final = fd.open(where, constants.O_RDONLY | FLAGS.NOFOLLOW);
         try {
-          if (!sameFile(made!, fd.fstat(final, { bigint: true })) || !this.holds(final, bytes)) throw osFailure("the file put back did not check out");
+          if (!sameFile(left.made!, fd.fstat(final, { bigint: true })) || !this.holds(final, bytes)) throw osFailure("the file put back did not check out");
         } finally {
           closeSync(final);
         }
@@ -532,7 +508,34 @@ export class Outside implements ToolLayer {
     }
   }
 
-  // *bytes* written to the new, empty *file*, then read back from it and checked by size and sha256: by its handle, so
+  // A new file at *where*: opened create-only, no link followed (a name taken throws EEXIST), *prepare*d by its handle,
+  // and *bytes* written and checked (writeChecked), then closed. *left* says whether it opened and what it made, for
+  // its caller to remove it by on a failure (removeIfMine).
+  private createNew(where: Where, bytes: Buffer, mismatch: string, left: Made, prepare?: (file: number) => void): void {
+    const { fd } = this.options;
+    const file = fd.open(where, constants.O_RDWR | constants.O_CREAT | constants.O_EXCL | FLAGS.NOFOLLOW, 0o666);
+    left.opened = true;
+    try {
+      left.made = fd.fstat(file, { bigint: true });
+      prepare?.(file);
+      this.writeChecked(file, bytes, mismatch);
+    } finally {
+      closeSync(file);
+    }
+  }
+
+  // The name *where* removed only while it is the file *made*; where *made* could not be read, only when *unseen*
+  // says the name is one a create-only open just made.
+  private removeIfMine(where: Where, made: BigIntStats | null, unseen = false): void {
+    const { fd } = this.options;
+    try {
+      if (made !== null ? sameFile(made, fd.lstat(where)) : unseen) fd.unlink(where);
+    } catch {
+      // Gone already.
+    }
+  }
+
+  // *bytes* written to the new, empty *file*, then read back from it and checked by size and byte by byte: by its handle, so
   // what is checked is what was written, wherever its name leads now. Throws *mismatch* if it does not check out.
   private writeChecked(file: number, bytes: Buffer, mismatch: string): void {
     for (let written = 0; written < bytes.length;) written += writeSync(file, bytes, written, bytes.length - written, written);
@@ -544,7 +547,7 @@ export class Outside implements ToolLayer {
     const back = Buffer.alloc(bytes.length + 1);
     let got = 0;
     for (let count = -1; count !== 0 && got < back.length; got += count) count = readSync(file, back, got, back.length - got, got);
-    return this.options.fd.fstat(file).size === bytes.length && got === bytes.length && sha256(back.subarray(0, got)) === sha256(bytes);
+    return this.options.fd.fstat(file).size === bytes.length && got === bytes.length && back.subarray(0, got).equals(bytes);
   }
 
   // *from* given the name *to* in the same folder, and never over a file there: a hard link fails where the name is

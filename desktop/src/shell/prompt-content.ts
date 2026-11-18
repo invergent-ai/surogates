@@ -46,8 +46,8 @@ export interface PromptContent {
   details: PromptDetail[];
   notes: string[]; // what the user should know before answering
   choice: PromptChoice | null;
-  checks: PromptChecks | null;
-  danger: boolean; // drawn in the warning style, as the Recycle Bin's prompts are
+  checks?: PromptChecks | null; // none: no list to tick
+  danger?: boolean; // drawn in the warning style, as the Recycle Bin's prompts are
   buttons: PromptButton[]; // left to right; the last is drawn as the main one
   focus: string; // the button focused as it opens
   cancel: string; // Escape's, and a window closed some other way
@@ -108,8 +108,6 @@ export function folderSheet(sheet: FolderSheet): PromptContent {
       details,
       notes: [],
       choice: null,
-      checks: null,
-      danger: false,
       buttons: [button("cancel", "Cancel"), button("change", "Change…")],
       // Change opens the system's folder dialog over the app: Cancel is the one that does nothing.
       focus: "cancel",
@@ -123,8 +121,6 @@ export function folderSheet(sheet: FolderSheet): PromptContent {
     details,
     notes: [...(sheet.busy ? [BUSY] : []), ...(sheet.links ? [linked(sheet.links)] : []), ...forProject],
     choice: { ...MODES, value: sheet.mode },
-    checks: null,
-    danger: false,
     buttons: sheet.busy
       ? [button("cancel", "Cancel"), button("new", "New folder"), button("change", "Browse…"), button("accept", "Use this folder", true)]
       : [button("cancel", "Cancel"), button("change", "Change…"), button("accept", "Use this folder", true)],
@@ -164,8 +160,6 @@ const ending = (host: string) => (host.length > TITLE_HOST ? `…${host.slice(1 
 const OPERATION = {
   notes: [],
   choice: null,
-  checks: null,
-  danger: false,
   buttons: [button("deny", "Deny"), button("stop_asking", "Allow and stop asking", true), button("allow", "Allow once", true)],
   focus: "deny",
   cancel: "deny",
@@ -250,8 +244,6 @@ export function approval(request: ApprovalRequest): PromptContent {
     details: [code("Address", address)],
     notes: request.privateNetwork ? ["This address is on a private network, such as a home or office network, or a VPN."] : [],
     choice: null,
-    checks: null,
-    danger: false,
     buttons: [button("deny", "Deny"), button("allow_session", "Allow all its ports for this chat", true), button("allow", "Allow", true)],
     focus: "deny",
     cancel: "deny",
@@ -265,8 +257,7 @@ const files = (n: number) => `${n} ${n === 1 ? "file" : "files"}`;
 // The prompts of the files outside the chat's folder: Deny is focused and what Escape answers, and none offers to stop asking.
 function outsidePrompt(request: Exclude<ApprovalRequest, { kind: "command" | "change" | "input" | "network" | "browser" }>): PromptContent {
   const { chat } = request;
-  const base = { notes: [], choice: null, checks: null, danger: false, details: [], focus: "deny", cancel: "deny" };
-  const list = (legend: string, items: PromptChecks["items"]) => ({ legend, items });
+  const base = { notes: [], choice: null, details: [], focus: "deny", cancel: "deny" };
   if (request.kind === "read_folder") {
     return {
       ...base, title: `Let ${chat.agent} read a folder?`,
@@ -278,7 +269,7 @@ function outsidePrompt(request: Exclude<ApprovalRequest, { kind: "command" | "ch
     return {
       ...base, title: `Copy ${files(request.files.length)}?`,
       lead: `${chat.agent} asks to copy these files to ${shownPath(request.to)}. A file whose name is taken there is saved with a number added; nothing is overwritten.`,
-      checks: list("Files", request.files.map((f) => ({ value: f.from, label: named(f.from), detail: `${shownPath(posix.dirname(f.from))} · ${sizeOf(f.size)}` }))),
+      checks: { legend: "Files", items: request.files.map((f) => ({ value: f.from, label: named(f.from), detail: `${shownPath(posix.dirname(f.from))} · ${sizeOf(f.size)}` })) },
       buttons: [button("deny", "Deny"), button("allow", "Copy the ticked files", true)], height: 420,
     };
   }
@@ -286,7 +277,7 @@ function outsidePrompt(request: Exclude<ApprovalRequest, { kind: "command" | "ch
     return {
       ...base, danger: true, focus: "keep", cancel: "keep", title: `Move to the ${BIN}?`,
       lead: `${files(request.files.length)} will be removed from where ${request.files.length === 1 ? "it is" : "they are"} and moved to the ${BIN}, where you can restore ${request.files.length === 1 ? "it" : "them"}.`,
-      checks: list("Files", request.files.map((f) => ({ value: f, label: named(f), detail: shownPath(posix.dirname(f)) }))),
+      checks: { legend: "Files", items: request.files.map((f) => ({ value: f, label: named(f), detail: shownPath(posix.dirname(f)) })) },
       buttons: [button("keep", request.files.length === 1 ? "Keep it" : "Keep them"), button("trash", `Move to the ${BIN}`, true)], height: 420,
     };
   }
@@ -343,8 +334,6 @@ function browserPrompt(request: Extract<ApprovalRequest, { kind: "browser" }>): 
         "It cannot reach this computer's own services or your private networks.",
       ],
       choice: null,
-      checks: null,
-      danger: false,
       buttons: [button("deny", "Deny"), button("allow_session", "Allow for this chat", true)],
       focus: "deny",
       cancel: "deny",
@@ -376,8 +365,6 @@ function browserPrompt(request: Extract<ApprovalRequest, { kind: "browser" }>): 
         "It opens this chat's server only, never this computer's own services.",
       ],
       choice: null,
-      checks: null,
-      danger: false,
       buttons: [button("deny", "Deny"), button("allow_session", "Allow for this chat", true)],
       focus: "deny",
       cancel: "deny",
@@ -460,8 +447,6 @@ export function handBack(request: HandBackRequest): PromptContent {
     details,
     notes: [],
     choice: null,
-    checks: null,
-    danger: false,
     buttons: [button("keep", "Keep control"), button("hand_back", "Hand back", true)],
     focus: "keep",
     cancel: "keep",
@@ -478,8 +463,6 @@ export function freeMode(chat: ChatLabel): PromptContent {
     details: [code("Folder", shownPath(chat.folder))],
     notes: [],
     choice: null,
-    checks: null,
-    danger: false,
     buttons: [button("keep", "Keep asking"), button("free", "Work freely", true)],
     focus: "keep",
     cancel: "keep",
@@ -501,6 +484,6 @@ export function checkAnswer(
   if (choice === undefined) throw new Error("Not an option of this prompt");
   const shown = new Set(content.checks?.items.map((item) => item.value));
   const checked = [...new Set(Array.isArray(ticked) ? ticked.filter((value): value is string => typeof value === "string" && shown.has(value)) : [])];
-  if (content.checks !== null && offered.allows && checked.length === 0) return null;
+  if (content.checks && offered.allows && checked.length === 0) return null;
   return { button: offered.id, choice, checked };
 }
