@@ -176,6 +176,7 @@ import contextlib
 import errno
 import hashlib
 import json
+import math
 import tempfile
 from collections.abc import AsyncIterator, Collection
 from pathlib import Path
@@ -460,24 +461,28 @@ class DeviceWorkspaceIO:
             # A string is a collection of its characters: sorted, it would skip every one-letter folder.
             raise TypeError("skip and skip_top take folder names, not one string")
         refuse_nul(key)
+        kind = self._of("walk", key)
+        # Outside the folder each file comes with its mtime too: a listing sorts by it, with no look a file.
+        timed = kind == "outside.walk"
         value = await self._call(
-            self._of("walk", key), key=key, skip=sorted(skip), skip_top=sorted(skip_top), skip_hidden=skip_hidden,
-            since=since,
+            kind, key=key, skip=sorted(skip), skip_top=sorted(skip_top), skip_hidden=skip_hidden, since=since,
         )
         try:
             files, truncated, cursor = value["files"], value["truncated"], value["cursor"]
             if (
                 isinstance(files, list) and len(files) <= MAX_WALK_FILES
                 and all(
-                    isinstance(entry, list) and len(entry) == 2 and isinstance(entry[0], str)
+                    isinstance(entry, list) and len(entry) == 2 + timed and isinstance(entry[0], str)
                     and type(entry[1]) is int and entry[1] >= 0
+                    and (not timed or (type(entry[2]) in (int, float) and math.isfinite(entry[2])))
                     for entry in files
                 )
                 and type(truncated) is bool
                 # Taken here, not at the next walk's since: up to 20 digits, as the computer takes it back.
                 and isinstance(cursor, str) and cursor.isascii() and cursor.isdigit() and len(cursor) <= 20
             ):
-                return Walk([(path, size) for path, size in files], truncated, cursor)
+                mtimes = {entry[0]: float(entry[2]) for entry in files} if timed else None
+                return Walk([(entry[0], entry[1]) for entry in files], truncated, cursor, mtimes)
         except (KeyError, TypeError):
             pass
         raise DeviceOperationError("The computer returned an invalid listing")

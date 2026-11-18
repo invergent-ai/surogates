@@ -72,11 +72,14 @@ class Walk:
     ``truncated`` says a cap stopped the walk before it saw everything.
     ``cursor`` is where a later walk's ``since`` starts, by the clock of the
     computer that holds the files; None where nothing keeps one.
+    ``mtimes`` is each file's modification time by its path, where the walk
+    carries them (a computer's walk of a folder outside the chat's); else None.
     """
 
     files: list[tuple[str, int]]
     truncated: bool
     cursor: str | None
+    mtimes: dict[str, float] | None = None
 
 
 @dataclass(frozen=True, slots=True)

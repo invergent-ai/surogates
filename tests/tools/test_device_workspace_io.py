@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import dataclasses
 import errno
 import hashlib
 import json
@@ -840,7 +841,12 @@ class OutsideToo:
     async def run(self, kind, args, payload=None):
         self.sent.append((kind, json.loads(json.dumps(args))))
         if kind.startswith("outside."):
-            return await self.elsewhere.run(kind.removeprefix("outside."), args, payload)
+            outcome = await self.elsewhere.run(kind.removeprefix("outside."), args, payload)
+            if kind == "outside.walk" and "ok" in outcome:
+                # The app's outside walk carries each file's mtime too.
+                root = Path(args["key"])
+                outcome["ok"]["files"] = [[p, size, (root / p).lstat().st_mtime] for p, size in outcome["ok"]["files"]]
+            return outcome
         return await self.chat.run(kind, args, payload)
 
 
@@ -970,28 +976,53 @@ async def test_list_files_outside_the_folder_lists_by_name_and_search_by_content
     assert "one" in read and "two" in read
 
 
-async def test_a_long_outside_list_is_not_sorted_by_date_and_says_so(two_folders, monkeypatch):
+async def test_an_outside_list_is_sorted_by_the_walks_times_with_no_look_a_file(two_folders):
     laptop, wio, _chat, elsewhere = two_folders
-    monkeypatch.setattr(file_ops, "_OUTSIDE_SORT_MAX_FILES", 1)
+    for n in range(600):
+        (elsewhere / f"f{n}.txt").write_text("x")
+        os.utime(elsewhere / f"f{n}.txt", (n, n))
+    os.utime(elsewhere / "a.txt", (5_000, 5_000))
+    os.utime(elsewhere / "sub" / "b.txt", (4_000, 4_000))
     laptop.sent.clear()
-    listed = json.loads(await file_ops._list_files_handler({"path": str(elsewhere), "pattern": "*.txt"}, workspace_io=wio))
-    assert listed["total_count"] == 2
-    assert "too many files to sort by date" in listed["note"]
-    assert not [k for k, _ in laptop.sent if k in ("outside.stat", "outside.resolve") and _.get("path", "").endswith(".txt")]
-
-
-async def test_an_outside_file_whose_look_fails_is_still_listed(two_folders, monkeypatch):
-    _laptop, wio, _chat, elsewhere = two_folders
-    os.utime(elsewhere / "a.txt", (1_000, 1_000))
-    os.utime(elsewhere / "sub" / "b.txt", (2_000, 2_000))
-    real = wio.stat
-
-    async def stat(p):
-        if p.endswith("b.txt"):
-            raise OSError(errno.EFBIG, "too big")
-        return await real(p)
-
-    monkeypatch.setattr(wio, "stat", stat)
-    listed = json.loads(await file_ops._list_files_handler({"path": str(elsewhere), "pattern": "*.txt"}, workspace_io=wio))
-    assert listed["matches"] == [str(elsewhere / "a.txt"), str(elsewhere / "sub" / "b.txt")]
+    listed = json.loads((await file_ops._list_files_handler(
+        {"path": str(elsewhere), "pattern": "*.txt", "limit": 3}, workspace_io=wio,
+    )).split("\n\n[Hint")[0])
+    assert listed["total_count"] == 602
+    assert listed["matches"] == [str(elsewhere / "a.txt"), str(elsewhere / "sub" / "b.txt"), str(elsewhere / "f599.txt")]
     assert "note" not in listed
+    # The walk and nothing a file: no outside.stat.
+    assert [k for k, _ in laptop.sent if k.startswith("outside.")] == ["outside.resolve", "outside.stat", "outside.walk"]
+    # A file it listed is read as outside, as one outside.resolve gave.
+    assert wio.is_outside(str(elsewhere / "f3.txt"))
+
+
+async def test_a_walk_cut_short_is_said_in_a_note_a_repeated_search_does_not_replace(two_folders, monkeypatch):
+    _laptop, wio, _chat, elsewhere = two_folders
+    real = wio.walk
+
+    async def cut(key, **options):
+        return dataclasses.replace(await real(key, **options), truncated=True)
+
+    monkeypatch.setattr(wio, "walk", cut)
+    for _ in range(3):
+        listed = json.loads((await file_ops._search_files_handler(
+            {"path": str(elsewhere), "pattern": "*.txt", "target": "files"}, workspace_io=wio,
+        )).split("\n\n[Hint")[0])
+    assert "stopped listing this folder" in listed["note"]
+    assert "run this exact search 3 times" in listed["_warning"]
+
+
+def test_an_outside_listing_matches_files_as_ripgreps_globs_do():
+    files = ["top.xlsx", "a/b.txt", "a/x/b.txt", "a/x/y/b.txt", "b/c.xlsx", "p.jpg", "a/q.png", "a/r.gif"]
+
+    def matched(pattern):
+        return [f for f in files if file_ops._glob_matches(f, pattern)]
+
+    assert matched("*.{jpg,png}") == ["p.jpg", "a/q.png"]
+    assert matched("a/**/b.txt") == ["a/b.txt", "a/x/b.txt", "a/x/y/b.txt"]
+    assert matched("**/*.xlsx") == ["top.xlsx", "b/c.xlsx"]
+    assert matched("top.xlsx") == ["top.xlsx"]
+    # "*" stays in one folder; "**" at the end takes everything under it.
+    assert matched("a/*") == ["a/b.txt", "a/q.png", "a/r.gif"]
+    assert matched("a/**") == ["a/b.txt", "a/x/b.txt", "a/x/y/b.txt", "a/q.png", "a/r.gif"]
+    assert matched("[!a]/*") == ["b/c.xlsx"]

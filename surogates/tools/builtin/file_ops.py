@@ -15,7 +15,7 @@ import asyncio
 import concurrent.futures
 import difflib
 import errno
-import fnmatch
+import functools
 import io
 import json
 import logging
@@ -2314,20 +2314,60 @@ def _listed(files: list[str], mtimes: dict[str, float] | None, offset: int, limi
 
 
 def _glob_matches(path: str, pattern: str) -> bool:
-    """Whether *path*, under the folder listed, matches *pattern* as ripgrep's ``-g`` would."""
+    """Whether *path*, under the folder listed, matches *pattern* as ripgrep's ``-g`` would.
+
+    A pattern without a slash matches a file's name at any depth, one with a
+    slash its path under the folder.
+    """
     if "/" not in pattern:
-        return fnmatch.fnmatchcase(posixpath.basename(path), pattern)
-    while not fnmatch.fnmatchcase(path, pattern):
-        if not pattern.startswith("**/"):
-            return False
-        pattern = pattern[3:]
-    return True
+        path = posixpath.basename(path)
+    return _glob_regex(pattern).fullmatch(path) is not None
 
 
-# Most files an outside listing is sorted by date for; each one costs a round trip to the computer.
-_OUTSIDE_SORT_MAX_FILES = 500
-# How many of those round trips are in flight at once.
-_OUTSIDE_LOOKS = 16
+@functools.lru_cache(maxsize=64)
+def _glob_regex(pattern: str) -> re.Pattern[str]:
+    """*pattern* as ripgrep's globs read it: ``*`` and ``?`` within one name, ``**`` across folders (a ``**/``
+    matching none), ``[...]`` a character class and ``{a,b}`` either."""
+    out: list[str] = []
+    braces = 0
+    i, n = 0, len(pattern)
+    while i < n:
+        c = pattern[i]
+        if pattern.startswith("**", i) and (i == 0 or pattern[i - 1] == "/"):
+            if i + 2 == n:
+                out.append(".*")
+                i += 2
+                continue
+            if pattern[i + 2] == "/":
+                out.append("(?:.*/)?")
+                i += 3
+                continue
+        if c == "*":
+            out.append("[^/]*")
+        elif c == "?":
+            out.append("[^/]")
+        elif c == "[" and "]" in pattern[i + 2 :]:
+            end = pattern.index("]", i + 2)
+            body = pattern[i + 1 : end]
+            if body.startswith("!"):
+                body = "^" + body[1:]
+            out.append("[" + body.replace("\\", "\\\\") + "]")
+            i = end
+        elif c == "{":
+            braces += 1
+            out.append("(?:")
+        elif c == "}" and braces:
+            braces -= 1
+            out.append(")")
+        elif c == "," and braces:
+            out.append("|")
+        else:
+            out.append(re.escape(c))
+        i += 1
+    if braces:
+        # An unclosed brace is no alternation: matched as it is written.
+        return re.compile(re.escape(pattern))
+    return re.compile("".join(out), re.DOTALL)
 
 
 async def _files_outside(
@@ -2341,35 +2381,20 @@ async def _files_outside(
 
     Matched as ripgrep's ``-g`` does: a pattern without a slash by the file's
     name at any depth, one with a slash by its path under *key*, where a
-    leading ``**/`` matches no folder too.  Newest first, as in the folder.
+    ``**/`` matches no folder too.  Newest first, as in the folder, by the
+    times the walk carries.
     """
     walk = await wio.walk(key, skip=(), skip_hidden=True)
     pattern = pattern.strip("/")
-    files = [posixpath.join(key, path) for path, _size in walk.files if _glob_matches(path, pattern)]
-    # A walk has no times: each file is looked at, as _files_target_rg does, by its outside stat (the walk found it
-    # under *key*, so it is outside as *key* is), a few at a time.  A round trip a file, so only a short list is
-    # sorted; a longer one stays in the walk's order.  A file whose look fails (a name the computer refuses, a file
-    # too big) is still listed, as the oldest.
-    # ponytail: a walk that carries its times when listings get large.
-    mtimes: dict[str, float] | None = None
-    if len(files) <= _OUTSIDE_SORT_MAX_FILES:
-        wio.walked_outside(key, files)
-        looks = asyncio.Semaphore(_OUTSIDE_LOOKS)
-
-        async def mtime(p: str) -> float:
-            async with looks:
-                try:
-                    st = await wio.stat(p)
-                    return st.mtime if st else 0
-                except Exception:
-                    return 0
-
-        mtimes = dict(zip(files, await asyncio.gather(*(mtime(p) for p in files))))
-    result = _listed(files, mtimes, offset, limit)
+    mtimes = walk.mtimes or {}
+    matched = [path for path, _size in walk.files if _glob_matches(path, pattern)]
+    files = [posixpath.join(key, path) for path in matched]
+    # Found under *key*, so outside as *key* is: a later read of one asks for it so.
+    wio.walked_outside(key, files)
+    result = _listed(files, {f: mtimes.get(path, 0) for f, path in zip(files, matched)}, offset, limit)
     if walk.truncated:
-        result["_warning"] = "The computer stopped listing this folder before its end: name a folder further down."
-    if mtimes is None:
-        result["note"] = "Listed in folder order: there are too many files to sort by date."
+        # A note, not the _warning a repeated search says: both reach the model.
+        result["note"] = "The computer stopped listing this folder before its end: name a folder further down."
     return result
 
 
