@@ -325,8 +325,11 @@ async def _simulation_changes(
     tool_name: str, tool_args: Any, session: Any, tools: Any, summary_llm_client: Any, summary_model: str | None,
 ) -> bool | None:
     """Whether a simulated session's MCP call would change something; ``None`` outside a simulation."""
+    from surogates.simulation.scratch import STATE_TOOLS
     from surogates.simulation.side_effects import decide, is_simulated, summary_judge
 
+    if tool_name in STATE_TOOLS and (session.config or {}).get("test_mode"):
+        return True  # the agent's own platform state: faked whole in a test chat
     if not tool_name.startswith("mcp__") or not is_simulated(session.config):
         return None
     entry = tools.get(tool_name)

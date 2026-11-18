@@ -10,6 +10,41 @@ address, worksheet_id_or_name, conflict_behavior, file_name, mimetype, content,
 select, top, orderby, plus the upload source ``file.s3key`` / ``source_url``.
 Any other key holding a non-empty string is a reason to fake (it may be an
 id or path under a name we do not know); numbers and booleans pass.
+
+STATE_TOOLS: builtin tools that write durable platform state (or reach people) outside the
+chat.  In a test chat they return ``fake_result`` and record ``would_have``; their handler
+never runs.  Unclear effects are included (fail closed).  One line per tool:
+
+  memory                    saves/replaces/removes agent or user memory entries
+  skill_manage              creates, edits, deletes skills and their files
+  research_memory           writes the shared tenant evidence bank (.research/); unclear, included
+  research_outline          writes the shared tenant outline (.research/); unclear, included
+  cron_create/update/delete creates, changes, removes a schedule or routine
+  cron_pause/resume         switches a schedule off or on
+  cron_run_now              fires a schedule now (starts a real run)
+  followup_enroll           enrols a person in a follow-up protocol
+  followup_update           changes a person's follow-up record
+  followup_withdraw_consent records a person's consent withdrawal
+  escalate                  raises an alert to operators and the team
+  team_message_person       sends a message to an enrolled person
+  team_update_person        changes an enrolled person's record
+  team_enroll_person        enrols a person
+  team_escalation           writes/changes an escalation
+  team_tell_member          sends a message to a team member
+  send_form                 sends a WhatsApp Flow to the person
+  github                    GitHub REST proxy; can write (method is in the args), faked whole
+  run_coding_agent          checks out repos and may open PRs
+  start_case                starts a Keel case
+  complete_item/return_item reports a Keel work item
+  complete_step/raise_hand  reports or escalates a Keel step
+  step_outcome              closes a journey step
+  case_draft_form           drafts into a person's case form
+  process_draft_form        drafts into a person's process form
+  draft_save_file           saves a file in a Keel process draft
+  draft_save_scenario       saves a scenario in a Keel process draft
+  draft_process_save        saves a process draft
+  draft_process_edit        edits a process draft
+  draft_dry_run             runs a Keel draft (effect unclear); included
 """
 
 from __future__ import annotations
@@ -23,6 +58,16 @@ FILE_ACTIONS = frozenset({
     "ONE_DRIVE_DELETE_ITEM",
     "ONE_DRIVE_ONEDRIVE_CREATE_FOLDER",
     "SHARE_POINT_UPDATE_DRIVE_ITEM",
+})
+STATE_TOOLS = frozenset({
+    "memory", "skill_manage", "research_memory", "research_outline",
+    "cron_create", "cron_update", "cron_delete", "cron_pause", "cron_resume", "cron_run_now",
+    "followup_enroll", "followup_update", "followup_withdraw_consent", "escalate",
+    "team_message_person", "team_update_person", "team_enroll_person", "team_escalation", "team_tell_member",
+    "send_form", "github", "run_coding_agent",
+    "start_case", "complete_item", "return_item", "complete_step", "raise_hand", "step_outcome",
+    "case_draft_form", "process_draft_form",
+    "draft_save_file", "draft_save_scenario", "draft_process_save", "draft_process_edit", "draft_dry_run",
 })
 _DRIVE_KEYS = frozenset({"drive_id", "driveId", "parentReference.driveId"})
 REFERENCE_KEYS = _DRIVE_KEYS | frozenset({
