@@ -165,3 +165,9 @@ async def test_a_person_by_name_gets_a_dm():
     assert out["success"] and out["channel"] == "U0MADALIN"
     out = json.loads(await _post_to_channel_handler({"channel": "@Nobody Here", "text": "x"}, **_kwargs()))
     assert not out["success"] and "No one in Slack" in out["error"]
+
+
+async def test_links_post_without_previews():
+    await _post_to_channel_handler({"channel": "C0GROWTH1", "text": "see https://x.com/a/status/1"}, **_kwargs())
+    args = calls[0][1]
+    assert str(args["unfurl_links"]).lower() in ("false", "0") and str(args["unfurl_media"]).lower() in ("false", "0")
