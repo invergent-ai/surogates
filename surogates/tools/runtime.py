@@ -55,6 +55,7 @@ class ToolRuntime:
             case_step,
             channel_files,
             channel_messages,
+            channel_post,
             checkin,
             followup,
             intake,
@@ -121,6 +122,7 @@ class ToolRuntime:
             mate_ambient,  # mate_ambient_post (gated ambient channel post)
             channel_files,  # fetch_channel_file (pull a shared channel file)
             channel_messages,  # fetch_channel_messages (read recent channel messages)
+            channel_post,  # post_to_channel (post on the agent's own initiative into a connected Slack)
             whiteboard,  # whiteboard_draw (canvas chat surface)
             checkin,  # step_outcome (journey steps)
             followup,  # followup_enroll/update/status, escalate

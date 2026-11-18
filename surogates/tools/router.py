@@ -149,6 +149,9 @@ TOOL_LOCATIONS: dict[str, ToolLocation] = {
     # Channel message read — same rationale: needs the session-scoped API
     # client to call the ops server; no sandbox isolation.
     "fetch_channel_messages": ToolLocation.HARNESS,
+    # Proactive channel post: the bot token is resolved from the worker's
+    # vault and never enters a sandbox.
+    "post_to_channel": ToolLocation.HARNESS,
     # Phone call end — only records the decision; the voice process hangs up.
     "end_call": ToolLocation.HARNESS,
     # A case step's report to Keel: the worker's door key, session store and
