@@ -7,6 +7,7 @@ entirely in the channels process — no worker involvement.
 from __future__ import annotations
 
 import json
+import time
 
 
 def progress_key(kind: str, session_id) -> str:
@@ -19,7 +20,7 @@ async def set_placeholder(
 ) -> None:
     """Record the message to edit next; *text* is what it already says, kept
     when the next edit appends to it."""
-    record = {"channel": channel, "ts": ts, "thread_ts": thread_ts}
+    record = {"channel": channel, "ts": ts, "thread_ts": thread_ts, "at": time.time()}
     if text:
         record["text"] = text
     await redis.set(progress_key(kind, session_id), json.dumps(record), ex=ttl_s)

@@ -243,6 +243,10 @@ _DELIVERABLE_EVENTS = frozenset({
     EventType.CODE_RUN_CHANNEL_UPDATE,
     EventType.SESSION_STOPPED,
     EventType.CHANNEL_FORM,
+    # The turn ended: tells delivery to take down a "Thinking…" placeholder
+    # that no reply replaced. Queued after the turn's replies, so it is seen last.
+    EventType.SESSION_COMPLETE,
+    EventType.SESSION_FAIL,
 })
 
 # Delivered to the channel when a /stop actually halts the running turn, so the
@@ -400,6 +404,9 @@ def _build_channel_payload(event_type: EventType, data: dict, channel: str) -> d
                 payload["code_run"] = str(run_id)
     elif event_type == EventType.SESSION_STOPPED:
         payload["content"] = _STOPPED_CONFIRMATION
+    elif event_type in (EventType.SESSION_COMPLETE, EventType.SESSION_FAIL):
+        if channel in ADAPTER_CHANNELS:
+            payload["turn_end"] = True
     elif event_type == EventType.CHANNEL_FORM and capabilities_for(channel).forms:
         payload["flow"] = data.get("interactive") or {}
     elif (
@@ -1928,6 +1935,7 @@ class SessionStore:
             # final response is delivered.
             if scheduled and (
                 payload.get("intermediate")
+                or payload.get("turn_end")
                 or event_type == EventType.CODE_RUN_CHANNEL_UPDATE
             ):
                 return

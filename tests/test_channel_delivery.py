@@ -832,7 +832,9 @@ class TestThinkingPlaceholderDelivery:
         # update_ts was injected even on failure
         assert platform.send_calls[0][0].destination["update_ts"] == "20.0"
         # Placeholder must NOT be cleared on failure
-        assert await read_placeholder(redis, "slack", item.session_id) == {
+        kept = await read_placeholder(redis, "slack", item.session_id)
+        kept.pop("at", None)
+        assert kept == {
             "channel": "C001",
             "ts": "20.0",
             "thread_ts": None,
@@ -1572,3 +1574,57 @@ def test_a_short_or_parenthesised_reply_is_still_sent(content):
         EventType.LLM_RESPONSE, {"message": {"role": "assistant", "content": content}}, "whatsapp",
     )
     assert payload["content"] == content
+
+
+class TestTurnEndPlaceholder:
+    """A turn that ends without a reply takes its "Thinking…" down."""
+
+    async def _run(self, *, text=None, recorded_after_end=False):
+        from surogates.channels.channel_progress import read_placeholder, set_placeholder
+
+        redis = _FakeRedis()
+        ended = datetime.now(timezone.utc) + (
+            timedelta(seconds=-60) if recorded_after_end else timedelta(seconds=60)
+        )
+        item = _FakeOutboxItem(
+            id=301, payload={"turn_end": True}, created_at=ended,
+            destination={"channel_identifier": APP_ID, "channel_id": "C001"},
+        )
+        await set_placeholder(
+            redis, "slack", item.session_id, channel="C001", ts="20.0",
+            thread_ts="10.0", text=text,
+        )
+        delivery = _FakeDeliveryService(items=[item])
+        platform = _FakeMediaPlatform()
+        dispatcher = _make_dispatcher(
+            platform=platform, delivery=delivery,
+            cache=_FakeCache(_KNOWN_CACHE), redis=redis,
+        )
+        await dispatcher.deliver_batch(platform)
+        assert platform.send_calls == []  # never sent as a message
+        assert delivery.delivered == [(301, None)]
+        return platform, await read_placeholder(redis, "slack", item.session_id)
+
+    async def test_unreplaced_placeholder_is_deleted_and_cleared(self):
+        platform, left = await self._run()
+        assert platform.deleted == [{"channel": "C001", "ts": "20.0"}]
+        assert left is None
+
+    async def test_narration_message_stays_but_its_record_goes(self):
+        platform, left = await self._run(text="Looking it up…")
+        assert platform.deleted == []
+        assert left is None
+
+    async def test_next_messages_placeholder_is_left_alone(self):
+        platform, left = await self._run(recorded_after_end=True)
+        assert platform.deleted == []
+        assert left is not None and left["ts"] == "20.0"
+
+
+def test_turn_end_is_queued_for_adapter_channels_only():
+    from surogates.session.events import EventType
+    from surogates.session.store import _build_channel_payload
+
+    for event in (EventType.SESSION_COMPLETE, EventType.SESSION_FAIL):
+        assert _build_channel_payload(event, {}, "slack") == {"turn_end": True}
+        assert _build_channel_payload(event, {}, "web") == {}
