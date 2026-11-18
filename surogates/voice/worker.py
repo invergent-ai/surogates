@@ -38,7 +38,7 @@ from surogates.voice.outbound import (
 )
 from surogates.voice.soundscape import Pack, Soundscape, SoundscapePlayer, fetch_pack
 from surogates.voice.sessions import CallTarget, VoiceSessions, normalize_caller
-from surogates.voice.text import asks_for_details
+from surogates.voice.text import asks_for_details, say_as
 from surogates.voice.speech import Slot, build_stt, build_tts, phrase_scope, turn_handling
 from surogates.voice.tts import PhraseCache, RoTTS
 
@@ -326,7 +326,8 @@ async def entrypoint(ctx: JobContext) -> None:
         log.warning("call %s refused: %s", info.call_id, e, exc_info=not isinstance(e, ProviderUnavailable))
         await report(refused_outcome(e))
         return await tone_and_hang_up(ctx, vs.tts_url)
-    phrases = PhraseCache(rt.redis, tts, scope=phrase_scope(config.speaking, config.language, str(org_id)))
+    phrases = PhraseCache(rt.redis, tts, scope=phrase_scope(config.speaking, config.language, str(org_id)),
+                          say=lambda t: say_as(t, config.pronunciations, config.language))
     slots = CallSlots(rt.redis, vs.max_concurrent_calls)  # releasing a line never taken is a no-op
     if not await slots.take(info.call_id, hold_seconds=config.max_call_seconds + 60):
         log.warning("call %s refused: all %d lines busy", info.call_id, vs.max_concurrent_calls)

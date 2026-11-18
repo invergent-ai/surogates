@@ -68,3 +68,19 @@ async def test_fixed_phrases_are_synthesized_once_and_replayed_from_redis():
     assert calls == ["Bună ziua!"]  # the second call, a new process, read it back
     assert sum(f.samples_per_channel for f in again) == sum(f.samples_per_channel for f in first) > 0
     assert all(f.sample_rate == RATE for f in again)
+
+
+async def test_fixed_phrases_speak_as_the_line_does():
+    """The greeting goes through the line's say_as, like the agent's sentences: "Surogate" is said "Surogheit"."""
+    from surogates.voice.text import say_as
+    from surogates.voice.tts import PhraseCache
+
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(json.loads(request.content)["input"])
+        return httpx.Response(200, headers={"x-audio-sample-rate": str(RATE)}, content=_speech(0.2))
+
+    cache = PhraseCache(None, _tts(handler), say=lambda t: say_as(t, {"Superstar": "Siupărstar"}, "ro"))
+    [f async for f in cache.frames("Bună, sunt Superstar, de la Surogate.")]
+    assert calls == ["Bună, sunt Siupărstar, de la Surogheit."]
