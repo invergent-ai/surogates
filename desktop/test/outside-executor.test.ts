@@ -746,6 +746,54 @@ describe("outside put back's edges, and the chat's folder by another name", () =
     expect(journal.bindings.copyOf(ROOT, copy)).toBeUndefined();
   });
 
+  it("reads the chat's own files through a grant that holds its folder, by any spelling", async () => {
+    journal.bindings.grantRead(ROOT, base);
+    writeFileSync(join(work, "a.txt"), "mine");
+    // By its own path, and, on a drive that ignores case, by another spelling.
+    for (const [outside, dir] of [[layer(), work], [layer(caseless()), work], [layer(caseless()), join(base, "WORK")]] as const) {
+      const key = join(dir, "a.txt");
+      expect(outside.refusal(op("outside.read", { key, max_bytes: null })), key).toBeNull();
+      expect(await outside.run(op("outside.read", { key, max_bytes: null }), never()), key).toEqual({ ok: Buffer.from("mine").toString("base64") });
+      expect(await outside.run(op("outside.stat", { key }), never()), key).toMatchObject({ ok: { is_dir: false, size: 4 } });
+      expect(await outside.run(op("outside.list_dir", { key: dir }), never()), key).toEqual({ ok: ["a.txt"] });
+    }
+  });
+
+  it("tells the chat's folder by device and inode both, after a reboot too", async () => {
+    folderTools();
+    // Rebooted since it was bound: the binder would compare the inode alone.
+    journal.bindings.replace({ ...journal.bindings.get(ROOT)!, boot: "an earlier boot" });
+    journal.bindings.grantRead(ROOT, desktop);
+    const scan = join(desktop, "Scan");
+    const chat = fdPaths.lstat(work);
+    // Scan, on another drive, with the chat's folder's inode number.
+    const twin = (st: ReturnType<FdPaths["lstat"]>) => Object.assign(Object.create(Object.getPrototypeOf(st)), st, { ino: chat.ino, dev: chat.dev + 1n });
+    const held = new Set<number>();
+    const lookalike: FdPaths = {
+      ...fdPaths,
+      hold: (where) => {
+        const dir = fdPaths.hold(where);
+        if (where === scan || (typeof where !== "string" && where.name === "Scan")) held.add(dir);
+        return dir;
+      },
+      lstat: (where) => {
+        const st = fdPaths.lstat(where);
+        return where === scan || (typeof where !== "string" && where.name === "Scan") ? twin(st) : st;
+      },
+      fstat: ((file: number, options?: { bigint: true }) => {
+        if (!options) return fdPaths.fstat(file);
+        const st = fdPaths.fstat(file, options);
+        return held.has(file) ? twin(st) : st;
+      }) as FdPaths["fstat"],
+    };
+    const cerere = join(scan, "cerere.pdf");
+    const outside = layer(lookalike);
+    expect(outside.refusal(op("outside.trash", { files: [cerere] }))).toBeNull();
+    chosenFor.mockReturnValueOnce([cerere]);
+    expect(await outside.run(op("outside.trash", { files: [cerere] }), never())).toEqual({ ok: { trashed: [cerere], kept: [] } });
+    expect(held.size).toBeGreaterThan(0);
+  });
+
   it("tells the chat's folder by its identity, whatever its path's spelling", async () => {
     folderTools();
     journal.bindings.grantRead(ROOT, base);

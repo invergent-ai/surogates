@@ -16,14 +16,14 @@ import { type BigIntStats, closeSync, constants, fchmodSync, readSync, writeSync
 import { extname } from "node:path";
 
 import type { Approvals } from "../binding/approvals.js";
-import { confirmedFolder, type FolderGuards } from "../binding/folder.js";
+import type { FolderGuards } from "../binding/folder.js";
 import { Failure, FOLDER_UNAVAILABLE, fromNode, io, MAX_MESSAGE_CHARS, READ_TOO_LARGE } from "../files/answers.js";
 import type { FdPaths, Where } from "../files/fd-paths.js";
 import { FLAGS } from "../files/flags.js";
 import { linesFrom, listed, readFrom, revisionOf, statOf, walkFrom } from "../files/operations.js";
-import { identityOf, sameFile } from "../files/identity.js";
+import { type Identity, identityOf, sameFile } from "../files/identity.js";
 import { inside } from "../files/paths.js";
-import type { Binding, Bindings } from "../journal/bindings.js";
+import type { Bindings } from "../journal/bindings.js";
 import type { Operation, Outcome } from "../link/protocol.js";
 import { BIN } from "../platform.js";
 import { basename, hostPathOf, isAbsolute, join, resolve } from "../session-path.js";
@@ -173,7 +173,7 @@ export class Outside implements ToolLayer {
     if (typeof key !== "string") return key;
     const grant = this.grantOf(root, key);
     if (grant === null) return noPermission(key);
-    return this.answer(kind, () => this.read(root, kind, args, grant, key));
+    return this.answer(kind, () => this.read(kind, args, grant, key));
   }
 
   // The grant of *root*'s that holds *path*, no link on its way; null for none. On Windows a folder is looked at only
@@ -341,9 +341,10 @@ export class Outside implements ToolLayer {
     // Spelled as its own, it is the chat's by its path, as every caller tells first.
     const grant = binding === undefined || inside(path, binding.folder) ? null : this.grantOf(root, path);
     if (grant === null) return false;
+    const ids = this.chatIds(root);
     for (let at = path; ; at = at.slice(0, at.lastIndexOf("/"))) {
       try {
-        if (isChat(binding!, this.options.fd.lstat(at))) return true;
+        if (isChat(ids, this.options.fd.lstat(at))) return true;
       } catch {
         // Not there: nothing it is.
       }
@@ -460,7 +461,13 @@ export class Outside implements ToolLayer {
         try {
           made = fd.fstat(file, { bigint: true });
           // The original's permissions, where the OS keeps them (Windows keeps one read-only bit, its own to set).
-          if (process.platform !== "win32") fchmodSync(file, Number(before.mode) & 0o777);
+          if (process.platform !== "win32") {
+            try {
+              fchmodSync(file, Number(before.mode) & 0o777);
+            } catch {
+              // A drive that keeps no permissions (FAT, exFAT, some shares) refuses: the file keeps the drive's own.
+            }
+          }
           this.writeChecked(file, bytes, "the changes did not check out once written");
         } finally {
           closeSync(file);
@@ -550,7 +557,7 @@ export class Outside implements ToolLayer {
     }
   }
 
-  private read(root: string, kind: string, args: Record<string, unknown>, grant: string, key: string): unknown {
+  private read(kind: string, args: Record<string, unknown>, grant: string, key: string): unknown {
     const { fd } = this.options;
     const opener = (where: Where) => (flags: number) => fd.open(where, flags);
     switch (kind) {
@@ -559,7 +566,7 @@ export class Outside implements ToolLayer {
       case "outside.stat":
         try {
           // A link put there since is no file of the grant's: answered as nothing there, as a stat that fails is.
-          return this.within(root, grant, key, (where) => {
+          return this.within(null, grant, key, (where) => {
             const st = fd.lstat(where);
             return st.isSymbolicLink() ? null : statOf(st);
           });
@@ -567,11 +574,11 @@ export class Outside implements ToolLayer {
           return null;
         }
       case "outside.read":
-        return this.within(root, grant, key, (where) => readFrom(args, key, opener(where)));
+        return this.within(null, grant, key, (where) => readFrom(args, key, opener(where)));
       case "outside.read_lines":
-        return this.within(root, grant, key, (where) => linesFrom(args, key, opener(where)));
+        return this.within(null, grant, key, (where) => linesFrom(args, key, opener(where)));
       case "outside.list_dir":
-        return this.within(root, grant, key, (where) => {
+        return this.within(null, grant, key, (where) => {
           const held = io(key, () => fd.hold(where));
           try {
             return listed(io(key, () => fd.readdir({ dir: held })));
@@ -580,13 +587,13 @@ export class Outside implements ToolLayer {
           }
         });
       default: // outside.walk
-        return this.within(root, grant, key, (where) => walkFrom(args, key, opener(where), fd));
+        return this.within(null, grant, key, (where) => walkFrom(args, key, opener(where), fd));
     }
   }
 
   // *use* given *key* as reached from *grant*: the grant's own folder by its path, which withinGrant checked; anything
   // in it by its name in its folder, held open, each folder from the grant down held in turn and never through a link.
-  private within<T>(root: string, grant: string, key: string, use: (where: Where) => T): T {
+  private within<T>(root: string | null, grant: string, key: string, use: (where: Where) => T): T {
     const { where, release } = this.reach(root, grant, key);
     try {
       return use(where);
@@ -595,12 +602,30 @@ export class Outside implements ToolLayer {
     }
   }
 
-  // *key* as within reaches it, its folder held until *release*: for a use that waits on something in between. Each
-  // folder held on the way, and *key* itself, is checked not to be *root*'s chat's folder by its identity: by another
-  // spelling of its path (case, a short name) that is the chat's own, its tools' to touch, never this layer's.
-  private reach(root: string, grant: string, key: string): { where: Where; release: () => void } {
+  // The chat's folder's identities, device and inode both: the binder's, read through the walk (on Windows its device is
+  // the volume's serial, which a reboot keeps), and, on Linux and macOS, the folder's own now, by its path with no link
+  // followed at its name, since a reboot can renumber a mount's device there. None for no root, or an unbound one.
+  private chatIds(root: string | null): Identity<bigint>[] {
+    const binding = root === null ? undefined : this.options.bindings.get(root);
+    if (binding === undefined) return [];
+    const ids = [{ dev: BigInt(binding.dev), ino: BigInt(binding.ino) }];
+    if (process.platform !== "win32") {
+      try {
+        ids.push(identityOf(this.options.fd.lstat(binding.folder)));
+      } catch {
+        // Gone: the binder's identity alone.
+      }
+    }
+    return ids;
+  }
+
+  // *key* as within reaches it, its folder held until *release*: for a use that waits on something in between. For a
+  // *root* that changes files (a trash, a put back, a copy), each folder held on the way, and *key* itself, is checked
+  // not to be its chat's folder by identity: by another spelling of its path (case, a short name) that is the chat's
+  // own, its tools' to change, never this layer's. A read (root null) may reach the chat's own files any way: it harms nothing.
+  private reach(root: string | null, grant: string, key: string): { where: Where; release: () => void } {
     const { fd } = this.options;
-    const binding = this.options.bindings.get(root);
+    const ids = this.chatIds(root);
     const notChat = (stats: () => BigIntStats) => {
       let st: BigIntStats;
       try {
@@ -608,7 +633,7 @@ export class Outside implements ToolLayer {
       } catch {
         return; // nothing there yet, as a copy's new name: no folder of the chat's
       }
-      if (binding !== undefined && isChat(binding, st)) throw new Failure({ type: "denied", message: byAnotherName(key) });
+      if (isChat(ids, st)) throw new Failure({ type: "denied", message: byAnotherName(key) });
     };
     if (key === grant) {
       notChat(() => fd.lstat(grant));
@@ -666,10 +691,10 @@ export class Outside implements ToolLayer {
   }
 }
 
-// Whether *stats* are of *binding*'s folder: its identity as the binder confirmed it, through the file host's walk.
-function isChat(binding: Binding, stats: BigIntStats): boolean {
+// Whether *stats* are of the chat's folder, one of *ids*: by device and inode both, as an inode alone repeats across drives.
+function isChat(ids: Identity<bigint>[], stats: BigIntStats): boolean {
   const { dev, ino } = identityOf(stats);
-  return confirmedFolder(binding, { dev: Number(dev), ino: Number(ino) });
+  return ids.some((id) => id.dev === dev && id.ino === ino);
 }
 
 // The path a read kind names: resolve's as the agent wrote it, made plain, which must be absolute; every other's key,
