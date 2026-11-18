@@ -35,6 +35,12 @@ async def _slack(method: str, request: Request):
         return {"ok": True, "channels": [{"id": "C0GROWTH1", "name": "growth"},
                                          {"id": "C0SECRET1", "name": "secret"}],
                 "response_metadata": {"next_cursor": ""}}
+    if method == "users.list":
+        return {"ok": True, "members": [
+            {"id": "U0MADALIN", "name": "madalin", "profile": {"real_name": "Mădălin Tatarciuc", "display_name": "Madalin"}},
+            {"id": "U0GONE", "name": "old", "deleted": True, "profile": {"real_name": "Madalin Tatarciuc"}},
+            {"id": "U0BOT", "name": "bridge", "is_bot": True, "profile": {"real_name": "Madalin Tatarciuc"}}],
+            "response_metadata": {"next_cursor": ""}}
     if method == "chat.postMessage":
         if args["channel"] == "C0SECRET1":
             return {"ok": False, "error": "not_in_channel"}
@@ -146,3 +152,16 @@ async def test_input_limits():
         {"channel": "#growth", "text": "hi", "image_url": "http://insecure/a.png"}, **_kwargs()))
     assert "https" in out["error"]
     assert calls == []
+
+
+async def test_a_person_id_posts_in_their_dm():
+    out = json.loads(await _post_to_channel_handler({"channel": "U0PERSON1", "text": "a question for you"}, **_kwargs()))
+    assert out["success"] and out["channel"] == "U0PERSON1"
+    assert calls[0][0] == "chat.postMessage" and calls[0][1]["channel"] == "U0PERSON1"
+
+
+async def test_a_person_by_name_gets_a_dm():
+    out = json.loads(await _post_to_channel_handler({"channel": "@Madalin Tatarciuc", "text": "Confirm @surogate_ai?"}, **_kwargs()))
+    assert out["success"] and out["channel"] == "U0MADALIN"
+    out = json.loads(await _post_to_channel_handler({"channel": "@Nobody Here", "text": "x"}, **_kwargs()))
+    assert not out["success"] and "No one in Slack" in out["error"]

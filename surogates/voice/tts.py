@@ -70,10 +70,12 @@ class PhraseCache:
     TTL = 7 * 24 * 3600  # a greeting edited in Studio is a new key; old ones expire
     FRAME_S = 0.1
 
-    def __init__(self, redis, tts: tts.TTS, scope: str = "") -> None:
+    def __init__(self, redis, tts: tts.TTS, scope: str = "", say=None) -> None:
         # scope: the owning org for a provider's voice. Its audio was paid with their key, and a cloned
         # voice must never play on another tenant's line; our own voices are shared by every line.
-        self._redis, self._tts, self._scope = redis, tts, scope
+        # say: how the line speaks text (text.say_as with its pronunciations), the same as the agent's own
+        # sentences; without it a greeting said "Surogate" the English-blind way.
+        self._redis, self._tts, self._scope, self._say = redis, tts, scope, say or (lambda t: t)
 
     def _key(self, text: str) -> str:
         t = self._tts
@@ -81,6 +83,7 @@ class PhraseCache:
                 f"{hashlib.sha256(text.encode()).hexdigest()}")
 
     async def frames(self, text: str) -> AsyncIterator[rtc.AudioFrame]:
+        text = self._say(text)
         key, pcm = self._key(text), None
         try:
             pcm = await self._redis.get(key)

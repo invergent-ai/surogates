@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import unicodedata
 from types import SimpleNamespace
 from typing import Any
 
@@ -31,7 +32,7 @@ MAX_BLOCKS = 50
 MAX_TEXT = 40_000
 _SECTION_TEXT = 3000
 
-_CHANNEL_ID = re.compile(r"^[CGD][A-Z0-9]{6,}$")
+_CHANNEL_ID = re.compile(r"^[CGDUW][A-Z0-9]{6,}$")  # U/W: a person; Slack posts it in the bot's DM with them
 _CHANNEL_MENTION = re.compile(r"^<#([CG][A-Z0-9]+)(?:\|[^>]*)?>$")
 
 POST_TO_CHANNEL_SCHEMA = ToolSchema(
@@ -52,7 +53,7 @@ POST_TO_CHANNEL_SCHEMA = ToolSchema(
             "kind": {"type": "string", "enum": ["slack"], "description": "Channel kind (default 'slack')."},
             "channel": {
                 "type": "string",
-                "description": "Channel name like '#growth', or a channel id like 'C0123ABCD'.",
+                "description": "Channel name like '#growth' or a channel id like 'C0123ABCD'; or one person, privately (a DM): '@Their Full Name' or their Slack id 'U0123ABCD'.",
             },
             "text": {"type": "string", "description": "Plain message text (fallback when blocks are given)."},
             "blocks": {
@@ -123,6 +124,8 @@ async def _resolve_channel(client: Any, channel: str) -> str:
         return mention.group(1)
     if _CHANNEL_ID.match(channel):
         return channel
+    if channel.startswith("@"):  # a person, by name: Slack posts it in the bot's DM with them
+        return await _resolve_person(client, channel[1:].strip())
     name = channel.lstrip("#").lower()
     cursor = None
     while True:
@@ -139,6 +142,31 @@ async def _resolve_channel(client: Any, channel: str) -> str:
         f"No channel #{name} that the bot can see. Check the name, or, for a "
         f"private channel, invite the bot to it first."
     )
+
+
+def _fold(name: str) -> str:
+    """"Mădălin Tătarciuc" and "madalin tatarciuc" are the same person."""
+    return "".join(c for c in unicodedata.normalize("NFKD", name) if not unicodedata.combining(c)).casefold().strip()
+
+
+async def _resolve_person(client: Any, name: str) -> str:
+    want, cursor, hits = _fold(name), None, {}
+    while True:
+        resp = await client.users_list(limit=500, cursor=cursor)
+        for u in resp.get("members") or []:
+            if u.get("deleted") or u.get("is_bot"):
+                continue
+            p = u.get("profile") or {}
+            if want in {_fold(n) for n in (u.get("name"), u.get("real_name"), p.get("real_name"), p.get("display_name")) if n}:
+                hits[u["id"]] = p.get("real_name") or u.get("name")
+        cursor = (resp.get("response_metadata") or {}).get("next_cursor")
+        if not cursor:
+            break
+    if len(hits) == 1:
+        return next(iter(hits))
+    if hits:
+        raise _PostError(f"More than one person in Slack is called '{name}': {', '.join(hits.values())}. Use their Slack id.")
+    raise _PostError(f"No one in Slack is called '{name}'. Use their full name as Slack shows it, or their Slack id (U…).")
 
 
 async def _explain(client: Any, code: str, channel: str) -> str:
