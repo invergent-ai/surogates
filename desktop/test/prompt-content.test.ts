@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { ApprovalRequest, ChatLabel } from "../src/binding/approvals.js";
 import type { FolderSheet } from "../src/binding/binder.js";
 import { segments } from "../src/shell/text.js";
-import { approval, folderSheet, freeMode, handBack, sizeOf } from "../src/shell/prompt-content.js";
+import { approval, checkAnswer, folderSheet, freeMode, handBack, sizeOf } from "../src/shell/prompt-content.js";
 
 const SHEET: FolderSheet = {
   agent: "acme.surogate.ai", folder: "/home/me/notes", mode: "free", links: null, refusal: null, project: null, busy: false,
@@ -371,5 +371,27 @@ describe("the browser's prompts", () => {
     expect(long.title.endsWith(".attacker.net?")).toBe(true);
     const short = approval({ kind: "browser", chat: CHAT, action: "open", detail: "https://a.example/" });
     expect(long.height).toBeGreaterThan(short.height + 5 * 19);
+  });
+});
+
+describe("a prompt with a list to tick", () => {
+  const base = { ...folderSheet(SHEET), checks: { legend: "Files", items: [
+    { value: "a", label: "A", detail: "/x/a" }, { value: "b", label: "B", detail: "/x/b" },
+  ] } };
+  const content = { ...base, buttons: [{ id: "deny", label: "Deny", allows: false }, { id: "allow", label: "Allow", allows: true }], choice: null };
+
+  it("keeps existing content with no list and no warning style", () => {
+    expect([folderSheet(SHEET), approval({ kind: "command", chat: CHAT, command: "ls", workdir: "/home/me/notes", background: false })].map((c) => [c.checks, c.danger])).toEqual([[null, false], [null, false]]);
+  });
+
+  it("returns the ticked items with the answer, and nothing it did not show", () => {
+    expect(checkAnswer(content, "allow", null, ["b", "zzz", "b"])).toEqual({ button: "allow", choice: null, checked: ["b"] });
+    expect(checkAnswer({ ...content, checks: null }, "allow", null, ["a"])).toEqual({ button: "allow", choice: null, checked: [] });
+  });
+
+  it("answers an allow with nothing ticked as a denial", () => {
+    expect(checkAnswer(content, "allow", null, [])).toBeNull();
+    expect(checkAnswer(content, "allow", null, ["zzz"])).toBeNull();
+    expect(checkAnswer(content, "deny", null, [])).toEqual({ button: "deny", choice: null, checked: [] });
   });
 });

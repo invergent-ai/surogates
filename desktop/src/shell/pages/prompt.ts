@@ -16,6 +16,8 @@ interface Content {
   details: Array<{ label: string; value: string; code: boolean; keep: string }>;
   notes: string[];
   choice: { legend: string; options: Array<{ value: string; label: string; description: string }>; value: string } | null;
+  checks: { legend: string; items: Array<{ value: string; label: string; detail: string }> } | null;
+  danger: boolean;
   buttons: Array<{ id: string; label: string; allows: boolean }>;
   focus: string;
   cancel: string;
@@ -30,7 +32,7 @@ interface State {
 
 interface Prompt {
   state(): Promise<State>;
-  answer(button: string, choice: string | null): Promise<boolean>;
+  answer(button: string, choice: string | null, checked: string[]): Promise<boolean>;
   onChanged(listener: () => void): () => void;
   onArmed(listener: (armed: boolean) => void): () => void;
 }
@@ -66,13 +68,15 @@ const element = <K extends keyof HTMLElementTagNameMap>(tag: K, className: strin
 
 const chosen = (): string | null => document.querySelector<HTMLInputElement>("#prompt-choice input:checked")?.value ?? null;
 
+const ticked = (): string[] => [...document.querySelectorAll<HTMLInputElement>("#prompt-checks input:checked")].map((box) => box.value);
+
 // A button was pressed, by a key, a press, or with neither as assistive technology presses one: the main
 // process says whether it is taken. One it refuses came too soon, and the prompt says so in a line beside the
 // buttons, which a screen reader reads by itself: a person who pressed sees, or hears, why nothing happened.
 function answer(id: string): void {
   const offered = content?.buttons.find((button) => button.id === id);
   if (!offered) return;
-  void prompt.answer(id, content?.choice ? chosen() : null).then((taken) => {
+  void prompt.answer(id, content?.choice ? chosen() : null, ticked()).then((taken) => {
     if (!taken) byId("prompt-refused").textContent = TOO_SOON;
   }, () => {});
 }
@@ -176,6 +180,24 @@ function draw(state: State): void {
       label.append(radio, element("span", "name", option.label));
       const row = element("div", "option");
       row.append(label, description);
+      return row;
+    }));
+  }
+  document.querySelector(".prompt")?.classList.toggle("danger", content.danger);
+  const checks = byId("prompt-checks");
+  checks.hidden = content.checks === null;
+  if (content.checks) {
+    showText(byId("prompt-checks-legend"), content.checks.legend);
+    checks.append(...content.checks.items.map((item, index) => {
+      const box = document.createElement("input");
+      Object.assign(box, { type: "checkbox", value: item.value, checked: true });
+      const detail = element("span", "desc", item.detail);
+      detail.id = `check-${index}`;
+      box.setAttribute("aria-describedby", detail.id);
+      const label = element("label", "");
+      label.append(box, element("span", "name", item.label));
+      const row = element("div", "option");
+      row.append(label, detail);
       return row;
     }));
   }

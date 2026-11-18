@@ -1498,6 +1498,15 @@ body.prompt-page {
   font-size: 12.5px;
 }
 
+.prompt.danger h1 {
+  color: var(--danger);
+}
+
+.prompt.danger .actions .btn:last-child {
+  background: var(--danger);
+  color: #fff;
+}
+
 .prompt .actions {
   display: flex;
   flex-wrap: wrap;

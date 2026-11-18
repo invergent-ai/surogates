@@ -12,7 +12,7 @@
 import { BrowserWindow } from "electron";
 
 import { dropMenu, lockPage } from "./main-window.js";
-import type { PromptContent } from "./prompt-content.js";
+import { checkAnswer, type PromptContent } from "./prompt-content.js";
 import type { PromptQueue } from "./prompt-queue.js";
 import { ownPage } from "./window-policy.js";
 
@@ -37,6 +37,7 @@ export interface PromptWindowOptions {
 export interface PromptAnswer {
   button: string;
   choice: string | null; // the option chosen, when the prompt offers a choice
+  checked: string[]; // the items of its list still ticked, when it shows one
 }
 
 /**
@@ -142,14 +143,11 @@ export function openPrompt(options: PromptWindowOptions, signal: AbortSignal): P
   // True once taken; false for one that the input protection holds back: before it has passed since the prompt
   // was shown, or too soon after a key or a press that may not answer. Which button, and which choice, is the
   // page's word: this process sees keys and presses, not what they land on. Whether, is this process's own count.
-  handle("prompt:answer", (pressed, chosen) => {
-    const offered = content.buttons.find((candidate) => candidate.id === pressed);
-    if (!offered) throw new Error("Not a button of this prompt");
-    const choice = content.choice === null ? null : content.choice.options.find((option) => option.value === chosen)?.value;
-    if (choice === undefined) throw new Error("Not an option of this prompt");
+  handle("prompt:answer", (pressed, chosen, ticked) => {
+    const checked = checkAnswer(content, pressed, chosen, ticked);
     const now = performance.now();
     if (now < armedAt || !(answers || now - lastInput >= INPUT_PROTECTION_MS)) return false;
-    answer ??= { button: offered.id, choice };
+    answer ??= checked;
     close();
     return true;
   });

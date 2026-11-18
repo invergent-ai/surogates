@@ -795,7 +795,7 @@ describe("a chat's browser taken over, and handed back", () => {
     await asked.click(HAND_BACK, { force: true, noWaitAfter: true });
     // And the prompt's own page saying it was pressed, right after those: the main process goes by its own count.
     expect(await asked.evaluate(() =>
-      (window as unknown as { surogatePrompt: { answer(button: string, choice: string | null): Promise<boolean> } }).surogatePrompt.answer("hand_back", null))).toBe(false);
+      (window as unknown as { surogatePrompt: { answer(button: string, choice: string | null, checked: string[]): Promise<boolean> } }).surogatePrompt.answer("hand_back", null, []))).toBe(false);
     expect(await asked.evaluate(() => (document.activeElement as HTMLElement).dataset.id)).toBe("keep");
     // Nothing came of any: the confirmation is up still, the browser its user's, and the page not answered.
     await expect.poll(() => asked.getAttribute("#prompt-buttons", "data-held"), { timeout: 10_000 }).toBe("false");
@@ -871,7 +871,7 @@ describe("a chat's browser taken over, and handed back", () => {
     // The main process counts those keys by itself: its page's word that Hand back was pressed, right after one of
     // them, is not taken, though the confirmation has been up six times its protection.
     const word = () => asked.evaluate(() =>
-      (window as unknown as { surogatePrompt: { answer(button: string, choice: string | null): Promise<boolean> } }).surogatePrompt.answer("hand_back", null));
+      (window as unknown as { surogatePrompt: { answer(button: string, choice: string | null, checked: string[]): Promise<boolean> } }).surogatePrompt.answer("hand_back", null, []));
     expect(await word()).toBe(false);
     // A key held down: it repeats for two seconds, well past the protection, and answers nothing.
     await asked.keyboard.down("Enter");
