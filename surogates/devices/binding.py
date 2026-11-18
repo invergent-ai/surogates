@@ -15,6 +15,7 @@ must say it keeps that copy, or the thread has nowhere to work.
 
 from __future__ import annotations
 
+import re
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -57,6 +58,18 @@ def device_of(config: dict[str, Any] | None) -> UUID | None:
     if not isinstance(execution, dict) or execution.get("kind") != "device":
         return None
     return UUID(execution["device_id"])
+
+
+def shown_folder(path: str) -> str:
+    """A chat's folder as the user knows it: ``/mnt/c/a/b`` is ``C:\\a\\b``.
+
+    Mirrors ``windowsHostPath`` in desktop/src/session-path.ts; any other path
+    is shown as it is.
+    """
+    m = re.fullmatch(r"/mnt/([a-zA-Z])(/.*)?", path)
+    if not m:
+        return path
+    return f"{m.group(1).upper()}:" + (m.group(2) or "/").replace("/", "\\")
 
 
 def copy_of(config: dict[str, Any] | None) -> UUID | None:

@@ -18,9 +18,11 @@ from surogates.tenant.context import TenantContext
 MCP_AGENT_TOOLS = {"memory", "todo", "delegate_task", "consult_expert", "create_artifact", "mcp__crm__search"}
 
 
-def _context(available_tools, workspace_path="/data/ws") -> str:
+def _context(available_tools, workspace_path="/data/ws", execution=None) -> str:
     now = datetime.now(timezone.utc)
     config = {"workspace_path": workspace_path} if workspace_path else {}
+    if execution:
+        config["execution"] = execution
     session = Session(
         id=uuid4(), user_id=uuid4(), org_id=uuid4(), agent_id="agent-1", channel="web",
         status="active", config=config, created_at=now, updated_at=now,
@@ -66,3 +68,27 @@ def test_tools_narrowed_away_take_the_workspace_block_with_them():
 def test_without_a_workspace_or_a_tool_list_nothing_changes():
     assert "## Workspace" not in _context({"terminal"}, workspace_path=None)
     assert "## Workspace" in _context(None)
+
+
+DEVICE = {"kind": "device", "device_id": str(uuid4()), "device_name": "LAPTOP"}
+
+
+def test_a_device_chat_names_its_folder_not_home():
+    section = _context({"read_file"}, workspace_path="/mnt/c/Users/Ana/Scans", execution=DEVICE)
+    assert "- **Workspace**: the chat's folder on the user's computer, `C:\\Users\\Ana\\Scans` (your working directory)" in section
+    assert "`$HOME` (your working directory)" not in section
+    assert "private scratch area" in section
+    assert "not the user's Desktop" in section
+
+
+def test_a_linux_device_chat_shows_its_path_as_it_is():
+    section = _context({"read_file"}, workspace_path="/home/ana/proj", execution=DEVICE)
+    assert "`/home/ana/proj` (your working directory)" in section
+
+
+def test_shown_folder():
+    from surogates.devices.binding import shown_folder
+
+    assert shown_folder("/mnt/d/Profiles/x y/z") == "D:\\Profiles\\x y\\z"
+    assert shown_folder("/mnt/c") == "C:\\"
+    assert shown_folder("/home/ana") == "/home/ana"
