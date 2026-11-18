@@ -180,3 +180,23 @@ async def test_state_tools_run_for_real_outside_test_mode_and_reads_stay_real():
         handler = AsyncMock(return_value='{"ok": 1}')
         await _run_builtin(read, {"test_mode": {"scratch": None}}, handler)
         handler.assert_awaited_once()
+
+
+def test_experts_of_a_test_chat_get_no_state_tools(tmp_path):
+    import contextvars
+
+    from surogates.simulation.scratch import STATE_TOOLS
+    from surogates.tools.builtin import expert_loop as el
+    from tests.test_expert_tool_scope import LocalBackend, MediaGenConfig, _harness, _session, _StepStore
+
+    session = _session("web")
+    harness = _harness(_StepStore(session, LocalBackend(str(tmp_path))), media_gen=MediaGenConfig(), gate=None)
+    usable = harness._tool_usability(session, harness._tools.tool_names)
+
+    def scoped(config):
+        session.config = config
+        harness._withhold_from_experts(usable, None, session)
+        return el.expert_scope.get().withheld
+
+    assert STATE_TOOLS <= contextvars.copy_context().run(scoped, {"test_mode": {"scratch": None}})
+    assert "memory" not in contextvars.copy_context().run(scoped, {})

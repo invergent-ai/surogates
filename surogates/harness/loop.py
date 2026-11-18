@@ -1966,7 +1966,9 @@ class AgentHarness(
             has_slack=getattr(self, "_has_slack", True),
         )
 
-    def _withhold_from_experts(self, usable: dict[str, bool], offered: Iterable[str] | None) -> None:
+    def _withhold_from_experts(
+        self, usable: dict[str, bool], offered: Iterable[str] | None, session: Session | None = None,
+    ) -> None:
         """Keep from any expert this wake consults every tool the session
         could not be sent: one outside *offered* (the session's tool filter
         after its gates; ``None``: every tool), one *usable* takes off its
@@ -1980,6 +1982,11 @@ class AgentHarness(
         gate = self._governance_gate
         if gate is not None:
             withheld |= {name for name in names if not gate.runs_unasked(name)}
+        if session is not None and (session.config or {}).get("test_mode"):
+            # The expert's loop calls the router directly, past the test-mode fake in execute_single_tool.
+            from surogates.simulation.scratch import STATE_TOOLS
+
+            withheld |= STATE_TOOLS
         expert_scope.set(ExpertScope(withheld=frozenset(withheld), gate=gate))
 
     def _scope_skills(self, session: Session) -> None:
@@ -2023,7 +2030,7 @@ class AgentHarness(
         gate = self._governance_gate
         if gate is not None:
             offered = {name for name in offered if gate.offers(name)}
-        self._withhold_from_experts(self._tool_usability(session, offered), offered)
+        self._withhold_from_experts(self._tool_usability(session, offered), offered, session)
 
     # ------------------------------------------------------------------
     # Slash-command capability gate
@@ -3322,7 +3329,7 @@ class AgentHarness(
         tool_schemas = drop_unusable_tools(tool_schemas, **usable)
         # A consulted expert's model is not sent them, nor what the filter
         # and the policy took away.
-        self._withhold_from_experts(usable, tool_filter)
+        self._withhold_from_experts(usable, tool_filter, session)
         # Nor do the skill tools show a skill naming a tool the session is
         # never sent: the skill index's set, the same for both.
         self._scope_skills(session)

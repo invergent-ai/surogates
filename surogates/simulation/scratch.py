@@ -32,6 +32,9 @@ never runs.  Unclear effects are included (fail closed).  One line per tool:
   team_escalation           writes/changes an escalation
   team_tell_member          sends a message to a team member
   send_form                 sends a WhatsApp Flow to the person
+  browser_click/type/press_key  acts on a web page (may submit forms, may use a saved login)
+  browser_upload_file/drag      uploads a file / drags on a web page
+  browser_evaluate          runs script in a web page
   github                    GitHub REST proxy; can write (method is in the args), faked whole
   run_coding_agent          checks out repos and may open PRs
   start_case                starts a Keel case
@@ -64,7 +67,8 @@ STATE_TOOLS = frozenset({
     "cron_create", "cron_update", "cron_delete", "cron_pause", "cron_resume", "cron_run_now",
     "followup_enroll", "followup_update", "followup_withdraw_consent", "escalate",
     "team_message_person", "team_update_person", "team_enroll_person", "team_escalation", "team_tell_member",
-    "send_form", "github", "run_coding_agent",
+    "send_form", "github",
+    "browser_click", "browser_type", "browser_press_key", "browser_upload_file", "browser_evaluate", "browser_drag", "run_coding_agent",
     "start_case", "complete_item", "return_item", "complete_step", "raise_hand", "step_outcome",
     "case_draft_form", "process_draft_form",
     "draft_save_file", "draft_save_scenario", "draft_process_save", "draft_process_edit", "draft_dry_run",
