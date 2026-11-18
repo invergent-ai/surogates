@@ -38,7 +38,7 @@ import logging
 import os
 import urllib.parse
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import timedelta, timezone
 from typing import Any, Callable
 
 from fastapi import FastAPI, Request
@@ -845,6 +845,44 @@ class ChannelDeliveryDispatcher:
         else:
             await self._delivery.mark_failed(item.id, error)
 
+    async def _end_turn(self, platform: ChannelPlatform, item: Any) -> bool:
+        """The turn ended: take down its "Thinking…" placeholder if no reply
+        replaced it (the agent answered elsewhere, or not at all).
+
+        The turn's replies were queued before this row and are delivered first,
+        so a placeholder still recorded here is one nothing will edit. A
+        placeholder recorded after the turn ended belongs to the next message
+        and is left alone. A progress message (narration, it has ``text``) is
+        real content: it stays, only its record is dropped.
+        """
+        from surogates.channels.channel_progress import clear_placeholder, read_placeholder
+
+        try:
+            ph = await read_placeholder(self._redis, platform.kind, item.session_id) if self._redis else None
+            created = getattr(item, "created_at", None)
+            if created is not None and created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)  # stored as naive UTC
+            if ph and not (created and float(ph.get("at") or 0) > created.timestamp()):
+                delete = getattr(platform, "delete_message", None)
+                if delete is not None and ph.get("ts") and not ph.get("text"):
+                    identifier = item.destination.get("channel_identifier", "")
+                    resolved = await resolve_tenant(self._cache, platform.kind, identifier)
+                    if resolved is not None:
+                        creds = await resolve_channel_credentials(
+                            vault=self._vault, kind=platform.kind, identifier=identifier,
+                            org_id=resolved["org_id"],
+                            refs=platform.descriptor.vault_refs(identifier),
+                        )
+                        await delete(creds=creds, channel=ph.get("channel", ""), ts=ph["ts"])
+                await clear_placeholder(self._redis, platform.kind, item.session_id)
+        except Exception:
+            logger.warning(
+                "[delivery] clearing the placeholder at turn end failed for outbox %d — ignoring",
+                item.id, exc_info=True,
+            )
+        await self._delivery.mark_delivered_many([item.id])
+        return True
+
     async def _deliver_item(self, platform: ChannelPlatform, item: Any) -> bool:
         """Process a single outbox item: resolve creds and call platform.send.
 
@@ -858,6 +896,9 @@ class ChannelDeliveryDispatcher:
 
         Returns whether the item was delivered.
         """
+        if item.payload.get("turn_end"):
+            return await self._end_turn(platform, item)
+
         # 1. Extract channel identifier.
         identifier: str = item.destination.get("channel_identifier", "")
         if not identifier:
