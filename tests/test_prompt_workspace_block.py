@@ -101,6 +101,9 @@ def test_tools_path_is_shown_folders_inverse_on_a_windows_computer():
     for path in ("/mnt/d/Profiles/x y/z", "/mnt/c", "/mnt/c/Users/Ana/work/a.txt"):
         assert tools_path(shown_folder(path), work) == path
     assert tools_path("c:/Scans/", work) == "/mnt/c/Scans"
+    # A drive named alone is its root, as shown_folder shows /mnt/d.
+    for drive in ("D:", "D:\\", "D:/", "d:"):
+        assert tools_path(drive, work) == "/mnt/d"
     # A relative name, and any name on a computer that is not Windows, are left as they are.
     assert tools_path("a\\b.txt", work) == "a\\b.txt"
     assert tools_path("C:\\a", "/home/ana/proj") == "C:\\a"

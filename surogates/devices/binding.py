@@ -63,7 +63,8 @@ def device_of(config: dict[str, Any] | None) -> UUID | None:
 
 # A Windows drive's path as the tools name it (``/mnt/c/a``), and as its user does (``C:\\a``).
 _GUEST_DRIVE = re.compile(r"/mnt/([a-zA-Z])(/.*)?", re.DOTALL)
-_WINDOWS_DRIVE = re.compile(r"([A-Za-z]):[\\/](.*)", re.DOTALL)
+# A drive named alone ("D:") is its root, as shown_folder shows it ("D:\\").
+_WINDOWS_DRIVE = re.compile(r"([A-Za-z]):(?:[\\/](.*))?", re.DOTALL)
 
 
 def shown_folder(path: str) -> str:
@@ -88,7 +89,7 @@ def tools_path(path: str, root: str) -> str:
     m = _WINDOWS_DRIVE.fullmatch(path) if _GUEST_DRIVE.fullmatch(root) else None
     if not m:
         return path
-    rest = m.group(2).replace("\\", "/").rstrip("/")
+    rest = (m.group(2) or "").replace("\\", "/").rstrip("/")
     return f"/mnt/{m.group(1).lower()}" + (f"/{rest}" if rest else "")
 
 

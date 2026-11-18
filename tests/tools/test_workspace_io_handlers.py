@@ -207,7 +207,11 @@ class TestReadFile:
 
     async def test_path_outside_workspace_is_refused(self, ws):
         out = await call(file_ops._read_file_handler, ws, path="/etc/hostname")
-        assert "Path traversal blocked" in out["error"]
+        if isinstance(ws.kwargs.get("workspace_io"), DeviceWorkspaceIO):
+            # On a computer an absolute path outside the folder is asked of it, which refuses it without a grant.
+            assert "No permission to read /etc/hostname: ask for it first with request_folder_access." in out["error"]
+        else:
+            assert "Path traversal blocked" in out["error"]
 
     async def test_crlf_lines_are_read_page_by_page(self, ws):
         (ws.real / "a.txt").write_bytes(b"a\r\nb\r\nc\r\n")
