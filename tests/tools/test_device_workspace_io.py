@@ -968,3 +968,30 @@ async def test_list_files_outside_the_folder_lists_by_name_and_search_by_content
 
     read = await file_ops._read_file_handler({"path": str(elsewhere / "a.txt")}, workspace_io=wio)
     assert "one" in read and "two" in read
+
+
+async def test_a_long_outside_list_is_not_sorted_by_date_and_says_so(two_folders, monkeypatch):
+    laptop, wio, _chat, elsewhere = two_folders
+    monkeypatch.setattr(file_ops, "_OUTSIDE_SORT_MAX_FILES", 1)
+    laptop.sent.clear()
+    listed = json.loads(await file_ops._list_files_handler({"path": str(elsewhere), "pattern": "*.txt"}, workspace_io=wio))
+    assert listed["total_count"] == 2
+    assert "too many files to sort by date" in listed["note"]
+    assert not [k for k, _ in laptop.sent if k in ("outside.stat", "outside.resolve") and _.get("path", "").endswith(".txt")]
+
+
+async def test_an_outside_file_whose_look_fails_is_still_listed(two_folders, monkeypatch):
+    _laptop, wio, _chat, elsewhere = two_folders
+    os.utime(elsewhere / "a.txt", (1_000, 1_000))
+    os.utime(elsewhere / "sub" / "b.txt", (2_000, 2_000))
+    real = wio.stat
+
+    async def stat(p):
+        if p.endswith("b.txt"):
+            raise OSError(errno.EFBIG, "too big")
+        return await real(p)
+
+    monkeypatch.setattr(wio, "stat", stat)
+    listed = json.loads(await file_ops._list_files_handler({"path": str(elsewhere), "pattern": "*.txt"}, workspace_io=wio))
+    assert listed["matches"] == [str(elsewhere / "a.txt"), str(elsewhere / "sub" / "b.txt")]
+    assert "note" not in listed

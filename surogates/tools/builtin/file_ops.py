@@ -2324,6 +2324,10 @@ def _glob_matches(path: str, pattern: str) -> bool:
     return True
 
 
+# Most files an outside listing is sorted by date for; each one costs a round trip to the computer.
+_OUTSIDE_SORT_MAX_FILES = 500
+
+
 async def _files_outside(
     wio: DeviceWorkspaceIO,
     pattern: str,
@@ -2341,12 +2345,19 @@ async def _files_outside(
     pattern = pattern.strip("/")
     files = [posixpath.join(key, path) for path, _size in walk.files if _glob_matches(path, pattern)]
     # A walk has no times: each file is looked at, as _files_target_rg does, resolved first so that its stat is the
-    # outside one.  ponytail: two round trips a file; a walk that carries its times when listings get large.
-    mtimes: dict[str, float] = {}
-    for p in files:
-        st = await wio.stat(await wio.resolve(p))
-        mtimes[p] = st.mtime if st else 0
-    files.sort(key=lambda p: mtimes[p], reverse=True)
+    # outside one.  Two round trips a file, so only a short list is sorted; a longer one stays in the walk's order.
+    # A file whose look fails (a name the computer refuses, a file too big) is still listed, as the oldest.
+    # ponytail: a walk that carries its times when listings get large.
+    sorted_by_date = len(files) <= _OUTSIDE_SORT_MAX_FILES
+    if sorted_by_date:
+        mtimes: dict[str, float] = {}
+        for p in files:
+            try:
+                st = await wio.stat(await wio.resolve(p))
+                mtimes[p] = st.mtime if st else 0
+            except Exception:
+                mtimes[p] = 0
+        files.sort(key=lambda p: mtimes[p], reverse=True)
     total_count = len(files)
     return {
         "matches": files[offset : offset + limit],
@@ -2355,6 +2366,7 @@ async def _files_outside(
         "truncated": total_count > offset + limit,
         **({"_warning": "The computer stopped listing this folder before its end: name a folder further down."}
            if walk.truncated else {}),
+        **({} if sorted_by_date else {"note": "Listed in folder order: there are too many files to sort by date."}),
     }
 
 
