@@ -64,6 +64,19 @@ def test_path_without_drive_is_faked():
     assert not inside_scratch("ONE_DRIVE_ONEDRIVE_UPLOAD_FILE", up, SCOPE)
 
 
+def test_a_site_name_is_faked_whatever_it_holds():
+    for site in ("R1", "F1", SCOPE["root_path"], "", None, 1):
+        assert not inside_scratch("SHARE_POINT_UPDATE_DRIVE_ITEM", {**RENAME, "site_name": site}, SCOPE)
+
+
+def test_known_ids_and_paths_mix_only_with_a_drive():
+    up = {"folder_item_id": "F2", "folder_path": SCOPE["root_path"] + "/sub", "name": "a"}
+    assert not inside_scratch("ONE_DRIVE_ONEDRIVE_UPLOAD_FILE", up, SCOPE)
+    assert inside_scratch("ONE_DRIVE_ONEDRIVE_UPLOAD_FILE", {**up, "drive_id": "D"}, SCOPE)
+    assert inside_scratch("ONE_DRIVE_ONEDRIVE_UPLOAD_FILE", {"folder_item_id": "F2", "name": "a"}, SCOPE)
+    assert not inside_scratch("ONE_DRIVE_ONEDRIVE_UPLOAD_FILE", {"drive_id": "D", "name": "a"}, SCOPE)
+
+
 def test_not_a_file_action_or_no_scope_is_faked():
     assert not inside_scratch("OUTLOOK_SEND_EMAIL", RENAME, SCOPE)
     assert not inside_scratch("ONE_DRIVE_MOVE_ITEM", RENAME, {})

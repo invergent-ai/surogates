@@ -109,14 +109,14 @@ def _leaves(value: Any, prefix: str = ""):
         yield prefix, value
 
 
-def _reference_ok(key: str, value: Any, scratch: dict) -> bool:
+def _reference_ok(key: str, value: Any, scratch: dict, known: set) -> bool:
     if not isinstance(value, str) or not value:
         return False
     if key in _DRIVE_KEYS:
         return value == scratch.get("drive_id")
     if key == "site_name":
         return False  # no site is on the list; fail closed
-    if value == scratch.get("root_id") or value in (scratch.get("item_ids") or ()):
+    if value in known:
         return True
     root = scratch.get("root_path")
     return "/" in value and bool(root) and _under(value, root)
@@ -126,21 +126,18 @@ def inside_scratch(slug: str, args: dict, scratch: dict) -> bool:
     """True only if *slug* is a file action and every reference in *args* is inside the copy."""
     if slug not in FILE_ACTIONS or not isinstance(args, dict) or not scratch:
         return False
-    targets = 0
-    by_path = has_drive = False
+    known = {scratch.get("root_id"), *(scratch.get("item_ids") or ())}
+    refs: list[tuple[str, str]] = []
     for key, value in _leaves(args):
         if key in REFERENCE_KEYS:
-            if not _reference_ok(key, value, scratch):
+            if not _reference_ok(key, value, scratch, known):
                 return False
-            if key in _DRIVE_KEYS:
-                has_drive = True
-            else:
-                targets += 1
-                by_path |= value not in (scratch.get("root_id"), *(scratch.get("item_ids") or ()))
+            refs.append((key, value))
         elif key in _HARMLESS:
             continue
         elif isinstance(value, str) and value:
             return False  # an unknown key holding text may be a reference ("targetFolderId": "ORIG")
+    targets = [value for key, value in refs if key not in _DRIVE_KEYS]
     # A call that names nothing in the copy would act on a default location.
     # A path resolves in the default drive unless a drive (already checked) is named.
-    return targets > 0 and (has_drive or not by_path)
+    return bool(targets) and (len(targets) < len(refs) or all(value in known for value in targets))
