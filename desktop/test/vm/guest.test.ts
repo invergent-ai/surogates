@@ -6,7 +6,7 @@
 
 import { spawnSync } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import { dirname, join } from "node:path";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -147,7 +147,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
   it("reaches nothing of this computer past its root's folder: what lies beside it, the user's ~/.ssh, or a write beside it", async () => {
     expect(await run([
       `ls -A "${dir}"`,
-      "ls ~/.ssh 2>&1 | sed 's/.*: //'",
+      `ls ${userInfo().homedir}/.ssh 2>&1 | sed 's/.*: //'`,
       `(echo x > "${dir}/outside.txt") 2>&1 | sed 's/.*: //'`,
     ].join("; "))).toEqual({ ok: { output: "my folder's\nNo such file or directory\nPermission denied\n", returncode: 0, timed_out: false } });
     expect(existsSync(join(dir, "outside.txt"))).toBe(false);

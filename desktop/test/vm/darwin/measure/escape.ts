@@ -9,11 +9,12 @@
 // either protected write is a security finding: stop and report it.
 
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { userInfo } from "node:os";
 import { join } from "node:path";
 
 import { expect, it } from "vitest";
 
-import { judged, lab, type Ran, ready, record, ROOTS, scratch, signal, USER } from "./harness.js";
+import { judged, lab, type Ran, ready, record, ROOTS, scratch, signal } from "./harness.js";
 
 it("keeps a session's command within its walls", async () => {
   const [mine, theirs] = [scratch("escape-mine"), scratch("escape-theirs")];
@@ -35,7 +36,7 @@ it("keeps a session's command within its walls", async () => {
     uid: await look("uid", "id -u"),
     "the other root's uid": await look("the other root's uid", "id -u", two),
     interfaces: await look("interfaces", "ip -o link | awk -F': ' '{print $2}' | tr '\\n' ' '"),
-    "the host's ~/.ssh": await look("the host's ~/.ssh", `ls -d ${USER.home}/.ssh 2>&1 || true`),
+    "the host's ~/.ssh": await look("the host's ~/.ssh", `ls -d ${userInfo().homedir}/.ssh 2>&1 || true`),
     "the other root's folder": await look("the other root's folder", `ls ${theirs} 2>&1 || true`),
     "the other root's sleep": await look("the other root's sleep", "ps -eo args | grep -c '^sleep 300' || true"),
     "a fetch past the proxy unasked": await look("a fetch past the proxy unasked", "curl -s -m 10 -o /dev/null -w '%{http_code}' http://1.1.1.1/ || echo \" curl ended $?\""),

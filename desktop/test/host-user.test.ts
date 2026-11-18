@@ -1,6 +1,6 @@
 // Whom the guest's roots run for, this computer's user, by its OS (host-user.ts): on Linux and macOS, the user's own
-// uid, gid and name; on Windows, which has no uid, Linux's first user's, the
-// user's name made one a Linux user can have; the home is the root's private one at a fixed path on every OS.
+// uid, gid and name; on Windows, which has no uid, Linux's first user's, and the user's name made one a Linux user
+// can have. The home is the root's private one at a fixed path on every OS.
 
 import { userInfo } from "node:os";
 
