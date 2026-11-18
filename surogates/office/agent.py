@@ -10,7 +10,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from surogates.config import OfficeSettings
-from surogates.devices.binding import device_of
+from surogates.devices.binding import device_of, tools_path
 from surogates.devices.workspace import DeviceOperationError, DeviceWorkspaceIO, said
 from surogates.office import sessions as office_sessions
 from surogates.office.editor_config import build_editor_config
@@ -67,6 +67,9 @@ def relative_path(path: str, session: Any) -> str:
     as given, and ``within_folder`` refuses them."""
     root = str(session.config.get("workspace_path") or "/workspace").rstrip("/")
     homes = () if device_of(session.config) is not None else _HOMES
+    if homes == ():
+        # C:\a, as the prompt shows a Windows chat's folder, is /mnt/c/a.
+        path = tools_path(path, root)
     for prefix in (*homes, "__WORKSPACE__", root):
         if path == prefix or path.startswith(prefix + "/"):
             path = path[len(prefix):].lstrip("/")
@@ -77,7 +80,12 @@ def relative_path(path: str, session: Any) -> str:
 #: What a document outside a desktop chat's folder is answered: the office tools work on the folder's files alone.
 OUTSIDE_DOCUMENT = (
     "Files outside the chat's folder are read-only: copy the document into the chat's folder with copy_files, "
-    "work on the copy, then offer put_back."
+    "work on the copy, then call put_back (the app asks the user)."
+)
+#: And what reading one is answered: read_file reads it where it is; copying is for changing it.
+OUTSIDE_DOCUMENT_READ = (
+    "office_read works on the chat's folder alone: read a document outside it with read_file. To change it, "
+    "copy it into the chat's folder with copy_files, work on the copy, then call put_back (the app asks the user)."
 )
 
 

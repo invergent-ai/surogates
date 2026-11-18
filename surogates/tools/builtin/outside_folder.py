@@ -14,7 +14,8 @@ import json
 import posixpath
 from typing import Any
 
-from surogates.devices.workspace import MAX_MESSAGE_CHARS, OUTSIDE_OLD_APP, TOO_LARGE, DeviceWorkspaceIO
+from surogates.devices.binding import tools_path
+from surogates.devices.workspace import MAX_MESSAGE_CHARS, TOO_LARGE, DeviceWorkspaceIO
 from surogates.tools.registry import ToolRegistry, ToolSchema
 from surogates.tools.utils.workspace_sandbox import NUL_REFUSED, holds_nul
 
@@ -36,8 +37,10 @@ def _absolute(path: str, root: str) -> str:
     """*path*, relative to the chat's folder *root* (``.`` is the folder) or absolute, as the computer takes it.
 
     Raises ValueError for a relative path that leads out of the folder, and for one through ``~``: the chat's own
-    home is a private scratch area, not the user's.  A file outside the folder is named by its absolute path.
+    home is a private scratch area, not the user's.  A file outside the folder is named by its absolute path, on a
+    Windows computer as its user does too (``C:\\a`` is ``/mnt/c/a``).
     """
+    path = tools_path(path, root)
     if path.startswith("/"):
         return _normal(path)
     if path == "~" or path.startswith("~/"):
@@ -66,9 +69,8 @@ async def _ask(kind: str, args: dict[str, Any], workspace_io: Any) -> str:
     outcome = await workspace_io.runner.run(kind, args)
     error = outcome.get("error")
     if isinstance(error, dict):
-        if error.get("type") == "unsupported":
-            # An app older than these kinds, whether the link or the app itself said so.
-            return _error(OUTSIDE_OLD_APP)
+        # An app older than these kinds is answered by the link, in OUTSIDE_OLD_APP's words (NO_OUTSIDE_OUTCOME); one
+        # that knows them says in its own why it did not, a kind it does not know among them.
         return _error(str(error.get("message") or f"The computer refused {kind}"))
     if "ok" not in outcome:
         return _error(f"The computer returned no result for {kind}")
@@ -87,7 +89,7 @@ async def _request_folder_access(arguments: dict[str, Any], **kwargs: Any) -> st
     folder = arguments.get("folder")
     if not isinstance(folder, str) or not folder.strip():
         return _error("'folder' is Desktop, Downloads, Documents, Pictures, or an absolute path.")
-    folder = folder.strip()
+    folder = tools_path(folder.strip(), computer.root)
     # A known folder's name goes as it is, for the computer to find; a path, normalised.
     return await _ask("outside.grant", {"folder": _normal(folder) if folder.startswith("/") else folder}, computer)
 
@@ -149,8 +151,10 @@ def register(registry: ToolRegistry) -> None:
         ),
         (
             "copy_files", _copy_files,
-            "Copy files between a folder outside the chat's and the chat's folder; the user confirms in a window. "
-            "A copy never overwrites: a taken name gets ' (1)'. Returns what was copied where, and what was skipped.",
+            "Copy files into the chat's folder, out of it, or straight between two folders outside it; the "
+            "destination must be the chat's folder or inside a folder already granted. The user confirms in a window "
+            "and may untick files. A copy never overwrites: a taken name gets ' (1)'. Returns what was copied where, "
+            "and what was skipped (an unticked file among them).",
             {
                 "files": {**_FILES, "description": "Absolute paths, or paths relative to the chat's folder."},
                 "to": {"type": "string", "description": "The folder to copy into: '.' for the chat's folder, or an absolute path."},
@@ -160,7 +164,8 @@ def register(registry: ToolRegistry) -> None:
         (
             "move_to_trash", _move_to_trash,
             "Move files outside the chat's folder to the computer's trash (the user can restore them from there); "
-            "the user confirms in a window. Returns what was trashed and what was kept.",
+            "the user confirms in a window. After copy_files, trash only the originals listed in its 'copied'. "
+            "Returns what was trashed and what was kept.",
             {"files": {**_FILES, "description": "Absolute paths of the files to move to the trash."}},
             ["files"],
         ),

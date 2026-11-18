@@ -24,6 +24,7 @@ from surogates.devices.workspace import (
     MAX_READ_BYTES,
     MAX_WRITE_BYTES,
     OUTPUT_CAP_CHARS,
+    OUTSIDE_READ_ONLY,
     READ_TOO_LARGE,
     WRITE_TOO_LARGE,
     DeviceOperationError,
@@ -891,6 +892,30 @@ async def test_routes_reads_of_a_path_outside_the_folder_to_outside_kinds(two_fo
     assert laptop.sent[1] == ("outside.resolve", {"path": str(elsewhere / "a.txt")})
 
 
+async def test_a_windows_path_is_the_tools_path_on_a_windows_computer():
+    sent: list[tuple[str, dict]] = []
+
+    class Windows:
+        async def run(self, kind, args, payload=None):
+            sent.append((kind, args))
+            return {"ok": args["path"] if kind.endswith("resolve") else None}
+
+    wio = DeviceWorkspaceIO(Windows(), root="/mnt/c/Users/Diana/work")
+    # The chat's own folder as the prompt shows it, and a folder outside it, as its user names them.
+    assert await wio.resolve("C:\\Users\\Diana\\work\\a.txt") == "/mnt/c/Users/Diana/work/a.txt"
+    assert await wio.resolve("C:\\Users\\Diana\\Desktop\\Scan\\b.pdf") == "/mnt/c/Users/Diana/Desktop/Scan/b.pdf"
+    assert await wio.check_write("D:/Scans/c.txt") == OUTSIDE_READ_ONLY
+    assert sent == [
+        ("resolve", {"path": "/mnt/c/Users/Diana/work/a.txt"}),
+        ("outside.resolve", {"path": "/mnt/c/Users/Diana/Desktop/Scan/b.pdf"}),
+        ("check_write", {"path": "/mnt/d/Scans/c.txt"}),
+    ]
+    # Elsewhere such a name is only a file's.
+    sent.clear()
+    await DeviceWorkspaceIO(Windows(), root="/home/ana/proj").resolve("C:\\a.txt")
+    assert sent == [("resolve", {"path": "C:\\a.txt"})]
+
+
 async def test_refuses_writes_deletes_and_searches_by_content_outside_the_folder(two_folders):
     laptop, wio, _chat, elsewhere = two_folders
     key = await wio.resolve(str(elsewhere / "a.txt"))
@@ -923,6 +948,15 @@ async def test_list_files_outside_the_folder_lists_by_name_and_search_by_content
     listed = json.loads(await file_ops._list_files_handler({"path": str(elsewhere), "pattern": "*.txt"}, workspace_io=wio))
     assert sorted(listed["matches"]) == [str(elsewhere / "a.txt"), str(elsewhere / "sub" / "b.txt")]
     assert listed["total_count"] == 2
+
+    # "**/" matches no folder too, as ripgrep's -g does; newest first, as in the chat's folder.
+    os.utime(elsewhere / "a.txt", (1_000, 1_000))
+    os.utime(elsewhere / "sub" / "b.txt", (2_000, 2_000))
+    deep = json.loads(await file_ops._list_files_handler({"path": str(elsewhere), "pattern": "**/*.txt"}, workspace_io=wio))
+    assert deep["matches"] == [str(elsewhere / "sub" / "b.txt"), str(elsewhere / "a.txt")]
+    os.utime(elsewhere / "a.txt", (3_000, 3_000))
+    newest = json.loads(await file_ops._list_files_handler({"path": str(elsewhere), "pattern": "*.txt"}, workspace_io=wio))
+    assert newest["matches"] == [str(elsewhere / "a.txt"), str(elsewhere / "sub" / "b.txt")]
 
     only_sub = json.loads(await file_ops._list_files_handler({"path": str(elsewhere), "pattern": "sub/*"}, workspace_io=wio))
     assert only_sub["matches"] == [str(elsewhere / "sub" / "b.txt")]

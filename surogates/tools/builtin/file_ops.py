@@ -2313,6 +2313,17 @@ async def _files_target_rg(
     }
 
 
+def _glob_matches(path: str, pattern: str) -> bool:
+    """Whether *path*, under the folder listed, matches *pattern* as ripgrep's ``-g`` would."""
+    if "/" not in pattern:
+        return fnmatch.fnmatchcase(posixpath.basename(path), pattern)
+    while not fnmatch.fnmatchcase(path, pattern):
+        if not pattern.startswith("**/"):
+            return False
+        pattern = pattern[3:]
+    return True
+
+
 async def _files_outside(
     wio: DeviceWorkspaceIO,
     pattern: str,
@@ -2323,15 +2334,19 @@ async def _files_outside(
     """Find files matching glob *pattern* under *key*, a folder outside the chat's, from the computer's walk.
 
     Matched as ripgrep's ``-g`` does: a pattern without a slash by the file's
-    name at any depth, one with a slash by its path under *key*.  In the
-    walk's order, by path: a walk has no times.
+    name at any depth, one with a slash by its path under *key*, where a
+    leading ``**/`` matches no folder too.  Newest first, as in the folder.
     """
     walk = await wio.walk(key, skip=(), skip_hidden=True)
-    by_path = "/" in pattern.strip("/")
-    files = [
-        posixpath.join(key, path) for path, _size in walk.files
-        if fnmatch.fnmatchcase(path if by_path else posixpath.basename(path), pattern.strip("/"))
-    ]
+    pattern = pattern.strip("/")
+    files = [posixpath.join(key, path) for path, _size in walk.files if _glob_matches(path, pattern)]
+    # A walk has no times: each file is looked at, as _files_target_rg does, resolved first so that its stat is the
+    # outside one.  ponytail: two round trips a file; a walk that carries its times when listings get large.
+    mtimes: dict[str, float] = {}
+    for p in files:
+        st = await wio.stat(await wio.resolve(p))
+        mtimes[p] = st.mtime if st else 0
+    files.sort(key=lambda p: mtimes[p], reverse=True)
     total_count = len(files)
     return {
         "matches": files[offset : offset + limit],

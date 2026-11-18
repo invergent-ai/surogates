@@ -182,6 +182,7 @@ from collections.abc import AsyncIterator, Collection
 from pathlib import Path
 from typing import Any, Protocol
 
+from surogates.devices.binding import tools_path
 from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
 from surogates.tools.workspace_io.base import (
     FileStat,
@@ -340,6 +341,8 @@ class DeviceWorkspaceIO:
 
     async def resolve(self, path: str) -> str:
         refuse_nul(path)
+        # C:\a, as the prompt shows a Windows chat's folder, is /mnt/c/a here.
+        path = tools_path(path, self.root)
         outside = self._outside_path(path)
         if outside is None:
             return await self._call("resolve", path=path)
@@ -350,6 +353,7 @@ class DeviceWorkspaceIO:
 
     async def check_write(self, path: str) -> str | None:
         refuse_nul(path)
+        path = tools_path(path, self.root)
         # The computer's own refusal first (a credential file, say), then, outside the folder, read-only.
         refused = await self._call("check_write", path=path)
         return refused or (OUTSIDE_READ_ONLY if self._outside_path(path) is not None else None)

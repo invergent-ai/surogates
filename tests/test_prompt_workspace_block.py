@@ -94,8 +94,32 @@ def test_shown_folder():
     assert shown_folder("/home/ana") == "/home/ana"
 
 
+def test_tools_path_is_shown_folders_inverse_on_a_windows_computer():
+    from surogates.devices.binding import shown_folder, tools_path
+
+    work = "/mnt/c/Users/Ana/work"
+    for path in ("/mnt/d/Profiles/x y/z", "/mnt/c", "/mnt/c/Users/Ana/work/a.txt"):
+        assert tools_path(shown_folder(path), work) == path
+    assert tools_path("c:/Scans/", work) == "/mnt/c/Scans"
+    # A relative name, and any name on a computer that is not Windows, are left as they are.
+    assert tools_path("a\\b.txt", work) == "a\\b.txt"
+    assert tools_path("C:\\a", "/home/ana/proj") == "C:\\a"
+
+
 def test_a_device_chat_is_told_how_to_work_on_files_outside_its_folder():
     said = "Files outside the chat's folder: ask once with request_folder_access"
     assert said in _context({"read_file"}, workspace_path="/home/ana/proj", execution=DEVICE)
-    assert "never ask for the same thing in the chat instead" in _context({"read_file"}, workspace_path="/home/ana/proj", execution=DEVICE)
+    context = _context({"read_file"}, workspace_path="/home/ana/proj", execution=DEVICE)
+    assert "never ask for the same thing in the chat instead" in context
+    # The direct move between two outside folders is offered, put_back is the agent's to call, and a move trashes
+    # only what was copied.
+    assert (
+        "copy_files copies into the chat's folder, out of it, or straight between two folders outside it; the "
+        "destination must be the chat's folder or inside a folder already granted."
+    ) in context
+    assert "then call put_back (the app asks the user)." in context
+    assert "move_to_trash only the originals listed in `copied`" in context
+    assert "On a Windows computer the tools name `C:\\a\\b` as `/mnt/c/a/b`; tell the user the `C:\\` form." in context
+    assert "offer put_back" not in context
+    assert "\u2014" not in context and "\u2013" not in context
     assert said not in _context({"read_file"})

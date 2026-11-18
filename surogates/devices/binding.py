@@ -60,16 +60,35 @@ def device_of(config: dict[str, Any] | None) -> UUID | None:
     return UUID(execution["device_id"])
 
 
+# A Windows drive's path as the tools name it (``/mnt/c/a``), and as its user does (``C:\\a``).
+_GUEST_DRIVE = re.compile(r"/mnt/([a-zA-Z])(/.*)?", re.DOTALL)
+_WINDOWS_DRIVE = re.compile(r"([A-Za-z]):[\\/](.*)", re.DOTALL)
+
+
 def shown_folder(path: str) -> str:
     """A chat's folder as the user knows it: ``/mnt/c/a/b`` is ``C:\\a\\b``.
 
     Mirrors ``windowsHostPath`` in desktop/src/session-path.ts; any other path
-    is shown as it is.
+    is shown as it is.  ``tools_path`` is its inverse.
     """
-    m = re.fullmatch(r"/mnt/([a-zA-Z])(/.*)?", path)
+    m = _GUEST_DRIVE.fullmatch(path)
     if not m:
         return path
     return f"{m.group(1).upper()}:" + (m.group(2) or "/").replace("/", "\\")
+
+
+def tools_path(path: str, root: str) -> str:
+    """*path* as the tools take it in a chat whose folder is *root*: ``C:\\a\\b`` is ``/mnt/c/a/b``.
+
+    Only on a Windows computer (*root* on a drive, ``/mnt/<letter>``), where the
+    user and the prompt name a folder the way ``shown_folder`` shows it; any
+    other path, and any path elsewhere, is as it is.
+    """
+    m = _WINDOWS_DRIVE.fullmatch(path) if _GUEST_DRIVE.fullmatch(root) else None
+    if not m:
+        return path
+    rest = m.group(2).replace("\\", "/").rstrip("/")
+    return f"/mnt/{m.group(1).lower()}" + (f"/{rest}" if rest else "")
 
 
 def copy_of(config: dict[str, Any] | None) -> UUID | None:

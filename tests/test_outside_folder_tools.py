@@ -81,6 +81,32 @@ async def test_copy_files_sends_absolute_paths_with_the_chats_folder_for_dot():
     ]
 
 
+async def test_a_windows_computer_takes_the_users_c_drive_paths():
+    work = "/mnt/c/Users/Diana/work"
+    laptop = OutsideLaptop(work, {"ok": {"folder": "/mnt/c/Users/Diana/Desktop/Scan"}}, {"ok": {"copied": [], "skipped": []}})
+    kwargs = {"workspace_io": DeviceWorkspaceIO(laptop, root=work)}
+
+    await call("request_folder_access", {"folder": "C:\\Users\\Diana\\Desktop\\Scan"}, **kwargs)
+    await call("copy_files", {
+        "files": ["C:\\Users\\Diana\\Desktop\\Scan\\a.pdf"], "to": "C:\\Users\\Diana\\Documents\\PONTAJE\\",
+    }, **kwargs)
+
+    assert laptop.asked == [
+        ("outside.grant", {"folder": "/mnt/c/Users/Diana/Desktop/Scan"}),
+        ("outside.copy", {
+            "files": ["/mnt/c/Users/Diana/Desktop/Scan/a.pdf"], "to": "/mnt/c/Users/Diana/Documents/PONTAJE",
+        }),
+    ]
+
+
+def test_the_office_tools_take_a_windows_chats_folder_as_its_user_names_it():
+    from surogates.office.agent import relative_path
+
+    session = device_session(workspace_path="/mnt/c/Users/Diana/work")
+    assert relative_path("C:\\Users\\Diana\\work\\docs\\a.docx", session) == "docs/a.docx"
+    assert relative_path("D:\\Scans\\a.docx", session) == "/mnt/d/Scans/a.docx"
+
+
 async def test_move_to_trash_sends_the_files_and_answers_what_was_trashed():
     trashed = {"trashed": ["/mnt/d/Scans/a.pdf"], "kept": [{"file": "/mnt/d/Scans/b.pdf", "reason": "unticked"}]}
     laptop, kwargs = on_the_computer({"ok": trashed})
@@ -105,17 +131,25 @@ async def test_put_back_sends_the_copy_by_its_full_path_and_answers_a_conflict_i
     assert laptop.asked == [("outside.put_back", {"copy": f"{FOLDER}/a.docx", "original": "/mnt/d/Scans/a.docx"})] * 2
 
 
-async def test_a_no_and_an_old_app_are_answered_as_the_tools_result():
+async def test_a_no_an_old_app_and_an_unknown_kind_are_answered_as_the_tools_result():
+    from surogates.devices.link import NO_OUTSIDE_OUTCOME
+
     _laptop, kwargs = on_the_computer(
         {"error": {"type": "denied", "message": "The user said no."}},
-        {"error": {"type": "unsupported", "message": "This computer does not handle outside.grant yet"}},
+        NO_OUTSIDE_OUTCOME,
+        {"error": {"type": "unsupported", "message": "This computer does not know 'outside.grant'."}},
     )
 
     assert json.loads(await call("request_folder_access", {"folder": "Downloads"}, **kwargs)) == {
         "error": "The user said no.",
     }
+    # The link's answer for an app older than these kinds.
     assert json.loads(await call("request_folder_access", {"folder": "Downloads"}, **kwargs)) == {
         "error": "The Surogate app on this computer cannot work outside the chat's folder yet. Update it, then try again.",
+    }
+    # An app that knows them is not told to update: its own words.
+    assert json.loads(await call("request_folder_access", {"folder": "Downloads"}, **kwargs)) == {
+        "error": "This computer does not know 'outside.grant'.",
     }
 
 
@@ -207,16 +241,18 @@ async def test_refuses_the_outside_tools_in_a_projects_thread(name):
 
 async def test_the_office_tools_send_a_document_outside_the_folder_to_copy_it_in_first(monkeypatch):
     from surogates.office import guard
-    from surogates.office.agent import OUTSIDE_DOCUMENT
+    from surogates.office.agent import OUTSIDE_DOCUMENT, OUTSIDE_DOCUMENT_READ
     from surogates.tools.builtin import office
 
     session = device_session()
     store = SimpleNamespace(get_session=lambda _id: _now(session))
     kwargs = {"session_store": store, "session_id": session.id}
 
-    for handler in (office._office_read, office._office_edit):
+    for handler, said in ((office._office_read, OUTSIDE_DOCUMENT_READ), (office._office_edit, OUTSIDE_DOCUMENT)):
         answer = json.loads(await handler({"path": "/mnt/d/Scans/a.docx", "ops": [{"op": "delete"}]}, **kwargs))
-        assert answer["error"] == OUTSIDE_DOCUMENT
+        assert answer["error"] == said
+    # Reading one is pointed at read_file; copying is for changing it.
+    assert "read_file" in OUTSIDE_DOCUMENT_READ and "read_file" not in OUTSIDE_DOCUMENT
     # A path through the computer's home folder is answered as before.
     answer = json.loads(await office._office_read({"path": "~/a.docx"}, **kwargs))
     assert answer["error"] == "Name the document by its path in the chat's folder, like docs/report.docx."
