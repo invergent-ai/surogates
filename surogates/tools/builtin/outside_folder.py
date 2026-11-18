@@ -12,9 +12,10 @@ from __future__ import annotations
 
 import json
 import posixpath
+from collections.abc import Callable
 from typing import Any
 
-from surogates.devices.binding import tools_path
+from surogates.devices.binding import inside_folder, normal_path, tools_path
 from surogates.devices.workspace import MAX_MESSAGE_CHARS, TOO_LARGE, DeviceWorkspaceIO
 from surogates.tools.registry import ToolRegistry, ToolSchema
 from surogates.tools.utils.workspace_sandbox import NUL_REFUSED, holds_nul
@@ -28,11 +29,6 @@ def _error(message: str) -> str:
     return json.dumps({"error": message})
 
 
-def _normal(path: str) -> str:
-    """An absolute *path* as the computer takes it: normalised, one leading slash, no trailing one."""
-    return posixpath.normpath("/" + path.lstrip("/"))
-
-
 def _absolute(path: str, root: str) -> str:
     """*path*, relative to the chat's folder *root* (``.`` is the folder) or absolute, as the computer takes it.
 
@@ -42,12 +38,12 @@ def _absolute(path: str, root: str) -> str:
     """
     path = tools_path(path, root)
     if path.startswith("/"):
-        return _normal(path)
+        return normal_path(path)
     if path == "~" or path.startswith("~/"):
         raise ValueError(f"'{path}' is in this chat's private scratch area, not the user's: give an absolute path.")
-    root = _normal(root)
+    root = normal_path(root)
     joined = posixpath.normpath(posixpath.join(root, path))
-    if joined != root and not joined.startswith(root.rstrip("/") + "/"):
+    if not inside_folder(joined, root):
         raise ValueError(f"'{path}' leads out of the chat's folder: give the file outside it by its absolute path.")
     return joined
 
@@ -82,58 +78,58 @@ def _computer(kwargs: dict[str, Any]) -> DeviceWorkspaceIO | None:
     return workspace_io if isinstance(workspace_io, DeviceWorkspaceIO) else None
 
 
-async def _request_folder_access(arguments: dict[str, Any], **kwargs: Any) -> str:
+async def _on_computer(kind: str, kwargs: dict[str, Any], build: Callable[[str], dict[str, Any]]) -> str:
+    """Run *kind* with the args *build* makes from the chat's folder, in a chat on a computer; a ValueError's words otherwise."""
     computer = _computer(kwargs)
     if computer is None:
         return _error(_NOT_ON_A_COMPUTER)
-    folder = arguments.get("folder")
-    if not isinstance(folder, str) or not folder.strip():
-        return _error("'folder' is Desktop, Downloads, Documents, Pictures, or an absolute path.")
-    folder = tools_path(folder.strip(), computer.root)
-    # A known folder's name goes as it is, for the computer to find; a path, normalised.
-    return await _ask("outside.grant", {"folder": _normal(folder) if folder.startswith("/") else folder}, computer)
+    try:
+        args = build(computer.root)
+    except ValueError as exc:
+        return _error(str(exc))
+    return await _ask(kind, args, computer)
+
+
+async def _request_folder_access(arguments: dict[str, Any], **kwargs: Any) -> str:
+    def build(root: str) -> dict[str, Any]:
+        folder = arguments.get("folder")
+        if not isinstance(folder, str) or not folder.strip():
+            raise ValueError("'folder' is Desktop, Downloads, Documents, Pictures, or an absolute path.")
+        folder = tools_path(folder.strip(), root)
+        # A known folder's name goes as it is, for the computer to find; a path, normalised.
+        return {"folder": normal_path(folder) if folder.startswith("/") else folder}
+
+    return await _on_computer("outside.grant", kwargs, build)
 
 
 async def _copy_files(arguments: dict[str, Any], **kwargs: Any) -> str:
-    computer = _computer(kwargs)
-    if computer is None:
-        return _error(_NOT_ON_A_COMPUTER)
-    files, to = _paths(arguments.get("files")), arguments.get("to")
-    if files is None or not isinstance(to, str) or not to.strip():
-        return _error("'files' lists the files to copy, and 'to' is the folder to copy them into ('.' is the chat's).")
-    try:
-        args = {"files": [_absolute(f, computer.root) for f in files], "to": _absolute(to.strip(), computer.root)}
-    except ValueError as exc:
-        return _error(str(exc))
-    return await _ask("outside.copy", args, computer)
+    def build(root: str) -> dict[str, Any]:
+        files, to = _paths(arguments.get("files")), arguments.get("to")
+        if files is None or not isinstance(to, str) or not to.strip():
+            raise ValueError("'files' lists the files to copy, and 'to' is the folder to copy them into ('.' is the chat's).")
+        return {"files": [_absolute(f, root) for f in files], "to": _absolute(to.strip(), root)}
+
+    return await _on_computer("outside.copy", kwargs, build)
 
 
 async def _move_to_trash(arguments: dict[str, Any], **kwargs: Any) -> str:
-    computer = _computer(kwargs)
-    if computer is None:
-        return _error(_NOT_ON_A_COMPUTER)
-    files = _paths(arguments.get("files"))
-    if files is None:
-        return _error("'files' lists the files to move to the trash.")
-    try:
-        args = {"files": [_absolute(f, computer.root) for f in files]}
-    except ValueError as exc:
-        return _error(str(exc))
-    return await _ask("outside.trash", args, computer)
+    def build(root: str) -> dict[str, Any]:
+        files = _paths(arguments.get("files"))
+        if files is None:
+            raise ValueError("'files' lists the files to move to the trash.")
+        return {"files": [_absolute(f, root) for f in files]}
+
+    return await _on_computer("outside.trash", kwargs, build)
 
 
 async def _put_back(arguments: dict[str, Any], **kwargs: Any) -> str:
-    computer = _computer(kwargs)
-    if computer is None:
-        return _error(_NOT_ON_A_COMPUTER)
-    copy, original = arguments.get("working_copy"), arguments.get("original")
-    if not isinstance(copy, str) or not copy.strip() or not isinstance(original, str) or not original.strip():
-        return _error("'working_copy' is the changed copy in the chat's folder, and 'original' the file it replaces.")
-    try:
-        args = {"copy": _absolute(copy.strip(), computer.root), "original": _absolute(original.strip(), computer.root)}
-    except ValueError as exc:
-        return _error(str(exc))
-    return await _ask("outside.put_back", args, computer)
+    def build(root: str) -> dict[str, Any]:
+        copy, original = arguments.get("working_copy"), arguments.get("original")
+        if not isinstance(copy, str) or not copy.strip() or not isinstance(original, str) or not original.strip():
+            raise ValueError("'working_copy' is the changed copy in the chat's folder, and 'original' the file it replaces.")
+        return {"copy": _absolute(copy.strip(), root), "original": _absolute(original.strip(), root)}
+
+    return await _on_computer("outside.put_back", kwargs, build)
 
 
 _FILES = {"type": "array", "items": {"type": "string"}, "minItems": 1}

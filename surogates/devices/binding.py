@@ -15,6 +15,7 @@ must say it keeps that copy, or the thread has nowhere to work.
 
 from __future__ import annotations
 
+import posixpath
 import re
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -89,6 +90,19 @@ def tools_path(path: str, root: str) -> str:
         return path
     rest = m.group(2).replace("\\", "/").rstrip("/")
     return f"/mnt/{m.group(1).lower()}" + (f"/{rest}" if rest else "")
+
+
+def normal_path(path: str) -> str:
+    """An absolute *path* as the computer takes it: normalised, one leading slash, no trailing one.
+
+    normpath keeps a leading "//": "//home/a" is "/home/a" here, as on the computer.
+    """
+    return posixpath.normpath("/" + path.lstrip("/"))
+
+
+def inside_folder(path: str, root: str) -> bool:
+    """Whether the normal *path* is the normal folder *root* or in it."""
+    return path == root or path.startswith(root.rstrip("/") + "/")
 
 
 def copy_of(config: dict[str, Any] | None) -> UUID | None:

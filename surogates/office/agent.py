@@ -66,8 +66,9 @@ def relative_path(path: str, session: Any) -> str:
     for the workspace to refuse.  On a computer ``~`` and ``$HOME`` are its user's home, not the folder: they are kept
     as given, and ``within_folder`` refuses them."""
     root = str(session.config.get("workspace_path") or "/workspace").rstrip("/")
-    homes = () if device_of(session.config) is not None else _HOMES
-    if homes == ():
+    on_device = device_of(session.config) is not None
+    homes = () if on_device else _HOMES
+    if on_device:
         # C:\a, as the prompt shows a Windows chat's folder, is /mnt/c/a.
         path = tools_path(path, root)
     for prefix in (*homes, "__WORKSPACE__", root):

@@ -176,13 +176,12 @@ import contextlib
 import errno
 import hashlib
 import json
-import posixpath
 import tempfile
 from collections.abc import AsyncIterator, Collection
 from pathlib import Path
 from typing import Any, Protocol
 
-from surogates.devices.binding import tools_path
+from surogates.devices.binding import inside_folder, normal_path, tools_path
 from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
 from surogates.tools.workspace_io.base import (
     FileStat,
@@ -299,6 +298,7 @@ class DeviceWorkspaceIO:
         self.identity = identity
         self.caches_documents = caches_documents
         # The keys outside.resolve gave: only those are files outside the folder.
+        # ponytail: only grows, for the IO's life (one tool call's); a bound if an IO ever lives long.
         self._outside: set[str] = set()
 
     @property
@@ -315,22 +315,24 @@ class DeviceWorkspaceIO:
         """*path* normalised when it is absolute and not in the folder, as outside.resolve takes it; else None."""
         if not path.startswith("/"):
             return None
-        # normpath keeps a leading "//": "//home/a" is "/home/a" here, as on the computer.
-        path, root = posixpath.normpath("/" + path.lstrip("/")), posixpath.normpath("/" + self.root.lstrip("/"))
-        if path == root or path.startswith(root.rstrip("/") + "/"):
-            return None
-        return path
+        path = normal_path(path)
+        return None if inside_folder(path, normal_path(self.root)) else path
 
     def is_outside(self, key: str) -> bool:
         """Whether *key* is a file outside the folder: one outside.resolve gave."""
         return key in self._outside
 
+    def walked_outside(self, key: str, files: Collection[str]) -> None:
+        """*files*, found by the computer's walk of *key*, a folder outside.resolve gave, are outside too."""
+        if self.is_outside(key):
+            self._outside.update(files)
+
     def _of(self, kind: str, key: str) -> str:
         """The kind that reads *key*: the folder's own, or its outside.* twin."""
-        return f"outside.{kind}" if key in self._outside else kind
+        return f"outside.{kind}" if self.is_outside(key) else kind
 
     def _only_inside(self, key: str) -> None:
-        if key in self._outside:
+        if self.is_outside(key):
             raise WorkspaceSandboxError(OUTSIDE_READ_ONLY)
 
     # -- files -----------------------------------------------------------

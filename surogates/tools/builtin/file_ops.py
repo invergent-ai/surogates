@@ -2302,15 +2302,15 @@ async def _files_target_rg(
     for p in files:
         st = await wio.stat(p)
         mtimes[p] = st.mtime if st else 0
-    files.sort(key=lambda p: mtimes[p], reverse=True)
-    total_count = len(files)
-    paginated = files[offset : offset + limit]
-    return {
-        "matches": paginated,
-        "count": len(paginated),
-        "total_count": total_count,
-        "truncated": total_count > offset + limit,
-    }
+    return _listed(files, mtimes, offset, limit)
+
+
+def _listed(files: list[str], mtimes: dict[str, float] | None, offset: int, limit: int) -> dict[str, Any]:
+    """A page of *files*, newest first by *mtimes* (as they are, for None), and how many there are in all."""
+    if mtimes is not None:
+        files.sort(key=lambda p: mtimes[p], reverse=True)
+    page = files[offset : offset + limit]
+    return {"matches": page, "count": len(page), "total_count": len(files), "truncated": len(files) > offset + limit}
 
 
 def _glob_matches(path: str, pattern: str) -> bool:
@@ -2326,6 +2326,8 @@ def _glob_matches(path: str, pattern: str) -> bool:
 
 # Most files an outside listing is sorted by date for; each one costs a round trip to the computer.
 _OUTSIDE_SORT_MAX_FILES = 500
+# How many of those round trips are in flight at once.
+_OUTSIDE_LOOKS = 16
 
 
 async def _files_outside(
@@ -2344,30 +2346,31 @@ async def _files_outside(
     walk = await wio.walk(key, skip=(), skip_hidden=True)
     pattern = pattern.strip("/")
     files = [posixpath.join(key, path) for path, _size in walk.files if _glob_matches(path, pattern)]
-    # A walk has no times: each file is looked at, as _files_target_rg does, resolved first so that its stat is the
-    # outside one.  Two round trips a file, so only a short list is sorted; a longer one stays in the walk's order.
-    # A file whose look fails (a name the computer refuses, a file too big) is still listed, as the oldest.
+    # A walk has no times: each file is looked at, as _files_target_rg does, by its outside stat (the walk found it
+    # under *key*, so it is outside as *key* is), a few at a time.  A round trip a file, so only a short list is
+    # sorted; a longer one stays in the walk's order.  A file whose look fails (a name the computer refuses, a file
+    # too big) is still listed, as the oldest.
     # ponytail: a walk that carries its times when listings get large.
-    sorted_by_date = len(files) <= _OUTSIDE_SORT_MAX_FILES
-    if sorted_by_date:
-        mtimes: dict[str, float] = {}
-        for p in files:
-            try:
-                st = await wio.stat(await wio.resolve(p))
-                mtimes[p] = st.mtime if st else 0
-            except Exception:
-                mtimes[p] = 0
-        files.sort(key=lambda p: mtimes[p], reverse=True)
-    total_count = len(files)
-    return {
-        "matches": files[offset : offset + limit],
-        "count": len(files[offset : offset + limit]),
-        "total_count": total_count,
-        "truncated": total_count > offset + limit,
-        **({"_warning": "The computer stopped listing this folder before its end: name a folder further down."}
-           if walk.truncated else {}),
-        **({} if sorted_by_date else {"note": "Listed in folder order: there are too many files to sort by date."}),
-    }
+    mtimes: dict[str, float] | None = None
+    if len(files) <= _OUTSIDE_SORT_MAX_FILES:
+        wio.walked_outside(key, files)
+        looks = asyncio.Semaphore(_OUTSIDE_LOOKS)
+
+        async def mtime(p: str) -> float:
+            async with looks:
+                try:
+                    st = await wio.stat(p)
+                    return st.mtime if st else 0
+                except Exception:
+                    return 0
+
+        mtimes = dict(zip(files, await asyncio.gather(*(mtime(p) for p in files))))
+    result = _listed(files, mtimes, offset, limit)
+    if walk.truncated:
+        result["_warning"] = "The computer stopped listing this folder before its end: name a folder further down."
+    if mtimes is None:
+        result["note"] = "Listed in folder order: there are too many files to sort by date."
+    return result
 
 
 async def _content_target_rg(

@@ -480,6 +480,8 @@ def _sanitize_paths(data: Any, workspace_path: str | None) -> Any:
         # insert the token between every character.
         return data
     if isinstance(data, str):
+        if ws not in data:
+            return data
         # Only where the folder's path ends: a sibling that only begins like it ("/a/proj-old", a folder outside a
         # desktop chat's) is another folder, not the workspace.
         # Only a name's own characters continue it: a JSON-escaped newline, a sentence's ".", "&" or "|" end it.
