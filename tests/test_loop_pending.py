@@ -713,10 +713,17 @@ async def test_a_hand_backs_wake_expands_no_skill_for_a_follow_up_with_the_words
     ("inbox_action_completed", "Go on."),
     ("inbox_governance_decision", "Go on."),
     # What a channel and a call write: the sender.
-    ({"platform": "slack", "chat_id": "C1", "chat_type": "dm", "user_id": "U1", "user_name": "Ada"}, "Go on."),
-    ({"platform": "slack", "chat_id": "C1", "chat_type": "group", "user_id": "U1", "user_name": "Ada", "files": []}, "Ada: Go on."),
+    ({"platform": "slack", "chat_id": "D1", "chat_type": "dm", "user_id": "U0123ABCD", "user_name": "Ada"},
+     "[From Ada (Slack U0123ABCD)] Go on."),
+    ({"platform": "slack", "chat_id": "C1", "chat_type": "group", "user_id": "U0123ABCD", "user_name": "Ada", "files": []},
+     "[From Ada (Slack U0123ABCD)] Go on."),
+    # The name not resolved yet: the adapter left the member id in its place.
+    ({"platform": "slack", "chat_id": "D1", "chat_type": "dm", "user_id": "U0123ABCD", "user_name": "U0123ABCD"},
+     "[From Slack U0123ABCD] Go on."),
+    ({"platform": "telegram", "chat_id": "-1", "chat_type": "group", "user_id": "7", "user_name": "Ada"}, "Ada: Go on."),
     ({"platform": "voice", "chat_id": "+40700000000", "chat_type": "dm", "user_id": "+40700000000"}, "Go on."),
-], ids=["none", "an action completed", "a governance decision", "a direct message", "a group's message", "a call"])
+], ids=["none", "an action completed", "a governance decision", "a direct message", "a group's message",
+        "a name not resolved", "another channel's group", "a call"])
 def test_replay_takes_a_users_message_whatever_names_its_source(source, reads):
     said_so = SimpleNamespace(id=1, type=EventType.USER_MESSAGE.value, data={"content": "Go on.", "source": source})
     assert ContextReplayMixin._rebuild_messages(SimpleNamespace(), [said_so]) == [{"role": "user", "content": reads}]

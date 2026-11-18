@@ -34,6 +34,8 @@ from surogates.session.files import HARNESS_WITHIN_S, gave_up_level, session_fil
 
 logger = logging.getLogger(__name__)
 
+_SLACK_MEMBER_ID = re.compile(r"[UWB][A-Z0-9]{2,}")
+
 
 def sanitize_sender_name(name: str) -> str:
     """Neutralize an attributed display name for safe inline prefixing.
@@ -76,10 +78,15 @@ def build_user_message_dict(
     # to an item), not as a channel's sender: it has no sender to attribute.
     _source = event_data.get("source")
     _source = _source if isinstance(_source, dict) else {}
-    if _source.get("chat_type") == "group":
-        _sender = sanitize_sender_name((_source.get("user_name") or "").strip())
-        if _sender:
-            content = f"{_sender}: {content}" if content else _sender
+    _sender = sanitize_sender_name((_source.get("user_name") or "").strip())
+    _slack_id = str(_source.get("user_id") or "")
+    if _source.get("platform") == "slack" and _SLACK_MEMBER_ID.fullmatch(_slack_id):
+        # The member id too, in a DM as in a channel, so the agent can look the person up.
+        _sender = _sender.replace("[", "").replace("]", "")
+        _tag = f"[From {_sender} (Slack {_slack_id})]" if _sender and _sender != _slack_id else f"[From Slack {_slack_id}]"
+        content = f"{_tag} {content}" if content else _tag
+    elif _source.get("chat_type") == "group" and _sender:
+        content = f"{_sender}: {content}" if content else _sender
     # Fold per-user ephemeral notes (view-context, non-inlined attachments)
     # into the user content here so the bytes are determined entirely by the
     # durable event payload.  This keeps the provider's implicit prefix cache
