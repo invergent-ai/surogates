@@ -307,6 +307,14 @@ async def test_a_text_model_set_as_the_image_model_is_named(tmp_path):
     assert f"the configured image model {MODEL} does not generate images" in result["error"]
 
 
+@pytest.mark.asyncio
+async def test_a_listing_without_modalities_does_not_refuse_the_model(tmp_path):
+    provider = _Provider(models=[{"id": MODEL}], chat=lambda _: _chat_image(_png()))
+    result = await _run(provider, {}, tmp_path)
+    assert "error" not in result
+    assert provider.chat_calls[0]["extra_body"] == {"modalities": ["image", "text"]}
+
+
 @pytest.mark.parametrize(("channel", "says"), [
     ("whatsapp", "MEDIA:"),
     ("slack", "MEDIA:"),
