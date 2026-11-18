@@ -92,3 +92,10 @@ def test_shown_folder():
     assert shown_folder("/mnt/d/Profiles/x y/z") == "D:\\Profiles\\x y\\z"
     assert shown_folder("/mnt/c") == "C:\\"
     assert shown_folder("/home/ana") == "/home/ana"
+
+
+def test_a_device_chat_is_told_how_to_work_on_files_outside_its_folder():
+    said = "Files outside the chat's folder: ask once with request_folder_access"
+    assert said in _context({"read_file"}, workspace_path="/home/ana/proj", execution=DEVICE)
+    assert "never ask for the same thing in the chat instead" in _context({"read_file"}, workspace_path="/home/ana/proj", execution=DEVICE)
+    assert said not in _context({"read_file"})

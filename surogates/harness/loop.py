@@ -1941,6 +1941,7 @@ class AgentHarness(
             # built without it keeps the tools, as before).
             has_image_model="generate_image" not in _unwired_media,
             has_video_model="generate_video" not in _unwired_media,
+            on_device=device_of(session.config) is not None,
         )
 
     def _withhold_from_experts(self, usable: dict[str, bool], offered: Iterable[str] | None) -> None:

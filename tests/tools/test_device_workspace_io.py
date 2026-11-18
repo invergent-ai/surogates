@@ -825,3 +825,105 @@ async def test_the_reference_laptop_refuses_a_walk_it_cannot_take(root):
         "error": {"type": "value", "message": "'key' must be a string"},
     }
     assert (await perform(LocalWorkspaceIO(str(root)), "walk", {**taken, "since": "9" * 20}))["ok"]["files"] == []
+
+
+class OutsideToo:
+    """A computer whose chat's folder is *chat*, and that also answers outside.* kinds in *elsewhere*,
+    as the app does in a folder its user granted: the same outcomes, through the JSON a link carries."""
+
+    def __init__(self, chat: Path, elsewhere: Path) -> None:
+        self.chat = InProcessRunner(LocalWorkspaceIO(workspace_path=str(chat)))
+        self.elsewhere = InProcessRunner(LocalWorkspaceIO(workspace_path=str(elsewhere)))
+        self.sent: list[tuple[str, dict]] = []
+
+    async def run(self, kind, args, payload=None):
+        self.sent.append((kind, json.loads(json.dumps(args))))
+        if kind.startswith("outside."):
+            return await self.elsewhere.run(kind.removeprefix("outside."), args, payload)
+        return await self.chat.run(kind, args, payload)
+
+
+@pytest.fixture
+def two_folders(tmp_path):
+    chat, elsewhere = tmp_path / "chat", tmp_path / "chat-old"
+    chat.mkdir()
+    (elsewhere / "sub").mkdir(parents=True)
+    (elsewhere / "a.txt").write_text("one\ntwo\n")
+    (elsewhere / "sub" / "b.txt").write_text("b")
+    laptop = OutsideToo(chat, elsewhere)
+    return laptop, DeviceWorkspaceIO(laptop, root=str(chat)), chat, elsewhere
+
+
+async def test_routes_reads_of_a_path_outside_the_folder_to_outside_kinds(two_folders):
+    laptop, wio, chat, elsewhere = two_folders
+
+    # Named as the model may write it: normalised before it is sent, as the app takes only that.
+    key = await wio.resolve(f"{elsewhere}/sub/../a.txt/")
+    folder = await wio.resolve(str(elsewhere))
+    assert key == str(elsewhere / "a.txt")
+    assert (await wio.stat(key)).size == 8
+    assert await wio.read(key) == b"one\ntwo\n"
+    assert (await wio.read_lines(key, encoding="utf-8", offset=2, limit=1, max_bytes=100)).data == b"two\n"
+    assert sorted(await wio.list_dir(folder)) == ["a.txt", "sub"]
+    assert sorted((await wio.walk(folder, skip=())).files) == [("a.txt", 8), ("sub/b.txt", 1)]
+    assert wio.is_outside(key) and wio.is_outside(folder)
+
+    assert [kind for kind, _ in laptop.sent] == [
+        "outside.resolve", "outside.resolve", "outside.stat", "outside.read", "outside.read_lines",
+        "outside.list_dir", "outside.walk",
+    ]
+    assert laptop.sent[0][1] == {"path": str(elsewhere / "a.txt")}
+
+    # A path in the chat's folder, absolute or not, is the folder's as before; so is a key no outside.resolve gave.
+    laptop.sent.clear()
+    inside = await wio.resolve(str(chat / "x.txt"))
+    await wio.resolve("y.txt")
+    await wio.stat(inside)
+    await wio.stat(str(elsewhere / "sub" / "b.txt"))
+    assert [kind for kind, _ in laptop.sent] == ["resolve", "resolve", "stat", "stat"]
+    assert not wio.is_outside(inside)
+
+
+async def test_refuses_writes_deletes_and_searches_by_content_outside_the_folder(two_folders):
+    laptop, wio, _chat, elsewhere = two_folders
+    key = await wio.resolve(str(elsewhere / "a.txt"))
+    laptop.sent.clear()
+
+    for call in (
+        lambda: wio.write(key, b"changed"),
+        lambda: wio.delete(key),
+        lambda: wio.ripgrep(key, mode="content", pattern="one"),
+    ):
+        with pytest.raises(WorkspaceSandboxError) as refused:
+            await call()
+        assert str(refused.value) == (
+            "Files outside the chat's folder are read-only: use copy_files, move_to_trash or put_back."
+        )
+    # Nothing reached the computer, and the file is as it was.
+    assert laptop.sent == []
+    assert (elsewhere / "a.txt").read_text() == "one\ntwo\n"
+    # write_file's check answers so too, after the computer's own refusals.
+    assert await wio.check_write(str(elsewhere / "a.txt")) == (
+        "Files outside the chat's folder are read-only: use copy_files, move_to_trash or put_back."
+    )
+    assert await wio.check_write("/etc/passwd") == "Write denied: '/etc/passwd' is a protected system/credential file."
+    assert (elsewhere / "a.txt").read_text() == "one\ntwo\n"
+
+
+async def test_list_files_outside_the_folder_lists_by_name_and_search_by_content_is_refused(two_folders):
+    _laptop, wio, _chat, elsewhere = two_folders
+
+    listed = json.loads(await file_ops._list_files_handler({"path": str(elsewhere), "pattern": "*.txt"}, workspace_io=wio))
+    assert sorted(listed["matches"]) == [str(elsewhere / "a.txt"), str(elsewhere / "sub" / "b.txt")]
+    assert listed["total_count"] == 2
+
+    only_sub = json.loads(await file_ops._list_files_handler({"path": str(elsewhere), "pattern": "sub/*"}, workspace_io=wio))
+    assert only_sub["matches"] == [str(elsewhere / "sub" / "b.txt")]
+
+    searched = json.loads(await file_ops._search_files_handler(
+        {"path": str(elsewhere), "pattern": "one", "target": "content"}, workspace_io=wio,
+    ))
+    assert searched["error"] == "Search outside the chat's folder is by name: use list_files with a pattern."
+
+    read = await file_ops._read_file_handler({"path": str(elsewhere / "a.txt")}, workspace_io=wio)
+    assert "one" in read and "two" in read

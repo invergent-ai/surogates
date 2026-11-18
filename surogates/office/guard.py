@@ -12,7 +12,7 @@ from surogates.config import load_settings
 from surogates.devices.binding import device_of
 from surogates.harness.tool_schemas import has_file_pane
 from surogates.office import sessions as office_sessions
-from surogates.office.agent import AGENT_KINDS, location_of, relative_path, within_folder
+from surogates.office.agent import AGENT_KINDS, OUTSIDE_DOCUMENT, location_of, relative_path, within_folder
 from surogates.office.files import _folded
 from surogates.office.kinds import office_kind
 from surogates.sandbox.history import YOU
@@ -68,6 +68,8 @@ async def refused_open_document(tool_name: str, tool_args: Any, session: Any, *,
         # The editor may have it open by its path in the folder, which this one cannot be matched to. The desktop
         # refuses a write outside the folder anyway, so nothing that could be written is lost.
         for p in targets:
+            if relative_path(p, session).startswith("/"):
+                return f"{p}: {OUTSIDE_DOCUMENT}"
             if not within_folder(relative_path(p, session)):
                 return (
                     f"{p} names a file through the computer's home folder: name it by its path in the chat's folder, "

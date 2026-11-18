@@ -3,7 +3,7 @@
 Protocol version 1, JSON text frames of at most MAX_FRAME_CHARS (2 MiB); the app must
 accept frames that large.
 
-  app -> server   {"type": "hello", "protocols": [1], "open": [ids], "copies": true}
+  app -> server   {"type": "hello", "protocols": [1], "open": [ids], "copies": true, "outside": true}
                                                         first frame, within HELLO_TIMEOUT_S; "open"
                                                         lists the operations the app holds
                                                         unfinished, and is optional: an empty
@@ -12,7 +12,9 @@ accept frames that large.
                                                         the newest MAX_OPEN_REPORTED.  "copies"
                                                         says the app keeps a copy of a folder
                                                         for a project's thread to work in: a
-                                                        bind that names one is sent to no other
+                                                        bind that names one is sent to no other.
+                                                        "outside" says it runs the outside.*
+                                                        kinds; an app without it is sent none
   server -> app   {"type": "welcome", "protocol": 1, "device_id", "org_id",
                    "agent_id", "user_id", "name", "heartbeat_s": 15, "waits": true}
   app -> server   {"type": "ping"}                      every heartbeat_s
@@ -174,6 +176,7 @@ from surogates.devices.workspace import (
     CHUNK_BYTES,
     MAX_PAYLOAD_BYTES,
     MAX_READ_BYTES,
+    OUTSIDE_OLD_APP,
     is_well_formed,
     transfer_of,
 )
@@ -212,6 +215,9 @@ DAMAGED_OUTCOME: dict[str, Any] = {
 # What a bind that names a thread's copy is recorded as where the app did not say it keeps copies:
 # an app older than copies binds the thread to the folder itself, so it is sent nothing of it.
 NO_COPIES_OUTCOME: dict[str, Any] = {"error": {"type": "binding", "message": KEEPS_NO_COPY}}
+# What an outside.* operation is recorded as where the app did not say it works outside a chat's folder:
+# an older one knows no such kind, and is sent none.
+NO_OUTSIDE_OUTCOME: dict[str, Any] = {"error": {"type": "unsupported", "message": OUTSIDE_OLD_APP}}
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 
 CLOSE_PROTOCOL = 4400
@@ -314,6 +320,8 @@ class _Link:
         self._heard = asyncio.Event()
         # Whether the app said in its hello that it keeps a copy of a folder for a project's thread.
         self.copies = False
+        # Whether it said it works on files outside a chat's folder (the outside.* kinds).
+        self.outside = False
 
     async def send(self, frame: dict[str, Any]) -> None:
         async with self._send_lock:
@@ -364,6 +372,13 @@ class _Link:
                 # folder itself.  The thread is then not bound, and nothing else of it is sent.
                 await _bounded(self._operations.complete(
                     self._device.id, self._device.credential_generation, operation.id, operation.digest, NO_COPIES_OUTCOME,
+                ))
+                continue
+            if operation.kind.startswith("outside.") and not self.outside:
+                # Recorded refused for the app, which never hears of it: the tool says to update it.
+                await _bounded(self._operations.complete(
+                    self._device.id, self._device.credential_generation, operation.id, operation.digest,
+                    NO_OUTSIDE_OUTCOME,
                 ))
                 continue
             self._delivered.add(operation.id)
@@ -679,7 +694,7 @@ async def serve_device_link(
     pubsub: PubSub | None = None
     claimed = False
     try:
-        reported, link.copies = await _hello(websocket)
+        reported, link.copies, link.outside = await _hello(websocket)
         # Listen before claiming, so every message sent after the claim is seen.
         pubsub = await _bounded(presence.subscribe(device.id))
         # Set before the claim: release is compare-and-delete, so it is safe
@@ -767,8 +782,9 @@ async def _receive_frame(websocket: WebSocket) -> dict[str, Any]:
     return frame
 
 
-async def _hello(websocket: WebSocket) -> tuple[list[UUID], bool]:
-    """Read the app's hello: the operations it reports unfinished, and whether it keeps threads' copies."""
+async def _hello(websocket: WebSocket) -> tuple[list[UUID], bool, bool]:
+    """Read the app's hello: the operations it reports unfinished, whether it keeps threads' copies, and whether it
+    works outside a chat's folder."""
     try:
         frame = await asyncio.wait_for(_receive_frame(websocket), HELLO_TIMEOUT_S)
     except TimeoutError:
@@ -785,7 +801,7 @@ async def _hello(websocket: WebSocket) -> tuple[list[UUID], bool]:
     if not isinstance(reported, list) or len(reported) > MAX_OPEN_REPORTED:
         raise _Close(CLOSE_PROTOCOL, "malformed open list")
     try:
-        return [UUID(str(value)) for value in reported], frame.get("copies") is True
+        return [UUID(str(value)) for value in reported], frame.get("copies") is True, frame.get("outside") is True
     except ValueError:
         raise _Close(CLOSE_PROTOCOL, "malformed open list") from None
 

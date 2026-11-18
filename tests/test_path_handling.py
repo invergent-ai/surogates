@@ -381,3 +381,13 @@ async def test_a_child_shares_its_roots_task_id() -> None:
         tenant=MagicMock(asset_root="/tmp/test"),
     )
     assert registry.get("terminal").handler.call_args.kwargs["task_id"] == root
+
+
+def test_a_folder_that_only_begins_like_the_workspace_is_left_as_it_is() -> None:
+    # A folder outside a desktop chat's, beside it: it is not the workspace, and an event must not say it is.
+    assert _sanitize_paths(
+        {"path": "/home/ana/proj-old/a.txt", "files": ["/home/ana/proj/b.txt", "/home/ana/proj"]}, "/home/ana/proj",
+    ) == {"path": "/home/ana/proj-old/a.txt", "files": ["__WORKSPACE__/b.txt", "__WORKSPACE__"]}
+    assert _sanitize_paths('cd "/home/ana/proj" && ls /home/ana/proj2', "/home/ana/proj") == (
+        'cd "__WORKSPACE__" && ls /home/ana/proj2'
+    )

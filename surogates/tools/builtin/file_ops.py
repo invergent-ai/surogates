@@ -15,11 +15,13 @@ import asyncio
 import concurrent.futures
 import difflib
 import errno
+import fnmatch
 import io
 import json
 import logging
 import multiprocessing
 import os
+import posixpath
 import re
 import shlex
 import threading
@@ -28,6 +30,7 @@ from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import Any
 
+from surogates.devices.workspace import DeviceWorkspaceIO
 from surogates.tools.registry import ToolRegistry, ToolSchema
 from surogates.tools.workspace_io import RevisionConflict, WorkspaceIO, workspace_io_from
 
@@ -545,6 +548,9 @@ from surogates.tools.utils.binary_extensions import has_binary_extension
 from surogates.tools.utils.tool_output_limits import get_max_bytes, get_max_lines
 from surogates.tools.utils.workspace_sandbox import NUL_REFUSED, WorkspaceSandboxError
 from surogates.tools.utils.workspace_sandbox import holds_nul as _holds_nul
+
+# What search_files answers for content outside a desktop chat's folder: the computer searches there by name only.
+SEARCH_OUTSIDE = "Search outside the chat's folder is by name: use list_files with a pattern."
 
 
 # ---------------------------------------------------------------------------
@@ -2307,6 +2313,36 @@ async def _files_target_rg(
     }
 
 
+async def _files_outside(
+    wio: DeviceWorkspaceIO,
+    pattern: str,
+    key: str,
+    offset: int,
+    limit: int,
+) -> dict[str, Any]:
+    """Find files matching glob *pattern* under *key*, a folder outside the chat's, from the computer's walk.
+
+    Matched as ripgrep's ``-g`` does: a pattern without a slash by the file's
+    name at any depth, one with a slash by its path under *key*.  In the
+    walk's order, by path: a walk has no times.
+    """
+    walk = await wio.walk(key, skip=(), skip_hidden=True)
+    by_path = "/" in pattern.strip("/")
+    files = [
+        posixpath.join(key, path) for path, _size in walk.files
+        if fnmatch.fnmatchcase(path if by_path else posixpath.basename(path), pattern.strip("/"))
+    ]
+    total_count = len(files)
+    return {
+        "matches": files[offset : offset + limit],
+        "count": len(files[offset : offset + limit]),
+        "total_count": total_count,
+        "truncated": total_count > offset + limit,
+        **({"_warning": "The computer stopped listing this folder before its end: name a folder further down."}
+           if walk.truncated else {}),
+    }
+
+
 async def _content_target_rg(
     wio: WorkspaceIO,
     pattern: str,
@@ -2519,7 +2555,12 @@ async def _search_files_handler(
         if await wio.stat(key) is None:
             return _tool_error(f"Path not found: {path}")
 
-        if target == "files":
+        outside = isinstance(wio, DeviceWorkspaceIO) and wio.is_outside(key)
+        if outside and target != "files":
+            return _tool_error(SEARCH_OUTSIDE)
+        if outside:
+            result_dict = await _files_outside(wio, pattern, key, offset, limit)
+        elif target == "files":
             result_dict = await _files_target_rg(wio, pattern, key, offset, limit)
         else:
             result_dict = await _content_target_rg(

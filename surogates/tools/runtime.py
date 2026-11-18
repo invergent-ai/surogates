@@ -77,6 +77,7 @@ class ToolRuntime:
             media_gen,
             memory,
             office,
+            outside_folder,
             research,
             session_search,
             skill_manager,
@@ -104,6 +105,7 @@ class ToolRuntime:
             web_search,
             browser,
             file_ops,
+            outside_folder,  # request_folder_access, copy_files, move_to_trash, put_back (a desktop chat only)
             kb_tools,
             office,  # office_read, office_edit (live document editing through runtime-office)
             loop_control,

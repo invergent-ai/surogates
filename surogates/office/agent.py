@@ -74,6 +74,13 @@ def relative_path(path: str, session: Any) -> str:
     return posixpath.normpath(path or ".")
 
 
+#: What a document outside a desktop chat's folder is answered: the office tools work on the folder's files alone.
+OUTSIDE_DOCUMENT = (
+    "Files outside the chat's folder are read-only: copy the document into the chat's folder with copy_files, "
+    "work on the copy, then offer put_back."
+)
+
+
 def within_folder(path: str) -> bool:
     """Whether *path*, as ``relative_path`` gives it, names a file inside the workspace: not an absolute path outside
     it, a home folder's, or a way out.  A file whose name only begins like one (``~draft.docx``) is inside."""
