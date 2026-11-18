@@ -201,7 +201,8 @@ async def _post_slack(
     client = web_client(bot_token)
     try:
         channel_id = await _resolve_channel(client, channel)
-        kwargs: dict[str, Any] = {"channel": channel_id, "text": text}
+        # No link previews: an update with five links became five cards longer than the message itself.
+        kwargs: dict[str, Any] = {"channel": channel_id, "text": text, "unfurl_links": False, "unfurl_media": False}
         if blocks is not None:
             kwargs["blocks"] = blocks
         if thread_ts:
