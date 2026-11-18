@@ -117,6 +117,10 @@ async def _fetch_listing(client: Any) -> dict[str, ImageModelInfo]:
         arch = row.get("architecture") or {}
         outputs = arch.get("output_modalities") or row.get("output_modalities") or []
         inputs = arch.get("input_modalities") or row.get("input_modalities") or []
+        if not outputs:
+            # A listing without modalities says nothing about the model:
+            # leave it unknown rather than read it as making no images.
+            continue
         listing.setdefault(row["id"], ImageModelInfo(
             listed=True,
             makes_images="image" in outputs,
