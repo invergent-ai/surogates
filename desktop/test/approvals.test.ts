@@ -1834,12 +1834,81 @@ describe("files outside the chat's folder", () => {
     stop.abort();
     expect(await grant).toEqual(SAID_NO);
     user.auto = "timeout";
-    expect((await approvals.admit(op("outside.put_back", { copy: "c", original: "o" }), never()))).toMatchObject({ error: { type: "denied" } });
+    expect((await approvals.admit(op("outside.put_back", { copy: `${FOLDER}/a.txt`, original: "/home/me/Desktop/a.txt" }), never()))).toMatchObject({ error: { type: "denied" } });
     expect(journal.bindings.reads(ROOT)).toEqual([]);
   });
 
-  it("refuses an outside kind it does not know", async () => {
+  it("refuses an outside kind it does not know, asking no one", async () => {
     bind(ROOT, "free");
-    expect(await approvals.admit(op("outside.delete", { key: "/home/me/Desktop/a.txt" }), never())).toEqual(SAID_NO);
+    user.auto = "allow";
+    expect(await approvals.admit(op("outside.delete", { key: "/home/me/Desktop/a.txt" }), never()))
+      .toEqual({ error: { type: "denied", message: "This computer does not know 'outside.delete'." } });
+    expect(user.asked).toEqual([]);
+  });
+
+  it.each([
+    ["a grant's relative folder", op("outside.grant", { folder: "Desktop" }), "folder"],
+    ["a grant's empty folder", op("outside.grant", { folder: "" }), "folder"],
+    ["a grant's folder with ..", op("outside.grant", { folder: "/home/me/Desktop/../.." }), "folder"],
+    ["a grant's folder with a slash at its end", op("outside.grant", { folder: "/home/me/Desktop/" }), "folder"],
+    ["a grant's folder that is no text", op("outside.grant", { folder: { a: 1 } }), "folder"],
+    ["a copy's relative file", op("outside.copy", { files: ["/home/me/a.txt", "b.txt"], to: FOLDER }), "files"],
+    ["a copy's files that are no list", op("outside.copy", { files: "/home/me/a.txt", to: FOLDER }), "files"],
+    ["a copy's relative place", op("outside.copy", { files: ["/home/me/a.txt"], to: "." }), "to"],
+    ["a trash's file with .", op("outside.trash", { files: ["/home/me/./a.txt"] }), "files"],
+    ["a put back's copy with no path", op("outside.put_back", { original: "/home/me/a.txt" }), "copy"],
+    ["a put back's relative original", op("outside.put_back", { copy: `${FOLDER}/a.txt`, original: "a.txt" }), "original"],
+  ])("refuses %s before any window, not as the user's no", async (_, operation, name) => {
+    bind(ROOT, "ask");
+    user.auto = "allow";
+    expect(await approvals.admit(operation, never())).toEqual({
+      error: { type: "denied", message: `'${name}' must be an absolute path, with no '.' or '..' parts and no slash at its end.` },
+    });
+    expect(user.asked).toEqual([]);
+    expect(journal.bindings.reads(ROOT)).toEqual([]);
+  });
+
+  it("refuses a copy or a trash of no files before any window", async () => {
+    bind(ROOT, "ask");
+    for (const operation of [op("outside.copy", { files: [], to: FOLDER }), op("outside.trash", { files: [] })]) {
+      expect(await approvals.admit(operation, never())).toEqual({ error: { type: "denied", message: "'files' must list at least one file." } });
+    }
+    expect(user.asked).toEqual([]);
+  });
+
+  it("lists each file once, however often it was named", async () => {
+    bind(ROOT, "ask");
+    user.auto = "trash";
+    user.ticks = ["/home/me/a.txt"];
+    const trash = op("outside.trash", { files: ["/home/me/a.txt", "/home/me/a.txt"] });
+    expect(await approvals.admit(trash, never())).toBeNull();
+    expect(user.asked[0]).toMatchObject({ kind: "trash", files: ["/home/me/a.txt"] });
+    expect(approvals.chosenFor(trash.id)).toEqual(["/home/me/a.txt"]);
+  });
+
+  it("grants the folder its resolver names, and asks nobody about one it refuses", async () => {
+    bind(ROOT, "ask");
+    const seen: Array<[string, string]> = [];
+    const resolving = new Approvals({
+      bindings: journal.bindings, prompts: user, agent: "Research assistant",
+      resolveFolder: (folder, root) => (seen.push([folder, root]), folder === "Desktop" ? { folder: "/home/me/Desktop" } : { refused: "No such folder here." }),
+    });
+    user.auto = "allow";
+    expect(await resolving.admit(op("outside.grant", { folder: "Desktop" }), never())).toBeNull();
+    expect(user.asked).toEqual([{ kind: "read_folder", chat: chat(), folder: "/home/me/Desktop" }]);
+    expect(journal.bindings.reads(ROOT)).toEqual(["/home/me/Desktop"]);
+    expect(await resolving.admit(op("outside.grant", { folder: "Music" }), never())).toEqual({ error: { type: "denied", message: "No such folder here." } });
+    expect(user.asked).toHaveLength(1);
+    expect(seen).toEqual([["Desktop", ROOT], ["Music", ROOT]]);
+  });
+
+  it("gives a size to the first 50 files of a copy alone", async () => {
+    bind(ROOT, "ask");
+    const files = Array.from({ length: 51 }, (_, at) => join(base, `f${at}.txt`));
+    for (const file of files) writeFileSync(file, "abc");
+    user.auto = "deny";
+    await approvals.admit(op("outside.copy", { files, to: FOLDER }), never());
+    const sizes = (user.asked[0] as Extract<ApprovalRequest, { kind: "copy" }>).files.map((file) => file.size);
+    expect(sizes).toEqual([...Array.from({ length: 50 }, () => 3), 0]);
   });
 });

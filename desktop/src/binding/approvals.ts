@@ -1,6 +1,7 @@
 // Approvals (spec, Section 4). A chat that asks every time has its user allow
 // each command, file change and process input before it happens, in the
-// desktop's own window; a chat that works freely is asked nothing here. Each is
+// desktop's own window; a chat that works freely is asked nothing here but a use of
+// the agent's browser (below) and anything outside the chat's folder. Each is
 // asked in the runner's admit phase, before the journal marks the operation
 // started: a prompt still open when the app stops is asked again once the server
 // sends the operation again, nothing ran, and the command's timeout starts only
@@ -10,7 +11,7 @@
 // a destination off the package hosts asks too, while the command runs; "Allow for
 // this session" lets that host through, on every port, for the rest of the chat.
 
-import { statSync } from "node:fs";
+import { stat } from "node:fs/promises";
 import { posix } from "node:path";
 
 import { chatPortOf, SANDBOX_PORTS } from "../browser/ports.js";
@@ -65,15 +66,43 @@ const outsideDenied = (message: string): Outcome => ({ error: { type: "denied", 
 const SAID_NO = outsideDenied("The user said no.");
 const IN_A_THREAD = outsideDenied("Files outside the chat's folder can be used from the main chat, not from a project's thread.");
 const NOT_ANSWERED = outsideDenied("Nobody answered on this computer in time, so nothing was done.");
-const pathsOf = (value: unknown): string[] => (Array.isArray(value) ? value.map(String) : []);
-// A file's size for the copy window alone: the copy itself checks every file again.
-const sizeOf = (path: string): number => {
-  try {
-    return statSync(hostPathOf(path)).size;
-  } catch {
-    return 0;
+const UNKNOWN = (kind: string): Outcome => outsideDenied(`This computer does not know '${kind}'.`);
+// A path the agent gave that is not one whole guest path: refused before any window, which would show it as it came.
+const NOT_A_PATH = (name: string): Outcome => outsideDenied(
+  `'${name}' must be an absolute path, with no '.' or '..' parts and no slash at its end.`,
+);
+const NO_FILES = outsideDenied("'files' must list at least one file.");
+const isPath = (value: unknown): value is string =>
+  typeof value === "string" && posix.isAbsolute(value) && posix.normalize(value) === value && !value.endsWith("/");
+
+// The copy window's sizes, display only: the copy itself checks every file again. Each is looked at off the main
+// thread, one after another, within one budget for them all; past it, or past the first SIZED, a file shows 0. A
+// look that does not answer (a mount gone stale, a network drive) holds one of libuv's threads, not the app.
+// ponytail: one stalled look per window can stay stuck in the thread pool; a worker of its own if that ever bites.
+const SIZED = 50;
+const SIZES_MS = 500;
+async function sizesOf(files: string[]): Promise<number[]> {
+  const sizes = files.map(() => 0);
+  const deadline = performance.now() + SIZES_MS;
+  for (let at = 0; at < Math.min(files.length, SIZED); at++) {
+    const left = deadline - performance.now();
+    if (left <= 0) break;
+    let timer: NodeJS.Timeout | undefined;
+    const late = new Promise<"late">((resolve) => {
+      timer = setTimeout(() => resolve("late"), left);
+    });
+    try {
+      const size = await Promise.race([Promise.resolve().then(() => stat(hostPathOf(files[at]!))).then((info) => info.size), late]);
+      if (size === "late") break;
+      sizes[at] = size;
+    } catch {
+      // Unreadable: shown as 0.
+    } finally {
+      clearTimeout(timer);
+    }
   }
-};
+  return sizes;
+}
 
 // Whose download a write saves (browser/downloads.ts): one a page of the agent's browser started, or
 // one that began while its user held the browser, or just after they handed it back, which asks in
@@ -168,6 +197,10 @@ export interface ApprovalsOptions {
   // nobody. "busy": the sandbox holds every connection it takes from the browser, and could not be asked.
   listening?: (root: string, port: number) => Promise<boolean | "busy">;
   onError?: (error: unknown) => void; // a choice that could not be recorded, or a network prompt that failed, and why
+  // The folder an outside.grant names, as its window shows it and its grant keeps it: a known name ("Desktop") or an
+  // absolute path, resolved and checked for the chat *root*; or why it cannot be granted, and nobody is asked.
+  // Without it, only an absolute, normal path is taken.
+  resolveFolder?: (folder: string, root: string) => { folder: string } | { refused: string };
 }
 
 // How long an act's prompt waits for its page's address before it says the page is not known.
@@ -504,19 +537,23 @@ export class Approvals {
     const first = bound();
     if (!("root" in first)) return first;
     if (OUTSIDE_READS.has(kind)) return null;
+    const checked = this.outsideArgs(kind, args, root);
+    if ("refused" in checked) return checked.refused;
     return this.inLine(root, signal, SAID_NO, async () => {
       // Unbound while it waited its turn: asked nothing.
       const binding = bound();
       if (!("root" in binding)) return binding;
       const chat = { agent: this.options.agent, root, calling: operation.callingSessionId, folder: binding.folder };
-      const files = pathsOf(args.files);
+      const { files, folder } = checked;
       let request: ApprovalRequest;
-      const folder = String(args.folder ?? "");
       if (kind === "outside.grant") request = { kind: "read_folder", chat, folder };
-      else if (kind === "outside.copy") request = { kind: "copy", chat, to: String(args.to ?? ""), files: files.map((from) => ({ from, size: sizeOf(from) })) };
       else if (kind === "outside.trash") request = { kind: "trash", chat, files };
-      else if (kind === "outside.put_back") request = { kind: "put_back", chat, copy: String(args.copy ?? ""), original: String(args.original ?? "") };
-      else return SAID_NO;
+      else if (kind === "outside.put_back") request = { kind: "put_back", chat, copy: String(args.copy), original: String(args.original) };
+      else {
+        const sizes = await settled(sizesOf(files), signal);
+        if (signal.aborted || !sizes) return SAID_NO;
+        request = { kind: "copy", chat, to: String(args.to), files: files.map((from, at) => ({ from, size: sizes[at]! })) };
+      }
       let reply: PromptReply | undefined;
       try {
         // Raced against its signal: a prompt that ignores it cannot hold a cancel or a suspend.
@@ -546,6 +583,34 @@ export class Approvals {
       }
       return null;
     });
+  }
+
+  // An outside kind's paths, checked before anyone is asked: each whole and absolute, *files* without a repeat, and a
+  // grant's folder resolved. Or why not.
+  private outsideArgs(kind: string, args: Record<string, unknown>, root: string): { files: string[]; folder: string } | { refused: Outcome } {
+    const refused = (outcome: Outcome) => ({ refused: outcome });
+    let files: string[] = [];
+    let folder = "";
+    if (kind === "outside.copy" || kind === "outside.trash") {
+      if (!Array.isArray(args.files)) return refused(NOT_A_PATH("files"));
+      if (args.files.length === 0) return refused(NO_FILES);
+      if (!args.files.every(isPath)) return refused(NOT_A_PATH("files"));
+      files = [...new Set(args.files as string[])];
+      if (kind === "outside.copy" && !isPath(args.to)) return refused(NOT_A_PATH("to"));
+    } else if (kind === "outside.put_back") {
+      for (const name of ["copy", "original"]) if (!isPath(args[name])) return refused(NOT_A_PATH(name));
+    } else if (kind === "outside.grant") {
+      if (typeof args.folder !== "string") return refused(NOT_A_PATH("folder"));
+      const resolved = this.options.resolveFolder?.(args.folder, root) ?? (isPath(args.folder) ? { folder: args.folder } : null);
+      if (resolved === null) return refused(NOT_A_PATH("folder"));
+      if ("refused" in resolved) return refused(outsideDenied(resolved.refused));
+      // What the window shows and the grant keeps is checked like the rest, whoever resolved it.
+      if (!isPath(resolved.folder)) return refused(NOT_A_PATH("folder"));
+      folder = resolved.folder;
+    } else {
+      return refused(UNKNOWN(kind));
+    }
+    return { files, folder };
   }
 
   /** The files its user left ticked on an admitted copy or trash, read once: the layer copies or trashes these alone. */
