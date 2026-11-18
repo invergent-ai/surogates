@@ -5,9 +5,11 @@ every item id.  A change runs for real only if its action is in FILE_ACTIONS
 and every reference in its arguments points inside that copy.  Anything else,
 including a key or id-shaped value this module does not know, is faked.
 
-Harmless keys (never treated as references, whatever they hold): name, values,
-address, worksheet_id_or_name, conflict_behavior, file_name, mimetype, content,
-select, top, orderby, plus the upload source ``file.s3key`` / ``source_url``.
+Name keys (``name``, ``file_name``, ``file.name``) must be one plain path segment:
+no ``/``, ``\\`` or ``%``, not empty, not dots only.  Harmless keys (never treated as
+references, whatever they hold): values, address, worksheet_id_or_name,
+conflict_behavior, mimetype, ``file.mimetype``, content, select, top, orderby, plus
+the upload source ``file.s3key`` / ``source_url``.
 Any other key holding a non-empty string is a reason to fake (it may be an
 id or path under a name we do not know); numbers and booleans pass.
 
@@ -78,11 +80,20 @@ REFERENCE_KEYS = _DRIVE_KEYS | frozenset({
     "item_id", "itemId", "folder_item_id", "parent_folder", "folder", "folder_path",
     "parentReference.id", "server_relative_url", "site_name",
 })
+# A name lands in a path ("<folder>/<name>"), so it must be exactly one segment.
+_NAME_KEYS = frozenset({"name", "file_name", "file.name"})
 _HARMLESS = frozenset({
-    "name", "values", "address", "worksheet_id_or_name", "conflict_behavior", "file_name",
+    "values", "address", "worksheet_id_or_name", "conflict_behavior",
     "mimetype", "content", "select", "top", "orderby", "file.s3key", "file.source_url",
-    "s3key", "source_url",
+    "file.mimetype", "s3key", "source_url",
 })
+
+
+def _one_segment(value: Any) -> bool:
+    return (
+        isinstance(value, str) and bool(value.strip(" ."))
+        and not any(c in value for c in "/\\%")
+    )
 
 
 def _norm(path: str) -> str:
@@ -133,6 +144,9 @@ def inside_scratch(slug: str, args: dict, scratch: dict) -> bool:
             if not _reference_ok(key, value, scratch, known):
                 return False
             refs.append((key, value))
+        elif key in _NAME_KEYS:
+            if not _one_segment(value):
+                return False
         elif key in _HARMLESS:
             continue
         elif isinstance(value, str) and value:

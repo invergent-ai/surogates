@@ -303,3 +303,34 @@ def test_a_client_cannot_put_a_session_in_test_mode(channel):
         {"test_mode": {"scratch": None}, "pipeline_metadata": {"skillopt_run_id": "r1"}, "x": 1}, channel=channel,
     )
     assert config == {"x": 1}
+
+
+# --- code-review fixes: a name is one path segment ---------------------------
+
+_UP = {"folder_path": SCOPE["root_path"], "drive_id": "D"}
+_BAD_NAMES = ["../../../../Documente/a.pdf", "a/b.pdf", "..\\..\\x.pdf", "%2e%2e", "", "..", ".", " . ", None, 1]
+
+
+@pytest.mark.parametrize("key", ["name", "file_name"])
+@pytest.mark.parametrize("bad", _BAD_NAMES)
+def test_a_name_that_is_not_one_segment_is_faked(key, bad):
+    assert inside_scratch("ONE_DRIVE_ONEDRIVE_UPLOAD_FILE", {**_UP, key: "a.pdf"}, SCOPE)
+    assert not inside_scratch("ONE_DRIVE_ONEDRIVE_UPLOAD_FILE", {**_UP, key: bad}, SCOPE)
+
+
+def test_composio_nested_upload_inside_the_copy_is_real():
+    up = {**_UP, "file": {"name": "a.pdf", "mimetype": "application/pdf", "s3key": "k/a.pdf"}}
+    assert inside_scratch("ONE_DRIVE_ONEDRIVE_UPLOAD_FILE", up, SCOPE)
+
+
+@pytest.mark.parametrize("bad", _BAD_NAMES)
+def test_composio_nested_upload_with_a_bad_name_is_faked(bad):
+    up = {**_UP, "file": {"name": bad, "mimetype": "application/pdf", "s3key": "k/a.pdf"}}
+    assert not inside_scratch("ONE_DRIVE_ONEDRIVE_UPLOAD_FILE", up, SCOPE)
+
+
+def test_composio_nested_upload_with_an_unknown_key_is_faked():
+    up = {**_UP, "file": {"name": "a.pdf", "mimetype": "application/pdf", "s3key": "k"}, "user_id": "u1"}
+    assert not inside_scratch("ONE_DRIVE_ONEDRIVE_UPLOAD_FILE", up, SCOPE)
+    up = {**_UP, "file": {"name": "a.pdf", "mimetype": "application/pdf", "s3key": "k", "parent": "ORIG"}}
+    assert not inside_scratch("ONE_DRIVE_ONEDRIVE_UPLOAD_FILE", up, SCOPE)
