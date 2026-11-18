@@ -81,11 +81,12 @@ class _Platform:
 
 
 def _kwargs(*, routings=None, channel="schedule", config=None):
-    session = SimpleNamespace(agent_id="agent-1", org_id="org-1", channel=channel, config=config or {})
     if routings is None:
         routings = [{"agent_id": "agent-2", "org_id": "org-1", "channel_identifier": "A0OTHER"},
                     {"agent_id": "agent-1", "org_id": "org-1", "channel_identifier": "A0APP"}]
-    return {"session": session, "credential_vault": _Vault(), "platform_client": _Platform(routings)}
+    # What tool_exec's dispatch passes: the session's parts, never the session itself.
+    return {"agent_id": "agent-1", "tenant": SimpleNamespace(org_id="org-1"), "channel": channel,
+            "session_config": config or {}, "credential_vault": _Vault(), "platform_client": _Platform(routings)}
 
 
 async def test_posts_text_blocks_and_image_by_channel_name():
