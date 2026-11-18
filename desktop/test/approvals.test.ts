@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
-  type ApprovalAnswer, type ApprovalPrompts, type ApprovalRequest, Approvals, type ChatLabel, PREVIEW_BYTES,
+  type ApprovalAnswer, type ApprovalPrompts, type ApprovalRequest, Approvals, type ChatLabel, PREVIEW_BYTES, sizesOf,
 } from "../src/binding/approvals.js";
 import { Binder, type FolderPrompts } from "../src/binding/binder.js";
 import { BOOT_ID } from "../src/binding/folder.js";
@@ -1903,12 +1903,16 @@ describe("files outside the chat's folder", () => {
     const seen: Array<[string, string]> = [];
     const resolving = new Approvals({
       bindings: journal.bindings, prompts: user, agent: "Research assistant",
-      resolveFolder: (folder, root) => (seen.push([folder, root]), folder === "Desktop" ? { folder: "/home/me/Desktop" } : { refused: "No such folder here." }),
+      resolveFolder: async (folder, root) => (seen.push([folder, root]), folder === "Desktop" ? { folder: "/home/me/Desktop" } : { refused: "No such folder here." }),
     });
     user.auto = "allow";
-    expect(await resolving.admit(op("outside.grant", { folder: "Desktop" }), never())).toBeNull();
+    const grant = op("outside.grant", { folder: "Desktop" });
+    expect(await resolving.admit(grant, never())).toBeNull();
     expect(user.asked).toEqual([{ kind: "read_folder", chat: chat(), folder: "/home/me/Desktop" }]);
     expect(journal.bindings.reads(ROOT)).toEqual(["/home/me/Desktop"]);
+    // The folder its user allowed, for the layer to answer with, read once.
+    expect(resolving.chosenFor(grant.id)).toEqual(["/home/me/Desktop"]);
+    expect(resolving.chosenFor(grant.id)).toBeUndefined();
     expect(await resolving.admit(op("outside.grant", { folder: "Music" }), never())).toEqual({ error: { type: "denied", message: "No such folder here." } });
     expect(user.asked).toHaveLength(1);
     expect(seen).toEqual([["Desktop", ROOT], ["Music", ROOT]]);
@@ -1922,5 +1926,27 @@ describe("files outside the chat's folder", () => {
     await approvals.admit(op("outside.copy", { files, to: FOLDER }), never());
     const sizes = (user.asked[0] as Extract<ApprovalRequest, { kind: "copy" }>).files.map((file) => file.size);
     expect(sizes).toEqual([...Array.from({ length: 50 }, () => 3), 0]);
+  });
+
+  it("looks at a copy's sizes four at a time, and starts none once its budget is spent", async () => {
+    const files = Array.from({ length: 50 }, (_, at) => `/home/me/f${at}.txt`);
+    let flying = 0;
+    let most = 0;
+    const quick = await sizesOf(files, async () => {
+      most = Math.max(most, ++flying);
+      await new Promise((resolve) => setTimeout(resolve, 2));
+      flying -= 1;
+      return { size: 7 };
+    });
+    expect(quick).toEqual(files.map(() => 7));
+    expect(most).toBe(4);
+    // Looks that never answer: four started, no more, and every size 0 by the budget's end.
+    let started = 0;
+    const began = performance.now();
+    const stuck = await sizesOf(files, () => (started += 1, new Promise(() => {})));
+    expect(performance.now() - began).toBeLessThan(1_500);
+    expect(stuck).toEqual(files.map(() => 0));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(started).toBe(4);
   });
 });

@@ -41,7 +41,7 @@ export interface ToolLayer extends Executor {
   keepsCopies?(): boolean;
   // The folder an outside.grant names, resolved for chat *root*, or why it cannot be granted (approvals.ts): only where
   // the tools work outside a chat's folder, which the hello says.
-  resolveFolder?(folder: string, root: string): { folder: string } | { refused: string };
+  resolveFolder?(folder: string, root: string): Promise<{ folder: string } | { refused: string }>;
   // Whether a chat's host is on the folder of this identity, by its device and inode: another chat works there.
   folderInUse?(dev: number, ino: number): boolean;
   // The address of the page a calling session's next browser operation acts in, for its prompt; for an

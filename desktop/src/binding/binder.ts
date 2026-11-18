@@ -112,7 +112,7 @@ export interface BinderOptions {
   notComing?(of: string): void; // an upload the browser was asked about, by its operation, that got no leave
   // Whether something in a chat's sandbox listens on a port of its own loopback now: asked before its browser is sent there.
   listening?(root: string, port: number): Promise<boolean | "busy">;
-  resolveFolder?(folder: string, root: string): { folder: string } | { refused: string }; // an outside.grant's folder (approvals.ts)
+  resolveFolder?(folder: string, root: string): Promise<{ folder: string } | { refused: string }>; // an outside.grant's folder (approvals.ts)
   // The user is asked about every other operation first in a chat that asks every time,
   // and about a network destination off the package hosts in either mode.
   approvalPrompts: ApprovalPrompts;

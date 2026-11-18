@@ -79,22 +79,37 @@ const NOT_A_PATH = (name: string): Outcome => outsideDenied(
 const NO_FILES = outsideDenied("'files' must list at least one file.");
 const isPath = (value: unknown): value is string => typeof value === "string" && whole(value);
 
-// The copy window's sizes, display only: the copy itself checks every file again. The first SIZED are looked at
-// together, off the main thread, within one budget for them all; one not in by then, past the first SIZED, or that
+// The copy window's sizes, display only: the copy itself checks every file again. The first SIZED are looked at off
+// the main thread, LOOKS at a time, within one budget for them all; one not in by then, past the first SIZED, or that
 // cannot be read, shows 0. A look that does not answer (a mount gone stale, a network drive) holds one of libuv's
-// threads, not the app.
+// threads, not the app, and no new look starts once the budget is spent: a window holds LOOKS of them at most.
 // ponytail: stalled looks per window can stay stuck in the thread pool; a worker of their own if that ever bites.
 const SIZED = 50;
 const SIZES_MS = 500;
-async function sizesOf(files: string[]): Promise<number[]> {
+const LOOKS = 4;
+/** The sizes a copy window shows for *files*, each by *look*. Exported for its tests. */
+export async function sizesOf(files: string[], look: (path: string) => Promise<{ size: number }> = stat): Promise<number[]> {
   const sizes = files.map(() => 0);
-  const looks = files.slice(0, SIZED).map((file, at) =>
-    Promise.resolve().then(() => stat(hostPathOf(file))).then((info) => { sizes[at] = info.size; }, () => {}));
+  const count = Math.min(files.length, SIZED);
+  let next = 0;
+  let over = false;
+  const looker = async () => {
+    while (!over && next < count) {
+      const at = next++;
+      try {
+        const { size } = await look(hostPathOf(files[at]!));
+        if (!over) sizes[at] = size;
+      } catch {
+        // Unreadable: shown as 0.
+      }
+    }
+  };
   let timer: NodeJS.Timeout | undefined;
   const late = new Promise<void>((resolve) => {
     timer = setTimeout(resolve, SIZES_MS);
   });
-  await Promise.race([Promise.all(looks), late]);
+  await Promise.race([Promise.all(Array.from({ length: LOOKS }, looker)), late]);
+  over = true;
   clearTimeout(timer);
   // Those in by the budget's end, and no later: a late one would change what the window was given.
   return [...sizes];
@@ -196,7 +211,7 @@ export interface ApprovalsOptions {
   // The folder an outside.grant names, as its window shows it and its grant keeps it: a known name ("Desktop") or an
   // absolute path, resolved and checked for the chat *root*; or why it cannot be granted, and nobody is asked.
   // Without it, only an absolute, normal path is taken.
-  resolveFolder?: (folder: string, root: string) => { folder: string } | { refused: string };
+  resolveFolder?: (folder: string, root: string) => Promise<{ folder: string } | { refused: string }> | { folder: string } | { refused: string };
 }
 
 // How long an act's prompt waits for its page's address before it says the page is not known.
@@ -533,7 +548,7 @@ export class Approvals {
     const first = bound();
     if (!("root" in first)) return first;
     if (OUTSIDE_READS.has(kind)) return null;
-    const checked = this.outsideArgs(kind, args, root);
+    const checked = await this.outsideArgs(kind, args, root);
     if ("refused" in checked) return checked.refused;
     // A folder a grant of this chat's holds already is not asked about again: the layer answers it as granted.
     if (kind === "outside.grant" && this.options.bindings.reads(root).some((grant) => inside(checked.folder, grant))) return null;
@@ -573,6 +588,8 @@ export class Approvals {
           report(this.options.onError, error);
           return outsideDenied(couldNotAsk(error));
         }
+        // The folder its user allowed, for the layer to answer with: its name may resolve elsewhere by the time it runs.
+        this.chosen.set(operation.id, [folder]);
       }
       if (kind === "outside.copy" || kind === "outside.trash") {
         // Only what the window listed: a ticked file it did not show is not the user's choice.
@@ -586,7 +603,7 @@ export class Approvals {
 
   // An outside kind's paths, checked before anyone is asked: each whole and absolute, *files* without a repeat, and a
   // grant's folder resolved. Or why not.
-  private outsideArgs(kind: string, args: Record<string, unknown>, root: string): { files: string[]; folder: string } | { refused: Outcome } {
+  private async outsideArgs(kind: string, args: Record<string, unknown>, root: string): Promise<{ files: string[]; folder: string } | { refused: Outcome }> {
     const refused = (outcome: Outcome) => ({ refused: outcome });
     let files: string[] = [];
     let folder = "";
@@ -600,7 +617,8 @@ export class Approvals {
       for (const name of ["copy", "original"]) if (!isPath(args[name])) return refused(NOT_A_PATH(name));
     } else if (kind === "outside.grant") {
       if (typeof args.folder !== "string") return refused(NOT_A_PATH("folder"));
-      const resolved = this.options.resolveFolder?.(args.folder, root) ?? (isPath(args.folder) ? { folder: args.folder } : null);
+      // Looked at apart before it is resolved (outside/executor.ts): a drive that has stopped answering never holds the app.
+      const resolved = (await this.options.resolveFolder?.(args.folder, root)) ?? (isPath(args.folder) ? { folder: args.folder } : null);
       if (resolved === null) return refused(NOT_A_PATH("folder"));
       if ("refused" in resolved) return refused(outsideDenied(resolved.refused));
       // What the window shows and the grant keeps is checked like the rest, whoever resolved it.

@@ -20,7 +20,7 @@ import type { FolderGuards } from "../binding/folder.js";
 import { Failure, FOLDER_UNAVAILABLE, fromNode, io, MAX_MESSAGE_CHARS, READ_TOO_LARGE, type Refusal } from "../files/answers.js";
 import type { FdPaths, Where } from "../files/fd-paths.js";
 import { FLAGS } from "../files/flags.js";
-import { linesFrom, listed, readFrom, revisionOf, statOf, walkFrom } from "../files/operations.js";
+import { linesFrom, listed, readFrom, readFromAsync, revisionOf, statOf, walkFrom } from "../files/operations.js";
 import { type Identity, identityOf, sameFile } from "../files/identity.js";
 import { fileOs } from "../files/os.js";
 import { inside } from "../files/paths.js";
@@ -30,6 +30,7 @@ import type { Operation, Outcome } from "../link/protocol.js";
 import { BIN } from "../platform.js";
 import { basename, hostPathOf, isAbsolute, join, resolve } from "../session-path.js";
 import type { ToolLayer } from "../shell/device-stack.js";
+import { lookApart } from "../shell/folders-held.js";
 import { grantable, isKnownName, knownFolder, withinGrant } from "./places.js";
 
 const noPermission = (path: string): Outcome => ({
@@ -49,6 +50,14 @@ const osFailure = (message: string) => new Failure({ type: "os", message });
 const failureOf = (outcome: Outcome) => new Failure((outcome as { error: Refusal }).error);
 // A file operation of the chat's folder's own tools, run as one of an outside kind's steps.
 type Inner = (kind: string, args: Record<string, unknown>) => Promise<Outcome>;
+// The grant of a chat's that holds a path, no link on its way, or null (Outside.looker): each path looked at once a call.
+type Look = (path: string) => string | null;
+// An outside walk's bounds: shorter than a walk of the chat's folder, as it runs on the app's main thread (see Outside).
+const OUTSIDE_WALK_MS = 1_000;
+const OUTSIDE_WALK_FILES = 2_000;
+// A put back's temporary name beside the original: short and of one length, so an original whose name is near the
+// OS's longest still has one.
+const temporaryName = () => `.sgpb-${randomUUID().slice(0, 8)}`;
 // What a create-only open left behind: whether it opened, and the identity of the file it made, once read.
 type Made = { opened: boolean; made: BigIntStats | null };
 /**
@@ -83,6 +92,8 @@ export interface OutsideOptions {
   getPath: (name: "desktop" | "downloads" | "documents" | "pictures") => string;
   /** The file at this computer's own *hostPath* moved to its BIN (Electron's shell.trashItem); rejects if not. */
   trash: (hostPath: string) => Promise<void>;
+  /** A look at the folder at the session's path *folder* off the main thread, within a bound (lookApart by default). */
+  look?: (folder: string) => Promise<"there" | "gone" | "silent">;
 }
 
 // Every other member of the tools below, there only where they have it: a caller tells one they lack by its absence.
@@ -98,6 +109,9 @@ void EVERY;
 // The members the constructor assigns from PASSED.
 export interface Outside extends Pick<ToolLayer, Passed> {}
 
+// ponytail: every outside read, walk, copy and put back runs in the main process, a stale or slow drive's wait on its
+// thread (a grant's folder is looked at apart first, a walk has a short budget, a read yields between its pieces); the
+// upgrade is to move this layer's I/O into the file host's process, as a chat's folder's is.
 export class Outside implements ToolLayer {
   constructor(private readonly options: OutsideOptions) {
     const { tools } = options;
@@ -111,7 +125,7 @@ export class Outside implements ToolLayer {
    * The folder an outside.grant names, as its window shows it and its grant keeps it: a known folder ("Desktop") where
    * the OS keeps it, or an absolute path, as it resolves; or why the chat *root* may not be granted it.
    */
-  resolveFolder(folder: string, root: string): { folder: string } | { refused: string } {
+  async resolveFolder(folder: string, root: string): Promise<{ folder: string } | { refused: string }> {
     const binding = this.options.bindings.get(root);
     if (!binding) return { refused: failureOf(FOLDER_UNAVAILABLE).refusal.message };
     const known = isKnownName(folder);
@@ -122,6 +136,12 @@ export class Outside implements ToolLayer {
           ? `Surogate cannot read ${folder}: this computer keeps it on no drive of its own.`
           : `'${folder}' is not a folder Surogate can ask for: name Desktop, Downloads, Documents or Pictures, or give an absolute path.`,
       };
+    }
+    // Looked at apart first: the checks below resolve it on the main thread, which a drive that has stopped answering
+    // (a network share, a mount gone stale) would stop for as long. One gone is the checks' to say so.
+    const look = this.options.look ?? ((at: string) => lookApart(hostPathOf(at)));
+    if ((await look(path)) === "silent") {
+      return { refused: `Surogate cannot read ${folder}: it did not answer in time, as a network drive or one that has stopped answering may not.` };
     }
     const granted = grantable(path, this.options.tools.guards(), binding.folder);
     return granted.ok ? { folder: granted.folder } : { refused: granted.message };
@@ -134,31 +154,32 @@ export class Outside implements ToolLayer {
     const binding = this.options.bindings.get(root);
     if (!binding || binding.history !== undefined) return null;
     if (kind === "outside.grant") {
-      if (typeof args.folder !== "string") return denied("'folder' must be a folder's name or an absolute path.");
-      const resolved = this.resolveFolder(args.folder, root);
-      return "refused" in resolved ? denied(resolved.refused) : null;
+      // Its folder is resolved, and checked, by the approvals before its user is asked and by run(), each once it was
+      // looked at apart: here, on the main thread before either, it is not touched.
+      return typeof args.folder === "string" ? null : denied("'folder' must be a folder's name or an absolute path.");
     }
+    const look = this.looker(root);
     if (READS.has(kind)) {
       const path = pathOf(operation);
       if (typeof path !== "string") return path;
-      return this.grantOf(root, path) === null ? noPermission(path) : null;
+      return look(path) === null ? noPermission(path) : null;
     }
     if (kind === "outside.trash" && Array.isArray(args.files)) {
-      const own = args.files.find((file) => typeof file === "string" && this.chatOwns(root, file)) as string | undefined;
+      const own = args.files.find((file) => typeof file === "string" && this.chatOwns(root, file, look)) as string | undefined;
       if (own !== undefined) return chatsOwn(own);
     }
-    if (kind === "outside.put_back") return typeof args.copy === "string" && typeof args.original === "string" ? this.putBackRefusal(root, args.copy, args.original) : null;
+    if (kind === "outside.put_back") return typeof args.copy === "string" && typeof args.original === "string" ? this.putBackRefusal(root, args.copy, args.original, look) : null;
     if (kind === "outside.copy") {
       // A path to the chat's folder by another name is no grant's, and the chat's own tools know it by its own.
-      const named = [...(Array.isArray(args.files) ? args.files : []), args.to].find((path) => typeof path === "string" && this.reachesChat(root, path));
+      const named = [...(Array.isArray(args.files) ? args.files : []), args.to].find((path) => typeof path === "string" && this.reachesChat(root, path, look));
       if (typeof named === "string") return denied(byAnotherName(named));
     }
     if ((kind === "outside.copy" || kind === "outside.trash") && Array.isArray(args.files)) {
       // Malformed ones are the approvals' to refuse, in their words. A copy may take from the chat's folder too.
-      const out = args.files.find((file) => typeof file === "string" && this.sourceOf(root, file, kind === "outside.copy") === null) as string | undefined;
+      const out = args.files.find((file) => typeof file === "string" && this.sourceOf(root, file, look, kind === "outside.copy") === null) as string | undefined;
       if (out !== undefined) return noPermission(out);
     }
-    if (kind === "outside.copy" && typeof args.to === "string" && this.destinationOf(root, args.to) === null) return notDestination(args.to);
+    if (kind === "outside.copy" && typeof args.to === "string" && this.destinationOf(root, args.to, look) === null) return notDestination(args.to);
     return null;
   }
 
@@ -169,10 +190,14 @@ export class Outside implements ToolLayer {
     if (kind === "outside.grant") {
       // Kept by the approvals on its user's allow: answered with where, once it is kept.
       if (typeof args.folder !== "string") return denied("'folder' must be a folder's name or an absolute path.");
-      const resolved = this.resolveFolder(args.folder, root);
+      // The folder its user allowed, as the approvals kept it: answered so, whatever its name resolves to now (a
+      // Desktop the OS moved since), as long as it is still this chat's grant.
+      const approved = this.options.approvals.chosenFor(operation.id)?.[0];
+      if (approved !== undefined && this.options.bindings.reads(root).includes(approved)) return { ok: { folder: approved } };
+      const resolved = await this.resolveFolder(args.folder, root);
       if ("refused" in resolved) return denied(resolved.refused);
       // Answered as granted where a grant of this chat's holds it, as the approvals let it through unasked.
-      const held = this.options.bindings.reads(root).includes(resolved.folder) || this.grantOf(root, resolved.folder) !== null;
+      const held = this.options.bindings.reads(root).includes(resolved.folder) || this.looker(root)(resolved.folder) !== null;
       return held ? { ok: { folder: resolved.folder } } : noPermission(resolved.folder);
     }
     if (kind === "outside.copy") return this.copy(operation, signal);
@@ -182,42 +207,53 @@ export class Outside implements ToolLayer {
     // Checked again: an operation reaches here without its refusal asked, as one taken up again after a restart.
     const key = pathOf(operation);
     if (typeof key !== "string") return key;
-    const grant = this.grantOf(root, key);
+    const grant = this.looker(root)(key);
     if (grant === null) return noPermission(key);
     return this.answer(kind, () => this.read(kind, args, grant, key));
   }
 
-  // The grant of *root*'s that holds *path*, no link on its way; null for none. On Windows a folder is looked at only
-  // once the file host bound it: each grant is bound here, which keeps its folder held for the app's life, and does
+  // For one refusal() or run(): the grant of *root*'s that holds a path, no link on its way; null for none. Each path
+  // is looked at once a call, against the grants as they are then. On Windows a folder is looked at only once the file
+  // host bound it: each grant is bound here, once a call, which keeps its folder held for the app's life, and does
   // nothing for one bound already. A grant taken back is still bound, and is in no list of grants, so it holds nothing.
-  private grantOf(root: string, path: string): string | null {
-    const grants = this.options.bindings.reads(root);
-    for (const grant of grants) {
-      try {
-        this.options.fd.bind([grant]);
-      } catch {
-        // Gone, or no longer where its path leads: withinGrant finds nothing in it.
+  private looker(root: string): Look {
+    const { fd } = this.options;
+    const found = new Map<string, string | null>();
+    const bound = new Set<string>();
+    return (path) => {
+      const known = found.get(path);
+      if (known !== undefined) return known;
+      const grants = this.options.bindings.reads(root);
+      for (const grant of grants) {
+        if (bound.has(grant)) continue;
+        bound.add(grant);
+        try {
+          fd.bind([grant]);
+        } catch {
+          // Gone, or no longer where its path leads: withinGrant finds nothing in it.
+        }
       }
-    }
-    return withinGrant(grants, path, this.options.fd);
+      const grant = withinGrant(grants, path, fd);
+      found.set(path, grant);
+      return grant;
+    };
   }
 
   // Where a copy's *file* is read from: the chat's folder ("chat"), for a file in it, or the grant that holds it; null
   // for neither. The chat's folder is no grant's: a file there is the chat's own, read by its own tools.
-  private sourceOf(root: string, file: string, chat = true): "chat" | string | null {
+  private sourceOf(root: string, file: string, look: Look, chat = true): "chat" | string | null {
     const folder = this.options.bindings.get(root)?.folder;
     if (chat && folder !== undefined && file !== folder && inside(file, folder)) return "chat";
-    const grant = this.grantOf(root, file);
-    return this.reachesChat(root, file, grant) ? null : grant;
+    return this.reachesChat(root, file, look) ? null : look(file);
   }
 
   // Where a copy may go, as the folder it goes in: the chat's folder or one in it (grant null), written by its own
   // tools even where a grant holds the chat's folder too; or a folder in a grant, by that grant. Null for anywhere else.
-  private destinationOf(root: string, to: string): { dir: string; grant: string | null } | null {
+  private destinationOf(root: string, to: string, look: Look): { dir: string; grant: string | null } | null {
     const folder = this.options.bindings.get(root)?.folder;
     if (folder !== undefined && (to === "." || inside(to, folder))) return { dir: to === "." ? folder : to, grant: null };
-    const grant = this.grantOf(root, to);
-    return grant === null || this.reachesChat(root, to, grant) ? null : { dir: to, grant };
+    const grant = look(to);
+    return grant === null || this.reachesChat(root, to, look) ? null : { dir: to, grant };
   }
 
   // *operation*'s own steps by the chat's folder's tools, each an operation of its own, named *prefix* and a new id.
@@ -232,8 +268,9 @@ export class Outside implements ToolLayer {
     const ticked = this.options.approvals.chosenFor(operation.id);
     if (typeof args.to !== "string") return { error: { type: "value", message: "'to' must be a string" } };
     // Checked again: an operation reaches here without its refusal asked, as one taken up again after a restart.
-    if (this.reachesChat(root, args.to)) return denied(byAnotherName(args.to));
-    const to = this.destinationOf(root, args.to);
+    const look = this.looker(root);
+    if (this.reachesChat(root, args.to, look)) return denied(byAnotherName(args.to));
+    const to = this.destinationOf(root, args.to, look);
     if (to === null) return notDestination(args.to);
     // Taken up again after a restart, its user's ticks are gone: nothing is copied that nobody chose.
     if (ticked === undefined) return denied("Nothing was copied: the files its user chose are not known any more. Ask again.");
@@ -245,8 +282,8 @@ export class Outside implements ToolLayer {
         continue;
       }
       try {
-        if (this.reachesChat(root, from)) throw new Failure({ type: "denied", message: byAnotherName(from) });
-        const source = this.sourceOf(root, from);
+        if (this.reachesChat(root, from, look)) throw new Failure({ type: "denied", message: byAnotherName(from) });
+        const source = this.sourceOf(root, from, look);
         if (source === null) throw failureOf(noPermission(from));
         let read: Source;
         if (source === "chat") {
@@ -332,21 +369,19 @@ export class Outside implements ToolLayer {
     throw new Failure({ type: "os", message: `${to} has ${NAMES} files of that name already` });
   }
 
-  // Whether *path* is the chat's folder, in it, or holds it: its own tools' to delete, never this layer's. *grant* is
-  // the grant holding *path* (grantOf), where its caller has it already.
-  private chatOwns(root: string, path: string, grant?: string | null): boolean {
+  // Whether *path* is the chat's folder, in it, or holds it: its own tools' to delete, never this layer's.
+  private chatOwns(root: string, path: string, look: Look): boolean {
     const folder = this.options.bindings.get(root)?.folder;
-    return folder !== undefined && (inside(path, folder) || inside(folder, path) || this.reachesChat(root, path, grant));
+    return folder !== undefined && (inside(path, folder) || inside(folder, path) || this.reachesChat(root, path, look));
   }
 
   // Whether *path* reaches the chat's folder by a spelling of its own: on a drive that ignores case, or knows a short
   // name (WORK~1), a grant above the chat's folder spells it many ways, and only its identity tells. Each name from the
-  // grant down is looked at, none followed; reach() checks the folders it holds again, as it uses them. *held* is the
-  // grant holding *path* (grantOf), where its caller has it already: looked for here otherwise.
-  private reachesChat(root: string, path: string, held?: string | null): boolean {
+  // grant down is looked at, none followed; reach() checks the folders it holds again, as it uses them.
+  private reachesChat(root: string, path: string, look: Look): boolean {
     const binding = this.options.bindings.get(root);
     // Spelled as its own, it is the chat's by its path, as every caller tells first.
-    const grant = binding === undefined || inside(path, binding.folder) ? null : held === undefined ? this.grantOf(root, path) : held;
+    const grant = binding === undefined || inside(path, binding.folder) ? null : look(path);
     if (grant === null) return false;
     const ids = this.chatIds(root);
     for (let at = path; ; at = at.slice(0, at.lastIndexOf("/"))) {
@@ -361,9 +396,9 @@ export class Outside implements ToolLayer {
 
   // Why *copy* may not be put back over *original*, or null: the original a grant's file, not the chat's, and the copy
   // one this chat made of it.
-  private putBackRefusal(root: string, copy: string, original: string): Outcome | null {
-    const grant = this.grantOf(root, original);
-    if (this.chatOwns(root, original, grant)) return chatsOwn(original);
+  private putBackRefusal(root: string, copy: string, original: string, look: Look): Outcome | null {
+    const grant = look(original);
+    if (this.chatOwns(root, original, look)) return chatsOwn(original);
     if (grant === null) return noPermission(original);
     if (this.options.bindings.copyOf(root, copy)?.original !== original) {
       return denied(`${copy} is not a copy of ${original} made in this chat, so it cannot be put back there.`);
@@ -380,11 +415,13 @@ export class Outside implements ToolLayer {
     if (ticked === undefined) return denied(`Nothing was moved to the ${BIN}: the files its user chose are not known any more. Ask again.`);
     const done: { trashed: string[]; kept: Array<{ file: string; reason: string }> } = { trashed: [], kept: [] };
     for (const file of ticked) {
+      // Each file against the grants as they are when its turn comes: one taken back while the bin had another is seen.
+      const look = this.looker(root);
       try {
         if (signal.aborted) throw osFailure("stopped");
         // Checked again, as a read is: the chat's own, a file now in no grant, and a link put at its name since stay.
-        const grant = this.grantOf(root, file);
-        if (this.chatOwns(root, file, grant)) throw failureOf(chatsOwn(file));
+        const grant = look(file);
+        if (this.chatOwns(root, file, look)) throw failureOf(chatsOwn(file));
         if (grant === null) throw failureOf(noPermission(file));
         this.within(root, grant, file, (where) => {
           const st = io(file, () => this.options.fd.lstat(where));
@@ -412,10 +449,11 @@ export class Outside implements ToolLayer {
     const { copy, original } = args;
     if (typeof copy !== "string" || typeof original !== "string") return { error: { type: "value", message: "'copy' and 'original' must be strings" } };
     // Checked again: an operation reaches here without its refusal asked, as one taken up again after a restart.
-    const refused = this.putBackRefusal(root, copy, original);
+    const look = this.looker(root);
+    const refused = this.putBackRefusal(root, copy, original, look);
     if (refused !== null) return refused;
     const { revision } = this.options.bindings.copyOf(root, copy)!;
-    const grant = this.grantOf(root, original)!;
+    const grant = look(original)!;
     const { fd } = this.options;
     const conflict: Outcome = { error: { type: "conflict", message: `${original} changed since it was copied. Nothing was replaced; the changes are in ${copy}.` } };
     const notReplaced = (cause: string): Outcome => ({ error: { type: "os", message: `${original} was not replaced: ${cause}. Nothing was changed; the changes are still in ${copy}.` } });
@@ -438,7 +476,7 @@ export class Outside implements ToolLayer {
     const { where, release } = reached;
     try {
       if (typeof where === "string") return notReplaced(`${original} is a folder`);
-      const { dir, name } = where;
+      const { dir } = where;
       let before: BigIntStats | null;
       try {
         before = unchanged(where);
@@ -450,7 +488,7 @@ export class Outside implements ToolLayer {
       const read = await inner("read", { key: copy, max_bytes: null });
       if ("error" in read) return notReplaced(read.error.message);
       const bytes = Buffer.from(read.ok as string, "base64");
-      const temporary = { dir, name: `.${name}.surogate-put-back-${randomUUID().slice(0, 8)}` };
+      const temporary = { dir, name: temporaryName() };
       const left: Made = { opened: false, made: null };
       // The temporary file's name goes on every way out, the one that put it in place too: only while it is still this
       // put back's own, or, where its identity could not be read, as just made by a create-only open.
@@ -578,7 +616,7 @@ export class Outside implements ToolLayer {
     }
   }
 
-  private read(kind: string, args: Record<string, unknown>, grant: string, key: string): unknown {
+  private read(kind: string, args: Record<string, unknown>, grant: string, key: string): unknown | Promise<unknown> {
     const { fd } = this.options;
     const opener = (where: Where) => (flags: number) => fd.open(where, flags);
     switch (kind) {
@@ -595,7 +633,9 @@ export class Outside implements ToolLayer {
           return null;
         }
       case "outside.read":
-        return this.within(null, grant, key, (where) => readFrom(args, key, opener(where)));
+        // Opened by the same walk down, its folder held only for the open: readFromAsync opens before its first await,
+        // then reads its pieces off the main thread from the handle.
+        return this.within(null, grant, key, (where) => readFromAsync(args, key, opener(where)));
       case "outside.read_lines":
         return this.within(null, grant, key, (where) => linesFrom(args, key, opener(where)));
       case "outside.list_dir":
@@ -608,7 +648,8 @@ export class Outside implements ToolLayer {
           }
         });
       default: // outside.walk
-        return this.within(null, grant, key, (where) => walkFrom(args, key, opener(where), fd));
+        return this.within(null, grant, key, (where) =>
+          walkFrom(args, key, opener(where), fd, { budgetMs: OUTSIDE_WALK_MS, maxFiles: OUTSIDE_WALK_FILES, times: true }));
     }
   }
 
@@ -681,10 +722,10 @@ export class Outside implements ToolLayer {
   }
 
   // An outcome as the file helper's perform() makes one: a failure in its words, and a result too large to send refused.
-  private answer(kind: string, call: () => unknown): Outcome {
+  private async answer(kind: string, call: () => unknown): Promise<Outcome> {
     let outcome: Outcome;
     try {
-      outcome = { ok: call() ?? null };
+      outcome = { ok: (await call()) ?? null };
     } catch (error) {
       outcome = {
         error: error instanceof Failure

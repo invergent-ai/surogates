@@ -85,13 +85,16 @@ const noPermission = (path: string): Outcome => ({
 describe("Outside", () => {
   it("grants a known folder by its OS path and answers where", async () => {
     const outside = layer();
-    expect(outside.resolveFolder("desktop", ROOT)).toEqual({ folder: desktop });
-    expect(outside.resolveFolder(desktop, ROOT)).toEqual({ folder: desktop });
+    expect(await outside.resolveFolder("desktop", ROOT)).toEqual({ folder: desktop });
+    expect(await outside.resolveFolder(desktop, ROOT)).toEqual({ folder: desktop });
     // A name that is neither a known folder nor an absolute path, and one that may not be granted, are refused.
-    expect(outside.resolveFolder("Music", ROOT)).toMatchObject({ refused: expect.stringContaining("Music") });
-    const home = outside.resolveFolder(join(base, "home"), ROOT);
+    expect(await outside.resolveFolder("Music", ROOT)).toMatchObject({ refused: expect.stringContaining("Music") });
+    const home = await outside.resolveFolder(join(base, "home"), ROOT);
     expect(home).toMatchObject({ refused: expect.stringMatching(/^Surogate cannot read .*home: the folder .* holds/) });
-    expect(outside.refusal(op("outside.grant", { folder: "Music" }))).toMatchObject({ error: { type: "denied" } });
+    // Resolved by the approvals and by run(), never on refusal()'s way: only its shape is checked there.
+    expect(outside.refusal(op("outside.grant", { folder: 7 }))).toMatchObject({ error: { type: "denied" } });
+    expect(outside.refusal(op("outside.grant", { folder: "Music" }))).toBeNull();
+    expect(await outside.run(op("outside.grant", { folder: "Music" }), never())).toMatchObject({ error: { type: "denied" } });
     expect(outside.refusal(op("outside.grant", { folder: "Desktop" }))).toBeNull();
     // The approvals granted it, on its user's allow.
     journal.bindings.grantRead(ROOT, desktop);
@@ -100,6 +103,35 @@ describe("Outside", () => {
     expect(await outside.run(op("outside.grant", { folder: join(desktop, "Scan") }), never())).toEqual({ ok: { folder: join(desktop, "Scan") } });
     expect(await outside.run(op("outside.grant", { folder: join(base, "elsewhere") }), never())).toEqual(noPermission(join(base, "elsewhere")));
     expect(tools.ran).toEqual([]);
+  });
+
+  it("answers a grant with the folder its user allowed, wherever its name leads by the time it runs", async () => {
+    let moved = false;
+    const getMoved = (name: string) => (moved && name === "desktop" ? join(base, "elsewhere") : getPath(name));
+    const approvals = { chosenFor: vi.fn((): string[] | undefined => [desktop]) };
+    const outside = new Outside({ tools, bindings: journal.bindings, approvals, fd: fdPaths, getPath: getMoved, trash });
+    // Allowed and kept by the approvals, then the OS moved the Desktop before the grant ran: no second question.
+    journal.bindings.grantRead(ROOT, desktop);
+    moved = true;
+    const grant = op("outside.grant", { folder: "Desktop" });
+    expect(await outside.run(grant, never())).toEqual({ ok: { folder: desktop } });
+    expect(approvals.chosenFor).toHaveBeenCalledWith(grant.id);
+    // One allowed and taken back since is no grant: its name is resolved again, and leads nowhere granted.
+    journal.bindings.takeBackRead(ROOT, desktop);
+    expect(await outside.run(op("outside.grant", { folder: "Desktop" }), never())).toEqual(noPermission(join(base, "elsewhere")));
+  });
+
+  it("refuses a grant whose folder does not answer in time, before it is resolved", async () => {
+    const looked: string[] = [];
+    const outside = new Outside({
+      tools, bindings: journal.bindings, approvals: { chosenFor }, fd: fdPaths, getPath, trash,
+      look: async (folder) => (looked.push(folder), "silent"),
+    });
+    expect(await outside.resolveFolder("Desktop", ROOT)).toEqual({
+      refused: "Surogate cannot read Desktop: it did not answer in time, as a network drive or one that has stopped answering may not.",
+    });
+    expect(await outside.run(op("outside.grant", { folder: desktop }), never())).toMatchObject({ error: { type: "denied", message: expect.stringContaining("did not answer in time") } });
+    expect(looked).toEqual([desktop, desktop]);
   });
 
   it("answers a kind it does not know in its own words, not as an old app", async () => {
@@ -150,8 +182,32 @@ describe("Outside", () => {
     expect(await outside.run(op("outside.resolve", { path: `${desktop}/Scan/` }), never())).toEqual({ ok: join(desktop, "Scan") });
     const walked = await outside.run(op("outside.walk", { key: desktop, skip: [], skip_top: [], skip_hidden: false, since: null }), never());
     const theirs = await perform("walk", { key: desktop, skip: [], skip_top: [], skip_hidden: false, since: null }, context, never());
-    expect(walked).toMatchObject({ ok: { files: (theirs as { ok: { files: unknown } }).ok.files, truncated: false, cursor: expect.any(String) } });
+    // The same files and sizes, each with its mtime too, as a stat says it.
+    const files = (theirs as { ok: { files: Array<[string, number]> } }).ok.files;
+    const mtime = (path: string) => ((perform("stat", { key: join(desktop, path) }, context, never()) as unknown) as Promise<{ ok: { mtime: number } }>);
+    const timed = await Promise.all(files.map(async ([path, size]) => [path, size, (await mtime(path)).ok.mtime]));
+    expect(walked).toMatchObject({ ok: { files: timed, truncated: false, cursor: expect.any(String) } });
     expect(tools.ran).toEqual([]);
+  });
+
+  it("reads a large file in pieces off the main thread, and stops a walk sooner than the folder's own", async () => {
+    journal.bindings.grantRead(ROOT, desktop);
+    const outside = layer();
+    const big = join(desktop, "big.bin");
+    const bytes = Buffer.alloc(3 * 1024 * 1024 + 5, 7);
+    writeFileSync(big, bytes);
+    const read = outside.run(op("outside.read", { key: big, max_bytes: null }), never());
+    // The main thread is free while it reads: a timer set after it starts runs before it ends.
+    let ticked = false;
+    setImmediate(() => { ticked = true; });
+    expect(await read).toEqual({ ok: bytes.toString("base64") });
+    expect(ticked).toBe(true);
+    const many = join(desktop, "many");
+    mkdirSync(many);
+    for (let n = 0; n <= 2_000; n += 1) writeFileSync(join(many, `f${n}`), "");
+    const walked = await outside.run(op("outside.walk", { key: many, skip: [], skip_top: [], skip_hidden: false, since: null }), never());
+    expect(walked).toMatchObject({ ok: { truncated: true } });
+    expect((walked as { ok: { files: unknown[] } }).ok.files).toHaveLength(2_000);
   });
 
   it("refuses a path that leads out of the grant through a link", async () => {
@@ -495,7 +551,7 @@ describe("outside.trash and outside.put_back", () => {
     const operation = op("outside.put_back", { copy, original });
     return layer().run(operation, never());
   };
-  const changedAt = (path: string) => readdirSync(path).filter((name) => name.includes("surogate-put-back"));
+  const changedAt = (path: string) => readdirSync(path).filter((name) => name.includes(".sgpb-"));
 
   it("moves only the ticked files to the bin", async () => {
     journal.bindings.grantRead(ROOT, desktop);
@@ -680,7 +736,7 @@ describe("outside put back's edges, and the chat's folder by another name", () =
     const outcome = await layer().run(op("outside.copy", { files: [file], to: work }), never());
     return (outcome as { ok: { copied: Array<{ to: string }> } }).ok.copied[0]!.to;
   };
-  const temporaries = () => readdirSync(desktop).filter((name) => name.includes("surogate-put-back"));
+  const temporaries = () => readdirSync(desktop).filter((name) => name.includes(".sgpb-"));
   // A drive that ignores case, as Windows's and macOS's do: "WORK" is the chat's folder "work". *paths* false spells it
   // so only by a held folder's name, as a look by path finds nothing and the folder is swapped in after.
   const caseless = (paths = true): FdPaths => {
@@ -708,6 +764,18 @@ describe("outside put back's edges, and the chat's folder by another name", () =
     expect(statSync(note).mode & 0o777).toBe(0o600);
   });
 
+  it("puts back over an original whose name is 250 characters long, by a short temporary name", async () => {
+    folderTools();
+    journal.bindings.grantRead(ROOT, desktop);
+    const long = join(desktop, `${"n".repeat(246)}.txt`);
+    writeFileSync(long, "old\n");
+    const copy = await copied(long);
+    writeFileSync(copy, "changed\n");
+    expect(await layer().run(op("outside.put_back", { copy, original: long }), never())).toEqual({ ok: { original: long, copyDeleted: true } });
+    expect(readFileSync(long, "utf8")).toBe("changed\n");
+    expect(temporaries()).toEqual([]);
+  });
+
   it("leaves no second name of the file put back when the rename could not remove it", async () => {
     folderTools();
     journal.bindings.grantRead(ROOT, desktop);
@@ -718,7 +786,7 @@ describe("outside put back's edges, and the chat's folder by another name", () =
     const sticky: FdPaths = {
       ...fdPaths,
       unlink: (where) => {
-        if (!refused && typeof where !== "string" && where.name?.includes("surogate-put-back")) {
+        if (!refused && typeof where !== "string" && where.name?.includes(".sgpb-")) {
           refused = true;
           throw Object.assign(new Error("EBUSY: resource busy or locked"), { code: "EBUSY" });
         }
@@ -741,7 +809,7 @@ describe("outside put back's edges, and the chat's folder by another name", () =
       ...fdPaths,
       open: (where, flags, mode) => {
         const file = fdPaths.open(where, flags, mode);
-        if (typeof where !== "string" && where.name?.includes("surogate-put-back")) made = file;
+        if (typeof where !== "string" && where.name?.includes(".sgpb-")) made = file;
         return file;
       },
       fstat: ((file: number, options?: { bigint: true }) => {

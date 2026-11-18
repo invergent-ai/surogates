@@ -10,10 +10,11 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
-  accessSync, type BigIntStats, closeSync, constants, type Dirent, fchmodSync, fstatSync, readSync, type Stats, statSync, writeSync,
+  accessSync, type BigIntStats, closeSync, constants, type Dirent, fchmodSync, fstatSync, read as readCallback, readSync, type Stats, statSync, writeSync,
 } from "node:fs";
 import { constants as osConstants } from "node:os";
 import { posix } from "node:path";
+import { promisify } from "node:util";
 
 import { isBase64, type Outcome } from "../link/protocol.js";
 import {
@@ -76,6 +77,7 @@ const WRITE_EFBIG = new Failure({ type: "os", code: "EFBIG", message: WRITE_TOO_
 const READ_EFBIG = new Failure({ type: "os", code: "EFBIG", message: READ_TOO_LARGE });
 // What one read call takes from the file at a time.
 const READ_PIECE_BYTES = 1024 * 1024;
+const readAsync = promisify(readCallback);
 // The codecs read_file decodes text in, which read_lines pages, as surogates/tools/workspace_io/local.py's
 // CODE_UNITS: each one's code unit, as its width in bytes and where in it a line feed's or carriage return's value is.
 const CODE_UNITS: Record<string, readonly [width: number, low: number]> = {
@@ -172,18 +174,18 @@ function stat(args: Record<string, unknown>, { folder, at }: Context): unknown {
 
 /** A stat's answer for *st*: whether it is a folder, its size, its mtime as Python reads it, and its revision. */
 export function statOf(st: BigIntStats): unknown {
-  // st_mtime as CPython computes it from tv_sec and tv_nsec: seconds plus
-  // nanoseconds * 1e-9, with tv_nsec never negative.
+  return { is_dir: st.isDirectory(), size: Number(st.size), mtime: mtimeOf(st), revision: revisionOf(st) };
+}
+
+// st_mtime as CPython computes it from tv_sec and tv_nsec: seconds plus nanoseconds * 1e-9, with tv_nsec never negative.
+function mtimeOf(st: BigIntStats): number {
   let seconds = st.mtimeNs / 1_000_000_000n;
   let nanoseconds = st.mtimeNs % 1_000_000_000n;
   if (nanoseconds < 0n) {
     seconds -= 1n;
     nanoseconds += 1_000_000_000n;
   }
-  return {
-    is_dir: st.isDirectory(), size: Number(st.size), mtime: Number(seconds) + Number(nanoseconds) * 1e-9,
-    revision: revisionOf(st),
-  };
+  return Number(seconds) + Number(nanoseconds) * 1e-9;
 }
 
 // An open file that is a regular file; refused otherwise, before any byte moves.
@@ -219,6 +221,38 @@ export function readFrom(args: Record<string, unknown>, key: string, open: Opene
       const count = io(key, () => readSync(fd, piece, 0, piece.length, null));
       if (count === 0) break;
       // A short read keeps a copy of what it read, not the whole piece.
+      pieces.push(count === piece.length ? piece : Buffer.from(piece.subarray(0, count)));
+      size += count;
+    }
+    if (size > MAX_READ_BYTES) throw READ_EFBIG;
+    return Buffer.concat(pieces, size).toString("base64");
+  } finally {
+    io(key, () => closeSync(fd));
+  }
+}
+
+/**
+ * readFrom's answer, its pieces read off the main thread: for a read in the app's own process (outside/executor.ts),
+ * whose thread a large file's read would hold. *open* is called before the first await, so a caller holding the
+ * file's folder for the open may let it go once this returns its promise.
+ */
+export async function readFromAsync(args: Record<string, unknown>, key: string, open: Opener): Promise<string> {
+  const wanted = wholeOrNull(args, "max_bytes");
+  const limit = wanted === null ? MAX_READ_BYTES + 1 : Math.min(wanted, MAX_READ_BYTES + 1);
+  const fd = io(key, () => open(constants.O_RDONLY | FLAGS.NOFOLLOW | constants.O_NONBLOCK));
+  try {
+    if (regular(fd, key).size > MAX_READ_BYTES && limit > MAX_READ_BYTES) throw READ_EFBIG;
+    const pieces: Buffer[] = [];
+    let size = 0;
+    while (size < limit) {
+      const piece = Buffer.allocUnsafe(Math.min(READ_PIECE_BYTES, limit - size));
+      let count: number;
+      try {
+        ({ bytesRead: count } = await readAsync(fd, piece, 0, piece.length, null));
+      } catch (error) {
+        throw fromNode(error, key);
+      }
+      if (count === 0) break;
       pieces.push(count === piece.length ? piece : Buffer.from(piece.subarray(0, count)));
       size += count;
     }
@@ -524,15 +558,23 @@ export const listed = (names: string[]): string[] => names.filter((name) => !OWN
 // most. Each folder is read an entry at a time, so one of a million entries costs no more than the walk looks at. A
 // folder it may not read, or one a link took the place of, is left out, and the walk goes on. Out of handles, it
 // stops, said truncated: what the rest holds is unknown, and the walk must not be taken for whole.
-function walk(args: Record<string, unknown>, { folder, at }: Context): { files: Array<[string, number]>; truncated: boolean; cursor: string } {
+function walk(args: Record<string, unknown>, { folder, at }: Context): ReturnType<typeof walkFrom> {
   const key = keyInFolder(folder, text(args, "key"), at);
   return walkFrom(args, key, (flags) => fdPaths.open(key, flags));
+}
+
+/** How a walk is bounded, and whether each file comes with its mtime: [path, size, mtime]. */
+export interface WalkLimits {
+  budgetMs?: number;
+  maxFiles?: number;
+  times?: boolean;
 }
 
 /** walk's answer for *key*, opened by *open*, every folder below it entered through *fd*. */
 export function walkFrom(
   args: Record<string, unknown>, key: string, open: Opener, fd: FdPaths = fdPaths,
-): { files: Array<[string, number]>; truncated: boolean; cursor: string } {
+  { budgetMs = WALK_BUDGET_MS, maxFiles = MAX_WALK_FILES, times = false }: WalkLimits = {},
+): { files: Array<[string, number] | [string, number, number]>; truncated: boolean; cursor: string } {
   const { skip, skip_top: top, skip_hidden: hidden, since } = args;
   if (
     !names(skip) || !names(top) || typeof hidden !== "boolean"
@@ -542,11 +584,11 @@ export function walkFrom(
     throw valueError(BAD_WALK);
   }
   const cursor = String(BigInt(Date.now()) * 1_000_000n - WALK_MARGIN_NS);
-  const deadline = performance.now() + WALK_BUDGET_MS;
+  const deadline = performance.now() + budgetMs;
   const after = since === null ? null : BigInt(since);
   const skipped = new Set<string>(skip);
   const skippedTop = new Set<string>(top);
-  const files: Array<[string, number]> = [];
+  const files: Array<[string, number] | [string, number, number]> = [];
   let cost = 2; // "[]"
   let looks = 0;
   let truncated = false;
@@ -621,12 +663,13 @@ export function walkFrom(
         continue;
       }
       if (after !== null && st.mtimeNs < after && st.ctimeNs < after) continue;
-      const more = pyJsonLength(path) + 24;
-      if (files.length === MAX_WALK_FILES || cost + more > MAX_PAYLOAD_BYTES) {
+      // A time as JSON writes a double: at most 24 characters, and its ", ".
+      const more = pyJsonLength(path) + 24 + (times ? 26 : 0);
+      if (files.length === maxFiles || cost + more > MAX_PAYLOAD_BYTES) {
         truncated = true;
         break;
       }
-      files.push([path, Number(st.size)]);
+      files.push(times ? [path, Number(st.size), mtimeOf(st)] : [path, Number(st.size)]);
       cost += more;
     }
   } finally {
