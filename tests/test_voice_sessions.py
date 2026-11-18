@@ -64,6 +64,13 @@ async def test_open_call_withheld_number_never_remembers(monkeypatch):
     assert seen["identity"] == ("voice", "call:SCL_1")  # withheld callers never share one user
     assert seen["session"][2]["memory_boundary"] == "voice:call:SCL_1"
     assert call.caller == "anonymous"
+    assert "[The caller's number is withheld.] " in call.note
+
+
+async def test_the_agent_is_told_the_callers_number_before_the_greeting(monkeypatch):
+    call, _ = await _open(monkeypatch, caller="0722 000 111", remember=False)
+    assert call.note == ("[This call is in Romanian: speak only Romanian.] [The call comes from +40722000111.] "
+                         "[You already answered the phone with: «Bună ziua!».] ")
 
 
 def test_the_agents_question_is_read_from_the_real_tool_schema():

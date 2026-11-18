@@ -52,6 +52,16 @@ def speak_note(language: str) -> str:
 GREETED = "[You already answered the phone with: «{}».] "
 CALLED = "[You phoned this person; as they answered you said: «{}».] "
 GREETING_CUT = "[You answered the phone, but the caller interrupted you after: «{}».] "
+FROM_NUMBER = "[The call comes from +{}.] "
+WITHHELD = "[The caller's number is withheld.] "
+PHONED = "[You phoned +{}.] "
+
+
+def number_note(number: str, *, outbound: bool = False) -> str:
+    """Who is on the line (E.164), so the agent can look them up. Only the agent sees it, as it sees the session."""
+    if number == ANONYMOUS:
+        return "" if outbound else WITHHELD
+    return (PHONED if outbound else FROM_NUMBER).format(number)
 
 
 def normalize_caller(raw: str | None) -> str:
@@ -372,7 +382,8 @@ class VoiceSessions:
         call = CallSession(store=self._store, redis=self._redis, session_id=session_id, org_id=target.org_id,
                            agent_id=target.agent_id, user_id=user_id, caller=caller_id, language=language,
                            lines=lines or default_lines(language),
-                           note=speak_note(language) + (GREETED.format(greeting) if greeting else ""))
+                           note=speak_note(language) + number_note(caller_id)
+                           + (GREETED.format(greeting) if greeting else ""))
         if remember:  # a known number calling back may be answering a step
             call.before_first_words = self._step_reply(call)
         return call
@@ -383,10 +394,12 @@ class VoiceSessions:
         (we dialled their number), and what they say answers whatever the call was placed for."""
         session = await self._store.get_session(session_id)
         await self._store.update_session_config_key(session_id, "voice_call_id", call_id)
+        callee_id = normalize_caller(callee)
         call = CallSession(store=self._store, redis=self._redis, session_id=session_id, org_id=session.org_id,
-                           agent_id=session.agent_id, user_id=session.user_id, caller=normalize_caller(callee),
+                           agent_id=session.agent_id, user_id=session.user_id, caller=callee_id,
                            language=language, lines=lines or default_lines(language),
-                           note=speak_note(language) + (CALLED.format(said) if said else ""))
+                           note=speak_note(language) + number_note(callee_id, outbound=True)
+                           + (CALLED.format(said) if said else ""))
         call.before_first_words = self._step_reply(call)
         return call
 

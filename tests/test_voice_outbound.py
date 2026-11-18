@@ -158,6 +158,7 @@ async def test_the_call_joins_the_conversation_it_was_placed_from(monkeypatch):
     call = await VoiceSessions(store=S(), redis=None, session_factory=None).join_call(
         sid, call_id="out-40", callee="+40712000103", said="Bună ziua, vă sun de la clinică.")
     assert (call.session_id, call.user_id, call.caller) == (sid, user, "40712000103")
+    assert "[You phoned +40712000103.] [You phoned this person" in call.note
     assert "You phoned this person" in call.note and "vă sun de la clinică" in call.note
     assert call.before_first_words is not None and configured == [("voice_call_id", "out-40")]
 
