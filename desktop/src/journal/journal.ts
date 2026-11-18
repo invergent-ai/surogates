@@ -84,6 +84,18 @@ export class OperationJournal {
           domain TEXT NOT NULL,
           PRIMARY KEY (root, domain)
         );
+        CREATE TABLE IF NOT EXISTS read_grants (
+          root TEXT NOT NULL,
+          folder TEXT NOT NULL,
+          PRIMARY KEY (root, folder)
+        );
+        CREATE TABLE IF NOT EXISTS outside_copies (
+          root TEXT NOT NULL,
+          copy TEXT NOT NULL,
+          original TEXT NOT NULL,
+          revision TEXT NOT NULL,
+          PRIMARY KEY (root, copy)
+        );
         CREATE TABLE IF NOT EXISTS browsing (root TEXT PRIMARY KEY);
         CREATE TABLE IF NOT EXISTS browser_ports (port INTEGER PRIMARY KEY, root TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS browser_port_turns (port INTEGER PRIMARY KEY, turn TEXT NOT NULL);

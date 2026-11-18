@@ -99,6 +99,8 @@ export class Bindings {
   retire(root: string): void {
     const forgotten = this.atomically(() => {
       this.db.prepare(`DELETE FROM domains WHERE root = ?`).run(root);
+      this.db.prepare(`DELETE FROM read_grants WHERE root = ?`).run(root);
+      this.db.prepare(`DELETE FROM outside_copies WHERE root = ?`).run(root);
       this.db.prepare(`DELETE FROM browsing WHERE root = ?`).run(root);
       this.takePorts(root);
       return this.db.prepare(`DELETE FROM bindings WHERE root = ?`).run(root).changes;
@@ -172,6 +174,41 @@ export class Bindings {
   domains(root: string): string[] {
     const rows = this.db.prepare(`SELECT domain FROM domains WHERE root = ? ORDER BY rowid`).all(root) as Array<{ domain: string }>;
     return rows.map((row) => row.domain);
+  }
+
+  /** Let a bound root's agent read *folder* (a guest path outside its own folder) from now on. Once each; an unknown root changes nothing. */
+  grantRead(root: string, folder: string): void {
+    const { changes } = this.db.prepare(`INSERT OR IGNORE INTO read_grants (root, folder) SELECT root, ? FROM bindings WHERE root = ?`).run(folder, root);
+    if (changes > 0) this.changed(root);
+  }
+
+  /** Take *folder* back from a root. One never granted changes nothing, and tells nothing. */
+  takeBackRead(root: string, folder: string): void {
+    const { changes } = this.db.prepare(`DELETE FROM read_grants WHERE root = ? AND folder = ?`).run(root, folder);
+    if (changes > 0) this.changed(root);
+  }
+
+  /** The folders a root's user let its agent read outside its own, in the order granted. */
+  reads(root: string): string[] {
+    const rows = this.db.prepare(`SELECT folder FROM read_grants WHERE root = ? ORDER BY rowid`).all(root) as Array<{ folder: string }>;
+    return rows.map((row) => row.folder);
+  }
+
+  /** Note that *copy*, in a bound root's folder, was copied from *original* as it was at *revision*; a copy noted before is replaced. */
+  recordCopy(root: string, copy: string, original: string, revision: string): void {
+    this.db.prepare(`INSERT OR REPLACE INTO outside_copies (root, copy, original, revision) SELECT root, ?, ?, ? FROM bindings WHERE root = ?`)
+      .run(copy, original, revision, root);
+  }
+
+  /** Where *copy* came from and the revision it was taken at; undefined for a file that is no recorded copy. */
+  copyOf(root: string, copy: string): { original: string; revision: string } | undefined {
+    return this.db.prepare(`SELECT original, revision FROM outside_copies WHERE root = ? AND copy = ?`).get(root, copy) as
+      { original: string; revision: string } | undefined;
+  }
+
+  /** Forget that *copy* came from anywhere. */
+  forgetCopy(root: string, copy: string): void {
+    this.db.prepare(`DELETE FROM outside_copies WHERE root = ? AND copy = ?`).run(root, copy);
   }
 
   /** Let a bound root's agent use the browser on this computer from now on, as its user allowed. An unknown root changes nothing. */
