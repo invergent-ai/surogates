@@ -22,7 +22,7 @@ import {
   sandboxError, SHOWN_DOT_FOLDERS, valueError, WALK_BUDGET_MS, WALK_MARGIN_NS, WRITE_TOO_LARGE,
 } from "./answers.js";
 import { retold, saidInFailing, searched, spared } from "./edge.js";
-import { fdPaths, type Listing, type Where } from "./fd-paths.js";
+import { type FdPaths, fdPaths, type Listing, type Where } from "./fd-paths.js";
 import { FLAGS } from "./flags.js";
 import { identityOf } from "./identity.js";
 import { land } from "./land.js";
@@ -164,22 +164,26 @@ function revisionAt(key: string): string | null {
 
 function stat(args: Record<string, unknown>, { folder, at }: Context): unknown {
   try {
-    const st = fdPaths.stat(keyInFolder(folder, text(args, "key"), at), { bigint: true });
-    // st_mtime as CPython computes it from tv_sec and tv_nsec: seconds plus
-    // nanoseconds * 1e-9, with tv_nsec never negative.
-    let seconds = st.mtimeNs / 1_000_000_000n;
-    let nanoseconds = st.mtimeNs % 1_000_000_000n;
-    if (nanoseconds < 0n) {
-      seconds -= 1n;
-      nanoseconds += 1_000_000_000n;
-    }
-    return {
-      is_dir: st.isDirectory(), size: Number(st.size), mtime: Number(seconds) + Number(nanoseconds) * 1e-9,
-      revision: revisionOf(st),
-    };
+    return statOf(fdPaths.stat(keyInFolder(folder, text(args, "key"), at), { bigint: true }));
   } catch {
     return null;
   }
+}
+
+/** A stat's answer for *st*: whether it is a folder, its size, its mtime as Python reads it, and its revision. */
+export function statOf(st: BigIntStats): unknown {
+  // st_mtime as CPython computes it from tv_sec and tv_nsec: seconds plus
+  // nanoseconds * 1e-9, with tv_nsec never negative.
+  let seconds = st.mtimeNs / 1_000_000_000n;
+  let nanoseconds = st.mtimeNs % 1_000_000_000n;
+  if (nanoseconds < 0n) {
+    seconds -= 1n;
+    nanoseconds += 1_000_000_000n;
+  }
+  return {
+    is_dir: st.isDirectory(), size: Number(st.size), mtime: Number(seconds) + Number(nanoseconds) * 1e-9,
+    revision: revisionOf(st),
+  };
 }
 
 // An open file that is a regular file; refused otherwise, before any byte moves.
@@ -192,9 +196,18 @@ function regular(fd: number, key: string): Stats {
 
 function read(args: Record<string, unknown>, { folder, at }: Context): string {
   const key = keyInFolder(folder, text(args, "key"), at);
+  return readFrom(args, key, (flags) => fdPaths.open(key, flags));
+}
+
+// An opening of a key already checked, with these flags: by its path in the folder's helper, or one name at a time
+// from a grant outside the chat's folder (outside/executor.ts), which no sandbox binds.
+export type Opener = (flags: number) => number;
+
+/** read's answer for *key*, opened by *open*. */
+export function readFrom(args: Record<string, unknown>, key: string, open: Opener): string {
   const wanted = wholeOrNull(args, "max_bytes");
   const limit = wanted === null ? MAX_READ_BYTES + 1 : Math.min(wanted, MAX_READ_BYTES + 1);
-  const fd = io(key, () => fdPaths.open(key, constants.O_RDONLY | FLAGS.NOFOLLOW | constants.O_NONBLOCK));
+  const fd = io(key, () => open(constants.O_RDONLY | FLAGS.NOFOLLOW | constants.O_NONBLOCK));
   try {
     // Asked for whole, a file over the cap is refused from its size, before a byte of it is read.
     if (regular(fd, key).size > MAX_READ_BYTES && limit > MAX_READ_BYTES) throw READ_EFBIG;
@@ -224,6 +237,11 @@ const isInteger = (value: unknown): value is number => Number.isInteger(value);
 // decodes the page and applies every rule.
 function readLines(args: Record<string, unknown>, { folder, at }: Context): { data: string; total_lines: number } {
   const key = keyInFolder(folder, text(args, "key"), at);
+  return linesFrom(args, key, (flags) => fdPaths.open(key, flags));
+}
+
+/** read_lines's answer for *key*, opened by *open*. */
+export function linesFrom(args: Record<string, unknown>, key: string, open: Opener): { data: string; total_lines: number } {
   const { encoding, offset, limit, max_bytes: maxBytes } = args;
   const unit = typeof encoding === "string" && Object.hasOwn(CODE_UNITS, encoding) ? CODE_UNITS[encoding] : undefined;
   if (
@@ -232,7 +250,7 @@ function readLines(args: Record<string, unknown>, { folder, at }: Context): { da
   ) {
     throw valueError(BAD_PAGE);
   }
-  const fd = io(key, () => fdPaths.open(key, constants.O_RDONLY | FLAGS.NOFOLLOW | constants.O_NONBLOCK));
+  const fd = io(key, () => open(constants.O_RDONLY | FLAGS.NOFOLLOW | constants.O_NONBLOCK));
   try {
     // From the file's size, before a byte of it is read.
     if (regular(fd, key).size > MAX_READ_BYTES) throw READ_EFBIG;
@@ -486,8 +504,11 @@ function makeDirs(dir: string): void {
 
 function listDir(args: Record<string, unknown>, { folder, at }: Context): string[] {
   const key = keyInFolder(folder, text(args, "key"), at);
-  return io(key, () => fdPaths.readdir(key)).filter((name) => !OWN_FILE.test(name)).slice(0, MAX_NAMES);
+  return listed(io(key, () => fdPaths.readdir(key)));
 }
+
+/** list_dir's answer from a folder's names. */
+export const listed = (names: string[]): string[] => names.filter((name) => !OWN_FILE.test(name)).slice(0, MAX_NAMES);
 
 // walk (surogates/devices/workspace.py): the regular files under the folder at the key, each as its path from it and
 // its size, depth first. No link is followed, and no folder the tree hides is entered: one named in skip, one directly
@@ -505,6 +526,13 @@ function listDir(args: Record<string, unknown>, { folder, at }: Context): string
 // stops, said truncated: what the rest holds is unknown, and the walk must not be taken for whole.
 function walk(args: Record<string, unknown>, { folder, at }: Context): { files: Array<[string, number]>; truncated: boolean; cursor: string } {
   const key = keyInFolder(folder, text(args, "key"), at);
+  return walkFrom(args, key, (flags) => fdPaths.open(key, flags));
+}
+
+/** walk's answer for *key*, opened by *open*, every folder below it entered through *fd*. */
+export function walkFrom(
+  args: Record<string, unknown>, key: string, open: Opener, fd: FdPaths = fdPaths,
+): { files: Array<[string, number]>; truncated: boolean; cursor: string } {
   const { skip, skip_top: top, skip_hidden: hidden, since } = args;
   if (
     !names(skip) || !names(top) || typeof hidden !== "boolean"
@@ -523,10 +551,10 @@ function walk(args: Record<string, unknown>, { folder, at }: Context): { files: 
   let looks = 0;
   let truncated = false;
   // The key's own failure is the answer.
-  const keyFd = io(key, () => fdPaths.open(key, constants.O_RDONLY | FLAGS.DIRECTORY | FLAGS.NOFOLLOW));
+  const keyFd = io(key, () => open(constants.O_RDONLY | FLAGS.DIRECTORY | FLAGS.NOFOLLOW));
   let keyDir: Listing;
   try {
-    keyDir = io(key, () => fdPaths.listing(keyFd));
+    keyDir = io(key, () => fd.listing(keyFd));
   } catch (error) {
     closeSync(keyFd);
     throw error;
@@ -564,9 +592,9 @@ function walk(args: Record<string, unknown>, { folder, at }: Context): { files: 
           truncated = true;
           break;
         }
-        let fd: number;
+        let entered: number;
         try {
-          fd = fdPaths.open(at, constants.O_RDONLY | FLAGS.DIRECTORY | FLAGS.NOFOLLOW);
+          entered = fd.open(at, constants.O_RDONLY | FLAGS.DIRECTORY | FLAGS.NOFOLLOW);
         } catch (error) {
           if (outOfHandles(error)) {
             truncated = true;
@@ -575,9 +603,9 @@ function walk(args: Record<string, unknown>, { folder, at }: Context): { files: 
           continue;
         }
         try {
-          levels.push({ fd, rel: path, dir: fdPaths.listing(fd) });
+          levels.push({ fd: entered, rel: path, dir: fd.listing(entered) });
         } catch (error) {
-          closeSync(fd);
+          closeSync(entered);
           if (outOfHandles(error)) {
             truncated = true;
             break;
@@ -588,7 +616,7 @@ function walk(args: Record<string, unknown>, { folder, at }: Context): { files: 
       if (!entry.isFile() || OWN_FILE.test(name)) continue;
       let st: BigIntStats;
       try {
-        st = fdPaths.lstat(at);
+        st = fd.lstat(at);
       } catch {
         continue;
       }

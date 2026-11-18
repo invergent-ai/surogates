@@ -158,9 +158,12 @@ describe("a read too large for one frame", () => {
 });
 
 describe("a read's result", () => {
-  it("is a screenshot's too: it goes as a header naming it, then its chunks", async () => {
+  it.each([
+    ["a screenshot's", "browser.screenshot", { clip: null, labels: [] }],
+    ["a read outside the chat's folder's", "outside.read", { key: "/g/big.bin", max_bytes: null }],
+  ])("is %s too: it goes as a header naming it, then its chunks", async (_name, kind, args) => {
     await start(reading(DATA));
-    server.send({ ...readOp("s"), kind: "browser.screenshot", args: { clip: null, labels: [] } });
+    server.send({ ...readOp("s"), kind, args });
     await server.until(() => chunks("s").length === TRANSFER_WINDOW);
     expect(headers("s").map((f) => f.outcome)).toEqual([NAMED]);
     for (let seq = 0; seq < 6; seq++) server.send({ type: "chunk_ack", id: "s", seq });

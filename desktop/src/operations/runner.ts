@@ -100,7 +100,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 // The kinds whose data in a result may be a transfer (surogates/devices/workspace.py's RESULT_TRANSFERS).
-const RESULT_TRANSFERS: ReadonlySet<string> = new Set(["read", "browser.screenshot"]);
+const RESULT_TRANSFERS: ReadonlySet<string> = new Set(["read", "outside.read", "browser.screenshot"]);
 
 // What goes in the journal and on the wire: an outcome the server records, and
 // nothing it would refuse. A refused result closes the link with 4400, and the
