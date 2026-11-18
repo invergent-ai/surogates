@@ -391,3 +391,16 @@ def test_a_folder_that_only_begins_like_the_workspace_is_left_as_it_is() -> None
     assert _sanitize_paths('cd "/home/ana/proj" && ls /home/ana/proj2', "/home/ana/proj") == (
         'cd "__WORKSPACE__" && ls /home/ana/proj2'
     )
+
+
+@pytest.mark.parametrize("text", [
+    '{"output": "/home/ana/proj\\n"}', "/home/ana/proj\t", "cwd is /home/ana/proj.", "cd /home/ana/proj&&ls",
+    "/home/ana/proj|y", "/home/ana/proj\\x", "/home/ana/proj",
+])
+def test_the_workspace_path_is_sanitized_wherever_it_ends(text) -> None:
+    assert "/home/ana/proj" not in _sanitize_paths(text, "/home/ana/proj")
+
+
+@pytest.mark.parametrize("text", ["/home/ana/proj-old/a", "/home/ana/proj2", "/home/ana/proj_x", "/home/ana/proj.bak/a"])
+def test_a_longer_folder_name_is_not_the_workspace(text) -> None:
+    assert _sanitize_paths(text, "/home/ana/proj") == text

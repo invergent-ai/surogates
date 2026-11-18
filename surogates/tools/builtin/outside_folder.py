@@ -27,17 +27,33 @@ def _error(message: str) -> str:
     return json.dumps({"error": message})
 
 
+def _normal(path: str) -> str:
+    """An absolute *path* as the computer takes it: normalised, one leading slash, no trailing one."""
+    return posixpath.normpath("/" + path.lstrip("/"))
+
+
 def _absolute(path: str, root: str) -> str:
-    """*path*, relative to the chat's folder *root* (``.`` is the folder) or absolute, as the computer takes it:
-    absolute, normalised, with no trailing slash."""
-    return posixpath.normpath(posixpath.join(root, path))
+    """*path*, relative to the chat's folder *root* (``.`` is the folder) or absolute, as the computer takes it.
+
+    Raises ValueError for a relative path that leads out of the folder, and for one through ``~``: the chat's own
+    home is a private scratch area, not the user's.  A file outside the folder is named by its absolute path.
+    """
+    if path.startswith("/"):
+        return _normal(path)
+    if path == "~" or path.startswith("~/"):
+        raise ValueError(f"'{path}' is in this chat's private scratch area, not the user's: give an absolute path.")
+    root = _normal(root)
+    joined = posixpath.normpath(posixpath.join(root, path))
+    if joined != root and not joined.startswith(root.rstrip("/") + "/"):
+        raise ValueError(f"'{path}' leads out of the chat's folder: give the file outside it by its absolute path.")
+    return joined
 
 
 def _paths(value: Any) -> list[str] | None:
-    """*value* as a list of paths, or None when it is not one."""
+    """*value* as a list of paths, stripped, or None when it is not one."""
     if not isinstance(value, list) or not value or not all(isinstance(p, str) and p.strip() for p in value):
         return None
-    return value
+    return [p.strip() for p in value]
 
 
 async def _ask(kind: str, args: dict[str, Any], workspace_io: Any) -> str:
@@ -73,7 +89,7 @@ async def _request_folder_access(arguments: dict[str, Any], **kwargs: Any) -> st
         return _error("'folder' is Desktop, Downloads, Documents, Pictures, or an absolute path.")
     folder = folder.strip()
     # A known folder's name goes as it is, for the computer to find; a path, normalised.
-    return await _ask("outside.grant", {"folder": posixpath.normpath(folder) if folder.startswith("/") else folder}, computer)
+    return await _ask("outside.grant", {"folder": _normal(folder) if folder.startswith("/") else folder}, computer)
 
 
 async def _copy_files(arguments: dict[str, Any], **kwargs: Any) -> str:
@@ -83,11 +99,11 @@ async def _copy_files(arguments: dict[str, Any], **kwargs: Any) -> str:
     files, to = _paths(arguments.get("files")), arguments.get("to")
     if files is None or not isinstance(to, str) or not to.strip():
         return _error("'files' lists the files to copy, and 'to' is the folder to copy them into ('.' is the chat's).")
-    return await _ask(
-        "outside.copy",
-        {"files": [_absolute(f, computer.root) for f in files], "to": _absolute(to.strip(), computer.root)},
-        computer,
-    )
+    try:
+        args = {"files": [_absolute(f, computer.root) for f in files], "to": _absolute(to.strip(), computer.root)}
+    except ValueError as exc:
+        return _error(str(exc))
+    return await _ask("outside.copy", args, computer)
 
 
 async def _move_to_trash(arguments: dict[str, Any], **kwargs: Any) -> str:
@@ -97,7 +113,11 @@ async def _move_to_trash(arguments: dict[str, Any], **kwargs: Any) -> str:
     files = _paths(arguments.get("files"))
     if files is None:
         return _error("'files' lists the files to move to the trash.")
-    return await _ask("outside.trash", {"files": [_absolute(f, computer.root) for f in files]}, computer)
+    try:
+        args = {"files": [_absolute(f, computer.root) for f in files]}
+    except ValueError as exc:
+        return _error(str(exc))
+    return await _ask("outside.trash", args, computer)
 
 
 async def _put_back(arguments: dict[str, Any], **kwargs: Any) -> str:
@@ -107,11 +127,11 @@ async def _put_back(arguments: dict[str, Any], **kwargs: Any) -> str:
     copy, original = arguments.get("working_copy"), arguments.get("original")
     if not isinstance(copy, str) or not copy.strip() or not isinstance(original, str) or not original.strip():
         return _error("'working_copy' is the changed copy in the chat's folder, and 'original' the file it replaces.")
-    return await _ask(
-        "outside.put_back",
-        {"copy": _absolute(copy.strip(), computer.root), "original": _absolute(original.strip(), computer.root)},
-        computer,
-    )
+    try:
+        args = {"copy": _absolute(copy.strip(), computer.root), "original": _absolute(original.strip(), computer.root)}
+    except ValueError as exc:
+        return _error(str(exc))
+    return await _ask("outside.put_back", args, computer)
 
 
 _FILES = {"type": "array", "items": {"type": "string"}, "minItems": 1}

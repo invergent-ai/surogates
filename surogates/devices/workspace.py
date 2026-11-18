@@ -314,7 +314,8 @@ class DeviceWorkspaceIO:
         """*path* normalised when it is absolute and not in the folder, as outside.resolve takes it; else None."""
         if not path.startswith("/"):
             return None
-        path, root = posixpath.normpath(path), posixpath.normpath(self.root)
+        # normpath keeps a leading "//": "//home/a" is "/home/a" here, as on the computer.
+        path, root = posixpath.normpath("/" + path.lstrip("/")), posixpath.normpath("/" + self.root.lstrip("/"))
         if path == root or path.startswith(root.rstrip("/") + "/"):
             return None
         return path

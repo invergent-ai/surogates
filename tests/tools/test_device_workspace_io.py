@@ -883,6 +883,13 @@ async def test_routes_reads_of_a_path_outside_the_folder_to_outside_kinds(two_fo
     assert [kind for kind, _ in laptop.sent] == ["resolve", "resolve", "stat", "stat"]
     assert not wio.is_outside(inside)
 
+    # A leading "//" is one slash: the chat's own folder still, and outside by its one-slash path.
+    laptop.sent.clear()
+    await wio.resolve("/" + str(chat / "x.txt"))
+    await wio.resolve("/" + str(elsewhere / "a.txt"))
+    assert laptop.sent[0][0] == "resolve"
+    assert laptop.sent[1] == ("outside.resolve", {"path": str(elsewhere / "a.txt")})
+
 
 async def test_refuses_writes_deletes_and_searches_by_content_outside_the_folder(two_folders):
     laptop, wio, _chat, elsewhere = two_folders

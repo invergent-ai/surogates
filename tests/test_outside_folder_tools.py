@@ -121,7 +121,38 @@ async def test_a_no_and_an_old_app_are_answered_as_the_tools_result():
 
 async def test_a_chat_in_the_cloud_is_refused_and_asks_nothing():
     result = await call("copy_files", {"files": ["/a"], "to": "."}, workspace_io=None, session_config={})
-    assert "error" in json.loads(result)
+    assert json.loads(result) == {
+        "error": "Files outside the chat's folder are reached only in a chat on a folder of the user's computer.",
+    }
+
+
+@pytest.mark.parametrize(("name", "arguments", "named"), [
+    ("copy_files", {"files": ["../x.txt"], "to": "."}, "../x.txt"),
+    ("copy_files", {"files": ["/mnt/d/a.txt"], "to": "sub/../../out"}, "sub/../../out"),
+    ("move_to_trash", {"files": ["../x.txt"]}, "../x.txt"),
+    ("put_back", {"working_copy": "../x.docx", "original": "/mnt/d/x.docx"}, "../x.docx"),
+    ("put_back", {"working_copy": "x.docx", "original": "../x.docx"}, "../x.docx"),
+])
+async def test_a_relative_way_out_of_the_folder_is_refused_and_asks_nothing(name, arguments, named):
+    laptop, kwargs = on_the_computer()
+    assert json.loads(await call(name, arguments, **kwargs)) == {
+        "error": f"'{named}' leads out of the chat's folder: give the file outside it by its absolute path.",
+    }
+    assert laptop.asked == []
+
+
+async def test_a_path_through_the_chats_home_is_refused_and_asks_nothing():
+    laptop, kwargs = on_the_computer()
+    assert json.loads(await call("move_to_trash", {"files": ["~/a.txt"]}, **kwargs)) == {
+        "error": "'~/a.txt' is in this chat's private scratch area, not the user's: give an absolute path.",
+    }
+    assert laptop.asked == []
+
+
+async def test_paths_are_stripped_and_a_double_slash_is_one():
+    laptop, kwargs = on_the_computer({"ok": {"trashed": [], "kept": []}})
+    await call("move_to_trash", {"files": [" /mnt/d/a.pdf ", "//mnt/d/b.pdf", " c.txt"]}, **kwargs)
+    assert laptop.asked == [("outside.trash", {"files": ["/mnt/d/a.pdf", "/mnt/d/b.pdf", f"{FOLDER}/c.txt"]})]
 
 
 @pytest.mark.parametrize("arguments", [{"files": "a.txt", "to": "."}, {"files": ["a.txt"]}, {"files": [], "to": "."}])
