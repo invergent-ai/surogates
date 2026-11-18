@@ -250,6 +250,8 @@ function deviceOn(journal: OperationJournal, options: DeviceStackOptions, made: 
     journal,
     executor: binder,
     copies: keepsCopies,
+    // The Outside layer is what resolves a grant's folder: a stack without it has no resolveFolder, and one that wraps
+    // it without passing resolveFolder up would lose grants by name as well as this word.
     outside: tools.resolveFolder !== undefined,
     onStatus: (status) => {
       if (status !== "connected") serverWaits = false;

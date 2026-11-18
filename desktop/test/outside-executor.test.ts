@@ -12,7 +12,7 @@ import { type FdPaths, fdPaths, type Where } from "../src/files/fd-paths.js";
 import { perform } from "../src/files/operations.js";
 import { OperationJournal } from "../src/journal/journal.js";
 import type { Operation, Outcome } from "../src/link/protocol.js";
-import { numberedName, Outside } from "../src/outside/executor.js";
+import { binError, numberedName, Outside } from "../src/outside/executor.js";
 import { BIN } from "../src/platform.js";
 import type { ToolLayer } from "../src/shell/device-stack.js";
 
@@ -586,12 +586,14 @@ describe("outside.trash and outside.put_back", () => {
     const note = join(desktop, "note.txt");
     const copy = await copied(note);
     writeFileSync(copy, "changed\n");
-    // Open in Excel: Windows refuses to move it, and Electron's shell.trashItem says so in an Error of its own words, with no code.
+    // The bin refuses: Electron's shell.trashItem says so in an Error of its own words, with no code.
     trash = async () => {
       throw new Error("Failed to move item to trash");
     };
     const outcome = await putBack(copy, note);
-    expect(outcome).toMatchObject({ error: { type: "os", message: expect.stringContaining("open in another program") } });
+    expect(outcome).toMatchObject({ error: { type: "os", message: expect.stringContaining("Failed to move item to trash") } });
+    // Another program is blamed on Windows alone, where a file open there cannot be moved.
+    expect((outcome as { error: { message: string } }).error.message.includes("open in another program")).toBe(process.platform === "win32");
     expect((outcome as { error: { message: string } }).error.message).toContain(copy);
     expect(readFileSync(note, "utf8")).toBe("first\nsecond\n");
     expect(readFileSync(copy, "utf8")).toBe("changed\n");
@@ -841,5 +843,14 @@ describe("outside put back's edges, and the chat's folder by another name", () =
     expect(readdirSync(work).sort()).toEqual(["a.txt", "b.txt"]);
     expect(readdirSync(bin)).toEqual([]);
     expect(tools.ran.map((ran) => ran.kind).filter((kind) => kind === "write" || kind === "delete")).toEqual([]);
+  });
+});
+
+describe("binError", () => {
+  it("blames another program only for a Windows Recycle Bin failure", () => {
+    const refused = new Error("Failed to move item to trash");
+    expect(binError(refused, "win32").refusal).toEqual({ type: "os", message: "Failed to move item to trash (it may be open in another program)" });
+    expect(binError(refused, "darwin").refusal).toEqual({ type: "os", message: "Failed to move item to trash" });
+    expect(binError(refused, "linux").refusal).toEqual({ type: "os", message: "Failed to move item to trash" });
   });
 });

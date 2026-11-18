@@ -49,15 +49,14 @@ const TOO_LARGE = "too large";
 const sha256 = (buffer: Buffer) => createHash("sha256").update(buffer).digest("hex");
 const said = (error: unknown) => error instanceof Failure ? error.refusal.message : error instanceof Error ? error.message : String(error);
 const osFailure = (message: string) => new Failure({ type: "os", message });
-// Why a trash or a rename failed, in words its user can act on: Windows refuses either for a file open in another program.
-// A rename says so by its code; the bin (Electron's shell.trashItem) by an Error of its own words and no code, which
-// cannot tell that from any other refusal, so it says both.
-const causeOf = (error: unknown) => {
-  if (error instanceof Failure) return said(error);
-  const { code } = error as NodeJS.ErrnoException;
-  if (code === "EBUSY" || code === "EPERM") return "it is open in another program";
-  return code === undefined ? `${said(error)} (it may be open in another program)` : said(error);
-};
+/**
+ * Why the bin refused a file, in words its user can act on. Electron's shell.trashItem says it in an Error of its own
+ * words, with no code: on Windows, which refuses to move a file open in another program, that may be why; elsewhere an
+ * open file never stops a move, so the bin's words are said alone.
+ */
+export function binError(error: unknown, platform: NodeJS.Platform = process.platform): Failure {
+  return osFailure(platform === "win32" ? `${said(error)} (it may be open in another program)` : said(error));
+}
 
 /** The *n*th name a copy of *name* tries: its own first, then "name (1).ext", "name (2).ext", and on. */
 export function numberedName(name: string, n: number): string {
@@ -393,10 +392,10 @@ export class Outside implements ToolLayer {
         });
         // ponytail: the bin takes a path, so a link swapped in after the look above and before the move is moved itself
         // (a link is moved, never followed); held by a handle once the OS's trash takes one.
-        await this.options.trash(hostPathOf(file));
+        await this.options.trash(hostPathOf(file)).catch((error: unknown) => { throw binError(error); });
         done.trashed.push(file);
       } catch (error) {
-        done.kept.push({ file, reason: causeOf(error) });
+        done.kept.push({ file, reason: said(error) });
       }
     }
     return { ok: done };
@@ -492,10 +491,10 @@ export class Outside implements ToolLayer {
       try {
         // ponytail: the bin takes a path, as outside.trash's does: a folder on the way swapped after the look above sends
         // what is there now instead, and the link below then finds the name taken and replaces nothing.
-        await this.options.trash(hostPathOf(original));
+        await this.options.trash(hostPathOf(original)).catch((error: unknown) => { throw binError(error); });
       } catch (error) {
         removeTemporary();
-        return { error: { type: "os", message: `${original} could not be moved to the ${BIN}: ${causeOf(error)}. Nothing was replaced; the changes are still in ${copy}.` } };
+        return { error: { type: "os", message: `${original} could not be moved to the ${BIN}: ${said(error)}. Nothing was replaced; the changes are still in ${copy}.` } };
       }
       try {
         this.renamed(temporary, where, made!);
