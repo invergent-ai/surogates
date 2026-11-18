@@ -8,8 +8,9 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { FolderGuards } from "../src/binding/folder.js";
-import { fdPaths } from "../src/files/fd-paths.js";
+import { type FdPaths, fdPaths } from "../src/files/fd-paths.js";
 import { grantable, KNOWN_FOLDERS, knownFolder, withinGrant } from "../src/outside/places.js";
+import { importedOn } from "./platforms.js";
 
 let base: string;
 let guards: FolderGuards;
@@ -34,6 +35,13 @@ describe("known folders", () => {
     expect(knownFolder("Music", getPath)).toBeNull();
     expect(knownFolder("/home/a/Desktop", getPath)).toBeNull();
   });
+
+  it("names no folder for a known folder Windows keeps on no drive", async () => {
+    const places = await importedOn("win32", () => import("../src/outside/places.js"));
+    const getPath = (name: string) => (name === "desktop" ? "\\\\server\\share\\Ana\\Desktop" : `C:\\Users\\Ana\\${name}`);
+    expect(places.knownFolder("Desktop", getPath)).toBeNull();
+    expect(places.knownFolder("downloads", getPath)).toBe("/mnt/c/Users/Ana/downloads");
+  });
 });
 
 describe("a grant", () => {
@@ -52,8 +60,13 @@ describe("a grant", () => {
     symlinkSync(work, join(base, "home", "work-link"));
     expect(grantable(work, guards, work)).toEqual({ ok: false, message: "That is this chat's folder already." });
     expect(grantable(join(base, "home", "work-link"), guards, work)).toEqual({ ok: false, message: "That is this chat's folder already." });
-    // The folder holding the chat's folder, as Diana's Desktop holds her chat's Scan, may be granted.
+    // A folder in the chat's folder, which its commands can write, is refused too.
+    mkdirSync(join(work, "in", "Documents"), { recursive: true });
+    expect(grantable(join(work, "in", "Documents"), guards, work)).toEqual({
+      ok: false, message: "That folder is in this chat's folder, which the chat reads already.",
+    });
     expect(grantable(base, guards, join(base, "home", "Desktop", "Scan"))).toMatchObject({ ok: false });
+    // The folder holding the chat's folder, as Diana's Desktop holds her chat's Scan, may be granted.
     expect(grantable(join(base, "home", "Desktop"), guards, join(base, "home", "Desktop", "Scan"))).toMatchObject({ ok: true });
   });
 });
@@ -99,5 +112,43 @@ describe("the grant holding a path", () => {
     rmSync(join(desktop, "PONTAJE"), { recursive: true });
     symlinkSync(elsewhere, join(desktop, "PONTAJE"));
     expect(withinGrant([join(desktop, "PONTAJE")], join(desktop, "PONTAJE", "secret.txt"), fdPaths)).toBeNull();
+  });
+
+  it("refuses a path whose grant a link above it now leads elsewhere", () => {
+    // A grant made while the way to it was plain; then a folder above it is swapped for a link to the home folder.
+    const grant = join(base, "work", "in", "Documents");
+    mkdirSync(grant, { recursive: true });
+    mkdirSync(join(base, "home", "Documents"));
+    writeFileSync(join(base, "home", "Documents", "x"), "home's");
+    expect(withinGrant([grant], join(grant, "x"), fdPaths)).toBe(grant);
+    rmSync(join(base, "work", "in"), { recursive: true });
+    symlinkSync(join(base, "home"), join(base, "work", "in"));
+    expect(withinGrant([grant], join(grant, "x"), fdPaths)).toBeNull();
+    expect(withinGrant([grant], grant, fdPaths)).toBeNull();
+  });
+
+  it("refuses a path in a grant the file host does not hold, as Windows answers for a folder it never bound", () => {
+    // Windows's file host, with only the chat's Scan bound: above it a folder with nothing more of it, beside it nothing,
+    // and no hold of either (fd-paths-win32.ts, located and within).
+    const desktop = join(base, "home", "Desktop");
+    const scan = join(desktop, "Scan");
+    const missing = () => Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+    const above = (path: string) => scan.startsWith(`${path}/`);
+    const windows = {
+      ...fdPaths,
+      lstat: (where: string) => {
+        if (above(where)) return fdPaths.lstat(desktop);
+        if (where === scan || where.startsWith(`${scan}/`)) return fdPaths.lstat(where);
+        throw missing();
+      },
+      hold: (where: string) => {
+        if (above(where)) throw Object.assign(new Error("EACCES"), { code: "EACCES" });
+        if (where === scan) return fdPaths.hold(where);
+        throw missing();
+      },
+    } as FdPaths;
+    expect(withinGrant([desktop], join(desktop, "junction", "secret.txt"), windows)).toBeNull();
+    expect(withinGrant([desktop], join(desktop, "note.txt"), windows)).toBeNull();
+    expect(withinGrant([scan], join(scan, "new.pdf"), windows)).toBe(scan);
   });
 });

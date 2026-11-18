@@ -7,7 +7,7 @@ import { closeSync, constants, readFileSync } from "node:fs";
 import { posix } from "node:path";
 
 import { Failure, NUL_REFUSED, osError, sandboxError, valueError } from "./answers.js";
-import { fdPaths } from "./fd-paths.js";
+import { type FdPaths, fdPaths } from "./fd-paths.js";
 
 // A thread's copy of a folder stands for the folder (spec, Section 13, "The user's computer"): the helper works in the
 // copy, *folder*, and every request and answer names its files by the path of the folder the copy is of, *at*, as the
@@ -176,11 +176,11 @@ export function inside(path: string, folder: string): boolean {
   return path === folder || path.startsWith(`${folder}/`);
 }
 
-// Whether no name on the way to *path*, nor its own, is a link. Nothing is followed to find out.
-function linkless(path: string): boolean {
+// Whether no name on the way to *path*, nor its own, is a link, each looked at through *fd*. Nothing is followed to find out.
+export function linkless(path: string, fd: FdPaths = fdPaths): boolean {
   for (let end = path.indexOf("/", 1); ; end = path.indexOf("/", end + 1)) {
     try {
-      if (fdPaths.lstat(end < 0 ? path : path.slice(0, end)).isSymbolicLink()) return false;
+      if (fd.lstat(end < 0 ? path : path.slice(0, end)).isSymbolicLink()) return false;
     } catch (error) {
       // Not there, or not this user's to look at: no link that leads anywhere. A refusal of the file host's own stands.
       if (!systems(error)) throw error;
