@@ -17,14 +17,14 @@ out of training-data exports.
 from __future__ import annotations
 
 import logging
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 
 from surogates.channels.constants import API_CHANNEL, session_queue_priority
-from surogates.channels.memory_boundary import is_case_session
+from surogates.channels.memory_boundary import SKILLOPT_BOUNDARY_PREFIX, is_case_session
 from surogates.config import enqueue_session
 from surogates.runtime import (
     AgentRuntimeContext,
@@ -81,6 +81,21 @@ class SkillOverride(BaseModel):
     candidate_id: str | None = None
 
 
+class ScratchScope(BaseModel):
+    """The only OneDrive/SharePoint items a test-mode chat may change for real."""
+
+    drive_id: str
+    root_id: str
+    root_path: str
+    item_ids: list[str]
+
+
+class TestMode(BaseModel):
+    __test__ = False  # not a pytest class
+
+    scratch: ScratchScope | None = None
+
+
 class PromptRequest(BaseModel):
     """A single prompt submission.
 
@@ -99,6 +114,9 @@ class PromptRequest(BaseModel):
     # caller's, or a person's shared with the agent. Whose it is is checked when the
     # browser starts; one that is none of these is never loaded.
     browser_profile_id: UUID | None = None
+    # Skill-optimisation chats only: reads are real, changes outside the
+    # scratch copy are faked.  Needs metadata.skillopt_run_id.
+    test_mode: TestMode | None = None
 
 
 class PromptAccepted(BaseModel):
@@ -249,8 +267,20 @@ async def _submit_one(
                 tenant.org_id, sorted(body.skill_overrides),
             )
 
+    session_id = uuid4()
+    if body.test_mode is not None:
+        run_id = (body.metadata or {}).get("skillopt_run_id")
+        if not run_id:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="test_mode requires metadata.skillopt_run_id.",
+            )
+        config["test_mode"] = body.test_mode.model_dump()
+        config["memory_boundary"] = f"{SKILLOPT_BOUNDARY_PREFIX}{run_id}:{session_id}"
+
     try:
         session = await create_agent_session(
+            session_id=session_id,
             store=store,
             storage=request.app.state.storage,
             settings=settings,

@@ -93,6 +93,10 @@ CASE_BOUNDARY_PREFIX = "case:"
 SIMULATION_BOUNDARY_PREFIX = "simulation:"
 
 
+# A skill-optimisation test chat's memory: per run and chat, never a real one's.
+SKILLOPT_BOUNDARY_PREFIX = "skillopt:"
+
+
 def simulation_boundary(run_id: object, boundary: str) -> str:
     return f"{SIMULATION_BOUNDARY_PREFIX}{run_id}:{boundary}"
 
@@ -288,6 +292,7 @@ def session_memory_boundary(session: object) -> str | None:
                 # Stamped by the API session route; a sub-agent or worker the
                 # session starts inherits it on its own channel.
                 END_USER_BOUNDARY_PREFIX,
+                SKILLOPT_BOUNDARY_PREFIX,
             )
         ):
             return persisted
