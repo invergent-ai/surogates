@@ -121,6 +121,8 @@ from surogates.harness.tool_guardrails import ToolGuardrailConfig, ToolGuardrail
 from surogates.sandbox.copy_files import has_copy, read_copy, writes_to_copy
 from surogates.sandbox.history import PRUNE_DAYS
 from surogates.sandbox.pool import sandbox_session_key
+from surogates.simulation.scratch import STATE_TOOLS
+from surogates.simulation.side_effects import is_test_mode
 from surogates.scheduled.schedule import local_iso
 from surogates.harness.landing import routine_project
 from surogates.workstreams import is_project_master, is_project_thread, master_refusal, thread_refusal, under_a_thread
@@ -1967,7 +1969,7 @@ class AgentHarness(
         )
 
     def _withhold_from_experts(
-        self, usable: dict[str, bool], offered: Iterable[str] | None, session: Session | None = None,
+        self, usable: dict[str, bool], offered: Iterable[str] | None, session: Session,
     ) -> None:
         """Keep from any expert this wake consults every tool the session
         could not be sent: one outside *offered* (the session's tool filter
@@ -1982,10 +1984,8 @@ class AgentHarness(
         gate = self._governance_gate
         if gate is not None:
             withheld |= {name for name in names if not gate.runs_unasked(name)}
-        if session is not None and (session.config or {}).get("test_mode"):
+        if is_test_mode(session.config):
             # The expert's loop calls the router directly, past the test-mode fake in execute_single_tool.
-            from surogates.simulation.scratch import STATE_TOOLS
-
             withheld |= STATE_TOOLS
         expert_scope.set(ExpertScope(withheld=frozenset(withheld), gate=gate))
 

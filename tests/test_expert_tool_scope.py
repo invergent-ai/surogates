@@ -310,7 +310,7 @@ def test_the_session_and_its_experts_are_cut_by_the_same_facts(channel, tmp_path
     usable = harness._tool_usability(session, harness._tools.tool_names)
 
     def scoped() -> el.ExpertScope:
-        harness._withhold_from_experts(usable, None)
+        harness._withhold_from_experts(usable, None, session)
         return el.expert_scope.get()
 
     scope = contextvars.copy_context().run(scoped)

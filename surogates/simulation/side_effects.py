@@ -55,10 +55,15 @@ Judge = Callable[[str, str], Awaitable[bool]]
 _decided: dict[str, tuple[bool, float]] = {}
 
 
+def is_test_mode(config: dict | None) -> bool:
+    """A skill-optimisation test chat: only scratch-copy file changes run for real."""
+    return bool((config or {}).get("test_mode"))
+
+
 def is_simulated(config: dict | None) -> bool:
     config = config or {}
     # A sub-agent made before it inherited the run id still has the run's memory boundary.
-    return bool(config.get("simulation_run_id")) or bool(config.get("test_mode")) or str(config.get("memory_boundary") or "").startswith(
+    return bool(config.get("simulation_run_id")) or is_test_mode(config) or str(config.get("memory_boundary") or "").startswith(
         SIMULATION_BOUNDARY_PREFIX
     )
 

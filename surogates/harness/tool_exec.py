@@ -40,6 +40,8 @@ from surogates.tools.coerce import coerce_tool_args
 from surogates.runtime.governance import CASE_ITEM_TOOLS, CASE_STEP_TOOLS, floor_gate
 from surogates.runtime.turn_slots import turn_activity
 from surogates.sandbox.history import PROJECT_MOUNT
+from surogates.simulation.scratch import STATE_TOOLS
+from surogates.simulation.side_effects import decide, is_simulated, is_test_mode, summary_judge
 from surogates.storage.tenant import boundary_workspace_prefix
 from surogates.workstreams import THREAD_REFUSED_AGENT_TYPES, is_project_thread, sub_agent, thread_refusal, under_a_thread
 from surogates.workstreams.stream import project_of
@@ -204,8 +206,6 @@ async def _build_session_sandbox_spec(
     sandbox_spec.env["SUROGATES_IS_SERVICE_ACCOUNT"] = (
         "1" if is_service_account else "0"
     )
-    from surogates.simulation.side_effects import is_simulated
-
     sandbox_spec.simulated = is_simulated(session.config)
     # A session's own image: held to the operator's list again here, where the sandbox is made, whatever path its
     # config came by.  A sub-agent carries its root's (create_child_session), so a reprovision under it runs the same.
@@ -329,22 +329,20 @@ async def _simulation_changes(
     In a test chat no LLM judges an unknown tool: it is faked (fail closed).  Raw outbound
     HTTP from the sandbox is not blocked in a test chat; that is accepted for phase 1.
     """
-    from surogates.simulation.scratch import STATE_TOOLS
-    from surogates.simulation.side_effects import decide, is_simulated, summary_judge
-
-    if tool_name in STATE_TOOLS and (session.config or {}).get("test_mode"):
+    config = session.config or {}
+    test_mode = is_test_mode(config)
+    if tool_name in STATE_TOOLS and test_mode:
         return True  # the agent's own platform state: faked whole in a test chat
-    if not tool_name.startswith("mcp__") or not is_simulated(session.config):
+    if not tool_name.startswith("mcp__") or not is_simulated(config):
         return None
     entry = tools.get(tool_name)
-    test_mode = (session.config or {}).get("test_mode")
     return await decide(
         tool_name,
         entry.schema.annotations if entry else None,
         llm=None if test_mode else summary_judge(summary_llm_client, summary_model),
         args=tool_args,
         description=entry.schema.description if entry else "",
-        scratch=((session.config or {}).get("test_mode") or {}).get("scratch"),
+        scratch=(config.get("test_mode") or {}).get("scratch"),
     )
 
 
@@ -495,7 +493,7 @@ async def _apply_ssh_access(
     config = getattr(session, "config", None) or {}
     raw = config.get("ssh_targets") or []
     # A test chat reaches no real server over ssh.
-    if not raw or credential_vault is None or config.get("test_mode"):
+    if not raw or credential_vault is None or is_test_mode(config):
         return
     try:
         targets = validate_targets(raw)
