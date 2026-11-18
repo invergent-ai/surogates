@@ -45,10 +45,23 @@ def test_other_drive_is_faked():
 
 def test_sharepoint_path_outside_root_is_faked():
     base = "/Surogate - teste/r1/0-1/Fise"
-    ok = {"server_relative_url": f"{base}/a.pdf", "name": "b.pdf"}
+    ok = {"server_relative_url": f"{base}/a.pdf", "name": "b.pdf", "drive_id": "D"}
     assert inside_scratch("SHARE_POINT_UPDATE_DRIVE_ITEM", ok, SCOPE)
-    for bad in ("/Documente/a.pdf", base + "X/a.pdf", base.lower() + "/a.pdf"):
+    for bad in ("/Documente/a.pdf", base + "X/a.pdf", base.lower() + "/a.pdf",
+                base + "/../../../../Documente/a.pdf", base + "/%2e%2e/%2e%2e/x", base + "/./a.pdf", base + "\\..\\x"):
         assert not inside_scratch("SHARE_POINT_UPDATE_DRIVE_ITEM", {**ok, "server_relative_url": bad}, SCOPE)
+
+
+def test_onedrive_folder_path_traversal_is_faked():
+    base = SCOPE["root_path"]
+    up = {"folder_path": base + "/sub", "name": "a", "drive_id": "D"}
+    assert inside_scratch("ONE_DRIVE_ONEDRIVE_UPLOAD_FILE", up, SCOPE)
+    assert not inside_scratch("ONE_DRIVE_ONEDRIVE_UPLOAD_FILE", {**up, "folder_path": base + "/../x"}, SCOPE)
+
+
+def test_path_without_drive_is_faked():
+    up = {"folder_path": SCOPE["root_path"] + "/sub", "name": "a"}
+    assert not inside_scratch("ONE_DRIVE_ONEDRIVE_UPLOAD_FILE", up, SCOPE)
 
 
 def test_not_a_file_action_or_no_scope_is_faked():
@@ -87,3 +100,11 @@ async def test_execute_mixed_batch_is_faked():
 
 def test_test_mode_counts_as_simulated():
     assert is_simulated({"test_mode": {"scratch": None}})
+
+
+@pytest.mark.asyncio
+async def test_junk_batch_entry_is_faked_not_a_crash():
+    good = {"tool_slug": "ONE_DRIVE_DELETE_ITEM", "arguments": {"item_id": "F1"}}
+    assert not await decide(ROUTER, None, llm=None, args={"tools": [good]}, scratch=SCOPE)
+    for junk in ("junk", {"arguments": {}}, {"tool_slug": "ONE_DRIVE_DELETE_ITEM", "arguments": "x"}):
+        assert await decide(ROUTER, None, llm=None, args={"tools": [good, junk]}, scratch=SCOPE)

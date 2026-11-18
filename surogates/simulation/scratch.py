@@ -41,6 +41,9 @@ def _norm(path: str) -> str:
 
 
 def _under(path: str, root: str) -> bool:
+    # Dot segments, percent-encoding and backslashes can climb out of the root: refuse them.
+    if "%" in path or "\\" in path or {".", ".."} & set(path.split("/")):
+        return False
     path, root = _norm(path), _norm(root)
     return path == root or path.startswith(root + "/")
 
@@ -74,15 +77,20 @@ def inside_scratch(slug: str, args: dict, scratch: dict) -> bool:
     if slug not in FILE_ACTIONS or not isinstance(args, dict) or not scratch:
         return False
     targets = 0
+    by_path = has_drive = False
     for key, value in _leaves(args):
         if key in REFERENCE_KEYS:
             if not _reference_ok(key, value, scratch):
                 return False
-            if key not in _DRIVE_KEYS:
+            if key in _DRIVE_KEYS:
+                has_drive = True
+            else:
                 targets += 1
+                by_path |= value not in (scratch.get("root_id"), *(scratch.get("item_ids") or ()))
         elif key in _HARMLESS:
             continue
         elif isinstance(value, str) and value:
             return False  # an unknown key holding text may be a reference ("targetFolderId": "ORIG")
     # A call that names nothing in the copy would act on a default location.
-    return targets > 0
+    # A path resolves in the default drive unless a drive (already checked) is named.
+    return targets > 0 and (has_drive or not by_path)

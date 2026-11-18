@@ -120,12 +120,14 @@ async def decide(
             if scratch:
                 from surogates.simulation.scratch import inside_scratch
 
-                calls = [c for c in tool_args(args)["tools"]]
-                return any([
-                    await _cached(f"router:{c['tool_slug']}", c["tool_slug"], "", None, llm)
-                    and not inside_scratch(c["tool_slug"], tool_args(c.get("arguments")), scratch)
+                calls = tool_args(args).get("tools")
+                if not all(
+                    isinstance(c, dict) and isinstance(c.get("tool_slug"), str) and isinstance(c.get("arguments", {}), dict)
                     for c in calls
-                ])
+                ):
+                    return True
+                verdicts = await asyncio.gather(*(_cached(f"router:{c['tool_slug']}", c["tool_slug"], "", None, llm) for c in calls))
+                return any(v and not inside_scratch(c["tool_slug"], c.get("arguments", {}), scratch) for v, c in zip(verdicts, calls))
             verdicts = await asyncio.gather(*(_cached(f"router:{s}", s, "", None, llm) for s in slugs))
             return any(verdicts)
     key = f"{name}:{hashlib.sha256(description.encode()).hexdigest()[:16]}"
