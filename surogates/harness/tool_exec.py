@@ -336,6 +336,7 @@ async def _simulation_changes(
         llm=summary_judge(summary_llm_client, summary_model),
         args=tool_args,
         description=entry.schema.description if entry else "",
+        scratch=((session.config or {}).get("test_mode") or {}).get("scratch"),
     )
 
 

@@ -58,7 +58,7 @@ _decided: dict[str, tuple[bool, float]] = {}
 def is_simulated(config: dict | None) -> bool:
     config = config or {}
     # A sub-agent made before it inherited the run id still has the run's memory boundary.
-    return bool(config.get("simulation_run_id")) or str(config.get("memory_boundary") or "").startswith(
+    return bool(config.get("simulation_run_id")) or bool(config.get("test_mode")) or str(config.get("memory_boundary") or "").startswith(
         SIMULATION_BOUNDARY_PREFIX
     )
 
@@ -101,8 +101,12 @@ async def _cached(key: str, name: str, description: str, annotations: dict | Non
 
 async def decide(
     name: str, annotations: dict | None, *, llm: Judge | None, args: Any = None, description: str = "",
+    scratch: dict | None = None,
 ) -> bool:
-    """Whether calling *name* would change something; any doubt counts as yes."""
+    """Whether calling *name* would change something; any doubt counts as yes.
+
+    With *scratch* (a test chat's copy), a router call's file change inside the copy counts as safe to run.
+    """
     if name.startswith(_ROUTER_PREFIXES):
         tool = name.rsplit("__", 1)[-1].upper()
         # The router's executors run any app tool, or code that can: the
@@ -113,6 +117,15 @@ async def decide(
             slugs = router_slugs(args)
             if not slugs:
                 return True
+            if scratch:
+                from surogates.simulation.scratch import inside_scratch
+
+                calls = [c for c in tool_args(args)["tools"]]
+                return any([
+                    await _cached(f"router:{c['tool_slug']}", c["tool_slug"], "", None, llm)
+                    and not inside_scratch(c["tool_slug"], tool_args(c.get("arguments")), scratch)
+                    for c in calls
+                ])
             verdicts = await asyncio.gather(*(_cached(f"router:{s}", s, "", None, llm) for s in slugs))
             return any(verdicts)
     key = f"{name}:{hashlib.sha256(description.encode()).hexdigest()[:16]}"
