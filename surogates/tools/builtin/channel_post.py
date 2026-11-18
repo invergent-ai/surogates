@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from types import SimpleNamespace
 from typing import Any
 
 from surogates.channels.credentials import resolve_channel_credentials
@@ -189,9 +190,12 @@ async def _post_slack(
 
 
 async def _post_to_channel_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
-    session = kwargs.get("session")
-    if session is None:
-        return _fail("post_to_channel needs a session.")
+    # The runtime passes the session's parts, not the session (tool_exec dispatch).
+    tenant = kwargs.get("tenant")
+    if tenant is None or not kwargs.get("agent_id"):
+        return _fail("post_to_channel needs an agent's session.")
+    session = SimpleNamespace(agent_id=kwargs["agent_id"], org_id=tenant.org_id,
+                              channel=kwargs.get("channel"), config=kwargs.get("session_config") or {})
     kind = str(arguments.get("kind") or "slack").lower()
     if kind != "slack":
         return _fail(f"Posting to '{kind}' is not supported; only 'slack'.")
