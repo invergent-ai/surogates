@@ -153,3 +153,12 @@ def test_a_cloud_metadata_link_is_never_fetched() -> None:
 
     assert "metadata" in _wrong_upload_urls(["http://169.254.169.254/latest/meta-data/"])
     assert _wrong_upload_urls(["http://host.docker.internal:8820/api/files/x?name=a.png"]) is None
+
+
+def test_with_no_picker_the_open_dialogs_file_input_wins() -> None:
+    # X's compose dialog sits over the home timeline, which has its own composer and file input: the
+    # files must reach the dialog the agent is writing in, not the page behind it.
+    from surogates.browser.client import _SET_FILES_SCRIPT as script
+    assert '[aria-modal="true"], [role="dialog"]' in script
+    assert script.index("inDialog") < script.index("to = \"the page's file input\"")
+    assert "an open dialog's file input" in script
