@@ -247,7 +247,7 @@ describe("a new chat's folder on a mount that does not answer", () => {
     guards: { home, dataDir: join(dir, "data"), cacheDir: join(dir, "cache"), appDirs: [] },
     agent: "Research assistant",
     hosts: { run: async () => ({ ok: null }) },
-    approvalPrompts: { approve: async () => "deny", confirmFreeMode: async () => false },
+    approvalPrompts: { approve: async () => ({ answer: "deny", checked: [] }), confirmFreeMode: async () => false },
     answers: (path) => looks.answers(path),
   });
 

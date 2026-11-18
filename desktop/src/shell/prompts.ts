@@ -5,7 +5,7 @@
 
 import { type BrowserWindow, dialog } from "electron";
 
-import type { ApprovalAnswer, ApprovalPrompts } from "../binding/approvals.js";
+import type { ApprovalPrompts, PromptReply } from "../binding/approvals.js";
 import type { FolderPrompts } from "../binding/binder.js";
 import { forThisOs } from "../platform.js";
 import { guestPathOf, hostPathOf } from "../session-path.js";
@@ -83,11 +83,12 @@ export function desktopPrompts(options: DesktopPromptsOptions): FolderPrompts & 
       if (answer.button === "change" || answer.button === "new") return answer.button;
       return answer.button === "accept" && (answer.choice === "free" || answer.choice === "ask") ? { mode: answer.choice } : null;
     },
-    // Its buttons' ids are the answers; one closed some other way, or dismissed, denies.
+    // Its buttons' ids are the answers, with what its list still had ticked; one closed some other way, or dismissed,
+    // denies. An allowing button with nothing ticked came back null (prompt-window.ts), and so denies too.
     async approve(request, signal) {
       const answer = await ask(approval(request), signal);
-      if (answer === TIMEOUT) return "timeout";
-      return answer === null ? "deny" : (answer.button as ApprovalAnswer);
+      if (answer === TIMEOUT) return { answer: "timeout", checked: [] };
+      return answer === null ? { answer: "deny", checked: [] } : { answer: answer.button as PromptReply["answer"], checked: answer.checked };
     },
     async confirmFreeMode(chat, signal) {
       const answer = await ask(freeMode(chat), signal);

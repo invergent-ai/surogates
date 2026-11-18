@@ -120,7 +120,7 @@ const binder = confirm && hosts
           : request.kind === "network" ? request.host
           : request.kind;
         // Without --ask only a network prompt comes, and is denied; any other is a fault, and fails loudly.
-        return Promise.resolve(ask === undefined || named.includes(ask) ? "deny" : "allow");
+        return Promise.resolve({ answer: ask === undefined || named.includes(ask) ? "deny" : "allow", checked: [] });
       },
       confirmFreeMode: () => Promise.resolve(false),
     },

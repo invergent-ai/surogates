@@ -82,7 +82,7 @@ function open(): OperationJournal {
 
 // The user at the approval prompts: allows each operation, and never lets a chat work freely.
 const allowing: ApprovalPrompts = {
-  approve: () => Promise.resolve("allow"),
+  approve: () => Promise.resolve({ answer: "allow", checked: [] }),
   confirmFreeMode: () => Promise.resolve(false),
 };
 
@@ -777,7 +777,7 @@ describe("a chat's bind operation", () => {
     const denying: ApprovalPrompts = {
       approve: (request) => {
         asked.push(request.kind);
-        return Promise.resolve("deny");
+        return Promise.resolve({ answer: "deny", checked: [] });
       },
       confirmFreeMode: () => Promise.resolve(false),
     };
@@ -797,7 +797,7 @@ describe("a chat's bind operation", () => {
     const asked: string[] = [];
     const chooser = binder(new User(), {
       refusal: (operation) => (operation.kind === "browser.navigate" ? { error: { type: "no_browser", message: "none" } } : null),
-      approvalPrompts: { approve: (request) => (asked.push(request.kind), Promise.resolve("allow")), confirmFreeMode: () => Promise.resolve(false) },
+      approvalPrompts: { approve: (request) => (asked.push(request.kind), Promise.resolve({ answer: "allow", checked: [] })), confirmFreeMode: () => Promise.resolve(false) },
     });
     const navigate = { ...bindOp(ROOT, { folder: notes, nonce: "n" }), kind: "browser.navigate", invocationId: "1:c", ordinal: 1, args: { url: "https://example.com/" } };
     expect(await chooser.admit(navigate, never())).toEqual({ error: { type: "no_browser", message: "none" } });
@@ -822,7 +822,7 @@ describe("a chat's bind operation", () => {
       approvalPrompts: {
         approve: (request) => {
           asked.push(request);
-          return Promise.resolve("deny");
+          return Promise.resolve({ answer: "deny", checked: [] });
         },
         confirmFreeMode: () => Promise.resolve(false),
       },

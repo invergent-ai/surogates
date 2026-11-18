@@ -35,9 +35,9 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the network, through the
   const user: ApprovalPrompts = {
     approve: async (request, dismissed) => {
       prompts.push(request);
-      if (held && request.kind === "network") return new Promise((resolve) => dismissed.addEventListener("abort", () => resolve("deny"), { once: true }));
+      if (held && request.kind === "network") return new Promise((resolve) => dismissed.addEventListener("abort", () => resolve({ answer: "deny", checked: [] }), { once: true }));
       await new Promise((resolve) => setTimeout(resolve, 300));
-      return request.kind === "network" ? answer(request) : "allow";
+      return request.kind === "network" ? { answer: answer(request), checked: [] } : { answer: "allow", checked: [] };
     },
     confirmFreeMode: async () => false,
   };

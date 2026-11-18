@@ -156,7 +156,7 @@ async function start(overrides: Partial<DeviceStackOptions> = {}) {
       return tools;
     },
     prompts: { pickFolder: () => Promise.resolve(folder), confirmFolder: (sheet) => Promise.resolve({ mode: sheet.mode }) },
-    approvalPrompts: { approve: () => Promise.resolve("deny"), confirmFreeMode: () => Promise.resolve(false) },
+    approvalPrompts: { approve: () => Promise.resolve({ answer: "deny", checked: [] }), confirmFreeMode: () => Promise.resolve(false) },
     onStatus: (status) => {
       statuses.push(status);
       if (status === "stopped") order.push("link");
@@ -312,7 +312,7 @@ describe("one agent's device", () => {
     tools.address = (session) => Promise.resolve(`https://bank.example/${session}`);
     const device = await start({
       prompts: { pickFolder: () => Promise.resolve(folder), confirmFolder: () => Promise.resolve({ mode: "ask" }) },
-      approvalPrompts: { approve: (request) => (asked.push(request), Promise.resolve("allow")), confirmFreeMode: () => Promise.resolve(false) },
+      approvalPrompts: { approve: (request) => (asked.push(request), Promise.resolve({ answer: "allow", checked: [] })), confirmFreeMode: () => Promise.resolve(false) },
     });
     await server.until(() => statuses.includes("connected"));
     const prepared = await device.binder.prepareFolder("pick", "window-1", new AbortController().signal);
@@ -328,7 +328,7 @@ describe("one agent's device", () => {
     const asked: ApprovalRequest[] = [];
     let answer: "deny" | "allow_session" = "deny";
     const device = await start({
-      approvalPrompts: { approve: (request) => (asked.push(request), Promise.resolve(answer)), confirmFreeMode: () => Promise.resolve(false) },
+      approvalPrompts: { approve: (request) => (asked.push(request), Promise.resolve({ answer: answer, checked: [] })), confirmFreeMode: () => Promise.resolve(false) },
     });
     await server.until(() => statuses.includes("connected"));
     const prepared = await device.binder.prepareFolder("pick", "window-1", new AbortController().signal);
@@ -373,7 +373,7 @@ describe("one agent's device", () => {
     before.bindings.allowPort(OTHER, 5173);
     before.close();
     const device = await start({
-      approvalPrompts: { approve: () => Promise.resolve("allow_session"), confirmFreeMode: () => Promise.resolve(false) },
+      approvalPrompts: { approve: () => Promise.resolve({ answer: "allow_session", checked: [] }), confirmFreeMode: () => Promise.resolve(false) },
     });
     await server.until(() => statuses.includes("connected"));
     expect(tools.forwards).toEqual([[{ port: 5173, root: OTHER }]]);
@@ -407,7 +407,7 @@ describe("one agent's device", () => {
     const device = await start({
       approvalPrompts: {
         // Open until dismissed, when it settles with the answer that would let it through.
-        approve: (request, signal) => (asked.push(request), new Promise((resolve) => signal.addEventListener("abort", () => resolve("allow_session")))),
+        approve: (request, signal) => (asked.push(request), new Promise((resolve) => signal.addEventListener("abort", () => resolve({ answer: "allow_session", checked: [] })))),
         confirmFreeMode: () => Promise.resolve(false),
       },
     });
@@ -565,7 +565,7 @@ describe("one agent's device", () => {
     const asked: ApprovalRequest[] = [];
     const device = await start({
       prompts: { pickFolder: () => Promise.resolve(folder), confirmFolder: () => Promise.resolve({ mode: "ask" }) },
-      approvalPrompts: { approve: (request) => (asked.push(request), Promise.resolve("allow")), confirmFreeMode: () => Promise.resolve(false) },
+      approvalPrompts: { approve: (request) => (asked.push(request), Promise.resolve({ answer: "allow", checked: [] })), confirmFreeMode: () => Promise.resolve(false) },
     });
     await server.until(() => statuses.includes("connected"));
     const prepared = await device.binder.prepareFolder("pick", "window-1", new AbortController().signal);
