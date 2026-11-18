@@ -586,9 +586,9 @@ describe("outside.trash and outside.put_back", () => {
     const note = join(desktop, "note.txt");
     const copy = await copied(note);
     writeFileSync(copy, "changed\n");
-    // Open in Excel: Windows refuses to move it.
+    // Open in Excel: Windows refuses to move it, and Electron's shell.trashItem says so in an Error of its own words, with no code.
     trash = async () => {
-      throw Object.assign(new Error("EBUSY: resource busy or locked"), { code: "EBUSY" });
+      throw new Error("Failed to move item to trash");
     };
     const outcome = await putBack(copy, note);
     expect(outcome).toMatchObject({ error: { type: "os", message: expect.stringContaining("open in another program") } });

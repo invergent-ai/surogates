@@ -50,7 +50,14 @@ const sha256 = (buffer: Buffer) => createHash("sha256").update(buffer).digest("h
 const said = (error: unknown) => error instanceof Failure ? error.refusal.message : error instanceof Error ? error.message : String(error);
 const osFailure = (message: string) => new Failure({ type: "os", message });
 // Why a trash or a rename failed, in words its user can act on: Windows refuses either for a file open in another program.
-const causeOf = (error: unknown) => ["EBUSY", "EPERM"].includes((error as NodeJS.ErrnoException).code ?? "") ? "it is open in another program" : said(error);
+// A rename says so by its code; the bin (Electron's shell.trashItem) by an Error of its own words and no code, which
+// cannot tell that from any other refusal, so it says both.
+const causeOf = (error: unknown) => {
+  if (error instanceof Failure) return said(error);
+  const { code } = error as NodeJS.ErrnoException;
+  if (code === "EBUSY" || code === "EPERM") return "it is open in another program";
+  return code === undefined ? `${said(error)} (it may be open in another program)` : said(error);
+};
 
 /** The *n*th name a copy of *name* tries: its own first, then "name (1).ext", "name (2).ext", and on. */
 export function numberedName(name: string, n: number): string {
@@ -80,7 +87,7 @@ const PASSED = [
 ] as const satisfies ReadonlyArray<keyof ToolLayer>;
 type Passed = (typeof PASSED)[number];
 // A member ToolLayer gains is passed down, or this fails to compile.
-const EVERY: [Exclude<keyof ToolLayer, Passed | "run" | "refusal" | "guards" | "live" | "stop">] extends [never] ? true : never = true;
+const EVERY: [Exclude<keyof ToolLayer, Passed | "run" | "refusal" | "resolveFolder" | "guards" | "live" | "stop">] extends [never] ? true : never = true;
 void EVERY;
 
 // The members the constructor assigns from PASSED.

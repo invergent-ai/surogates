@@ -8,12 +8,14 @@ import type { ApprovalRequest } from "../src/binding/approvals.js";
 import { BOOT_ID, type FolderGuards } from "../src/binding/folder.js";
 import type { StagedDownload } from "../src/browser/downloads.js";
 import { Browsing } from "../src/browser/executor.js";
+import { fdPaths } from "../src/files/fd-paths.js";
 import type { NetworkApprovals } from "../src/hosts/tool-hosts.js";
 import type { Bindings } from "../src/journal/bindings.js";
 import { OperationJournal } from "../src/journal/journal.js";
 import type { LinkStatus } from "../src/link/client.js";
 import type { Operation, Outcome } from "../src/link/protocol.js";
 import { ACCESS_ENDED, APP_CLOSED } from "../src/operations/runner.js";
+import { Outside } from "../src/outside/executor.js";
 import { type DeviceStack, type DeviceStackOptions, startDevice, stopDevice, type ToolLayer } from "../src/shell/device-stack.js";
 import { FakeLinkServer } from "./fake-server.js";
 
@@ -294,6 +296,52 @@ describe("one agent's device", () => {
     // The tools' network questions go to the binder's approvals: a chat this computer did not bind is denied.
     expect(await tools.network?.askNetwork("77777777-7777-4777-8777-777777777777",
       { host: "example.com", port: 443, privateNetwork: false }, new AbortController().signal)).toBe("deny");
+  });
+
+  it("runs an outside kind through the Outside layer and others below it", async () => {
+    const desktop = join(base, "home", "Desktop");
+    mkdirSync(desktop);
+    writeFileSync(join(desktop, "old.txt"), "old");
+    const asked: ApprovalRequest[] = [];
+    const trashed: string[] = [];
+    const device = await start({
+      tools: (bindings, approvals, changed, waiting) => {
+        tools.bindings = bindings;
+        tools.network = approvals;
+        return new Outside({
+          tools, bindings, approvals, fd: fdPaths, getPath: (name) => join(base, "home", name === "desktop" ? "Desktop" : name),
+          trash: async (path) => void trashed.push(path),
+        });
+      },
+      approvalPrompts: {
+        approve: (request) => {
+          asked.push(request);
+          return Promise.resolve(request.kind === "trash" ? { answer: "trash", checked: request.files } : { answer: "allow", checked: [] });
+        },
+        confirmFreeMode: () => Promise.resolve(false),
+      },
+    });
+    await server.until(() => statuses.includes("connected"));
+    // Its hello said it works outside a chat's folder: the server offers the outside tools to no app that does not.
+    expect(server.hellos.map((hello) => hello.outside)).toEqual([true]);
+    const prepared = await device.binder.prepareFolder("pick", "window-1", new AbortController().signal);
+    server.send(op("bind-1", "bind", { folder: prepared?.folder, nonce: prepared?.nonce }, true));
+    await server.until(() => results("bind-1").length === 1);
+    // A grant by the folder's name: the approvals ask about it, and keep it, where the layer resolves it.
+    server.send(op("grant-1", "outside.grant", { folder: "Desktop" }));
+    await server.until(() => results("grant-1").length === 1);
+    expect(results("grant-1")[0]?.outcome).toEqual({ ok: { folder: desktop } });
+    expect(asked[0]).toMatchObject({ kind: "read_folder", folder: desktop });
+    // The files its user ticked reach the layer from the same approvals.
+    server.send(op("trash-1", "outside.trash", { files: [join(desktop, "old.txt")] }));
+    await server.until(() => results("trash-1").length === 1);
+    expect(results("trash-1")[0]?.outcome).toEqual({ ok: { trashed: [join(desktop, "old.txt")], kept: [] } });
+    expect(trashed).toEqual([join(desktop, "old.txt")]);
+    // Any other kind goes below, untouched.
+    server.send(op("run-1", "run", { command: "echo hi", workdir: null, timeout: 10 }));
+    await server.until(() => results("run-1").length === 1);
+    expect(results("run-1")[0]?.outcome).toEqual({ ok: "ran run" });
+    expect(tools.ran.map((ran) => ran.id)).toEqual(["run-1"]);
   });
 
   it("asks the look it is given whether a new chat's folder answers, before its binder checks the folder", async () => {

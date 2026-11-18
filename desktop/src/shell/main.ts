@@ -26,6 +26,7 @@ import { Browsing } from "../browser/executor.js";
 import type { ApprovalPrompts } from "../binding/approvals.js";
 import type { FolderPrompts, Prepared } from "../binding/binder.js";
 import { revokeDevice, verifyDevice } from "../device.js";
+import { fdPaths } from "../files/fd-paths.js";
 import { hostUser } from "../host-user.js";
 import { fileToolsMissing, hostToolsPath, toolsMissing } from "../hosts/policy.js";
 import { NODE } from "../hosts/tool-hosts.js";
@@ -33,6 +34,7 @@ import { FolderLooks, LOOK_MS, onPath } from "./folders-held.js";
 import { INSTALLER } from "./installer.js";
 import { OperationJournal } from "../journal/journal.js";
 import type { LinkStatus } from "../link/client.js";
+import { Outside } from "../outside/executor.js";
 import { hostPathOf, shownPath } from "../session-path.js";
 import { backendFor, backendHere } from "../vm/backends.js";
 import { type FromManager, MANAGER, type ManagerProcess, REPO_IMAGE, type ToManager, type VmClient, vmEnv, vmOptions } from "../vm/client.js";
@@ -988,47 +990,53 @@ function startStack(agent: Agent, credential: LiveCredential): Promise<DeviceSta
     },
     agentHost: hostOf(agent),
     identity: { deviceId: credential.deviceId, orgId: credential.orgId, agentId: credential.agentId, userId: credential.userId },
-    // The tool layer under the binder: the file kinds in the root's file host, the process kinds in the
-    // VM, and the browser's kinds in this identity's browser host, with the browser Settings chose.
-    tools: (bindings, network, changed, waiting) => new Browsing({
-      tools: appTools({
-        bindingOf: (bound) => bindings.get(bound), network, dataDir: root, cacheDir: places.cache, env, vm: vmFor(), changed, waiting,
-        // A thread's history is made in the name of the account signed in on this device.
-        user: credential.userId,
-        // The sidebar says while a thread's copy of its folder is being made: its first step waits for it.
-        making: (event) => copying.heard(event),
-        // A chat host hears the start and end of its chat's turns on the app's sign-in at that moment, until that
-        // sign-in ends; with nobody signed in the idle time lets the folder go. A turn's end missed before the stream
-        // opened leaves that idle time to let it go too.
-        following: (chatId, turnEnded, turnStarted, asking) => {
-          const session = signedIn;
-          if (!session) return () => {};
-          return followTurns({
-            api: (path, init) => session.api(path, init), onError: report,
-            sessionId: chatId, onTurnEnd: turnEnded, onTurnStart: turnStarted, onAsking: asking, live: () => signedIn === session,
-          }).stop;
+    // The tool layer under the binder: the outside kinds by the app itself, the file kinds in the root's file host, the
+    // process kinds in the VM, and the browser's kinds in this identity's browser host, with the browser Settings chose.
+    tools: (bindings, approvals, changed, waiting) => new Outside({
+      tools: new Browsing({
+        tools: appTools({
+          bindingOf: (bound) => bindings.get(bound), network: approvals, dataDir: root, cacheDir: places.cache, env, vm: vmFor(), changed, waiting,
+          // A thread's history is made in the name of the account signed in on this device.
+          user: credential.userId,
+          // The sidebar says while a thread's copy of its folder is being made: its first step waits for it.
+          making: (event) => copying.heard(event),
+          // A chat host hears the start and end of its chat's turns on the app's sign-in at that moment, until that
+          // sign-in ends; with nobody signed in the idle time lets the folder go. A turn's end missed before the stream
+          // opened leaves that idle time to let it go too.
+          following: (chatId, turnEnded, turnStarted, asking) => {
+            const session = signedIn;
+            if (!session) return () => {};
+            return followTurns({
+              api: (path, init) => session.api(path, init), onError: report,
+              sessionId: chatId, onTurnEnd: turnEnded, onTurnStart: turnStarted, onAsking: asking, live: () => signedIn === session,
+            }).stop;
+          },
+          // And whether its chat is at rest, asked of the agent on the app's sign-in where another chat waits for the
+          // folder: with nobody signed in, or no answer, nobody can say. A turn heard of then keeps the folder, at most
+          // HOLD_IDLE_TIMES idle times (tool-hosts.ts, idleOut); anything else lets it go at its idle time.
+          atRest: (chatId, asking) => {
+            const session = signedIn;
+            return session ? restOf((path, init) => session.api(path, init), credential.agentId, chatId, asking) : Promise.resolve(undefined);
+          },
+        }),
+        browser: new BrowserClient(utilityBrowser(profilesOf(root, credential))),
+        staging: browserTemp(profilesOf(root, credential)),
+        bindingOf: (bound) => bindings.get(bound),
+        launch: () => {
+          const browser = chosenBrowser(browserSetting.get(), findBrowsers());
+          return browser && { executable: browser.executable, profile: profileOf(root, credential, browser) };
         },
-        // And whether its chat is at rest, asked of the agent on the app's sign-in where another chat waits for the
-        // folder: with nobody signed in, or no answer, nobody can say. A turn heard of then keeps the folder, at most
-        // HOLD_IDLE_TIMES idle times (tool-hosts.ts, idleOut); anything else lets it go at its idle time.
-        atRest: (chatId, asking) => {
-          const session = signedIn;
-          return session ? restOf((path, init) => session.api(path, init), credential.agentId, chatId, asking) : Promise.resolve(undefined);
-        },
+        // A chat's own servers its user let the browser open: the journal's ports, carried into the chat's sandbox
+        // by the VM, which also says whether one listens on a port.
+        ports: () => bindings.forwards(),
+        // And each port's last turn: the browser clears what a port's origins kept from before it.
+        turns: () => bindings.turns(),
+        vm: vmFor(),
       }),
-      browser: new BrowserClient(utilityBrowser(profilesOf(root, credential))),
-      staging: browserTemp(profilesOf(root, credential)),
-      bindingOf: (bound) => bindings.get(bound),
-      launch: () => {
-        const browser = chosenBrowser(browserSetting.get(), findBrowsers());
-        return browser && { executable: browser.executable, profile: profileOf(root, credential, browser) };
-      },
-      // A chat's own servers its user let the browser open: the journal's ports, carried into the chat's sandbox
-      // by the VM, which also says whether one listens on a port.
-      ports: () => bindings.forwards(),
-      // And each port's last turn: the browser clears what a port's origins kept from before it.
-      turns: () => bindings.turns(),
-      vm: vmFor(),
+      bindings, approvals, fd: fdPaths,
+      // Only the folders a grant may name (places.ts), where this computer keeps them.
+      getPath: (name) => app.getPath(name),
+      trash: (hostPath) => shell.trashItem(hostPath),
     }),
     prompts,
     approvalPrompts: prompts,
@@ -2585,6 +2593,14 @@ function showSettings(section?: "browser"): void {
         throw new Error("This chat's servers are not open to the browser on that port");
       }
       bindings.disallowPort(root, port);
+    });
+    // A folder outside a chat's own taken back by its user: its agent reads there no more, and its next read asks again.
+    // By the path as the row shows it (folders.ts), which names the grant it was made from.
+    handle("settings:take-back-read", (root, folder) => {
+      const bindings = openStack()?.bindings;
+      const granted = typeof root === "string" ? bindings?.reads(root).find((read) => shownPath(read) === folder) : undefined;
+      if (!bindings || granted === undefined) throw new Error("This chat cannot read that folder");
+      bindings.takeBackRead(root as string, granted);
     });
     // The agent's browser handed back from here, where it is held from a chat that is gone: such a chat has no
     // page to hand it back in, and another chat has a pane for it only where its own browser is open. Through the

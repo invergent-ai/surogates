@@ -6,7 +6,7 @@
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
-import type { ApprovalPrompts } from "../binding/approvals.js";
+import type { ApprovalPrompts, Approvals } from "../binding/approvals.js";
 import { Binder, type FolderPrompts } from "../binding/binder.js";
 import type { FolderGuards } from "../binding/folder.js";
 import { downloadSaver, type StagedDownload } from "../browser/downloads.js";
@@ -39,6 +39,9 @@ export interface ToolLayer extends Executor {
   retired?(root: string): void;
   // Whether a project's thread is given a copy of its folder to work in: without, the binder binds it to none.
   keepsCopies?(): boolean;
+  // The folder an outside.grant names, resolved for chat *root*, or why it cannot be granted (approvals.ts): only where
+  // the tools work outside a chat's folder, which the hello says.
+  resolveFolder?(folder: string, root: string): { folder: string } | { refused: string };
   // Whether a chat's host is on the folder of this identity, by its device and inode: another chat works there.
   folderInUse?(dev: number, ino: number): boolean;
   // The address of the page a calling session's next browser operation acts in, for its prompt; for an
@@ -77,7 +80,8 @@ export interface DeviceStackOptions {
   identity: Identity; // who every welcome must name
   // *changed*: what the tools' live() names may have changed.
   // *waiting*: tell an operation starts ("folder") or stops (null) waiting for its chat's folder.
-  tools(bindings: Bindings, network: NetworkApprovals, changed: () => void, waiting: (operationId: string, reason: "folder" | null) => void): ToolLayer;
+  // *approvals*: the binder's, for the network and the files a user ticked, which the tools are made before.
+  tools(bindings: Bindings, approvals: NetworkApprovals & Pick<Approvals, "chosenFor">, changed: () => void, waiting: (operationId: string, reason: "folder" | null) => void): ToolLayer;
   prompts: FolderPrompts;
   approvalPrompts: ApprovalPrompts;
   // Whether a folder for a new chat answered a look off the main thread in time (FolderLooks).
@@ -154,8 +158,12 @@ export async function stopDevice(started: Promise<DeviceStack> | undefined, shar
 
 // The stack on *journal*. *made* holds its tools as soon as they are made, for a start that fails after.
 function deviceOn(journal: OperationJournal, options: DeviceStackOptions, made: { tools?: ToolLayer }): DeviceStack {
-  // The tools ask the binder's approvals about the network; the binder exists by the time any host asks.
-  const network: NetworkApprovals = { askNetwork: (root, asked, signal) => binder.approvals.askNetwork(root, asked, signal) };
+  // The tools ask the binder's approvals about the network, and the files a user ticked; the binder exists by the time
+  // any host asks, or any operation runs.
+  const network: NetworkApprovals & Pick<Approvals, "chosenFor"> = {
+    askNetwork: (root, asked, signal) => binder.approvals.askNetwork(root, asked, signal),
+    chosenFor: (operationId) => binder.approvals.chosenFor(operationId),
+  };
   // Each session's operations on the tools, counted as they run: the binder runs nothing else there.
   // A chat's sub-agents are sessions of their own: their operations carry the chat as sessionId.
   // A chat with a background process alive on the tools works too, as a quit would end it.
@@ -225,6 +233,7 @@ function deviceOn(journal: OperationJournal, options: DeviceStackOptions, made: 
     address: tools.address?.bind(tools),
     notComing: tools.notComing?.bind(tools),
     listening: tools.listening?.bind(tools),
+    resolveFolder: tools.resolveFolder?.bind(tools),
     approvalPrompts: options.approvalPrompts,
     answers: options.answers,
     onError: options.onError,
@@ -241,6 +250,7 @@ function deviceOn(journal: OperationJournal, options: DeviceStackOptions, made: 
     journal,
     executor: binder,
     copies: keepsCopies,
+    outside: tools.resolveFolder !== undefined,
     onStatus: (status) => {
       if (status !== "connected") serverWaits = false;
       if (ENDED.includes(status)) ended.resolve();

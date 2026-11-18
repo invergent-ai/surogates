@@ -29,7 +29,7 @@ interface State {
 interface Folder {
   folder: string;
   chats: Array<{
-    root: string; title: string; mode: "free" | "ask"; hosts: string[]; browser: boolean; ports: number[];
+    root: string; title: string; mode: "free" | "ask"; hosts: string[]; browser: boolean; ports: number[]; reads: string[];
     processes: Array<{ id: string; command: string }>;
   }>;
 }
@@ -41,6 +41,7 @@ interface Settings {
   takeBrowserBack(root: string): Promise<void>;
   handBrowserBack(): Promise<boolean>;
   takePortBack(root: string, port: number): Promise<void>;
+  takeReadBack(root: string, folder: string): Promise<void>;
   stop(root: string, id: string): Promise<void>;
   set(key: string, value: string): Promise<void>;
   link(which: "usage"): Promise<void>;
@@ -157,6 +158,7 @@ function chatRow(chat: Folder["chats"][number]): HTMLElement {
       line(`Its browser opens port ${port} of this chat's servers`, "Take back", `port ${port} of this chat's servers`, () => settings.takePortBack(chat.root, port)),
       `port ${port}`,
     )),
+    ...chat.reads.map((folder) => keyed(line(`Reads ${folder}`, "Take back", folder, () => settings.takeReadBack(chat.root, folder)), `read ${folder}`)),
     ...chat.processes.map(({ id, command }) => keyed(line(`Runs ${command}`, "Stop", command, () => settings.stop(chat.root, id)), `process ${id}`)),
   );
   row.append(label);

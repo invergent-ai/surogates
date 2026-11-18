@@ -52,6 +52,8 @@ export interface DeviceLinkOptions {
   openIds: () => string[];
   // Whether the hello says this app keeps a copy of a folder for a project's thread (protocol.ts, hello).
   copies?: boolean;
+  // Whether it says this app works on files outside a chat's folder.
+  outside?: boolean;
   welcomeTimeoutMs?: number;
   delay?: (attempt: number) => number;
 }
@@ -168,7 +170,7 @@ export class DeviceLink {
         void this.stop();
         return;
       }
-      socket.send(JSON.stringify(hello(open, this.options.copies === true)));
+      socket.send(JSON.stringify(hello(open, this.options.copies === true, this.options.outside === true)));
     });
 
     socket.on("message", (data, isBinary) => {
