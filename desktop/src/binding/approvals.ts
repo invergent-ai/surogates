@@ -83,6 +83,12 @@ export type ApprovalRequest =
   // command: what the process runs, as its start named it; null for a process this run of the app did not start.
   | { kind: "input"; chat: ChatLabel; process: string; command: string | null; data: string }
   | { kind: "network"; chat: ChatLabel; host: string; port: number; privateNetwork: boolean }
+  // Outside the chat's folder, each file by its guest path: a folder to read, files to copy to a place (with each one's size),
+  // files to move to the Recycle Bin, and a copy's changes to put back over the original.
+  | { kind: "read_folder"; chat: ChatLabel; folder: string }
+  | { kind: "copy"; chat: ChatLabel; to: string; files: Array<{ from: string; size: number }> }
+  | { kind: "trash"; chat: ChatLabel; files: string[] }
+  | { kind: "put_back"; chat: ChatLabel; copy: string; original: string }
   // The chat's first use of the browser here ("use", with no detail), or what an operation would do
   // in its page: the address it opens, the script it runs, where it clicks, what it types or presses, its drag's path.
   // page: an act's, the address of the page it acts in, as the browser said it just before; null when it did not say in time.

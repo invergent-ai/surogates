@@ -395,3 +395,47 @@ describe("a prompt with a list to tick", () => {
     expect(checkAnswer(content, "deny", null, [])).toEqual({ button: "deny", choice: null, checked: [] });
   });
 });
+
+describe("the windows for files outside the chat's folder", () => {
+  const bin = process.platform === "darwin" ? "Trash" : "Recycle Bin";
+
+  it("asks to read a folder, for this chat", () => {
+    const c = approval({ kind: "read_folder", chat: CHAT, folder: "/home/me/docs" });
+    expect([c.title, c.lead]).toEqual(["Let acme.surogate.ai read a folder?", "acme.surogate.ai asks to read /home/me/docs and its subfolders for this chat. It can list and read files there, and change nothing."]);
+    expect(c.buttons.map((b) => [b.id, b.label])).toEqual([["deny", "Deny"], ["allow", "Allow for this chat"]]);
+    expect([c.focus, c.danger, c.checks]).toEqual(["deny", false, null]);
+  });
+
+  it("lists each file to copy, ticked by its path, with its folder and size", () => {
+    const c = approval({ kind: "copy", chat: CHAT, to: "/home/me/out", files: [{ from: "/home/me/docs/a.txt", size: 10 }, { from: "/home/me/x/b.txt", size: 2048 }] });
+    expect(c.title).toBe("Copy 2 files?");
+    expect(c.lead).toBe("acme.surogate.ai asks to copy these files to /home/me/out. A file whose name is taken there is saved with a number added; nothing is overwritten.");
+    expect(c.checks?.items).toEqual([
+      { value: "/home/me/docs/a.txt", label: "a.txt", detail: "/home/me/docs · 10 bytes" },
+      { value: "/home/me/x/b.txt", label: "b.txt", detail: "/home/me/x · 2 KB" },
+    ]);
+    expect(c.buttons.map((b) => [b.id, b.label])).toEqual([["deny", "Deny"], ["allow", "Copy the ticked files"]]);
+    expect(approval({ kind: "copy", chat: CHAT, to: "/o", files: [{ from: "/a/b", size: 1 }] }).title).toBe("Copy 1 file?");
+  });
+
+  it("warns, and focuses Keep them, for files going to the bin", () => {
+    const c = approval({ kind: "trash", chat: CHAT, files: ["/home/me/docs/a.txt", "/home/me/docs/b.txt"] });
+    expect([c.title, c.danger, c.focus, c.cancel]).toEqual([`Move to the ${bin}?`, true, "keep", "keep"]);
+    expect(c.lead).toBe(`2 files will be removed from where they are and moved to the ${bin}, where you can restore them.`);
+    expect(c.checks?.items.map((i) => i.value)).toEqual(["/home/me/docs/a.txt", "/home/me/docs/b.txt"]);
+    expect(c.buttons.map((b) => [b.id, b.label])).toEqual([["keep", "Keep them"], ["trash", `Move to the ${bin}`]]);
+  });
+
+  it("warns before changes go back over the original", () => {
+    const c = approval({ kind: "put_back", chat: CHAT, copy: "/home/me/notes/a.txt", original: "/home/me/docs/a.txt" });
+    expect([c.title, c.danger, c.focus]).toEqual(["Put the changes back?", true, "deny"]);
+    expect(c.lead).toBe(`The changes acme.surogate.ai made in its copy go into /home/me/docs/a.txt. The old version goes to the ${bin}, and the working copy in the chat's folder is deleted.`);
+    expect(c.buttons.map((b) => [b.id, b.label])).toEqual([["deny", "No, keep only the copy"], ["allow", "Put them back"]]);
+  });
+
+  it("never offers to stop asking", () => {
+    for (const r of [{ kind: "read_folder", folder: "/a" }, { kind: "copy", to: "/a", files: [] }, { kind: "trash", files: [] }, { kind: "put_back", copy: "/a", original: "/b" }] as const) {
+      expect(ids(approval({ ...r, chat: CHAT } as ApprovalRequest))).not.toContain("stop_asking");
+    }
+  });
+});

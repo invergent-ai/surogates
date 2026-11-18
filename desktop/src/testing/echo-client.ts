@@ -117,7 +117,8 @@ const binder = confirm && hosts
           : request.kind === "change" ? request.path
           : request.kind === "input" ? request.data
           : request.kind === "browser" ? request.detail
-          : request.host;
+          : request.kind === "network" ? request.host
+          : request.kind;
         // Without --ask only a network prompt comes, and is denied; any other is a fault, and fails loudly.
         return Promise.resolve(ask === undefined || named.includes(ask) ? "deny" : "allow");
       },

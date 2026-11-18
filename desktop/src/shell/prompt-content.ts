@@ -7,6 +7,7 @@ import { posix } from "node:path";
 import { type ApprovalRequest, type BrowserAction, type ChatLabel, PREVIEW_BYTES } from "../binding/approvals.js";
 import type { FolderSheet } from "../binding/binder.js";
 import type { LinkSummary } from "../binding/links.js";
+import { forThisOs } from "../platform.js";
 import { shownName, shownPath, shownWithin } from "../session-path.js";
 
 export interface PromptButton {
@@ -240,6 +241,7 @@ export function approval(request: ApprovalRequest): PromptContent {
     };
   }
   if (request.kind === "browser") return browserPrompt(request);
+  if (request.kind !== "network") return outsidePrompt(request);
   const address = `${request.host}:${request.port}`;
   const title = `Connect to ${ending(request.host)}:${request.port}?`;
   return {
@@ -256,6 +258,43 @@ export function approval(request: ApprovalRequest): PromptContent {
     // Tall enough to show the title, the lead, the warning and the whole address as it opens: a title past
     // 30 characters wraps to three lines of 25 px, and a line of 19 px in the address's block holds about 40.
     height: 245 + (title.length > 30 ? 75 : 25) + (request.privateNetwork ? 70 : 0) + Math.ceil(address.length / 40) * 19,
+  };
+}
+
+const BIN = forThisOs({ darwin: "Trash" }) ?? "Recycle Bin";
+const files = (n: number) => `${n} ${n === 1 ? "file" : "files"}`;
+// The prompts of the files outside the chat's folder: Deny is focused and what Escape answers, and none offers to stop asking.
+function outsidePrompt(request: Exclude<ApprovalRequest, { kind: "command" | "change" | "input" | "network" | "browser" }>): PromptContent {
+  const { chat } = request;
+  const base = { notes: [], choice: null, checks: null, danger: false, details: [], focus: "deny", cancel: "deny" };
+  const list = (legend: string, items: PromptChecks["items"]) => ({ legend, items });
+  if (request.kind === "read_folder") {
+    return {
+      ...base, title: `Let ${chat.agent} read a folder?`,
+      lead: `${chat.agent} asks to read ${shownPath(request.folder)} and its subfolders for this chat. It can list and read files there, and change nothing.`,
+      buttons: [button("deny", "Deny"), button("allow", "Allow for this chat", true)], height: 300,
+    };
+  }
+  if (request.kind === "copy") {
+    return {
+      ...base, title: `Copy ${files(request.files.length)}?`,
+      lead: `${chat.agent} asks to copy these files to ${shownPath(request.to)}. A file whose name is taken there is saved with a number added; nothing is overwritten.`,
+      checks: list("Files", request.files.map((f) => ({ value: f.from, label: named(f.from), detail: `${shownPath(posix.dirname(f.from))} · ${sizeOf(f.size)}` }))),
+      buttons: [button("deny", "Deny"), button("allow", "Copy the ticked files", true)], height: 420,
+    };
+  }
+  if (request.kind === "trash") {
+    return {
+      ...base, danger: true, focus: "keep", cancel: "keep", title: `Move to the ${BIN}?`,
+      lead: `${files(request.files.length)} will be removed from where ${request.files.length === 1 ? "it is" : "they are"} and moved to the ${BIN}, where you can restore ${request.files.length === 1 ? "it" : "them"}.`,
+      checks: list("Files", request.files.map((f) => ({ value: f, label: named(f), detail: shownPath(posix.dirname(f)) }))),
+      buttons: [button("keep", "Keep them"), button("trash", `Move to the ${BIN}`, true)], height: 420,
+    };
+  }
+  return {
+    ...base, danger: true, title: "Put the changes back?",
+    lead: `The changes ${chat.agent} made in its copy go into ${shownPath(request.original)}. The old version goes to the ${BIN}, and the working copy in the chat's folder is deleted.`,
+    buttons: [button("deny", "No, keep only the copy"), button("allow", "Put them back", true)], height: 320,
   };
 }
 
