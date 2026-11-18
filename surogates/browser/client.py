@@ -55,11 +55,19 @@ for (const f of frames) {
 }
 // No picker opened: the page's own file input, in the main frame before any embedded frame
 // (a chat widget's input must not take the post's video), preferring one that takes images or video.
+// One inside an open dialog comes first: X's compose dialog sits over the home timeline, whose own
+// composer has a file input too, and the files must reach the dialog being written in.
 for (const f of target ? [] : frames) {
   const inputs = await f.$$('input[type=file]').catch(() => []);
   if (!inputs.length) continue;
-  const media = [];
-  for (const i of inputs) if (await i.evaluate((e) => !e.accept || /image|video|\\*/.test(e.accept))) media.push(i);
+  const media = [], inDialog = [];
+  for (const i of inputs) {
+    const isMedia = await i.evaluate((e) => !e.accept || /image|video|\\*/.test(e.accept));
+    const open = await i.evaluate((e) => !!e.closest('[aria-modal="true"], [role="dialog"]'));
+    if (isMedia) media.push(i);
+    if (isMedia && open) inDialog.push(i);
+  }
+  if (inDialog.length) { target = inDialog.at(-1); to = "an open dialog's file input"; break; }
   target = (media.length ? media : inputs).at(-1);
   to = "the page's file input";
   break;
