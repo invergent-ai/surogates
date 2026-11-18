@@ -40,7 +40,7 @@ WRITE_VERBS = frozenset(
     "MARK REPLACE CLOSE RESOLVE ASSIGN APPROVE SUBMIT".split()
 )
 READ_VERBS = frozenset(
-    "GET LIST FETCH SEARCH FIND READ QUERY LOOKUP RETRIEVE DESCRIBE COUNT EXPORT".split()
+    "GET LIST FETCH SEARCH FIND READ QUERY LOOKUP RETRIEVE DESCRIBE COUNT EXPORT DOWNLOAD".split()
 )
 
 _ROUTER_PREFIXES = ("mcp__tool_router__", "mcp__composio_tool_router__")
@@ -84,11 +84,13 @@ async def _cached(key: str, name: str, description: str, annotations: dict | Non
     known = changes_something(name, annotations)
     if known is not None:
         return known
+    if llm is None:
+        # No judge (a test chat, or none configured): an unknown tool is faked.  The
+        # cache is not read, so an earlier LLM "read" verdict cannot make it real.
+        return True
     hit = _decided.get(key)
     if hit is not None and hit[1] > time.monotonic():
         return hit[0]
-    if llm is None:
-        return True
     try:
         verdict = bool(await asyncio.wait_for(llm(name, description), _JUDGE_TIMEOUT_S))
     except Exception:
@@ -105,8 +107,11 @@ async def decide(
 ) -> bool:
     """Whether calling *name* would change something; any doubt counts as yes.
 
-    With *scratch* (a test chat's copy), a router call's file change inside the copy counts as safe to run.
+    With *scratch* (a test chat's copy), a router call's file change inside the copy counts as safe to run,
+    and no LLM is asked: a test chat fakes every tool its name does not show to be a read.
     """
+    if scratch:
+        llm = None
     if name.startswith(_ROUTER_PREFIXES):
         tool = name.rsplit("__", 1)[-1].upper()
         # The router's executors run any app tool, or code that can: the

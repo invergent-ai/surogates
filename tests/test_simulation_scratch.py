@@ -200,3 +200,93 @@ def test_experts_of_a_test_chat_get_no_state_tools(tmp_path):
 
     assert STATE_TOOLS <= contextvars.copy_context().run(scoped, {"test_mode": {"scratch": None}})
     assert "memory" not in contextvars.copy_context().run(scoped, {})
+
+
+# --- final review fixes ------------------------------------------------------
+
+
+@pytest.mark.parametrize("seg", ["..", ".", ".. ", "...", " .", ". ."])
+def test_near_dot_path_segments_are_faked(seg):
+    base = SCOPE["root_path"]
+    up = {"folder_path": f"{base}/{seg}/x", "name": "a", "drive_id": "D"}
+    assert not inside_scratch("ONE_DRIVE_ONEDRIVE_UPLOAD_FILE", up, SCOPE)
+
+
+def test_a_dotted_name_segment_still_passes():
+    up = {"folder_path": SCOPE["root_path"] + "/.config/a..b", "name": "a", "drive_id": "D"}
+    assert inside_scratch("ONE_DRIVE_ONEDRIVE_UPLOAD_FILE", up, SCOPE)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("slug", [
+    "GOOGLECALENDAR_ACCEPT_EVENT", "OUTLOOK_DECLINE_EVENT", "ONE_DRIVE_COPY_ITEM",
+    "ONE_DRIVE_RENAME_ITEM", "ONE_DRIVE_RESTORE_ITEM", "COMPOSIO_MANAGE_CONNECTIONS",
+])
+async def test_unknown_inner_slug_is_faked_in_test_mode_even_if_the_llm_said_read(slug):
+    from unittest.mock import AsyncMock
+
+    from types import SimpleNamespace
+
+    from surogates.harness.tool_exec import _simulation_changes
+
+    reads = AsyncMock(return_value=False)
+    # A non-test simulation asked the LLM first and cached "read" for this slug.
+    assert not await decide(ROUTER, None, llm=reads, args=call(slug, {}))
+    reads.assert_awaited_once()
+    session = SimpleNamespace(config={"test_mode": {"scratch": SCOPE}})
+    tools = SimpleNamespace(get=lambda _n: None)
+    assert await _simulation_changes(ROUTER, call(slug, {}), session, tools, object(), "m") is True
+    session.config = {"test_mode": {"scratch": None}}
+    assert await _simulation_changes(ROUTER, call(slug, {}), session, tools, object(), "m") is True
+    assert await decide(ROUTER, None, llm=reads, args=call(slug, {}), scratch=SCOPE)
+    reads.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_download_is_a_read_in_test_mode():
+    assert not await decide(ROUTER, None, llm=None, args=call("ONE_DRIVE_DOWNLOAD_FILE", {"item_id": "X"}), scratch=SCOPE)
+
+
+@pytest.mark.asyncio
+async def test_a_non_test_simulation_still_asks_the_llm():
+    from unittest.mock import AsyncMock
+
+    reads = AsyncMock(return_value=False)
+    assert not await decide(ROUTER, None, llm=reads, args=call("GOOGLECALENDAR_ACCEPT_EVENT", {}))
+    reads.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_no_ssh_access_in_a_test_chat(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from surogates.harness import tool_exec
+    from surogates.ssh_access import resolve
+
+    bundle = SimpleNamespace(private_key="KEY", passphrase=None)
+    monkeypatch.setattr(resolve, "resolve_ssh_key", AsyncMock(return_value=bundle))
+    target = {"alias": "srv", "host": "srv.example.com", "key_name": "k", "host_key": "ssh-ed25519 AAAA"}
+    config = {"ssh_targets": [target], "agent_service_account_id": "00000000-0000-0000-0000-000000000001"}
+
+    def spec():
+        return SimpleNamespace(env={}, ssh_targets=None, ssh_key_material=None)
+
+    real = spec()
+    await tool_exec._apply_ssh_access(SimpleNamespace(config=config), SimpleNamespace(org_id=None), real, object())
+    assert real.ssh_key_material  # the setup above does reach a server outside a test chat
+    test = spec()
+    await tool_exec._apply_ssh_access(
+        SimpleNamespace(config={**config, "test_mode": {"scratch": None}}), SimpleNamespace(org_id=None), test, object(),
+    )
+    assert test.ssh_targets is None and test.ssh_key_material is None and test.env == {}
+
+
+@pytest.mark.parametrize("channel", ["web", "api"])
+def test_a_client_cannot_put_a_session_in_test_mode(channel):
+    from surogates.api.routes.sessions import apply_eval_isolation
+
+    config = apply_eval_isolation(
+        {"test_mode": {"scratch": None}, "pipeline_metadata": {"skillopt_run_id": "r1"}, "x": 1}, channel=channel,
+    )
+    assert config == {"x": 1}

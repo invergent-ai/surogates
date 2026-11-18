@@ -722,6 +722,10 @@ def apply_eval_isolation(
     resolved.pop(CASE_ITEM_KEY, None)
     resolved.pop(CASE_SCOPE_KEY, None)
     resolved.pop(CASE_AGENT_KEY, None)
+    # Only the skill-optimisation prompt route sets these: a client naming them would
+    # hide its chats from ops' lists or put its session in test mode.
+    resolved.pop("test_mode", None)
+    resolved.pop("pipeline_metadata", None)
     if channel not in (API_CHANNEL, BUY_PAGE_CHANNEL):
         return resolved
     if (

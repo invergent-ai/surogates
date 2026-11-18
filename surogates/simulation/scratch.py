@@ -90,8 +90,9 @@ def _norm(path: str) -> str:
 
 
 def _under(path: str, root: str) -> bool:
-    # Dot segments, percent-encoding and backslashes can climb out of the root: refuse them.
-    if "%" in path or "\\" in path or {".", ".."} & set(path.split("/")):
+    # Dot segments (and near-dot ones like ".. " or "..." a server may trim to ".."),
+    # percent-encoding and backslashes can climb out of the root: refuse them.
+    if "%" in path or "\\" in path or any(seg and not seg.strip(" .") for seg in path.split("/")):
         return False
     path, root = _norm(path), _norm(root)
     return path == root or path.startswith(root + "/")

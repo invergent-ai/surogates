@@ -324,7 +324,11 @@ def _noted(content: str, note: str) -> str:
 async def _simulation_changes(
     tool_name: str, tool_args: Any, session: Any, tools: Any, summary_llm_client: Any, summary_model: str | None,
 ) -> bool | None:
-    """Whether a simulated session's MCP call would change something; ``None`` outside a simulation."""
+    """Whether a simulated session's MCP call would change something; ``None`` outside a simulation.
+
+    In a test chat no LLM judges an unknown tool: it is faked (fail closed).  Raw outbound
+    HTTP from the sandbox is not blocked in a test chat; that is accepted for phase 1.
+    """
     from surogates.simulation.scratch import STATE_TOOLS
     from surogates.simulation.side_effects import decide, is_simulated, summary_judge
 
@@ -333,10 +337,11 @@ async def _simulation_changes(
     if not tool_name.startswith("mcp__") or not is_simulated(session.config):
         return None
     entry = tools.get(tool_name)
+    test_mode = (session.config or {}).get("test_mode")
     return await decide(
         tool_name,
         entry.schema.annotations if entry else None,
-        llm=summary_judge(summary_llm_client, summary_model),
+        llm=None if test_mode else summary_judge(summary_llm_client, summary_model),
         args=tool_args,
         description=entry.schema.description if entry else "",
         scratch=((session.config or {}).get("test_mode") or {}).get("scratch"),
@@ -487,8 +492,10 @@ async def _apply_ssh_access(
         validate_targets,
     )
 
-    raw = (getattr(session, "config", None) or {}).get("ssh_targets") or []
-    if not raw or credential_vault is None:
+    config = getattr(session, "config", None) or {}
+    raw = config.get("ssh_targets") or []
+    # A test chat reaches no real server over ssh.
+    if not raw or credential_vault is None or config.get("test_mode"):
         return
     try:
         targets = validate_targets(raw)
