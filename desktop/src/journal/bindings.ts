@@ -246,6 +246,12 @@ export class Bindings {
       { original: string; revision: string } | undefined;
   }
 
+  /** The copies a root's folder holds of *original*, in the order made. */
+  copiesFrom(root: string, original: string): string[] {
+    const rows = this.db.prepare(`SELECT copy FROM outside_copies WHERE root = ? AND original = ? ORDER BY rowid`).all(root, original) as Array<{ copy: string }>;
+    return rows.map((row) => row.copy);
+  }
+
   /** Forget that *copy* came from anywhere. */
   forgetCopy(root: string, copy: string): void {
     this.db.prepare(`DELETE FROM outside_copies WHERE root = ? AND copy = ?`).run(root, copy);

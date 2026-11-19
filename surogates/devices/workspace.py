@@ -47,7 +47,7 @@ enforces its rules; the worker never touches the folder.
   outside.move    files ([path]), to (path)                     {moved: [{from, to}], copied_only: [{from, to, reason}],
                                                                 skipped: [{from, reason}]}
   outside.trash   files ([path])                                {trashed: [path], kept: [{file, reason}]}
-  outside.put_back  copy, original                              {original, copyDeleted}
+  outside.put_back  copy, original                              {original, copyDeleted, olderCopiesDeleted?}
 
 The outside.* kinds are files outside the chat's folder, in a folder its user
 granted it (outside.grant).  Their paths are the computer's, absolute,

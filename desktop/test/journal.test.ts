@@ -414,8 +414,12 @@ describe("the bindings", () => {
     expect(journal.bindings.copyOf("r1", "/w/a.txt")).toEqual({ original: "/home/me/notes/a.txt", revision: "rev1" });
     journal.bindings.recordCopy("r1", "/w/a.txt", "/home/me/notes/a.txt", "rev2");
     expect(journal.bindings.copyOf("r1", "/w/a.txt")?.revision).toBe("rev2");
+    journal.bindings.recordCopy("r1", "/w/a (1).txt", "/home/me/notes/a.txt", "rev3");
+    journal.bindings.recordCopy("r1", "/w/b.txt", "/home/me/notes/b.txt", "rev1");
+    expect(journal.bindings.copiesFrom("r1", "/home/me/notes/a.txt")).toEqual(["/w/a.txt", "/w/a (1).txt"]);
     journal.bindings.forgetCopy("r1", "/w/a.txt");
     expect(journal.bindings.copyOf("r1", "/w/a.txt")).toBeUndefined();
+    expect(journal.bindings.copiesFrom("r1", "/home/me/notes/a.txt")).toEqual(["/w/a (1).txt"]);
     journal.close();
   });
 

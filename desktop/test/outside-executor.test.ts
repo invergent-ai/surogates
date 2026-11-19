@@ -835,6 +835,26 @@ describe("outside.trash and outside.put_back", () => {
     }
   });
 
+  it("deletes the out-of-date copies of an original once a newer copy is put back over it", async () => {
+    folderTools();
+    journal.bindings.grantRead(ROOT, desktop);
+    const note = join(desktop, "note.txt");
+    // Copied, then the original changed (its user saved it), so the agent copies it again.
+    const first = await copied(note);
+    writeFileSync(first, "edit on the old version\n");
+    writeFileSync(note, "saved by its user, and longer\n");
+    expect(await putBack(first, note)).toMatchObject({ error: { type: "conflict" } });
+    const second = await copied(note);
+    expect(second).not.toBe(first);
+    writeFileSync(second, "edit on the new version\n");
+    // An unrelated copy of another original stays.
+    const other = await copied(join(desktop, "Scan", "cerere.pdf"));
+    expect(await putBack(second, note)).toEqual({ ok: { original: note, copyDeleted: true, olderCopiesDeleted: [first] } });
+    expect(readFileSync(note, "utf8")).toBe("edit on the new version\n");
+    expect([existsSync(first), existsSync(second), existsSync(other)]).toEqual([false, false, true]);
+    expect([journal.bindings.copyOf(ROOT, first), journal.bindings.copyOf(ROOT, other)?.original]).toEqual([undefined, join(desktop, "Scan", "cerere.pdf")]);
+  });
+
   it("puts the changes back, sends the old version to the bin and deletes the working copy", async () => {
     folderTools();
     journal.bindings.grantRead(ROOT, desktop);

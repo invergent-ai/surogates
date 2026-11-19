@@ -712,7 +712,16 @@ export class Outside implements ToolLayer {
       // In place and checked: the working copy goes, by the chat's folder's own tools, and its record with it.
       const deleted = await inner("delete", { key: copy });
       this.options.bindings.forgetCopy(root, copy);
-      return { ok: { original, copyDeleted: !("error" in deleted) } };
+      // Every other copy of the original in the chat's folder is of a version that is gone now, as one made before the
+      // original changed and was copied again: deleted too, so no out-of-date copy is left to be taken for the file.
+      // ponytail: by its record alone; a file put at a stale copy's name since is deleted with it.
+      const older: string[] = [];
+      for (const stale of this.options.bindings.copiesFrom(root, original)) {
+        const gone = await inner("delete", { key: stale });
+        this.options.bindings.forgetCopy(root, stale);
+        if (!("error" in gone)) older.push(stale);
+      }
+      return { ok: { original, copyDeleted: !("error" in deleted), ...(older.length > 0 ? { olderCopiesDeleted: older } : {}) } };
     } finally {
       release();
     }
