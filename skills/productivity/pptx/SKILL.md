@@ -278,14 +278,14 @@ Convert presentations to individual slide images for visual inspection:
 
 ```bash
 python scripts/office/soffice.py --headless --convert-to pdf output.pptx
-rm -f slide-*.jpg
-pdftoppm -jpeg -r 150 output.pdf slide
-ls -1 "$PWD"/slide-*.jpg
+rm -f output-preview-*.jpg
+pdftoppm -jpeg -r 150 output.pdf output-preview
+ls -1 "$PWD"/output-preview-*.jpg
 ```
 
-**Pass the absolute paths printed above directly to `vision_analyze`** — it reads workspace files only, so render into the workspace, never `/tmp`. The `rm` clears stale images from prior runs. `pdftoppm` zero-pads based on page count: `slide-1.jpg` for decks under 10 pages, `slide-01.jpg` for 10-99, `slide-001.jpg` for 100+.
+**Pass the absolute paths printed above directly to `vision_analyze`** — it reads workspace files only, so render into the workspace, never `/tmp`. The `rm` clears stale images from prior runs. `pdftoppm` zero-pads based on page count: `output-preview-1.jpg` for decks under 10 pages, `output-preview-01.jpg` for 10-99, `output-preview-001.jpg` for 100+. **Name what you make after the document**, as `output-preview` is named after `output.pdf` here, never a plain `page` or `slide`, and give the build script a name no file in the workspace has: the user's own `page-1.jpg` or `make_doc.js` would be overwritten, then deleted in the clean up.
 
-**Clean up when the file is done.** Delete what you made only to build or check it, the build script, the PDF and the page images, unless the user asked for them: `rm -f output.pdf slide-*.jpg` and the generating script, and any `*-thumbs*.jpg` grids. Only the file the user asked for stays in the workspace; in a desktop chat the workspace is a folder the user sees on their computer.
+**Clean up when the file is done.** Delete what you made only to build or check it, the build script, the PDF and the page images, unless the user asked for them: `rm -f output.pdf output-preview-*.jpg` and the generating script, and any `*-thumbs*.jpg` grids. Only the file the user asked for stays in the workspace; in a desktop chat the workspace is a folder the user sees on their computer.
 
 **After fixes, rerun all four commands above** — the PDF must be regenerated from the edited `.pptx` before `pdftoppm` can reflect your changes.
 

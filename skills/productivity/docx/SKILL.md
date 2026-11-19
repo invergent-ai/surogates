@@ -79,15 +79,17 @@ These two are exact. Answer page count, wording, numbering, order and "is everyt
 Then look at the pages once, for what only an image shows: alignment, table borders, spacing, overlapping text.
 
 ```bash
-pdftoppm -jpeg -r 100 output.pdf page
-ls -1 "$PWD"/page-*.jpg
+pdftoppm -jpeg -r 100 output.pdf output-preview
+ls -1 "$PWD"/output-preview-*.jpg
 ```
 
 Ask `vision_analyze` about each image `ls` printed, once per page (it reads workspace files only — render into the workspace, never `/tmp`). It misreads small text and miscounts rows, so don't ask it what `pdftotext` already answered, and don't re-ask the same question at a higher resolution.
 
-`pdftoppm` zero-pads page numbers to the width of the page count (`page-01.jpg`…`page-12.jpg`).
+`pdftoppm` zero-pads page numbers to the width of the page count (`output-preview-01.jpg`…`output-preview-12.jpg`).
 
-**Clean up when the file is done.** Delete what you made only to build or check it, the build script, the PDF and the page images, unless the user asked for them: `rm -f make_doc.js output.pdf page-*.jpg`. Only the file the user asked for stays in the workspace; in a desktop chat the workspace is a folder the user sees on their computer.
+**Name what you make after the document**, as `output-preview` is named after `output.pdf` here, never a plain `page` or `slide`, and give the build script a name no file in the workspace has: the user's own `page-1.jpg` or `make_doc.js` would be overwritten, then deleted in the clean up.
+
+**Clean up when the file is done.** Delete what you made only to build or check it, the build script, the PDF and the page images, unless the user asked for them: `rm -f make_doc.js output.pdf output-preview-*.jpg`. Only the file the user asked for stays in the workspace; in a desktop chat the workspace is a folder the user sees on their computer.
 
 **Fitting a page limit.** If `pdfinfo` shows too many pages, make these changes in order, re-checking `pdfinfo` after each:
 
