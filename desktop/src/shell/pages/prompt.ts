@@ -188,10 +188,11 @@ function draw(state: State): void {
       const description = element("span", "desc", option.description);
       description.id = `choice-${option.value}`;
       radio.setAttribute("aria-describedby", description.id);
-      const label = element("label", "");
-      label.append(radio, element("span", "name", option.label));
-      const row = element("div", "option");
-      row.append(label, description);
+      // The whole box is the option's label: a click anywhere in it chooses it.
+      const head = element("span", "option-head");
+      head.append(radio, element("span", "name", option.label));
+      const row = element("label", "option");
+      row.append(head, description);
       return row;
     }));
   }
@@ -210,10 +211,11 @@ function draw(state: State): void {
       const detail = element("span", "desc", item.detail);
       detail.id = `check-${index}`;
       box.setAttribute("aria-describedby", detail.id);
-      const label = element("label", "");
-      label.append(box, element("span", "name", item.label));
-      const row = element("div", "option");
-      row.append(label, detail);
+      // The whole box is the item's label: a click anywhere in it ticks or unticks it.
+      const head = element("span", "option-head");
+      head.append(box, element("span", "name", item.label));
+      const row = element("label", "option");
+      row.append(head, detail);
       return row;
     }));
   }
