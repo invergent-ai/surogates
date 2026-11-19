@@ -458,20 +458,25 @@ describe("the windows for files outside the chat's folder", () => {
     expect([one.title, one.checks?.items[0]?.detail, one.details.map((d) => [d.label, d.value])]).toEqual(["Copy 1 file?", "1 byte", [["From", "/a"], ["To", "/o"]]]);
   });
 
-  it("warns, and focuses Keep them, for files going to the bin", () => {
+  it("warns, and focuses Keep them, for files going to the bin, with their folder under them", () => {
     const c = approval({ kind: "trash", chat: CHAT, files: ["/home/me/docs/a.txt", "/home/me/docs/b.txt"] });
-    expect([c.title, c.danger, c.focus, c.cancel]).toEqual([`Move to the ${bin}?`, true, "keep", "keep"]);
-    expect(c.lead).toBe(`2 files will be removed from where they are and moved to the ${bin}, where you can restore them.`);
-    expect(c.checks?.items.map((i) => i.value)).toEqual(["/home/me/docs/a.txt", "/home/me/docs/b.txt"]);
+    expect([c.title, c.danger, c.focus, c.cancel, c.detailsBelow]).toEqual([`Move 2 files to the ${bin}?`, true, "keep", "keep", true]);
+    expect(c.lead).toBe(`You can restore them from the ${bin}.`);
+    expect(c.checks?.items).toEqual([{ value: "/home/me/docs/a.txt", label: "a.txt", detail: "" }, { value: "/home/me/docs/b.txt", label: "b.txt", detail: "" }]);
+    expect(c.details.map((d) => [d.label, d.value])).toEqual([["From", "/home/me/docs"]]);
     expect(c.buttons.map((b) => [b.id, b.label])).toEqual([["keep", "Keep them"], ["trash", `Move to the ${bin}`]]);
-    expect(approval({ kind: "trash", chat: CHAT, files: ["/home/me/docs/a.txt"] }).buttons[0]!.label).toBe("Keep it");
+    const one = approval({ kind: "trash", chat: CHAT, files: ["/a/x.txt"] });
+    expect([one.title, one.lead, one.buttons[0]!.label]).toEqual([`Move 1 file to the ${bin}?`, `You can restore it from the ${bin}.`, "Keep it"]);
+    const two = approval({ kind: "trash", chat: CHAT, files: ["/a/x.txt", "/b/y.txt"] });
+    expect([two.details, two.checks?.items.map((i) => i.detail)]).toEqual([[], ["/a", "/b"]]);
   });
 
-  it("warns before changes go back over the original", () => {
+  it("warns before changes go back over the original, naming both under the text", () => {
     const c = approval({ kind: "put_back", chat: CHAT, copy: "/home/me/notes/a.txt", original: "/home/me/docs/a.txt" });
-    expect([c.title, c.danger, c.focus]).toEqual(["Put the changes back?", true, "deny"]);
-    expect(c.lead).toBe(`The changes acme.surogate.ai made in its copy go into /home/me/docs/a.txt. The old version goes to the ${bin}, and the working copy in the chat's folder is deleted.`);
-    expect(c.buttons.map((b) => [b.id, b.label])).toEqual([["deny", "No, keep only the copy"], ["allow", "Put them back"]]);
+    expect([c.title, c.danger, c.focus, c.detailsBelow]).toEqual(["Put the changes back?", true, "deny", true]);
+    expect(c.lead).toBe(`The original goes to the ${bin}, where you can restore it, and the edited copy is deleted from this chat's folder.`);
+    expect(c.details.map((d) => [d.label, d.value])).toEqual([["Edited copy", "/home/me/notes/a.txt"], ["Replaces", "/home/me/docs/a.txt"]]);
+    expect(c.buttons.map((b) => [b.id, b.label])).toEqual([["deny", "Keep only the copy"], ["allow", "Put back"]]);
   });
 
   it("never offers to stop asking", () => {

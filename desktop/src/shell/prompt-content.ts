@@ -316,17 +316,23 @@ function outsidePrompt(request: Exclude<ApprovalRequest, { kind: "command" | "ch
     };
   }
   if (request.kind === "trash") {
+    const one = request.files.length === 1;
+    // One From for files all in one folder; each file's own folder by it otherwise.
+    const folders = new Set(request.files.map((f) => posix.dirname(f)));
+    const from = folders.size === 1 ? [...folders][0]! : null;
     return {
-      ...base, danger: true, focus: "keep", cancel: "keep", title: `Move to the ${BIN}?`,
-      lead: `${files(request.files.length)} will be removed from where ${request.files.length === 1 ? "it is" : "they are"} and moved to the ${BIN}, where you can restore ${request.files.length === 1 ? "it" : "them"}.`,
-      checks: { legend: "Files", items: request.files.map((f) => ({ value: f, label: named(f), detail: shownPath(posix.dirname(f)) })) },
-      buttons: [button("keep", request.files.length === 1 ? "Keep it" : "Keep them"), button("trash", `Move to the ${BIN}`, true)], height: 420,
+      ...base, danger: true, detailsBelow: true, focus: "keep", cancel: "keep", title: `Move ${files(request.files.length)} to the ${BIN}?`,
+      lead: `You can restore ${one ? "it" : "them"} from the ${BIN}.`,
+      checks: { legend: "Files", items: request.files.map((f) => ({ value: f, label: named(f), detail: from === null ? shownPath(posix.dirname(f)) : "" })) },
+      details: from === null ? [] : [code("From", shownPath(from))],
+      buttons: [button("keep", one ? "Keep it" : "Keep them"), button("trash", `Move to the ${BIN}`, true)], height: 420,
     };
   }
   return {
-    ...base, danger: true, title: "Put the changes back?",
-    lead: `The changes ${chat.agent} made in its copy go into ${shownPath(request.original)}. The old version goes to the ${BIN}, and the working copy in the chat's folder is deleted.`,
-    buttons: [button("deny", "No, keep only the copy"), button("allow", "Put them back", true)], height: 320,
+    ...base, danger: true, detailsBelow: true, title: "Put the changes back?",
+    lead: `The original goes to the ${BIN}, where you can restore it, and the edited copy is deleted from this chat's folder.`,
+    details: [code("Edited copy", shownPath(request.copy)), code("Replaces", shownPath(request.original))],
+    buttons: [button("deny", "Keep only the copy"), button("allow", "Put back", true)], height: 320,
   };
 }
 
