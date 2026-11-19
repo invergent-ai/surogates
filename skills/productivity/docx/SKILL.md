@@ -87,6 +87,8 @@ Ask `vision_analyze` about each image `ls` printed, once per page (it reads work
 
 `pdftoppm` zero-pads page numbers to the width of the page count (`page-01.jpg`…`page-12.jpg`).
 
+**Clean up when the file is done.** Delete what you made only to build or check it, the build script, the PDF and the page images, unless the user asked for them: `rm -f make_doc.js output.pdf page-*.jpg`. Only the file the user asked for stays in the workspace; in a desktop chat the workspace is a folder the user sees on their computer.
+
 **Fitting a page limit.** If `pdfinfo` shows too many pages, make these changes in order, re-checking `pdfinfo` after each:
 
 1. Shorten the wording.

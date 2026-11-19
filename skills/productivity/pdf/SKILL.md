@@ -227,6 +227,8 @@ pdftoppm -png -r 80 output.pdf page && ls -1 "$PWD"/page-*.png
 
 Each `■` is a character the font couldn't draw: switch to the TrueType font above. Then ask `vision_analyze` about each page image once, for the look: layout, tables, the watermark. Render with `pdftoppm`, not `pypdfium2`.
 
+**Clean up when the file is done.** Delete what you made only to build or check it, the build script, the PDF and the page images, unless the user asked for them: `rm -f page-*.png` and the generating script. Only the file the user asked for stays in the workspace; in a desktop chat the workspace is a folder the user sees on their computer.
+
 ## Command-Line Tools
 
 ### pdftotext (poppler-utils)

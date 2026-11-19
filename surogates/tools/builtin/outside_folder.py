@@ -162,7 +162,8 @@ def register(registry: ToolRegistry) -> None:
             "copy_files", _copy_files,
             "Copy files into the chat's folder, out of it, or straight between two folders outside it; the "
             "destination must be the chat's folder or inside a folder already granted. The user confirms in a window "
-            "and may untick files. A copy never overwrites: a taken name gets ' (1)'. Returns what was copied where, "
+            "and may untick files. A copy never overwrites: a taken name gets ' (1)'. To put a file you made in the "
+            "chat's folder somewhere outside it, use move_files instead, so no copy is left here. Returns what was copied where, "
             "and what was skipped (an unticked file among them).",
             {
                 "files": {**_FILES, "description": "Absolute paths, or paths relative to the chat's folder."},

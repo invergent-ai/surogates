@@ -136,7 +136,7 @@ def test_a_device_chat_is_told_how_to_work_on_files_outside_its_folder():
     assert "To move files, use move_files (one window" in context
     assert "to make a new file in a folder outside, make it in the chat's folder, then move_files it there" in context
     assert "Use move_to_trash alone only when the user wants files deleted." in context
-    assert "Scripts, previews, page images and test renders you make only to build or check a file go in `~`, never in the chat's folder." in context
+    assert "when a file is done, delete the scripts, previews, page images and test renders you made only to build or check it" in context
     assert "If copy_files says a file is `open` in another program, tell the user before you change it" in context
     assert "keep every change the user made, add yours to it (find where by reading it, never by the row or cell numbers you used on the old copy)" in context
     assert 'If the access is for "this request", it ends when you finish this task' in context
