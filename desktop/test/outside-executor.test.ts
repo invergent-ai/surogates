@@ -171,6 +171,25 @@ describe("Outside", () => {
     expect(following).toHaveBeenCalledTimes(5);
   });
 
+  it("ends grants once, and leaves no follow running, when a follow's own check ends them as it is asked", async () => {
+    const stops: Array<ReturnType<typeof vi.fn>> = [];
+    let signedOut = false;
+    const following = vi.fn((_root: string, turnEnded: () => void) => {
+      const stop = vi.fn();
+      stops.push(stop);
+      // As the app's: asked whether it is live after a sign-out, it ends the task's grants then and there.
+      return { stop, live: () => (signedOut ? (turnEnded(), false) : true) };
+    });
+    new Outside({ tools, bindings: journal.bindings, approvals: { chosenFor }, fd: fdPaths, getPath, trash, following });
+    journal.bindings.grantRead(ROOT, desktop, true);
+    signedOut = true;
+    journal.bindings.grantRead(ROOT, join(base, "elsewhere"), true);
+    expect(journal.bindings.turnFolders(ROOT)).toEqual([]);
+    // Each follow it started is stopped: none keeps a stream open for a chat with no grant.
+    expect(stops.length).toBeGreaterThan(0);
+    for (const stop of stops) expect(stop).toHaveBeenCalledTimes(1);
+  });
+
   it("refuses a grant whose folder does not answer in time, before it is resolved", async () => {
     const looked: string[] = [];
     const outside = new Outside({
@@ -938,6 +957,24 @@ describe("outside.trash and outside.put_back", () => {
       ok: { moved: [], copied_only: [{ from: join(work, "draft.txt"), reason: expect.stringContaining("changed while it was being copied") }] },
     });
     expect(readFileSync(join(work, "draft.txt"), "utf8")).toBe("saved meanwhile, and longer\n");
+  });
+
+  it("takes away a file put in place that does not check out, and says where the old version is", async () => {
+    folderTools();
+    journal.bindings.grantRead(ROOT, desktop);
+    const note = join(desktop, "note.txt");
+    const copy = await copied(note);
+    writeFileSync(copy, "changed\n");
+    const outside = layer();
+    // The final read-back of the file at the original's name fails, as on a flaky share; the write's own check passes.
+    let checks = 0;
+    const holds = (outside as unknown as { holds: (file: number, bytes: Buffer) => boolean }).holds.bind(outside);
+    Object.assign(outside, { holds: (file: number, bytes: Buffer) => (++checks === 1 ? holds(file, bytes) : false) });
+    expect(await outside.run(op("outside.put_back", { copy, original: note }), never())).toEqual({
+      error: { type: "os", message: `The old version is in the ${BIN}; the changes are still in ${copy}.` },
+    });
+    expect([existsSync(note), readFileSync(join(bin, "note.txt"), "utf8"), readFileSync(copy, "utf8")]).toEqual([false, "first\nsecond\n", "changed\n"]);
+    expect(changedAt(desktop)).toEqual([]);
   });
 
   it("puts the changes back, sends the old version to the bin and deletes the working copy", async () => {

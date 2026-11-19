@@ -134,6 +134,10 @@ export class Outside implements ToolLayer {
   // and how many such grants it had when last told.
   private readonly turns = new Map<string, { stop: () => void; live: () => boolean }>();
   private readonly turnGrants = new Map<string, number>();
+  // The chats whose grants heldForTurn is handling, and those it heard change meanwhile: a follow's live() can end
+  // them as it is asked, which would otherwise re-enter it with a count it no longer has.
+  private readonly heldNow = new Set<string>();
+  private readonly heldAgain = new Set<string>();
   // Each root's working copies a put back refused because their original had changed since: out of date, and deleted
   // once a newer copy of that original is put back. In memory alone: after a restart such a copy is left, never lost.
   private readonly superseded = new Map<string, Map<string, string | null>>();
@@ -151,6 +155,22 @@ export class Outside implements ToolLayer {
   // operation runs, and let go once it has none: its turn over, taken back, or the chat removed. A grant more within
   // the turn keeps the follow it has; one that could not be followed then (nobody signed in) is tried again.
   private heldForTurn(root: string): void {
+    if (this.heldNow.has(root)) {
+      this.heldAgain.add(root);
+      return;
+    }
+    this.heldNow.add(root);
+    try {
+      do {
+        this.heldAgain.delete(root);
+        this.heldOnce(root);
+      } while (this.heldAgain.has(root));
+    } finally {
+      this.heldNow.delete(root);
+    }
+  }
+
+  private heldOnce(root: string): void {
     const { bindings } = this.options;
     const held = bindings.turnFolders(root).length;
     const before = this.turnGrants.get(root) ?? 0;
@@ -727,8 +747,11 @@ export class Outside implements ToolLayer {
         removeTemporary();
         return { error: { type: "os", message: `${original} could not be moved to the ${BIN}: ${said(error)}. Nothing was replaced; the changes are still in ${copy}.` } };
       }
+      // Whether this put back's file took the original's name: a name taken by another file it never touches.
+      let placed = false;
       try {
         this.renamed(temporary, where, left.made!);
+        placed = true;
         // Checked from the file now at the original's name, held open: the changes, whole, in this put back's own file.
         const final = fd.open(where, constants.O_RDONLY | FLAGS.NOFOLLOW);
         try {
@@ -738,7 +761,22 @@ export class Outside implements ToolLayer {
         }
       } catch {
         removeTemporary();
-        return inBin;
+        if (!placed) return inBin;
+        // The original's name holds this put back's file, unchecked: removed while it is still that file.
+        this.removeIfMine(where, left.made);
+        let taken = true;
+        try {
+          fd.lstat(where);
+        } catch {
+          taken = false;
+        }
+        if (!taken) return inBin;
+        return {
+          error: {
+            type: "os",
+            message: `The old version of ${original} is in the ${BIN}, and its name now holds a file this put back did not check. Look at it, or restore the old version from the ${BIN}. The changes are still in ${copy}.`,
+          },
+        };
       }
       // A second name of the file now in place, where the rename's own removal of it failed.
       removeTemporary();

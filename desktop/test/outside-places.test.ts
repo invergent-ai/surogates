@@ -72,6 +72,21 @@ describe("a grant", () => {
 });
 
 describe("the grant holding a path", () => {
+  it("finds a grant for a path spelled with other capitals only where the drive takes it for that very folder", () => {
+    const desktop = join(base, "home", "Desktop");
+    writeFileSync(join(desktop, "a.pdf"), "pdf");
+    const lower = join(base, "home", "desktop");
+    // On Linux "desktop" is another name, here none at all: no grant holds it.
+    expect(withinGrant([desktop], join(lower, "a.pdf"), fdPaths)).toBeNull();
+    // On a drive that ignores case (Windows, macOS) it is the very folder: as such a drive answers, it is the grant's.
+    const ignoringCase: FdPaths = { ...fdPaths, lstat: ((path: string, ...rest: unknown[]) =>
+      (fdPaths.lstat as (...a: unknown[]) => unknown)(typeof path === "string" && path.toLowerCase().startsWith(lower.toLowerCase())
+        ? desktop + path.slice(lower.length) : path, ...rest)) as FdPaths["lstat"] };
+    expect(withinGrant([desktop], join(lower, "a.pdf"), ignoringCase)).toBe(desktop);
+    // A folder that only starts like it, in any case, is still no grant's.
+    expect(withinGrant([desktop], join(base, "home", "desktop2", "a.pdf"), ignoringCase)).toBeNull();
+  });
+
   it("finds the grant that holds a path", () => {
     const desktop = join(base, "home", "Desktop");
     const scan = join(desktop, "Scan");

@@ -43,6 +43,20 @@ export function grantable(folder: string, guards: FolderGuards, chatFolder: stri
   return { ok: true, folder: checked.path };
 }
 
+// Whether *path* is in *root* spelled with other capitals: its part as long as *root* differs from it in case alone, and
+// is the very folder *root* is, by identity. On a drive that ignores case (Windows, macOS) it is; on Linux, another
+// folder or none. Looked at without following a link: the linkless check that follows holds the rest of the way.
+function sameFolderButCase(path: string, root: string, fd: FdPaths): boolean {
+  const head = path.slice(0, root.length);
+  if (head === root || head.toLowerCase() !== root.toLowerCase() || (path.length > root.length && path[root.length] !== "/")) return false;
+  try {
+    const [a, b] = [fd.lstat(head), fd.lstat(root)];
+    return a.isDirectory() && a.dev === b.dev && a.ino === b.ino;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * The deepest of *grants* that holds *path*, when no name on the way to *path*, from the root down, nor its own, is a
  * link (a reparse point on Windows): the path then is where it is spelled, and stays in the grant. Otherwise null.
@@ -52,7 +66,7 @@ export function grantable(folder: string, guards: FolderGuards, chatFolder: stri
  */
 export function withinGrant(grants: string[], path: string, fd: FdPaths): string | null {
   if (resolve(path) !== path) return null;
-  const grant = grants.filter((root) => inside(path, root)).sort((a, b) => b.length - a.length)[0];
+  const grant = grants.filter((root) => inside(path, root) || sameFolderButCase(path, root, fd)).sort((a, b) => b.length - a.length)[0];
   if (grant === undefined) return null;
   try {
     closeSync(fd.hold(grant));
