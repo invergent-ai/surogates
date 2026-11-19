@@ -98,9 +98,9 @@ describe("Outside", () => {
     expect(outside.refusal(op("outside.grant", { folder: "Desktop" }))).toBeNull();
     // The approvals granted it, on its user's allow.
     journal.bindings.grantRead(ROOT, desktop);
-    expect(await outside.run(op("outside.grant", { folder: "Desktop" }), never())).toEqual({ ok: { folder: desktop } });
+    expect(await outside.run(op("outside.grant", { folder: "Desktop" }), never())).toEqual({ ok: { folder: desktop, lasts: "this chat" } });
     // A folder in a grant is granted already: answered as asked, with nobody asked again.
-    expect(await outside.run(op("outside.grant", { folder: join(desktop, "Scan") }), never())).toEqual({ ok: { folder: join(desktop, "Scan") } });
+    expect(await outside.run(op("outside.grant", { folder: join(desktop, "Scan") }), never())).toEqual({ ok: { folder: join(desktop, "Scan"), lasts: "this chat" } });
     expect(await outside.run(op("outside.grant", { folder: join(base, "elsewhere") }), never())).toEqual(noPermission(join(base, "elsewhere")));
     expect(tools.ran).toEqual([]);
   });
@@ -114,11 +114,34 @@ describe("Outside", () => {
     journal.bindings.grantRead(ROOT, desktop);
     moved = true;
     const grant = op("outside.grant", { folder: "Desktop" });
-    expect(await outside.run(grant, never())).toEqual({ ok: { folder: desktop } });
+    expect(await outside.run(grant, never())).toEqual({ ok: { folder: desktop, lasts: "this chat" } });
     expect(approvals.chosenFor).toHaveBeenCalledWith(grant.id);
     // One allowed and taken back since is no grant: its name is resolved again, and leads nowhere granted.
     journal.bindings.takeBackRead(ROOT, desktop);
     expect(await outside.run(op("outside.grant", { folder: "Desktop" }), never())).toEqual(noPermission(join(base, "elsewhere")));
+  });
+
+  it("ends a grant for one turn when that turn ends, and follows each chat once", async () => {
+    let ended: (() => void) | undefined;
+    const stop = vi.fn();
+    const following = vi.fn((_root: string, turnEnded: () => void) => {
+      ended = turnEnded;
+      return stop;
+    });
+    const outside = new Outside({ tools, bindings: journal.bindings, approvals: { chosenFor }, fd: fdPaths, getPath, trash, following });
+    journal.bindings.grantRead(ROOT, desktop, true);
+    expect(await outside.run(op("outside.grant", { folder: "Desktop" }), never())).toEqual({ ok: { folder: desktop, lasts: "this request" } });
+    expect(await outside.run(op("outside.grant", { folder: join(desktop, "Scan") }), never())).toEqual({ ok: { folder: join(desktop, "Scan"), lasts: "this request" } });
+    expect(following).toHaveBeenCalledTimes(1);
+    expect(await outside.run(op("outside.stat", { key: join(desktop, "note.txt") }), never())).not.toHaveProperty("error");
+    ended!();
+    expect(stop).toHaveBeenCalledTimes(1);
+    expect(journal.bindings.reads(ROOT)).toEqual([]);
+    expect(await outside.run(op("outside.stat", { key: join(desktop, "note.txt") }), never())).toEqual(noPermission(join(desktop, "note.txt")));
+    // Granted for the turn again later: followed again.
+    journal.bindings.grantRead(ROOT, desktop, true);
+    await outside.run(op("outside.grant", { folder: "Desktop" }), never());
+    expect(following).toHaveBeenCalledTimes(2);
   });
 
   it("refuses a grant whose folder does not answer in time, before it is resolved", async () => {
@@ -576,6 +599,68 @@ describe("outside.trash and outside.put_back", () => {
     expect(await layer().run(op("outside.trash", { files: [other] }), never())).toMatchObject({ error: { type: "denied" } });
     expect(existsSync(other)).toBe(true);
     expect(tools.ran).toEqual([]);
+  });
+
+  const moveOf = async (files: string[], to: string, ticked = files) => {
+    chosenFor.mockReturnValueOnce(ticked);
+    const operation = op("outside.move", { files, to });
+    const outside = layer();
+    expect(outside.refusal(operation)).toBeNull();
+    return outside.run(operation, never());
+  };
+
+  it("moves the ticked files: each copied, then its original to the bin", async () => {
+    const documents = join(base, "home", "Documents");
+    mkdirSync(join(documents, "PONTAJE"), { recursive: true });
+    journal.bindings.grantRead(ROOT, desktop);
+    journal.bindings.grantRead(ROOT, documents);
+    const cerere = join(desktop, "Scan", "cerere.pdf");
+    const note = join(desktop, "note.txt");
+    const pontaje = join(documents, "PONTAJE");
+    expect(await moveOf([cerere, note], pontaje, [cerere])).toEqual({
+      ok: { moved: [{ from: cerere, to: join(pontaje, "cerere.pdf") }], copied_only: [], skipped: [{ from: note, reason: "not ticked by the user" }] },
+    });
+    expect(readFileSync(join(pontaje, "cerere.pdf"), "utf8")).toBe("pdf");
+    expect(readdirSync(bin)).toEqual(["cerere.pdf"]);
+    expect(existsSync(note)).toBe(true);
+    // Taken up again after a restart, its user's ticks are gone: nothing moves.
+    expect(await layer().run(op("outside.move", { files: [note], to: pontaje }), never())).toMatchObject({ error: { type: "denied" } });
+    expect(existsSync(note)).toBe(true);
+  });
+
+  it("moves into the chat's folder and keeps no copy record for the file moved", async () => {
+    folderTools();
+    journal.bindings.grantRead(ROOT, desktop);
+    const note = join(desktop, "note.txt");
+    expect(await moveOf([note], work)).toEqual({ ok: { moved: [{ from: note, to: join(work, "note.txt") }], copied_only: [], skipped: [] } });
+    expect(readFileSync(join(work, "note.txt"), "utf8")).toBe("first\nsecond\n");
+    expect(existsSync(note)).toBe(false);
+    expect(journal.bindings.copyOf(ROOT, join(work, "note.txt"))).toBeUndefined();
+  });
+
+  it("keeps an original that changed after it was copied, and says where its copy is", async () => {
+    folderTools();
+    journal.bindings.grantRead(ROOT, desktop);
+    const note = join(desktop, "note.txt");
+    const run = tools.run;
+    // Changed while its copy was being written.
+    tools.run = async (operation) => {
+      if (operation.kind === "write") writeFileSync(note, "changed meanwhile, and longer\n");
+      return run(operation, never());
+    };
+    expect(await moveOf([note], work)).toEqual({
+      ok: { moved: [], copied_only: [{ from: note, to: join(work, "note.txt"), reason: `${note} changed after it was copied, so it was kept where it is` }], skipped: [] },
+    });
+    expect(readFileSync(note, "utf8")).toBe("changed meanwhile, and longer\n");
+    expect(readdirSync(bin)).toEqual([]);
+  });
+
+  it("refuses to move a file of the chat's own folder, or into a folder that is not granted", async () => {
+    journal.bindings.grantRead(ROOT, desktop);
+    writeFileSync(join(work, "own.txt"), "own");
+    expect(layer().refusal(op("outside.move", { files: [join(work, "own.txt")], to: desktop }))).toMatchObject({ error: { type: "denied" } });
+    expect(layer().refusal(op("outside.move", { files: [join(desktop, "note.txt")], to: join(base, "elsewhere") }))).toMatchObject({ error: {} });
+    expect(layer().refusal(op("outside.move", { files: [join(base, "elsewhere", "secret.txt")], to: desktop }))).toEqual(noPermission(join(base, "elsewhere", "secret.txt")));
   });
 
   it("keeps a ticked file that became a link or vanished since it was asked about", async () => {

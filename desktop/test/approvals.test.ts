@@ -28,7 +28,7 @@ const FOLDER = "/home/me/notes";
 // The user at the desktop's prompts. With *auto*, each prompt is answered at once;
 // without, it stays open until the test answers it or its signal aborts it.
 // Confirmations get the next of *confirms*; past the end, they decline. *ticks*: what
-// each answer leaves ticked of a window's list.
+// each answer leaves ticked of a window's list; *choice*: the option each answer had chosen.
 type Answer = ApprovalAnswer | "trash" | "keep";
 class User implements ApprovalPrompts {
   readonly asked: ApprovalRequest[] = [];
@@ -36,12 +36,13 @@ class User implements ApprovalPrompts {
   readonly confirmations: ChatLabel[] = [];
   dismissed = 0;
   ticks: string[] = [];
+  choice: string | null = null;
 
   constructor(public auto: Answer | null = null, readonly confirms: boolean[] = []) {}
 
-  approve(request: ApprovalRequest, signal: AbortSignal): Promise<{ answer: Answer; checked: string[] }> {
+  approve(request: ApprovalRequest, signal: AbortSignal): Promise<{ answer: Answer; checked: string[]; choice?: string | null }> {
     this.asked.push(request);
-    if (this.auto) return Promise.resolve({ answer: this.auto, checked: this.ticks });
+    if (this.auto) return Promise.resolve({ answer: this.auto, checked: this.ticks, choice: this.choice });
     return new Promise((resolve) => {
       const prompt = { request, resolve };
       this.open.push(prompt);
@@ -1734,16 +1735,17 @@ describe("files outside the chat's folder", () => {
     op("outside.grant", { folder: "/home/me/Desktop" }), op("outside.copy", { files: ["/home/me/Desktop/a.txt"], to: FOLDER }),
     op("outside.trash", { files: ["/home/me/Desktop/a.txt"] }),
     op("outside.put_back", { copy: `${FOLDER}/a.txt`, original: "/home/me/Desktop/a.txt" }),
+    op("outside.move", { files: ["/home/me/Desktop/a.txt"], to: FOLDER }),
   ];
 
   it("asks for outside kinds even when the chat works freely", async () => {
     bind(ROOT, "free");
     user.auto = "deny";
     for (const operation of asked()) expect(await approvals.admit(operation, never())).toEqual(no(operation));
-    expect(user.asked.map((request) => request.kind)).toEqual(["read_folder", "copy", "trash", "put_back"]);
+    expect(user.asked.map((request) => request.kind)).toEqual(["read_folder", "copy", "trash", "put_back", "move"]);
     // Read kinds pass unasked: the layer checks the grant.
     for (const operation of READS) expect(await approvals.admit(operation, never())).toBeNull();
-    expect(user.asked).toHaveLength(4);
+    expect(user.asked).toHaveLength(5);
   });
 
   it("refuses every outside kind in a project's thread without asking", async () => {
@@ -1777,6 +1779,33 @@ describe("files outside the chat's folder", () => {
     user.auto = "deny";
     expect(await approvals.admit(op("outside.grant", { folder: "/home/me/Desktop2" }), never())).toEqual(SAID_NO);
     expect(user.asked).toHaveLength(3);
+  });
+
+  it("grants a folder for this turn alone unless its user chose the rest of the chat", async () => {
+    bind(ROOT, "ask");
+    user.auto = "allow";
+    expect(await approvals.admit(op("outside.grant", { folder: "/home/me/Desktop" }), never())).toBeNull();
+    expect(journal.bindings.forTurn(ROOT, "/home/me/Desktop")).toBe(true);
+    user.choice = "chat";
+    expect(await approvals.admit(op("outside.grant", { folder: "/home/me/Documents" }), never())).toBeNull();
+    expect(journal.bindings.forTurn(ROOT, "/home/me/Documents")).toBe(false);
+    expect(journal.bindings.reads(ROOT)).toEqual(["/home/me/Documents", "/home/me/Desktop"]);
+  });
+
+  it("asks a move in one window, with each file's size, and admits only the ticked files", async () => {
+    bind(ROOT, "ask");
+    const a = join(base, "a.txt");
+    writeFileSync(a, "12345");
+    const move = op("outside.move", { files: [a, "/home/me/b.txt"], to: "/home/me/PONTAJE" });
+    user.auto = "allow";
+    user.ticks = [a];
+    expect(await approvals.admit(move, never())).toBeNull();
+    expect(user.asked).toEqual([{ kind: "move", chat: chat(), to: "/home/me/PONTAJE", files: [{ from: a, size: 5 }, { from: "/home/me/b.txt", size: 0 }] }]);
+    expect(approvals.chosenFor(move.id)).toEqual([a]);
+    user.auto = "deny";
+    expect(await approvals.admit(op("outside.move", { files: [a], to: "/home/me/PONTAJE" }), never())).toEqual(SAID_NO);
+    expect(await approvals.admit(op("outside.move", { files: [a], to: "." }), never())).toMatchObject({ error: { type: "denied" } });
+    expect(user.asked).toHaveLength(2);
   });
 
   it("admits only the ticked files of a copy", async () => {

@@ -48,6 +48,7 @@ export interface PromptContent {
   choice: PromptChoice | null;
   checks?: PromptChecks | null; // none: no list to tick
   danger?: boolean; // drawn in the warning style, as the Recycle Bin's prompts are
+  detailsBelow?: boolean; // the details drawn under the list, together in one box: a move's From and To
   buttons: PromptButton[]; // left to right; the last is drawn as the main one
   focus: string; // the button focused as it opens
   cancel: string; // Escape's, and a window closed some other way
@@ -253,6 +254,15 @@ export function approval(request: ApprovalRequest): PromptContent {
   };
 }
 
+// How long a folder's read lasts: the agent's answer to this message, or the rest of the chat (bindings.ts, grantRead).
+const HOW_LONG: Omit<PromptChoice, "value"> = {
+  legend: "How long it can read this folder",
+  options: [
+    { value: "turn", label: "Just this request", description: "Ends when it finishes answering this message." },
+    { value: "chat", label: "For the rest of this chat", description: "You can remove access in Settings." },
+  ],
+};
+
 const files = (n: number) => `${n} ${n === 1 ? "file" : "files"}`;
 // The prompts of the files outside the chat's folder: Deny is focused and what Escape answers, and none offers to stop asking.
 function outsidePrompt(request: Exclude<ApprovalRequest, { kind: "command" | "change" | "input" | "network" | "browser" }>): PromptContent {
@@ -260,9 +270,11 @@ function outsidePrompt(request: Exclude<ApprovalRequest, { kind: "command" | "ch
   const base = { notes: [], choice: null, details: [], focus: "deny", cancel: "deny" };
   if (request.kind === "read_folder") {
     return {
-      ...base, title: `Let ${chat.agent} read a folder?`,
-      lead: `${chat.agent} asks to read ${shownPath(request.folder)} and its subfolders for this chat. It can list and read files there, and change nothing.`,
-      buttons: [button("deny", "Deny"), button("allow", "Allow for this chat", true)], height: 300,
+      ...base, title: `Let ${chat.agent} read ${named(request.folder)}?`,
+      lead: `${chat.agent} will be able to look at the files and folders in it. It asks you before copying, changing or deleting anything there. It works in the cloud, so what it reads is sent to it.`,
+      details: [code("Folder", shownPath(request.folder))],
+      choice: { ...HOW_LONG, value: "turn" },
+      buttons: [button("deny", "Don't allow"), button("allow", "Allow", true)], height: 470,
     };
   }
   if (request.kind === "copy") {
@@ -271,6 +283,22 @@ function outsidePrompt(request: Exclude<ApprovalRequest, { kind: "command" | "ch
       lead: `${chat.agent} asks to copy these files to ${shownPath(request.to)}. A file whose name is taken there is saved with a number added; nothing is overwritten.`,
       checks: { legend: "Files", items: request.files.map((f) => ({ value: f.from, label: named(f.from), detail: `${shownPath(posix.dirname(f.from))} · ${sizeOf(f.size)}` })) },
       buttons: [button("deny", "Deny"), button("allow", "Copy the ticked files", true)], height: 420,
+    };
+  }
+  if (request.kind === "move") {
+    const one = request.files.length === 1;
+    // One From for files all in one folder; each file's own folder by it otherwise.
+    const folders = new Set(request.files.map((f) => posix.dirname(f.from)));
+    const from = folders.size === 1 ? [...folders][0]! : null;
+    return {
+      ...base, danger: true, detailsBelow: true, title: `Move ${files(request.files.length)}?`,
+      lead: `${one ? "The file" : "Each file"} will be copied to the new folder. Then ${one ? "the" : "its"} original goes to the ${BIN}, where you can restore it if you need it.`,
+      checks: {
+        legend: "Files",
+        items: request.files.map((f) => ({ value: f.from, label: named(f.from), detail: from === null ? `${shownPath(posix.dirname(f.from))} · ${sizeOf(f.size)}` : sizeOf(f.size) })),
+      },
+      details: [...(from === null ? [] : [code("From", shownPath(from))]), code("To", shownPath(request.to))],
+      buttons: [button("deny", "Cancel"), button("allow", "Move", true)], height: 470,
     };
   }
   if (request.kind === "trash") {

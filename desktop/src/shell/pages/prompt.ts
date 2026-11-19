@@ -18,6 +18,7 @@ interface Content {
   choice: { legend: string; options: Array<{ value: string; label: string; description: string }>; value: string } | null;
   checks?: { legend: string; items: Array<{ value: string; label: string; detail: string }> } | null;
   danger?: boolean;
+  detailsBelow?: boolean;
   buttons: Array<{ id: string; label: string; allows: boolean }>;
   focus: string;
   cancel: string;
@@ -33,6 +34,7 @@ interface State {
 interface Prompt {
   state(): Promise<State>;
   answer(button: string, choice: string | null, checked: string[]): Promise<boolean>;
+  fit(height: number): Promise<void>;
   onChanged(listener: () => void): () => void;
   onArmed(listener: (armed: boolean) => void): () => void;
 }
@@ -139,6 +141,16 @@ document.addEventListener("keydown", down, true);
 document.addEventListener("pointerdown", down, true);
 for (const after of ["keyup", "pointerup", "pointercancel"]) document.addEventListener(after, up, true);
 
+// The window as tall as what it shows: measured with the prompt at its own height, not the window's.
+function fit(): void {
+  const box = document.querySelector<HTMLElement>(".prompt");
+  if (!box) return;
+  box.style.height = "auto";
+  const height = Math.ceil(box.getBoundingClientRect().height);
+  box.style.height = "";
+  void prompt.fit(height).catch(() => {});
+}
+
 // More may wait than the line here holds: each chat keeps its own later prompts back until this one is answered.
 function waiting(count: number): void {
   byId("prompt-waiting").textContent = count === 0 ? "" : "More prompts wait after this one.";
@@ -184,6 +196,10 @@ function draw(state: State): void {
     }));
   }
   document.querySelector(".prompt")?.classList.toggle("danger", content.danger === true);
+  // A move's From and To, under its list of files, in one box.
+  const details = byId("prompt-details");
+  details.classList.toggle("below", content.detailsBelow === true);
+  if (content.detailsBelow) byId("prompt-checks").after(details);
   const checks = byId("prompt-checks");
   checks.hidden = !content.checks;
   if (content.checks) {
@@ -209,6 +225,7 @@ function draw(state: State): void {
     return button;
   }));
   waiting(state.waiting);
+  fit();
   hold();
   document.querySelector<HTMLElement>(`#prompt-buttons button[data-id="${content.focus}"]`)?.focus();
 }
@@ -225,5 +242,8 @@ prompt.onArmed((now) => {
   armed = now;
   hold();
 });
-prompt.onChanged(() => void prompt.state().then((state) => waiting(state.waiting)));
+prompt.onChanged(() => void prompt.state().then((state) => {
+  waiting(state.waiting);
+  fit();
+}));
 void prompt.state().then(draw);

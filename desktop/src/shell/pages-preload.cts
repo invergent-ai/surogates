@@ -107,6 +107,7 @@ if (location.protocol === "file:") {
   contextBridge.exposeInMainWorld("surogatePrompt", {
     state: () => ipcRenderer.invoke("prompt:state"),
     answer: (button: string, choice: string | null, checked: string[]) => ipcRenderer.invoke("prompt:answer", button, choice, checked),
+    fit: (height: number) => ipcRenderer.invoke("prompt:fit", height),
     onChanged: listen("prompt:changed"),
     onArmed: (listener: (armed: boolean) => void) => {
       const relay = (_event: unknown, armed: unknown) => listener(armed === true);

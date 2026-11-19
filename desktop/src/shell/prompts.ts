@@ -88,7 +88,7 @@ export function desktopPrompts(options: DesktopPromptsOptions): FolderPrompts & 
     async approve(request, signal) {
       const answer = await ask(approval(request), signal);
       if (answer === TIMEOUT) return { answer: "timeout", checked: [] };
-      return answer === null ? { answer: "deny", checked: [] } : { answer: answer.button as PromptReply["answer"], checked: answer.checked };
+      return answer === null ? { answer: "deny", checked: [] } : { answer: answer.button as PromptReply["answer"], checked: answer.checked, choice: answer.choice };
     },
     async confirmFreeMode(chat, signal) {
       const answer = await ask(freeMode(chat), signal);

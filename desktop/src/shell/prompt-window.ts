@@ -17,6 +17,10 @@ import type { PromptQueue } from "./prompt-queue.js";
 import { ownPage } from "./window-policy.js";
 
 export const WIDTH = 460;
+// The tallest a prompt grows to fit what it shows; past it, its middle scrolls. And how long a prompt waits to be
+// shown for its page to measure itself, before it is shown at the height it was given.
+export const MAX_FIT = 720;
+const FIT_MS = 300;
 // The input protection: how long a prompt is shown, or focused again, before an answer counts.
 export const INPUT_PROTECTION_MS = 500;
 // The keys that only change what another key means.
@@ -151,6 +155,17 @@ export function openPrompt(options: PromptWindowOptions, signal: AbortSignal): P
     close();
     return true;
   });
+  // The page's own height, as it measured what it shows: the window takes it, within MAX_FIT. Once measured, it is shown.
+  const fitted = Promise.withResolvers<void>();
+  handle("prompt:fit", (height) => {
+    if (typeof height === "number" && Number.isFinite(height) && height > 0 && !window.isDestroyed()) {
+      // A window its user cannot resize is resized by this process alone, which some window managers allow only while it may be.
+      window.setResizable(true);
+      window.setContentSize(WIDTH, Math.min(Math.ceil(height), MAX_FIT));
+      window.setResizable(false);
+    }
+    fitted.resolve();
+  });
   const unheard = options.queue.onChange(() => send("prompt:changed"));
   const reveal = () => {
     parent.off("show", reveal);
@@ -168,10 +183,13 @@ export function openPrompt(options: PromptWindowOptions, signal: AbortSignal): P
   };
   parent.on("focus", pass);
   window.once("ready-to-show", () => {
-    if (parent.isVisible() && !parent.isMinimized()) return reveal();
-    options.unseen();
-    parent.on("show", reveal);
-    parent.on("restore", reveal);
+    void Promise.race([fitted.promise, new Promise((done) => setTimeout(done, FIT_MS))]).then(() => {
+      if (closing || window.isDestroyed()) return;
+      if (parent.isVisible() && !parent.isMinimized()) return reveal();
+      options.unseen();
+      parent.on("show", reveal);
+      parent.on("restore", reveal);
+    });
   });
   signal.addEventListener("abort", close, { once: true });
   window.once("closed", () => {

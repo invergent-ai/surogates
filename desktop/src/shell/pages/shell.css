@@ -1421,6 +1421,21 @@ body.prompt-page {
   gap: 12px;
 }
 
+/* A move's From and To, under its files, in one box: each a line of its own, with no box of its own. */
+#prompt-details.below {
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--raised);
+}
+
+#prompt-details.below .code {
+  padding: 0;
+  border: 0;
+  background: none;
+}
+
 /* No notes, no gap where they would be. */
 #prompt-notes:empty {
   display: none;

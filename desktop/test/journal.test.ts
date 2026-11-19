@@ -348,6 +348,37 @@ describe("the bindings", () => {
     journal.close();
   });
 
+  it("keeps a grant for one turn in memory alone, until its turn ends, a restart, or a grant for the chat", () => {
+    const journal = new OperationJournal(path);
+    journal.bindings.add(binding("r1", 1));
+    const told: string[] = [];
+    journal.bindings.watch((root) => told.push(root));
+    journal.bindings.grantRead("r1", "/home/me/papers");
+    journal.bindings.grantRead("r1", "/home/me/notes", true);
+    journal.bindings.grantRead("r1", "/home/me/papers", true);
+    expect(journal.bindings.reads("r1")).toEqual(["/home/me/papers", "/home/me/notes"]);
+    expect([journal.bindings.forTurn("r1", "/home/me/notes"), journal.bindings.forTurn("r1", "/home/me/papers")]).toEqual([true, false]);
+    journal.bindings.endTurnReads("r1");
+    journal.bindings.endTurnReads("r1");
+    expect(journal.bindings.reads("r1")).toEqual(["/home/me/papers"]);
+    // For the turn, then for the chat: the chat's takes its place.
+    journal.bindings.grantRead("r1", "/home/me/notes", true);
+    journal.bindings.grantRead("r1", "/home/me/notes");
+    expect(journal.bindings.forTurn("r1", "/home/me/notes")).toBe(false);
+    journal.bindings.takeBackRead("r1", "/home/me/notes");
+    journal.bindings.grantRead("r1", "/home/me/notes", true);
+    journal.bindings.takeBackRead("r1", "/home/me/notes");
+    expect(journal.bindings.reads("r1")).toEqual(["/home/me/papers"]);
+    expect(told).toEqual(Array(8).fill("r1"));
+    // None to a root it does not bind; and a restart ends them.
+    journal.bindings.grantRead("r9", "/home/me/notes", true);
+    journal.bindings.grantRead("r1", "/home/me/notes", true);
+    journal.close();
+    const after = new OperationJournal(path);
+    expect([after.bindings.reads("r9"), after.bindings.reads("r1")]).toEqual([[], ["/home/me/papers"]]);
+    after.close();
+  });
+
   it("grants nothing to a root it does not bind", () => {
     const journal = new OperationJournal(path);
     journal.bindings.grantRead("r9", "/home/me/notes");

@@ -44,6 +44,11 @@ const notDestination = (to: string): Outcome => denied(`The destination ${to} is
 // How many numbered names a copy tries past its own, as a download does.
 const NAMES = 100;
 const TOO_LARGE = "too large";
+// Why a file was not copied, as a copy's or a move's result says it.
+const skippedFor = (error: unknown): string => {
+  const reason = said(error);
+  return reason === READ_TOO_LARGE ? TOO_LARGE : reason;
+};
 const said = (error: unknown) => error instanceof Failure ? error.refusal.message : error instanceof Error ? error.message : String(error);
 const osFailure = (message: string) => new Failure({ type: "os", message });
 // An outcome's refusal, thrown: for one known to be refused.
@@ -83,6 +88,11 @@ const unticked = (requested: unknown, ticked: string[]): string[] =>
 // What a copy read: the file's bytes, base64, and, for one from a grant, its revision as read.
 type Source = { data: string; revision?: string };
 type Copied = { copied: Array<{ from: string; to: string }>; skipped: Array<{ from: string; reason: string }> };
+type Moved = {
+  moved: Array<{ from: string; to: string }>;
+  copied_only: Array<{ from: string; to: string; reason: string }>; // copied, but its original stayed where it is
+  skipped: Array<{ from: string; reason: string }>;
+};
 
 export interface OutsideOptions {
   tools: ToolLayer;
@@ -94,6 +104,11 @@ export interface OutsideOptions {
   trash: (hostPath: string) => Promise<void>;
   /** A look at the folder at the session's path *folder* off the main thread, within a bound (lookApart by default). */
   look?: (folder: string) => Promise<"there" | "gone" | "silent">;
+  /**
+   * Chat *root*'s turns followed: *turnEnded* each time one ends, until the stop it returns. Without it, or with nobody
+   * signed in, a grant for one turn lasts until the app restarts.
+   */
+  following?: (root: string, turnEnded: () => void) => () => void;
 }
 
 // Every other member of the tools below, there only where they have it: a caller tells one they lack by its absence.
@@ -113,6 +128,9 @@ export interface Outside extends Pick<ToolLayer, Passed> {}
 // thread (a grant's folder is looked at apart first, a walk has a short budget, a read yields between its pieces); the
 // upgrade is to move this layer's I/O into the file host's process, as a chat's folder's is.
 export class Outside implements ToolLayer {
+  // Each chat with a grant for its turn alone, followed until that turn ends (granted), by the stop of its following.
+  private readonly turns = new Map<string, () => void>();
+
   constructor(private readonly options: OutsideOptions) {
     const { tools } = options;
     for (const name of PASSED) {
@@ -168,18 +186,24 @@ export class Outside implements ToolLayer {
       const own = args.files.find((file) => typeof file === "string" && this.chatOwns(root, file, look)) as string | undefined;
       if (own !== undefined) return chatsOwn(own);
     }
+    if (kind === "outside.move") {
+      // Its originals go to the bin: as trash's, none of the chat's own; and as copy's, no destination by another name.
+      const own = (Array.isArray(args.files) ? args.files : []).find((file) => typeof file === "string" && this.chatOwns(root, file, look)) as string | undefined;
+      if (own !== undefined) return chatsOwn(own);
+      if (typeof args.to === "string" && this.reachesChat(root, args.to, look)) return denied(byAnotherName(args.to));
+    }
     if (kind === "outside.put_back") return typeof args.copy === "string" && typeof args.original === "string" ? this.putBackRefusal(root, args.copy, args.original, look) : null;
     if (kind === "outside.copy") {
       // A path to the chat's folder by another name is no grant's, and the chat's own tools know it by its own.
       const named = [...(Array.isArray(args.files) ? args.files : []), args.to].find((path) => typeof path === "string" && this.reachesChat(root, path, look));
       if (typeof named === "string") return denied(byAnotherName(named));
     }
-    if ((kind === "outside.copy" || kind === "outside.trash") && Array.isArray(args.files)) {
+    if ((kind === "outside.copy" || kind === "outside.trash" || kind === "outside.move") && Array.isArray(args.files)) {
       // Malformed ones are the approvals' to refuse, in their words. A copy may take from the chat's folder too.
       const out = args.files.find((file) => typeof file === "string" && this.sourceOf(root, file, look, kind === "outside.copy") === null) as string | undefined;
       if (out !== undefined) return noPermission(out);
     }
-    if (kind === "outside.copy" && typeof args.to === "string" && this.destinationOf(root, args.to, look) === null) return notDestination(args.to);
+    if ((kind === "outside.copy" || kind === "outside.move") && typeof args.to === "string" && this.destinationOf(root, args.to, look) === null) return notDestination(args.to);
     return null;
   }
 
@@ -193,15 +217,16 @@ export class Outside implements ToolLayer {
       // The folder its user allowed, as the approvals kept it: answered so, whatever its name resolves to now (a
       // Desktop the OS moved since), as long as it is still this chat's grant.
       const approved = this.options.approvals.chosenFor(operation.id)?.[0];
-      if (approved !== undefined && this.options.bindings.reads(root).includes(approved)) return { ok: { folder: approved } };
+      if (approved !== undefined && this.options.bindings.reads(root).includes(approved)) return { ok: this.granted(root, approved, approved) };
       const resolved = await this.resolveFolder(args.folder, root);
       if ("refused" in resolved) return denied(resolved.refused);
       // Answered as granted where a grant of this chat's holds it, as the approvals let it through unasked.
-      const held = this.options.bindings.reads(root).includes(resolved.folder) || this.looker(root)(resolved.folder) !== null;
-      return held ? { ok: { folder: resolved.folder } } : noPermission(resolved.folder);
+      const holder = this.options.bindings.reads(root).includes(resolved.folder) ? resolved.folder : this.looker(root)(resolved.folder);
+      return holder !== null ? { ok: this.granted(root, resolved.folder, holder) } : noPermission(resolved.folder);
     }
     if (kind === "outside.copy") return this.copy(operation, signal);
     if (kind === "outside.trash") return this.trash(operation, signal);
+    if (kind === "outside.move") return this.move(operation, signal);
     if (kind === "outside.put_back") return this.putBack(operation, signal);
     if (!READS.has(kind)) return unknown(kind);
     // Checked again: an operation reaches here without its refusal asked, as one taken up again after a restart.
@@ -210,6 +235,20 @@ export class Outside implements ToolLayer {
     const grant = this.looker(root)(key);
     if (grant === null) return noPermission(key);
     return this.answer(kind, () => this.read(kind, args, grant, key));
+  }
+
+  // *folder* granted to *root* by its grant *holder*, and for how long: a grant for the turn ends with it, as followed here.
+  private granted(root: string, folder: string, holder: string): { folder: string; lasts: "this request" | "this chat" } {
+    if (!this.options.bindings.forTurn(root, holder)) return { folder, lasts: "this chat" };
+    if (!this.turns.has(root)) {
+      const stop = this.options.following?.(root, () => {
+        this.turns.get(root)?.();
+        this.turns.delete(root);
+        this.options.bindings.endTurnReads(root);
+      });
+      if (stop) this.turns.set(root, stop);
+    }
+    return { folder, lasts: "this request" };
   }
 
   // For one refusal() or run(): the grant of *root*'s that holds a path, no link on its way; null for none. Each path
@@ -282,33 +321,79 @@ export class Outside implements ToolLayer {
         continue;
       }
       try {
-        if (this.reachesChat(root, from, look)) throw new Failure({ type: "denied", message: byAnotherName(from) });
-        const source = this.sourceOf(root, from, look);
-        if (source === null) throw failureOf(noPermission(from));
-        let read: Source;
-        if (source === "chat") {
-          const outcome = await inner("read", { key: from, max_bytes: null });
-          if ("error" in outcome) throw new Failure(outcome.error);
-          read = { data: outcome.ok as string };
-        } else {
-          read = this.within(root, source, from, (where) => ({
-            // Looked at before the read: a change in between makes the revision older than the bytes, and a put back
-            // then finds the original changed, and refuses; never the other way round.
-            revision: revisionOf(io(from, () => this.options.fd.lstat(where))),
-            data: readFrom({ max_bytes: null }, from, (flags) => this.options.fd.open(where, flags)),
-          }));
-        }
-        const name = basename(from);
-        const key = to.grant === null ? await this.intoChat(to.dir, name, read.data, inner) : this.intoGrant(root, to.grant, to.dir, name, read.data);
-        // A copy of an outside file is remembered for its put back; any other made at a key once a copy's is no copy.
-        if (to.grant === null) {
-          if (source === "chat") this.options.bindings.forgetCopy(root, key);
-          else this.options.bindings.recordCopy(root, key, from, read.revision!);
-        }
-        done.copied.push({ from, to: key });
+        done.copied.push({ from, to: (await this.copyOne(root, from, to, look, inner)).key });
       } catch (error) {
-        const reason = said(error);
-        done.skipped.push({ from, reason: reason === READ_TOO_LARGE ? TOO_LARGE : reason });
+        done.skipped.push({ from, reason: skippedFor(error) });
+      }
+    }
+    for (const from of unticked(args.files, ticked)) done.skipped.push({ from, reason: UNTICKED });
+    return { ok: done };
+  }
+
+  // *from* copied into *to*: the new file's key, and the revision of an outside original as it was read. Or throws.
+  private async copyOne(root: string, from: string, to: { dir: string; grant: string | null }, look: Look, inner: Inner): Promise<{ key: string; revision?: string }> {
+    if (this.reachesChat(root, from, look)) throw new Failure({ type: "denied", message: byAnotherName(from) });
+    const source = this.sourceOf(root, from, look);
+    if (source === null) throw failureOf(noPermission(from));
+    let read: Source;
+    if (source === "chat") {
+      const outcome = await inner("read", { key: from, max_bytes: null });
+      if ("error" in outcome) throw new Failure(outcome.error);
+      read = { data: outcome.ok as string };
+    } else {
+      read = this.within(root, source, from, (where) => ({
+        // Looked at before the read: a change in between makes the revision older than the bytes, and a put back
+        // then finds the original changed, and refuses; never the other way round.
+        revision: revisionOf(io(from, () => this.options.fd.lstat(where))),
+        data: readFrom({ max_bytes: null }, from, (flags) => this.options.fd.open(where, flags)),
+      }));
+    }
+    const name = basename(from);
+    const key = to.grant === null ? await this.intoChat(to.dir, name, read.data, inner) : this.intoGrant(root, to.grant, to.dir, name, read.data);
+    // A copy of an outside file is remembered for its put back; any other made at a key once a copy's is no copy.
+    if (to.grant === null) {
+      if (source === "chat") this.options.bindings.forgetCopy(root, key);
+      else this.options.bindings.recordCopy(root, key, from, read.revision!);
+    }
+    return { key, revision: read.revision };
+  }
+
+  // The files its user ticked, each copied to *to* and, once its copy is made and checked, its original to the bin:
+  // one that cannot be copied stays where it is, and one whose original cannot go (changed since it was read, say) is
+  // said with its copy. Only files in a grant: the chat's own are its own tools' to move.
+  private async move(operation: Operation, signal: AbortSignal): Promise<Outcome> {
+    const { args, sessionId: root } = operation;
+    // Let go before anything else: a move refused here is not done later with them.
+    const ticked = this.options.approvals.chosenFor(operation.id);
+    if (typeof args.to !== "string") return { error: { type: "value", message: "'to' must be a string" } };
+    // Checked again: an operation reaches here without its refusal asked, as one taken up again after a restart.
+    const look = this.looker(root);
+    if (this.reachesChat(root, args.to, look)) return denied(byAnotherName(args.to));
+    const to = this.destinationOf(root, args.to, look);
+    if (to === null) return notDestination(args.to);
+    if (ticked === undefined) return denied("Nothing was moved: the files its user chose are not known any more. Ask again.");
+    const done: Moved = { moved: [], copied_only: [], skipped: [] };
+    const inner = this.inner(operation, "outside-move", signal);
+    for (const from of ticked) {
+      if (signal.aborted) {
+        done.skipped.push({ from, reason: "stopped" });
+        continue;
+      }
+      let copied: { key: string; revision?: string };
+      try {
+        if (this.chatOwns(root, from, look)) throw failureOf(chatsOwn(from));
+        copied = await this.copyOne(root, from, to, look, inner);
+      } catch (error) {
+        done.skipped.push({ from, reason: skippedFor(error) });
+        continue;
+      }
+      try {
+        await this.trashOne(root, from, this.looker(root), copied.revision, signal);
+        // Its original is in the bin: the copy in the chat's folder is the file now, no working copy to put back.
+        if (to.grant === null) this.options.bindings.forgetCopy(root, copied.key);
+        done.moved.push({ from, to: copied.key });
+      } catch (error) {
+        done.copied_only.push({ from, to: copied.key, reason: said(error) });
       }
     }
     for (const from of unticked(args.files, ticked)) done.skipped.push({ from, reason: UNTICKED });
@@ -415,23 +500,9 @@ export class Outside implements ToolLayer {
     if (ticked === undefined) return denied(`Nothing was moved to the ${BIN}: the files its user chose are not known any more. Ask again.`);
     const done: { trashed: string[]; kept: Array<{ file: string; reason: string }> } = { trashed: [], kept: [] };
     for (const file of ticked) {
-      // Each file against the grants as they are when its turn comes: one taken back while the bin had another is seen.
-      const look = this.looker(root);
       try {
-        if (signal.aborted) throw osFailure("stopped");
-        // Checked again, as a read is: the chat's own, a file now in no grant, and a link put at its name since stay.
-        const grant = look(file);
-        if (this.chatOwns(root, file, look)) throw failureOf(chatsOwn(file));
-        if (grant === null) throw failureOf(noPermission(file));
-        this.within(root, grant, file, (where) => {
-          const st = io(file, () => this.options.fd.lstat(where));
-          if (st.isSymbolicLink()) throw osFailure(`${file} is a link now, not the file its user chose`);
-          // A folder, the grant's own among them, is no file its user was asked about.
-          if (!st.isFile()) throw osFailure("not a file");
-        });
-        // ponytail: the bin takes a path, so a link swapped in after the look above and before the move is moved itself
-        // (a link is moved, never followed); held by a handle once the OS's trash takes one.
-        await this.options.trash(hostPathOf(file)).catch((error: unknown) => { throw binError(error); });
+        // Each file against the grants as they are when its turn comes: one taken back while the bin had another is seen.
+        await this.trashOne(root, file, this.looker(root), undefined, signal);
         done.trashed.push(file);
       } catch (error) {
         done.kept.push({ file, reason: said(error) });
@@ -439,6 +510,25 @@ export class Outside implements ToolLayer {
     }
     for (const file of unticked(operation.args.files, ticked)) done.kept.push({ file, reason: UNTICKED });
     return { ok: done };
+  }
+
+  // *file*, in a grant, to the bin; with *revision*, only while it is still the file as it was read then. Or throws.
+  private async trashOne(root: string, file: string, look: Look, revision: string | undefined, signal: AbortSignal): Promise<void> {
+    if (signal.aborted) throw osFailure("stopped");
+    // Checked again, as a read is: the chat's own, a file now in no grant, and a link put at its name since stay.
+    const grant = look(file);
+    if (this.chatOwns(root, file, look)) throw failureOf(chatsOwn(file));
+    if (grant === null) throw failureOf(noPermission(file));
+    this.within(root, grant, file, (where) => {
+      const st = io(file, () => this.options.fd.lstat(where));
+      if (st.isSymbolicLink()) throw osFailure(`${file} is a link now, not the file its user chose`);
+      // A folder, the grant's own among them, is no file its user was asked about.
+      if (!st.isFile()) throw osFailure("not a file");
+      if (revision !== undefined && revisionOf(st) !== revision) throw osFailure(`${file} changed after it was copied, so it was kept where it is`);
+    });
+    // ponytail: the bin takes a path, so a link swapped in after the look above and before the move is moved itself
+    // (a link is moved, never followed); held by a handle once the OS's trash takes one.
+    await this.options.trash(hostPathOf(file)).catch((error: unknown) => { throw binError(error); });
   }
 
   // A copy's changes put back over its original, in order: the original unchanged since it was copied, the changes

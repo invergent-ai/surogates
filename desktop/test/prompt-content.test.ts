@@ -399,11 +399,44 @@ describe("a prompt with a list to tick", () => {
 describe("the windows for files outside the chat's folder", () => {
   const bin = process.platform === "darwin" ? "Trash" : "Recycle Bin";
 
-  it("asks to read a folder, for this chat", () => {
+  it("asks to read a folder, by its name and whole path, for this request unless the rest of the chat is chosen", () => {
     const c = approval({ kind: "read_folder", chat: CHAT, folder: "/home/me/docs" });
-    expect([c.title, c.lead]).toEqual(["Let acme.surogate.ai read a folder?", "acme.surogate.ai asks to read /home/me/docs and its subfolders for this chat. It can list and read files there, and change nothing."]);
-    expect(c.buttons.map((b) => [b.id, b.label])).toEqual([["deny", "Deny"], ["allow", "Allow for this chat"]]);
+    expect([c.title, c.lead]).toEqual([
+      "Let acme.surogate.ai read docs?",
+      "acme.surogate.ai will be able to look at the files and folders in it. It asks you before copying, changing or deleting anything there. It works in the cloud, so what it reads is sent to it.",
+    ]);
+    expect(c.details.map((d) => [d.label, d.value])).toEqual([["Folder", "/home/me/docs"]]);
+    expect(c.choice).toEqual({
+      legend: "How long it can read this folder",
+      options: [
+        { value: "turn", label: "Just this request", description: "Ends when it finishes answering this message." },
+        { value: "chat", label: "For the rest of this chat", description: "You can remove access in Settings." },
+      ],
+      value: "turn",
+    });
+    expect(c.buttons.map((b) => [b.id, b.label])).toEqual([["deny", "Don't allow"], ["allow", "Allow"]]);
     expect([c.focus, c.danger ?? false, c.checks ?? null]).toEqual(["deny", false, null]);
+    // The choice the user made is the answer's; one the window did not offer is refused.
+    expect(checkAnswer(c, "allow", "chat", [])).toEqual({ button: "allow", choice: "chat", checked: [] });
+    expect(() => checkAnswer(c, "allow", "forever", [])).toThrow();
+  });
+
+  it("moves files in one window: the files ticked, then From and To in one box under them", () => {
+    const c = approval({ kind: "move", chat: CHAT, to: "/home/me/PONTAJE", files: [{ from: "/home/me/Scan/a.pdf", size: 10 }, { from: "/home/me/Scan/b.pdf", size: 2048 }] });
+    expect([c.title, c.danger, c.focus, c.cancel, c.detailsBelow]).toEqual(["Move 2 files?", true, "deny", "deny", true]);
+    expect(c.lead).toBe(`Each file will be copied to the new folder. Then its original goes to the ${bin}, where you can restore it if you need it.`);
+    expect(c.checks?.items).toEqual([
+      { value: "/home/me/Scan/a.pdf", label: "a.pdf", detail: "10 bytes" },
+      { value: "/home/me/Scan/b.pdf", label: "b.pdf", detail: "2 KB" },
+    ]);
+    expect(c.details.map((d) => [d.label, d.value])).toEqual([["From", "/home/me/Scan"], ["To", "/home/me/PONTAJE"]]);
+    expect(c.buttons.map((b) => [b.id, b.label])).toEqual([["deny", "Cancel"], ["allow", "Move"]]);
+    // From two folders: each file's own by it, and no From.
+    const two = approval({ kind: "move", chat: CHAT, to: "/o", files: [{ from: "/a/x.pdf", size: 1 }, { from: "/b/y.pdf", size: 1 }] });
+    expect(two.details.map((d) => d.label)).toEqual(["To"]);
+    expect(two.checks?.items.map((i) => i.detail)).toEqual(["/a · 1 byte", "/b · 1 byte"]);
+    const one = approval({ kind: "move", chat: CHAT, to: "/o", files: [{ from: "/a/x.pdf", size: 1 }] });
+    expect([one.title, one.lead]).toEqual(["Move 1 file?", `The file will be copied to the new folder. Then the original goes to the ${bin}, where you can restore it if you need it.`]);
   });
 
   it("lists each file to copy, ticked by its path, with its folder and size", () => {
@@ -435,7 +468,7 @@ describe("the windows for files outside the chat's folder", () => {
   });
 
   it("never offers to stop asking", () => {
-    for (const r of [{ kind: "read_folder", folder: "/a" }, { kind: "copy", to: "/a", files: [] }, { kind: "trash", files: [] }, { kind: "put_back", copy: "/a", original: "/b" }] as const) {
+    for (const r of [{ kind: "read_folder", folder: "/a" }, { kind: "copy", to: "/a", files: [] }, { kind: "move", to: "/a", files: [] }, { kind: "trash", files: [] }, { kind: "put_back", copy: "/a", original: "/b" }] as const) {
       expect(ids(approval({ ...r, chat: CHAT } as ApprovalRequest))).not.toContain("stop_asking");
     }
   });

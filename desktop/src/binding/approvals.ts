@@ -152,6 +152,7 @@ export type ApprovalRequest =
   | { kind: "read_folder"; chat: ChatLabel; folder: string }
   | { kind: "copy"; chat: ChatLabel; to: string; files: Array<{ from: string; size: number }> }
   | { kind: "trash"; chat: ChatLabel; files: string[] }
+  | { kind: "move"; chat: ChatLabel; to: string; files: Array<{ from: string; size: number }> }
   | { kind: "put_back"; chat: ChatLabel; copy: string; original: string }
   // The chat's first use of the browser here ("use", with no detail), or what an operation would do
   // in its page: the address it opens, the script it runs, where it clicks, what it types or presses, its drag's path.
@@ -174,10 +175,11 @@ export type BrowserAction = "use" | "port" | "open" | "script" | "click" | "down
 // host, on every port, for the rest of the chat. "timeout": nobody answered in time.
 // Any answer a prompt does not offer denies.
 export type ApprovalAnswer = "allow" | "deny" | "stop_asking" | "allow_session" | "timeout";
-// A window's answer, with what its list still had ticked: the trash window's buttons are its own.
+// A window's answer, with what its list still had ticked, and the option it had chosen: the trash window's buttons are its own.
 export interface PromptReply {
   answer: ApprovalAnswer | "trash" | "keep";
   checked: string[];
+  choice?: string | null; // a folder's read window: "chat" for the rest of the chat, else this turn alone
 }
 
 // The desktop shell's own windows; fakes in tests. Each settles once its signal aborts.
@@ -566,7 +568,8 @@ export class Approvals {
       else {
         const sizes = await settled(sizesOf(files), signal);
         if (signal.aborted || !sizes) return no;
-        request = { kind: "copy", chat, to: String(args.to), files: files.map((from, at) => ({ from, size: sizes[at]! })) };
+        const sized = files.map((from, at) => ({ from, size: sizes[at]! }));
+        request = { kind: kind === "outside.move" ? "move" : "copy", chat, to: String(args.to), files: sized };
       }
       let reply: PromptReply | undefined;
       try {
@@ -582,7 +585,8 @@ export class Approvals {
       if (reply.answer !== (kind === "outside.trash" ? "trash" : "allow")) return no;
       if (kind === "outside.grant") {
         try {
-          this.options.bindings.grantRead(root, folder);
+          // For this turn alone unless its user chose the rest of the chat: a window that offered no choice grants the least.
+          this.options.bindings.grantRead(root, folder, reply.choice !== "chat");
         } catch (error) {
           // Not kept, the layer would refuse every read of it anyway.
           report(this.options.onError, error);
@@ -591,7 +595,7 @@ export class Approvals {
         // The folder its user allowed, for the layer to answer with: its name may resolve elsewhere by the time it runs.
         this.chosen.set(operation.id, [folder]);
       }
-      if (kind === "outside.copy" || kind === "outside.trash") {
+      if (kind === "outside.copy" || kind === "outside.trash" || kind === "outside.move") {
         // Only what the window listed: a ticked file it did not show is not the user's choice.
         const ticked = files.filter((file) => reply.checked.includes(file));
         if (ticked.length === 0) return no;
@@ -607,12 +611,12 @@ export class Approvals {
     const refused = (outcome: Outcome) => ({ refused: outcome });
     let files: string[] = [];
     let folder = "";
-    if (kind === "outside.copy" || kind === "outside.trash") {
+    if (kind === "outside.copy" || kind === "outside.trash" || kind === "outside.move") {
       if (!Array.isArray(args.files)) return refused(NOT_A_PATH("files"));
       if (args.files.length === 0) return refused(NO_FILES);
       if (!args.files.every(isPath)) return refused(NOT_A_PATH("files"));
       files = [...new Set(args.files as string[])];
-      if (kind === "outside.copy" && !isPath(args.to)) return refused(NOT_A_PATH("to"));
+      if ((kind === "outside.copy" || kind === "outside.move") && !isPath(args.to)) return refused(NOT_A_PATH("to"));
     } else if (kind === "outside.put_back") {
       for (const name of ["copy", "original"]) if (!isPath(args[name])) return refused(NOT_A_PATH(name));
     } else if (kind === "outside.grant") {

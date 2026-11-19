@@ -330,7 +330,8 @@ describe("one agent's device", () => {
     // A grant by the folder's name: the approvals ask about it, and keep it, where the layer resolves it.
     server.send(op("grant-1", "outside.grant", { folder: "Desktop" }));
     await server.until(() => results("grant-1").length === 1);
-    expect(results("grant-1")[0]?.outcome).toEqual({ ok: { folder: desktop } });
+    // Allowed with no choice made: for this turn alone.
+    expect(results("grant-1")[0]?.outcome).toEqual({ ok: { folder: desktop, lasts: "this request" } });
     expect(asked[0]).toMatchObject({ kind: "read_folder", folder: desktop });
     // The files its user ticked reach the layer from the same approvals.
     server.send(op("trash-1", "outside.trash", { files: [join(desktop, "old.txt")] }));

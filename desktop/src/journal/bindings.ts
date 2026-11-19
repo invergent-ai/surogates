@@ -53,6 +53,8 @@ const read = (row: Row | undefined): Binding | undefined =>
 
 export class Bindings {
   private readonly listeners = new Set<(root: string) => void>();
+  // Each root's folders granted for its turn alone (grantRead): never journaled, so a restart ends them.
+  private readonly turnReads = new Map<string, Set<string>>();
 
   constructor(private readonly db: DatabaseSync) {}
 
@@ -100,6 +102,7 @@ export class Bindings {
     const forgotten = this.atomically(() => {
       this.db.prepare(`DELETE FROM domains WHERE root = ?`).run(root);
       this.db.prepare(`DELETE FROM read_grants WHERE root = ?`).run(root);
+      this.turnReads.delete(root);
       this.db.prepare(`DELETE FROM outside_copies WHERE root = ?`).run(root);
       this.db.prepare(`DELETE FROM browsing WHERE root = ?`).run(root);
       this.takePorts(root);
@@ -176,22 +179,46 @@ export class Bindings {
     return rows.map((row) => row.domain);
   }
 
-  /** Let a bound root's agent read *folder* (a guest path outside its own folder) from now on. Once each; an unknown root changes nothing. */
-  grantRead(root: string, folder: string): void {
+  /**
+   * Let a bound root's agent read *folder* (a guest path outside its own folder): for the rest of the chat, kept in the
+   * journal; or, *forTurn*, only until endTurnReads, kept in memory alone, so a restart ends it too. Once each; a grant
+   * for the chat takes the place of one for the turn. An unknown root changes nothing.
+   */
+  grantRead(root: string, folder: string, forTurn = false): void {
+    if (forTurn) {
+      if (!this.get(root) || this.reads(root).includes(folder)) return;
+      this.turnReads.set(root, new Set([...(this.turnReads.get(root) ?? []), folder]));
+      this.changed(root);
+      return;
+    }
+    const held = this.turnReads.get(root)?.delete(folder) === true;
     const { changes } = this.db.prepare(`INSERT OR IGNORE INTO read_grants (root, folder) SELECT root, ? FROM bindings WHERE root = ?`).run(folder, root);
-    if (changes > 0) this.changed(root);
+    if (changes > 0 || held) this.changed(root);
   }
 
-  /** Take *folder* back from a root. One never granted changes nothing, and tells nothing. */
+  /** Take *folder* back from a root, for the turn or the chat. One never granted changes nothing, and tells nothing. */
   takeBackRead(root: string, folder: string): void {
+    const held = this.turnReads.get(root)?.delete(folder) === true;
     const { changes } = this.db.prepare(`DELETE FROM read_grants WHERE root = ? AND folder = ?`).run(root, folder);
-    if (changes > 0) this.changed(root);
+    if (changes > 0 || held) this.changed(root);
   }
 
-  /** The folders a root's user let its agent read outside its own, in the order granted. */
+  /** End a root's grants for its turn (grantRead's *forTurn*): its turn is over. */
+  endTurnReads(root: string): void {
+    const held = (this.turnReads.get(root)?.size ?? 0) > 0;
+    this.turnReads.delete(root);
+    if (held) this.changed(root);
+  }
+
+  /** Whether *folder* is a root's grant for its turn alone. */
+  forTurn(root: string, folder: string): boolean {
+    return this.turnReads.get(root)?.has(folder) === true;
+  }
+
+  /** The folders a root's user let its agent read outside its own, in the order granted: the chat's, then the turn's. */
   reads(root: string): string[] {
     const rows = this.db.prepare(`SELECT folder FROM read_grants WHERE root = ? ORDER BY rowid`).all(root) as Array<{ folder: string }>;
-    return rows.map((row) => row.folder);
+    return [...rows.map((row) => row.folder), ...(this.turnReads.get(root) ?? [])];
   }
 
   /** Note that *copy*, in a bound root's folder, was copied from *original* as it was at *revision*; a copy noted before is replaced. */
