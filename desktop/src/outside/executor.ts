@@ -132,6 +132,9 @@ export class Outside implements ToolLayer {
   // and how many such grants it had when last told.
   private readonly turns = new Map<string, () => void>();
   private readonly turnGrants = new Map<string, number>();
+  // Each root's working copies a put back refused because their original had changed since: out of date, and deleted
+  // once a newer copy of that original is put back. In memory alone: after a restart such a copy is left, never lost.
+  private readonly superseded = new Map<string, Set<string>>();
 
   constructor(private readonly options: OutsideOptions) {
     const { tools } = options;
@@ -142,9 +145,9 @@ export class Outside implements ToolLayer {
     options.bindings.watch((root) => this.heldForTurn(root));
   }
 
-  // A chat's turn followed from the moment a grant for it alone is made, whoever made it and whether or not its
-  // operation runs: followed anew at each such grant, so a follow that stopped by itself (a sign-out) is started again;
-  // and let go once it has none, its turn over, taken back, or the chat removed.
+  // A chat's turn followed from the moment its first grant for it alone is made, whoever made it and whether or not its
+  // operation runs, and let go once it has none: its turn over, taken back, or the chat removed. A grant more within
+  // the turn keeps the follow it has; one that could not be followed then (nobody signed in) is tried again.
   private heldForTurn(root: string): void {
     const { bindings } = this.options;
     const held = bindings.turnFolders(root).length;
@@ -152,7 +155,7 @@ export class Outside implements ToolLayer {
     if (held === before) return;
     if (held === 0) this.turnGrants.delete(root);
     else this.turnGrants.set(root, held);
-    if (held > 0 && held < before) return;
+    if (held > 0 && before > 0 && this.turns.has(root)) return;
     this.turns.get(root)?.();
     this.turns.delete(root);
     if (held === 0) return;
@@ -213,6 +216,11 @@ export class Outside implements ToolLayer {
       const own = (Array.isArray(args.files) ? args.files : []).find((file) => typeof file === "string" && this.holdsChat(root, file, look)) as string | undefined;
       if (own !== undefined) return chatsOwn(own);
       if (typeof args.to === "string" && this.reachesChat(root, args.to, look)) return denied(byAnotherName(args.to));
+      // Nothing to move: a file already in that folder, or the chat's own file moved within its folder.
+      const to = typeof args.to === "string" ? this.destinationOf(root, args.to, look) : null;
+      const stays = (Array.isArray(args.files) ? args.files : []).find((file) => typeof file === "string" && to !== null
+        && (posix.dirname(file) === to.dir || (to.grant === null && this.sourceOf(root, file, look) === "chat"))) as string | undefined;
+      if (stays !== undefined) return denied(`${stays} is in that folder, or this chat's folder, already: nothing to move.`);
     }
     if (kind === "outside.put_back") return typeof args.copy === "string" && typeof args.original === "string" ? this.putBackRefusal(root, args.copy, args.original, look) : null;
     if (kind === "outside.copy") {
@@ -414,6 +422,7 @@ export class Outside implements ToolLayer {
         if (own) {
           const deleted = await inner("delete", { key: from });
           if ("error" in deleted) throw new Failure(deleted.error);
+          this.options.bindings.forgetCopy(root, from);
         } else {
           await this.trashOne(root, from, this.looker(root), copied.revision, signal);
         }
@@ -550,12 +559,13 @@ export class Outside implements ToolLayer {
 
   // Whether *file*, in *grant*, is open in an office program, as the lock file it keeps beside it says: LibreOffice's
   // ".~lock.<name>#", which names who has it open and where, or Word's and Excel's "~$<name>", which drops the name's
-  // first two letters once it is long. How it is said ("open in another program, by monica on monica-ASUS"), or null.
+  // first letter or two once it is long. A lock of another file whose name ends the same reads as this one's: refused
+  // in error, never replaced in error. How it is said ("open in another program, by monica on monica-ASUS"), or null.
   // ponytail: a lock left by a program that crashed reads as open; the words say which lock file to delete then.
   private openIn(root: string, grant: string, file: string): string | null {
     const dir = posix.dirname(file);
     const name = posix.basename(file);
-    for (const lock of new Set([`.~lock.${name}#`, `~$${name}`, `~$${name.slice(2)}`])) {
+    for (const lock of new Set([`.~lock.${name}#`, `~$${name}`, `~$${name.slice(1)}`, `~$${name.slice(2)}`])) {
       const path = `${dir}/${lock}`;
       try {
         const who = this.within(root, grant, path, (where): string | null => {
@@ -613,6 +623,11 @@ export class Outside implements ToolLayer {
     const conflict: Outcome = {
       error: { type: "conflict", message: `${original} changed since it was copied. Nothing was replaced; the changes are in ${copy}. Copy it again and read that copy first: it holds the user's saved changes, which must all be kept. Make your change on it as a new edit, never by reusing rows, cells or positions from the old copy, then put that back.` },
     };
+    // Refused for an original changed since: this copy is out of date, and goes once a newer one is put back.
+    const changed = (): Outcome => {
+      this.superseded.set(root, new Set([...(this.superseded.get(root) ?? []), copy]));
+      return conflict;
+    };
     // Open in a program, it is not replaced: its user's unsaved edits would overwrite it, or be lost.
     const open = this.openIn(root, grant, original);
     if (open !== null) {
@@ -649,9 +664,9 @@ export class Outside implements ToolLayer {
         before = unchanged(where);
       } catch (error) {
         // Gone: maybe a put back that stopped between the bin and the rename.
-        return (error as NodeJS.ErrnoException).code === "ENOENT" ? gone : conflict;
+        return (error as NodeJS.ErrnoException).code === "ENOENT" ? gone : changed();
       }
-      if (before === null) return conflict;
+      if (before === null) return changed();
       const read = await inner("read", { key: copy, max_bytes: null });
       if ("error" in read) return notReplaced(read.error.message);
       const bytes = Buffer.from(read.ok as string, "base64");
@@ -675,7 +690,7 @@ export class Outside implements ToolLayer {
         if (signal.aborted) throw osFailure("it was stopped");
         if (unchanged(where) === null) {
           removeTemporary();
-          return conflict;
+          return changed();
         }
       } catch (error) {
         removeTemporary();
@@ -707,14 +722,14 @@ export class Outside implements ToolLayer {
       // In place and checked: the working copy goes, by the chat's folder's own tools, and its record with it.
       const deleted = await inner("delete", { key: copy });
       this.options.bindings.forgetCopy(root, copy);
-      // Every other copy of the original in the chat's folder is of a version that is gone now, as one made before the
-      // original changed and was copied again: deleted too, so no out-of-date copy is left to be taken for the file.
-      // ponytail: by its record alone; a file put at a stale copy's name since is deleted with it.
+      // The copies of this original a put back refused as out of date (changed()) go too, so none is left to be taken
+      // for the file. Any other copy of it, one its user keeps, or one with edits of its own, stays.
       const older: string[] = [];
-      for (const stale of this.options.bindings.copiesFrom(root, original)) {
-        const gone = await inner("delete", { key: stale });
-        this.options.bindings.forgetCopy(root, stale);
-        if (!("error" in gone)) older.push(stale);
+      const stale = this.superseded.get(root);
+      for (const old of this.options.bindings.copiesFrom(root, original).filter((made) => stale?.delete(made))) {
+        const gone = await inner("delete", { key: old });
+        this.options.bindings.forgetCopy(root, old);
+        if (!("error" in gone)) older.push(old);
       }
       return { ok: { original, copyDeleted: !("error" in deleted), ...(older.length > 0 ? { olderCopiesDeleted: older } : {}) } };
     } finally {

@@ -1045,7 +1045,7 @@ function startStack(agent: Agent, credential: LiveCredential): Promise<DeviceSta
         return followTurns({
           api: (path, init) => session.api(path, init), onError: report, sessionId: chatId, onTurnEnd: turnEnded, live: () => signedIn === session,
           onTurnStart: (type) => {
-            if (type === "user.message") turnEnded();
+            if (type !== "ask_user_question.response" && type !== "session.resume") turnEnded();
           },
         }).stop;
       },

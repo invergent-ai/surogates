@@ -9,7 +9,7 @@
 // same keys and presses.
 // Over a hidden window, a prompt waits to be shown until the window is, and the user is told.
 
-import { BrowserWindow } from "electron";
+import { BrowserWindow, screen } from "electron";
 
 import { dropMenu, lockPage } from "./main-window.js";
 import { checkAnswer, type PromptContent } from "./prompt-content.js";
@@ -161,7 +161,9 @@ export function openPrompt(options: PromptWindowOptions, signal: AbortSignal): P
     if (typeof height === "number" && Number.isFinite(height) && height > 0 && !window.isDestroyed()) {
       // A window its user cannot resize is resized by this process alone, which some window managers allow only while it may be.
       window.setResizable(true);
-      window.setContentSize(WIDTH, Math.min(Math.ceil(height), MAX_FIT));
+      // Within the screen the app's window is on, its buttons on it: what does not fit scrolls in its middle.
+      const room = screen.getDisplayMatching(parent.getBounds()).workArea.height - 40;
+      window.setContentSize(WIDTH, Math.max(160, Math.min(Math.ceil(height), MAX_FIT, room)));
       window.setResizable(false);
     }
     fitted.resolve();

@@ -143,24 +143,25 @@ describe("Outside", () => {
     expect(stops[0]).toHaveBeenCalledTimes(1);
     expect(journal.bindings.reads(ROOT)).toEqual([]);
     expect(await outside.run(op("outside.stat", { key: join(desktop, "note.txt") }), never())).toEqual(noPermission(join(desktop, "note.txt")));
-    // Each new grant for the turn follows it anew: a follow that stopped by itself is no reason to stop following.
+    // A grant more within the same turn keeps its follow: a reconnect could miss the turn's end.
     journal.bindings.grantRead(ROOT, desktop, true);
     journal.bindings.grantRead(ROOT, join(base, "elsewhere"), true);
-    expect(following).toHaveBeenCalledTimes(3);
-    expect(stops[1]).toHaveBeenCalledTimes(1);
+    expect(following).toHaveBeenCalledTimes(2);
+    expect(stops[1]).not.toHaveBeenCalled();
     // Taken back in Settings, its follow is let go; a grant for the chat is never followed.
     journal.bindings.takeBackRead(ROOT, desktop);
+    expect(stops[1]).not.toHaveBeenCalled();
     journal.bindings.takeBackRead(ROOT, join(base, "elsewhere"));
-    expect(stops[2]).toHaveBeenCalledTimes(1);
+    expect(stops[1]).toHaveBeenCalledTimes(1);
     journal.bindings.grantRead(ROOT, desktop);
-    expect(following).toHaveBeenCalledTimes(3);
+    expect(following).toHaveBeenCalledTimes(2);
     // Nobody signed in: not followed, and followed as soon as the next grant can be.
     signedIn = false;
     journal.bindings.grantRead(ROOT, join(base, "elsewhere"), true);
     signedIn = true;
     journal.bindings.grantRead(ROOT, join(base, "home"), true);
-    expect(following).toHaveBeenCalledTimes(5);
-    expect(stops).toHaveLength(4);
+    expect(following).toHaveBeenCalledTimes(4);
+    expect(stops).toHaveLength(3);
   });
 
   it("refuses a grant whose folder does not answer in time, before it is resolved", async () => {
@@ -706,6 +707,17 @@ describe("outside.trash and outside.put_back", () => {
       ok: { moved: [{ from: join(work, "test.txt"), to: join(desktop, "test.txt") }], copied_only: [], skipped: [] },
     });
     expect([readFileSync(join(desktop, "test.txt"), "utf8"), existsSync(join(work, "test.txt")), readdirSync(bin)]).toEqual(["made here", false, []]);
+    // A working copy moved out is no working copy any more.
+    const kept = join(desktop, "note.txt");
+    chosenFor.mockReturnValueOnce([kept]);
+    await layer().run(op("outside.copy", { files: [kept], to: work }), never());
+    expect(journal.bindings.copyOf(ROOT, join(work, "note.txt"))?.original).toBe(kept);
+    expect(await moveOf([join(work, "note.txt")], join(desktop, "Scan"))).toMatchObject({ ok: { moved: [{ from: join(work, "note.txt") }] } });
+    expect(journal.bindings.copyOf(ROOT, join(work, "note.txt"))).toBeUndefined();
+    // Nothing to move: refused before anyone is asked.
+    expect(layer().refusal(op("outside.move", { files: [join(desktop, "note.txt")], to: desktop }))).toMatchObject({ error: { type: "denied", message: expect.stringContaining("nothing to move") } });
+    writeFileSync(join(work, "c.txt"), "c");
+    expect(layer().refusal(op("outside.move", { files: [join(work, "c.txt")], to: work }))).toMatchObject({ error: { type: "denied" } });
     expect(tools.ran.map((ran) => ran.kind)).toContain("delete");
     // Within the chat's folder it is the chat's own tools' move; and into its own folder it would only be renamed.
     mkdirSync(join(work, "sub"));
@@ -835,24 +847,33 @@ describe("outside.trash and outside.put_back", () => {
     }
   });
 
-  it("deletes the out-of-date copies of an original once a newer copy is put back over it", async () => {
+  it("deletes only the copies a put back refused as out of date once a newer copy is put back over it", async () => {
     folderTools();
     journal.bindings.grantRead(ROOT, desktop);
     const note = join(desktop, "note.txt");
-    // Copied, then the original changed (its user saved it), so the agent copies it again.
-    const first = await copied(note);
+    // One layer, as the app has: what it refused is remembered there.
+    const outside = layer();
+    const copyOf = async (file: string) => {
+      chosenFor.mockReturnValueOnce([file]);
+      const outcome = await outside.run(op("outside.copy", { files: [file], to: work }), never());
+      return (outcome as { ok: { copied: Array<{ to: string }> } }).ok.copied[0]!.to;
+    };
+    const back = (copy: string) => outside.run(op("outside.put_back", { copy, original: note }), never());
+    // A copy its user keeps, never put back.
+    const kept = await copyOf(note);
+    // Copied, then the original changed (its user saved it): refused, and so out of date.
+    const first = await copyOf(note);
     writeFileSync(first, "edit on the old version\n");
     writeFileSync(note, "saved by its user, and longer\n");
-    expect(await putBack(first, note)).toMatchObject({ error: { type: "conflict" } });
-    const second = await copied(note);
-    expect(second).not.toBe(first);
+    expect(await back(first)).toMatchObject({ error: { type: "conflict" } });
+    const second = await copyOf(note);
     writeFileSync(second, "edit on the new version\n");
     // An unrelated copy of another original stays.
-    const other = await copied(join(desktop, "Scan", "cerere.pdf"));
-    expect(await putBack(second, note)).toEqual({ ok: { original: note, copyDeleted: true, olderCopiesDeleted: [first] } });
+    const other = await copyOf(join(desktop, "Scan", "cerere.pdf"));
+    expect(await back(second)).toEqual({ ok: { original: note, copyDeleted: true, olderCopiesDeleted: [first] } });
     expect(readFileSync(note, "utf8")).toBe("edit on the new version\n");
-    expect([existsSync(first), existsSync(second), existsSync(other)]).toEqual([false, false, true]);
-    expect([journal.bindings.copyOf(ROOT, first), journal.bindings.copyOf(ROOT, other)?.original]).toEqual([undefined, join(desktop, "Scan", "cerere.pdf")]);
+    expect([existsSync(kept), existsSync(first), existsSync(second), existsSync(other)]).toEqual([true, false, false, true]);
+    expect([journal.bindings.copyOf(ROOT, first), journal.bindings.copyOf(ROOT, kept)?.original]).toEqual([undefined, note]);
   });
 
   it("puts the changes back, sends the old version to the bin and deletes the working copy", async () => {
