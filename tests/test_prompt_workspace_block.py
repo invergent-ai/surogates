@@ -142,7 +142,7 @@ def test_a_device_chat_is_told_how_to_work_on_files_outside_its_folder():
     assert "keep every change the user made, add yours to it (find where by reading it, never by the row or cell numbers you used on the old copy)" in context
     assert 'If the access is for "this request", it ends when you finish this task' in context
     assert "ask the user anything you need with ask_user_question" in context
-    assert "On a Windows computer the tools name `C:\\a\\b` as `/mnt/c/a/b`; tell the user the `C:\\` form." in context
+    assert "On a Windows computer the tools name `C:\\a\\b` as `/mnt/c/a/b`; tell the user the `C:\\` form, and call the trash the Recycle Bin there." in context
     assert "offer put_back" not in context
     assert "\u2014" not in context and "\u2013" not in context
     assert said not in _context({"read_file"})
