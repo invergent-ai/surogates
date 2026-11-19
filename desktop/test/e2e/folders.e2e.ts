@@ -138,9 +138,10 @@ describe("Settings → Folders and permissions", () => {
     // A chat the agent gives no title.
     await bound(client, folders[1]!, THIRD, "free");
     const open = await foldersSettings(shell, page);
-    await expect.poll(() => texts(open, ".folder-path")).toEqual(folders);
-    expect(await texts(open, "#folders .row .label > span:first-child")).toEqual(["Quarterly report", "InvoicesU+202Egpj.exe", "A chat"]);
-    expect(await texts(open, "#folders .row .label > .desc")).toEqual(["Asks every time", "Works freely", "Works freely"]);
+    // Each chat with its folder under its name.
+    await expect.poll(() => texts(open, ".folder-path")).toEqual([folders[0], folders[0], folders[1]]);
+    expect(await texts(open, "#folders .row .chat-head > strong")).toEqual(["Quarterly report", "InvoicesU+202Egpj.exe", "A chat"]);
+    expect(await texts(open, "#folders .row .chat-head > .chip")).toEqual(["Asks every time", "Works freely", "Works freely"]);
     expect(await open.isVisible("#folders-none")).toBe(false);
     // A chat is found by its title.
     await open.fill("#settings-search", "quarterly");
@@ -151,7 +152,7 @@ describe("Settings → Folders and permissions", () => {
     const { shell, page, client } = await signedIn();
     await bound(client, folders[0]!, THIRD, "free");
     const settings = await foldersSettings(shell, page);
-    await expect.poll(() => texts(settings, "#folders .row .label > span:first-child")).toEqual(["A chat"]);
+    await expect.poll(() => texts(settings, "#folders .row .chat-head > strong")).toEqual(["A chat"]);
     expect(agent.asked.title).toBe(1);
     // Drawn again, as each change of the app's state draws it.
     for (const _ of [1, 2, 3]) {
@@ -166,7 +167,7 @@ describe("Settings → Folders and permissions", () => {
     await settings.keyboard.press("Escape").catch(() => {});
     await expect.poll(() => settings.isClosed()).toBe(true);
     const again = await foldersSettings(shell, page);
-    await expect.poll(() => texts(again, "#folders .row .label > span:first-child")).toEqual(["Receipts"]);
+    await expect.poll(() => texts(again, "#folders .row .chat-head > strong")).toEqual(["Receipts"]);
     expect(agent.asked.title).toBe(2);
   });
 
@@ -174,10 +175,10 @@ describe("Settings → Folders and permissions", () => {
     const { shell, page, client } = await signedIn();
     await bound(client, folders[0]!, CHAT, "free");
     const settings = await foldersSettings(shell, page);
-    await expect.poll(() => texts(settings, "#folders .row .label > .desc")).toEqual(["Works freely"]);
+    await expect.poll(() => texts(settings, "#folders .row .chat-head > .chip")).toEqual(["Works freely"]);
     // Switched from the chat's own bar, while Settings is open.
     await client.evaluate((id) => window.surogateDesktop!.setMode(id, "ask"), CHAT);
-    await expect.poll(() => texts(settings, "#folders .row .label > .desc")).toEqual(["Asks every time"]);
+    await expect.poll(() => texts(settings, "#folders .row .chat-head > .chip")).toEqual(["Asks every time"]);
   });
 
   it("lists a chat its user let use the browser here, and takes it back: its next browser call asks its first use again", async () => {
@@ -340,7 +341,7 @@ describe("Settings → Folders and permissions", () => {
     agent.titles.set(CHAT, "Quarterly report");
     await bound(client, folders[0]!, CHAT, "free");
     const settings = await foldersSettings(shell, page);
-    await expect.poll(() => texts(settings, "#folders .row .label > span:first-child")).toEqual(["Quarterly report"]);
+    await expect.poll(() => texts(settings, "#folders .row .chat-head > strong")).toEqual(["Quarterly report"]);
     await settings.keyboard.press("Escape").catch(() => {});
     await expect.poll(() => settings.isClosed()).toBe(true);
     // Logged out, then back in: this computer is added again, and the chat bound on it again.
@@ -356,7 +357,7 @@ describe("Settings → Folders and permissions", () => {
     agent.titles.set(CHAT, "Receipts");
     await bound(client, folders[0]!, CHAT, "free");
     const again = await foldersSettings(shell, page);
-    await expect.poll(() => texts(again, "#folders .row .label > span:first-child")).toEqual(["Receipts"]);
+    await expect.poll(() => texts(again, "#folders .row .chat-head > strong")).toEqual(["Receipts"]);
   });
 
   it("lists each port of a chat's own servers its user let the browser open, lowest first, and takes one back: the browser's line and the other port's stay", async () => {

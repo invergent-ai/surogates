@@ -1280,13 +1280,62 @@ body.settings-page {
   cursor: pointer;
 }
 
-/* A folder's path, as a heading over its chats: written left to right, whole, and wrapped anywhere. */
+/* A chat's folder, under its name: written left to right, whole, and wrapped anywhere. */
 .folder-path {
-  margin: 24px 0 4px;
-  font: 13px/1.5 ui-monospace, "Noto Sans Mono", monospace;
+  color: var(--fg-2);
+  font: 12px/1.5 ui-monospace, "Noto Sans Mono", monospace;
   direction: ltr;
   unicode-bidi: isolate;
   overflow-wrap: anywhere;
+}
+
+/* Folders and permissions: one card for each chat, its name and mode first, its folder, then what it holds. */
+.settings-content .desc.lead {
+  margin: -10px 0 18px;
+}
+
+.row.chat {
+  display: grid;
+  gap: 6px;
+  min-height: 0;
+  margin-bottom: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+}
+
+.chat-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.chat-head .chip {
+  padding: 1px 8px;
+  border-radius: 99px;
+  background: var(--raised);
+  color: var(--fg-2);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+.chat-lines {
+  display: grid;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.row.chat .line {
+  justify-content: space-between;
+  margin-top: 0;
+}
+
+.row.chat .line small {
+  color: var(--fg-2);
+  font-size: 12px;
+  opacity: 0.8;
 }
 
 .row {
