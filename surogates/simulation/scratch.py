@@ -164,13 +164,33 @@ _HARMLESS = frozenset({
 })
 
 
+# Refused anywhere in a name or path: escapes, slashes NFKC does not fold
+# (U+2215, U+2044) and zero-width characters (invisible, and not whitespace).
+_REFUSED = frozenset("\\%\u2215\u2044\u200b\u200c\u200d\ufeff")
+
+
+def _segments_ok(value: str) -> list[str] | None:
+    """*value*'s NFKC segments, or None when one could climb out or hide.
+
+    NFKC folds lookalikes (U+FF0F to "/", U+2024 to ".", NBSP to space); a
+    lookalike slash is refused, not folded, as the server may not fold it.
+    Dot segments, near-dot ones (".. ", "...", ".\t.") a server may trim to
+    "..", are refused.
+    """
+    v = unicodedata.normalize("NFKC", value)
+    if v.count("/") != value.count("/") or any(c in _REFUSED for c in v):
+        return None
+    segs = v.split("/")
+    if any(seg and not re.sub(r"[\s.]", "", seg) for seg in segs):
+        return None
+    return segs
+
+
 def _one_segment(value: Any) -> bool:
     if not isinstance(value, str):
         return False
-    # NFKC folds lookalikes (U+FF0F to "/", U+2024 to ".", NBSP to space);
-    # U+2215/U+2044 have no folding, so they are refused by name.
-    v = unicodedata.normalize("NFKC", value)
-    return bool(re.sub(r"[\s.]", "", v)) and not any(c in v for c in "/\\%\u2215\u2044")
+    segs = _segments_ok(value)
+    return segs is not None and len(segs) == 1 and segs[0] != ""
 
 
 def _norm(path: str) -> str:
@@ -178,9 +198,7 @@ def _norm(path: str) -> str:
 
 
 def _under(path: str, root: str) -> bool:
-    # Dot segments (and near-dot ones like ".. " or "..." a server may trim to ".."),
-    # percent-encoding and backslashes can climb out of the root: refuse them.
-    if "%" in path or "\\" in path or any(seg and not seg.strip(" .") for seg in path.split("/")):
+    if _segments_ok(path) is None:
         return False
     path, root = _norm(path), _norm(root)
     return path == root or path.startswith(root + "/")

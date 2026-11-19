@@ -225,6 +225,25 @@ def test_near_dot_path_segments_are_faked(seg):
     assert not inside_scratch("ONE_DRIVE_ONEDRIVE_UPLOAD_FILE", up, SCOPE)
 
 
+@pytest.mark.parametrize("seg", [
+    "\u00a0..\u00a0", "\u2024\u2024", ".\t.", "\u3000", "..\u200b", "\ufeff..",
+    "a\uff0f..", "a\u2215b", "a\u2044b", "x\u200cy", "x\u200dy",
+])
+def test_lookalike_path_segments_are_faked(seg):
+    up = {"folder_path": f"{SCOPE['root_path']}/{seg}/x", "name": "a", "drive_id": "D"}
+    assert not inside_scratch("ONE_DRIVE_ONEDRIVE_UPLOAD_FILE", up, SCOPE)
+
+
+@pytest.mark.parametrize("bad", ["a\u200bb.pdf", "\ufeff", "x\u200c.pdf", "x\u200d.pdf", ".\u200b."])
+def test_a_name_with_a_zero_width_character_is_faked(bad):
+    assert not inside_scratch("ONE_DRIVE_ONEDRIVE_UPLOAD_FILE", {**_UP, "name": bad}, SCOPE)
+
+
+def test_a_romanian_path_and_name_still_pass():
+    up = {"folder_path": SCOPE["root_path"] + "/Situații/Țară", "name": "ședință.pdf", "drive_id": "D"}
+    assert inside_scratch("ONE_DRIVE_ONEDRIVE_UPLOAD_FILE", up, SCOPE)
+
+
 def test_a_dotted_name_segment_still_passes():
     up = {"folder_path": SCOPE["root_path"] + "/.config/a..b", "name": "a", "drive_id": "D"}
     assert inside_scratch("ONE_DRIVE_ONEDRIVE_UPLOAD_FILE", up, SCOPE)
