@@ -698,29 +698,38 @@ describe("outside.trash and outside.put_back", () => {
     expect(existsSync(cerere)).toBe(true);
   });
 
-  it("never copies a file of the chat's own folder, even run without its refusal asked, nor one into its own folder", async () => {
+  it("moves a file out of the chat's folder: copied, then deleted there by its own tools", async () => {
     folderTools();
     journal.bindings.grantRead(ROOT, desktop);
-    writeFileSync(join(work, "own.txt"), "own");
-    chosenFor.mockReturnValueOnce([join(work, "own.txt")]);
-    expect(await layer().run(op("outside.move", { files: [join(work, "own.txt")], to: desktop }), never())).toMatchObject({
-      ok: { moved: [], copied_only: [], skipped: [{ from: join(work, "own.txt") }] },
+    writeFileSync(join(work, "test.txt"), "made here");
+    expect(await moveOf([join(work, "test.txt")], desktop)).toEqual({
+      ok: { moved: [{ from: join(work, "test.txt"), to: join(desktop, "test.txt") }], copied_only: [], skipped: [] },
     });
-    expect(existsSync(join(desktop, "own.txt"))).toBe(false);
+    expect([readFileSync(join(desktop, "test.txt"), "utf8"), existsSync(join(work, "test.txt")), readdirSync(bin)]).toEqual(["made here", false, []]);
+    expect(tools.ran.map((ran) => ran.kind)).toContain("delete");
+    // Within the chat's folder it is the chat's own tools' move; and into its own folder it would only be renamed.
+    mkdirSync(join(work, "sub"));
+    writeFileSync(join(work, "b.txt"), "b");
+    chosenFor.mockReturnValueOnce([join(work, "b.txt")]);
+    expect(await layer().run(op("outside.move", { files: [join(work, "b.txt")], to: join(work, "sub") }), never())).toMatchObject({
+      ok: { moved: [], skipped: [{ from: join(work, "b.txt"), reason: expect.stringContaining("chat's own tools") }] },
+    });
     const note = join(desktop, "note.txt");
     chosenFor.mockReturnValueOnce([note]);
     expect(await layer().run(op("outside.move", { files: [note], to: desktop }), never())).toEqual({
       ok: { moved: [], copied_only: [], skipped: [{ from: note, reason: "it is in that folder already" }] },
     });
-    expect([existsSync(note), existsSync(join(desktop, "note (1).txt")), readdirSync(bin)]).toEqual([true, false, []]);
+    expect([existsSync(note), existsSync(join(desktop, "note (1).txt")), existsSync(join(work, "b.txt")), readdirSync(bin)]).toEqual([true, false, true, []]);
   });
 
-  it("refuses to move a file of the chat's own folder, or into a folder that is not granted", async () => {
-    journal.bindings.grantRead(ROOT, desktop);
-    writeFileSync(join(work, "own.txt"), "own");
-    expect(layer().refusal(op("outside.move", { files: [join(work, "own.txt")], to: desktop }))).toMatchObject({ error: { type: "denied" } });
-    expect(layer().refusal(op("outside.move", { files: [join(desktop, "note.txt")], to: join(base, "elsewhere") }))).toMatchObject({ error: {} });
-    expect(layer().refusal(op("outside.move", { files: [join(base, "elsewhere", "secret.txt")], to: desktop }))).toEqual(noPermission(join(base, "elsewhere", "secret.txt")));
+  it("never moves the chat's folder itself, or a folder that holds it, even run without its refusal asked", async () => {
+    journal.bindings.grantRead(ROOT, base);
+    for (const file of [work, base]) {
+      expect(layer().refusal(op("outside.move", { files: [file], to: desktop }))).toMatchObject({ error: { type: "denied" } });
+      chosenFor.mockReturnValueOnce([file]);
+      expect(await layer().run(op("outside.move", { files: [file], to: desktop }), never())).toMatchObject({ ok: { moved: [], skipped: [{ from: file }] } });
+    }
+    expect(layer().refusal(op("outside.move", { files: [join(desktop, "note.txt")], to: join(base, "..", "x") }))).not.toBeNull();
   });
 
   it("keeps a ticked file that became a link or vanished since it was asked about", async () => {

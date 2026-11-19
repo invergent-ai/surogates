@@ -435,6 +435,11 @@ describe("the windows for files outside the chat's folder", () => {
     const two = approval({ kind: "move", chat: CHAT, to: "/o", files: [{ from: "/a/x.pdf", size: 1 }, { from: "/b/y.pdf", size: 1 }] });
     expect(two.details.map((d) => d.label)).toEqual(["To"]);
     expect(two.checks?.items.map((i) => i.detail)).toEqual(["/a · 1 byte", "/b · 1 byte"]);
+    // The chat's own files are removed from its folder, not binned.
+    const out = approval({ kind: "move", chat: CHAT, to: "/o", files: [{ from: `${CHAT.folder}/t.txt`, size: 1 }] });
+    expect(out.lead).toBe("The file will be copied to the new folder. Then it is removed from this chat's folder.");
+    const mixed = approval({ kind: "move", chat: CHAT, to: "/o", files: [{ from: `${CHAT.folder}/t.txt`, size: 1 }, { from: "/a/x.pdf", size: 1 }] });
+    expect(mixed.lead).toBe(`Each file will be copied to the new folder. Then the originals in this chat's folder are removed from it, and the others go to the ${bin}, where you can restore them.`);
     const one = approval({ kind: "move", chat: CHAT, to: "/o", files: [{ from: "/a/x.pdf", size: 1 }] });
     expect([one.title, one.lead]).toEqual(["Move 1 file?", `The file will be copied to the new folder. Then the original goes to the ${bin}, where you can restore it if you need it.`]);
   });

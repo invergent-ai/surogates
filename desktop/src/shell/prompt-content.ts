@@ -287,12 +287,19 @@ function outsidePrompt(request: Exclude<ApprovalRequest, { kind: "command" | "ch
   }
   if (request.kind === "move") {
     const one = request.files.length === 1;
+    // The chat's own files are removed from its folder, not sent to the bin.
+    const own = request.files.filter((f) => f.from.startsWith(`${chat.folder}/`)).length;
+    const then = own === 0
+      ? `Then ${one ? "the" : "its"} original goes to the ${BIN}, where you can restore it if you need it.`
+      : own === request.files.length
+        ? `Then ${one ? "it is" : "each is"} removed from this chat's folder.`
+        : `Then the originals in this chat's folder are removed from it, and the others go to the ${BIN}, where you can restore them.`;
     // One From for files all in one folder; each file's own folder by it otherwise.
     const folders = new Set(request.files.map((f) => posix.dirname(f.from)));
     const from = folders.size === 1 ? [...folders][0]! : null;
     return {
       ...base, danger: true, detailsBelow: true, title: `Move ${files(request.files.length)}?`,
-      lead: `${one ? "The file" : "Each file"} will be copied to the new folder. Then ${one ? "the" : "its"} original goes to the ${BIN}, where you can restore it if you need it.`,
+      lead: `${one ? "The file" : "Each file"} will be copied to the new folder. ${then}`,
       checks: {
         legend: "Files",
         items: request.files.map((f) => ({ value: f.from, label: named(f.from), detail: from === null ? `${shownPath(posix.dirname(f.from))} · ${sizeOf(f.size)}` : sizeOf(f.size) })),

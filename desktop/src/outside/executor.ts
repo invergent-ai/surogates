@@ -208,8 +208,9 @@ export class Outside implements ToolLayer {
       if (own !== undefined) return chatsOwn(own);
     }
     if (kind === "outside.move") {
-      // Its originals go to the bin: as trash's, none of the chat's own; and as copy's, no destination by another name.
-      const own = (Array.isArray(args.files) ? args.files : []).find((file) => typeof file === "string" && this.chatOwns(root, file, look)) as string | undefined;
+      // A file in the chat's folder may be moved out, by its path there; never the folder itself, one that holds it, or
+      // the chat's folder by another name. And as copy's, no destination by another name.
+      const own = (Array.isArray(args.files) ? args.files : []).find((file) => typeof file === "string" && this.holdsChat(root, file, look)) as string | undefined;
       if (own !== undefined) return chatsOwn(own);
       if (typeof args.to === "string" && this.reachesChat(root, args.to, look)) return denied(byAnotherName(args.to));
     }
@@ -221,7 +222,7 @@ export class Outside implements ToolLayer {
     }
     if ((kind === "outside.copy" || kind === "outside.trash" || kind === "outside.move") && Array.isArray(args.files)) {
       // Malformed ones are the approvals' to refuse, in their words. A copy may take from the chat's folder too.
-      const out = args.files.find((file) => typeof file === "string" && this.sourceOf(root, file, look, kind === "outside.copy") === null) as string | undefined;
+      const out = args.files.find((file) => typeof file === "string" && this.sourceOf(root, file, look, kind !== "outside.trash") === null) as string | undefined;
       if (out !== undefined) return noPermission(out);
     }
     if ((kind === "outside.copy" || kind === "outside.move") && typeof args.to === "string" && this.destinationOf(root, args.to, look) === null) return notDestination(args.to);
@@ -370,9 +371,9 @@ export class Outside implements ToolLayer {
     return { key, revision: read.revision };
   }
 
-  // The files its user ticked, each copied to *to* and, once its copy is made and checked, its original to the bin:
-  // one that cannot be copied stays where it is, and one whose original cannot go (changed since it was read, say) is
-  // said with its copy. Only files in a grant: the chat's own are its own tools' to move.
+  // The files its user ticked, each copied to *to* and, once its copy is made and checked, its original to the bin, or,
+  // for a file of the chat's own folder moved out of it, deleted there: one that cannot be copied stays where it is, and
+  // one whose original cannot go (changed since it was read, say) is said with its copy.
   private async move(operation: Operation, signal: AbortSignal): Promise<Outcome> {
     const { args, sessionId: root } = operation;
     // Let go before anything else: a move refused here is not done later with them.
@@ -392,17 +393,26 @@ export class Outside implements ToolLayer {
         continue;
       }
       let copied: { key: string; revision?: string };
+      // A file of the chat's own folder, moved out of it: copied, then deleted there by its own tools, as a working copy put back is.
+      let own = false;
       try {
-        if (this.chatOwns(root, from, look)) throw failureOf(chatsOwn(from));
+        if (this.holdsChat(root, from, look)) throw failureOf(chatsOwn(from));
+        own = this.sourceOf(root, from, look) === "chat";
         // Moved into its own folder it would be only renamed "name (1)": it is where it is to go already.
         if (posix.dirname(from) === to.dir) throw osFailure("it is in that folder already");
+        if (own && to.grant === null) throw osFailure("it is in this chat's folder already: move it there with the chat's own tools");
         copied = await this.copyOne(root, from, to, look, inner);
       } catch (error) {
         done.skipped.push({ from, reason: skippedFor(error) });
         continue;
       }
       try {
-        await this.trashOne(root, from, this.looker(root), copied.revision, signal);
+        if (own) {
+          const deleted = await inner("delete", { key: from });
+          if ("error" in deleted) throw new Failure(deleted.error);
+        } else {
+          await this.trashOne(root, from, this.looker(root), copied.revision, signal);
+        }
       } catch (error) {
         done.copied_only.push({ from, to: copied.key, reason: said(error) });
         continue;
@@ -472,6 +482,13 @@ export class Outside implements ToolLayer {
       if (made) return key;
     }
     throw new Failure({ type: "os", message: `${to} has ${NAMES} files of that name already` });
+  }
+
+  // Whether *path* is the chat's folder, holds it, or reaches it by another spelling: a move's never, though it may move a
+  // file in it out.
+  private holdsChat(root: string, path: string, look: Look): boolean {
+    const folder = this.options.bindings.get(root)?.folder;
+    return folder !== undefined && (inside(folder, path) || this.reachesChat(root, path, look));
   }
 
   // Whether *path* is the chat's folder, in it, or holds it: its own tools' to delete, never this layer's.
