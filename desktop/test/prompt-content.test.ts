@@ -399,7 +399,7 @@ describe("a prompt with a list to tick", () => {
 describe("the windows for files outside the chat's folder", () => {
   const bin = process.platform === "darwin" ? "Trash" : "Recycle Bin";
 
-  it("asks to read a folder, by its name and whole path, for this request unless the rest of the chat is chosen", () => {
+  it("asks to read a folder, by its name and whole path, for the rest of the chat unless this request alone is chosen", () => {
     const c = approval({ kind: "read_folder", chat: CHAT, folder: "/home/me/docs" });
     expect([c.title, c.lead]).toEqual([
       "Let acme.surogate.ai read docs?",
@@ -412,7 +412,7 @@ describe("the windows for files outside the chat's folder", () => {
         { value: "chat", label: "For the rest of this chat", description: "You can remove access in Settings." },
         { value: "turn", label: "Just this request", description: "Ends when it finishes this task." },
       ],
-      value: "turn",
+      value: "chat",
     });
     expect(c.buttons.map((b) => [b.id, b.label])).toEqual([["deny", "Don't allow"], ["allow", "Allow"]]);
     expect([c.focus, c.danger ?? false, c.checks ?? null]).toEqual(["deny", false, null]);

@@ -282,7 +282,7 @@ function outsidePrompt(request: Exclude<ApprovalRequest, { kind: "command" | "ch
       ...base, title: `Let ${chat.agent} read ${named(request.folder)}?`,
       lead: `${chat.agent} will be able to look at the files and folders in it. It asks you before copying, changing or deleting anything there. It works in the cloud, so what it reads is sent to it.`,
       details: [code("Folder", shownPath(request.folder))],
-      choice: { ...HOW_LONG, value: "turn" },
+      choice: { ...HOW_LONG, value: "chat" },
       buttons: [button("deny", "Don't allow"), button("allow", "Allow", true)], height: 470,
     };
   }
