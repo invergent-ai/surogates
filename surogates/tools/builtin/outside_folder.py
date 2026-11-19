@@ -152,7 +152,9 @@ def register(registry: ToolRegistry) -> None:
             "Ask the user to let this chat read a folder outside its own: Desktop, Downloads, Documents, Pictures, "
             "or an absolute path the user named. The user answers in a window on their computer; once allowed, "
             "list_files and read_file work there with absolute paths, read-only. Returns the folder granted and how "
-            "long: 'this request' ends when you finish this answer (ask again next time), 'this chat' lasts.",
+            "long: 'this request' ends when you finish this task (ask again next time), 'this chat' lasts. While "
+            "'this request' access is open, ask the user anything you need mid-task with ask_user_question: "
+            "a question in your reply ends the task, and the access with it.",
             {"folder": {"type": "string", "description": "Desktop, Downloads, Documents, Pictures, or an absolute path."}},
             ["folder"],
         ),

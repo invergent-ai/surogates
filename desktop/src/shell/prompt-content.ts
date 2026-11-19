@@ -258,7 +258,7 @@ export function approval(request: ApprovalRequest): PromptContent {
 const HOW_LONG: Omit<PromptChoice, "value"> = {
   legend: "How long it can read this folder",
   options: [
-    { value: "turn", label: "Just this request", description: "Ends when it finishes answering this message." },
+    { value: "turn", label: "Just this request", description: "Ends when it finishes this task." },
     { value: "chat", label: "For the rest of this chat", description: "You can remove access in Settings." },
   ],
 };
