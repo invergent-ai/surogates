@@ -379,6 +379,26 @@ describe("the bindings", () => {
     after.close();
   });
 
+  it("lists each folder once: a wider grant takes the place of the narrower ones that last no longer", () => {
+    const journal = new OperationJournal(path);
+    journal.bindings.add(binding("r1", 1));
+    journal.bindings.grantRead("r1", "/home/me/Desktop/PONTAJE");
+    journal.bindings.grantRead("r1", "/home/me/Desktop/Scan", true);
+    journal.bindings.grantRead("r1", "/home/me/Desktop2");
+    // For the turn: the chat's narrower grant outlasts it, and stays.
+    journal.bindings.grantRead("r1", "/home/me/Desktop", true);
+    expect(journal.bindings.reads("r1")).toEqual(["/home/me/Desktop/PONTAJE", "/home/me/Desktop2", "/home/me/Desktop"]);
+    // Inside a grant already: nothing changes.
+    journal.bindings.grantRead("r1", "/home/me/Desktop/Scan/a", true);
+    expect(journal.bindings.reads("r1")).toEqual(["/home/me/Desktop/PONTAJE", "/home/me/Desktop2", "/home/me/Desktop"]);
+    // For the chat: it takes the place of both.
+    journal.bindings.grantRead("r1", "/home/me/Desktop");
+    expect(journal.bindings.reads("r1")).toEqual(["/home/me/Desktop2", "/home/me/Desktop"]);
+    journal.bindings.grantRead("r1", "/home/me/Desktop/Scan");
+    expect(journal.bindings.reads("r1")).toEqual(["/home/me/Desktop2", "/home/me/Desktop"]);
+    journal.close();
+  });
+
   it("grants nothing to a root it does not bind", () => {
     const journal = new OperationJournal(path);
     journal.bindings.grantRead("r9", "/home/me/notes");

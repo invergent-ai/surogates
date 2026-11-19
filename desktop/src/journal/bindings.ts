@@ -7,6 +7,7 @@ import { randomBytes } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 
 import { SANDBOX_PORTS } from "../browser/ports.js";
+import { inside } from "../files/paths.js";
 
 // Work freely (the default), or ask every time.
 export type Mode = "free" | "ask";
@@ -181,19 +182,32 @@ export class Bindings {
 
   /**
    * Let a bound root's agent read *folder* (a guest path outside its own folder): for the rest of the chat, kept in the
-   * journal; or, *forTurn*, only until endTurnReads, kept in memory alone, so a restart ends it too. Once each; a grant
-   * for the chat takes the place of one for the turn. An unknown root changes nothing.
+   * journal; or, *forTurn*, only until endTurnReads, kept in memory alone, so a restart ends it too. A folder a grant
+   * holds already, for the chat, or for the turn when this one is for the turn too, changes nothing; a grant takes the
+   * place of those it holds that last no longer than it, so each folder is listed once. An unknown root changes nothing.
    */
   grantRead(root: string, folder: string, forTurn = false): void {
+    if (!this.get(root)) return;
+    const turn = this.turnReads.get(root) ?? new Set<string>();
+    const kept = this.chatReads(root);
+    if (kept.some((grant) => inside(folder, grant)) || (forTurn && [...turn].some((grant) => inside(folder, grant)))) return;
+    for (const grant of turn) if (inside(grant, folder)) turn.delete(grant);
     if (forTurn) {
-      if (!this.get(root) || this.reads(root).includes(folder)) return;
-      this.turnReads.set(root, new Set([...(this.turnReads.get(root) ?? []), folder]));
-      this.changed(root);
-      return;
+      turn.add(folder);
+      this.turnReads.set(root, turn);
+    } else {
+      this.atomically(() => {
+        for (const grant of kept) if (inside(grant, folder)) this.db.prepare(`DELETE FROM read_grants WHERE root = ? AND folder = ?`).run(root, grant);
+        this.db.prepare(`INSERT OR IGNORE INTO read_grants (root, folder) VALUES (?, ?)`).run(root, folder);
+      });
     }
-    const held = this.turnReads.get(root)?.delete(folder) === true;
-    const { changes } = this.db.prepare(`INSERT OR IGNORE INTO read_grants (root, folder) SELECT root, ? FROM bindings WHERE root = ?`).run(folder, root);
-    if (changes > 0 || held) this.changed(root);
+    this.changed(root);
+  }
+
+  // A root's grants for the rest of its chat, in the order granted.
+  private chatReads(root: string): string[] {
+    const rows = this.db.prepare(`SELECT folder FROM read_grants WHERE root = ? ORDER BY rowid`).all(root) as Array<{ folder: string }>;
+    return rows.map((row) => row.folder);
   }
 
   /** Take *folder* back from a root, for the turn or the chat. One never granted changes nothing, and tells nothing. */
@@ -217,8 +231,7 @@ export class Bindings {
 
   /** The folders a root's user let its agent read outside its own, in the order granted: the chat's, then the turn's. */
   reads(root: string): string[] {
-    const rows = this.db.prepare(`SELECT folder FROM read_grants WHERE root = ? ORDER BY rowid`).all(root) as Array<{ folder: string }>;
-    return [...rows.map((row) => row.folder), ...(this.turnReads.get(root) ?? [])];
+    return [...this.chatReads(root), ...(this.turnReads.get(root) ?? [])];
   }
 
   /** Note that *copy*, in a bound root's folder, was copied from *original* as it was at *revision*; a copy noted before is replaced. */
