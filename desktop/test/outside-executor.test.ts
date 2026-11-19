@@ -794,6 +794,47 @@ describe("outside.trash and outside.put_back", () => {
     expect(readdirSync(bin)).toEqual([]);
   });
 
+  it("puts nothing back over a file open in an office program, and says who has it open", async () => {
+    folderTools();
+    journal.bindings.grantRead(ROOT, desktop);
+    const book = join(desktop, "Registru test.xlsx");
+    writeFileSync(book, "old");
+    const lock = join(desktop, ".~lock.Registru test.xlsx#");
+    writeFileSync(lock, ",monica,monica-ASUS,19.11.2026 12:37,file:///home/monica/.config/libreoffice/4;");
+    // Copied while open: the copy says so.
+    chosenFor.mockReturnValueOnce([book]);
+    const copy = await layer().run(op("outside.copy", { files: [book], to: work }), never()) as { ok: { copied: Array<{ to: string; open?: string }> } };
+    expect(copy.ok.copied[0]!.open).toBe(`${book} is open in another program by monica on monica-ASUS (its lock file is ${lock})`);
+    const working = copy.ok.copied[0]!.to;
+    writeFileSync(working, "new");
+    const refused = await putBack(working, book) as { error: { type: string; message: string } };
+    expect(refused.error.type).toBe("conflict");
+    expect(refused.error.message).toContain("is open in another program by monica on monica-ASUS");
+    expect(refused.error.message).toContain("Ask the user to save and close it, then call put_back again.");
+    expect([readFileSync(book, "utf8"), readFileSync(working, "utf8"), readdirSync(bin)]).toEqual(["old", "new", []]);
+    // Nor moved to the bin while open.
+    chosenFor.mockReturnValueOnce([book]);
+    expect(await layer().run(op("outside.trash", { files: [book] }), never())).toMatchObject({
+      ok: { trashed: [], kept: [{ file: book, reason: expect.stringContaining("ask the user to save and close it first") }] },
+    });
+    // Closed: put back.
+    rmSync(lock);
+    expect(await putBack(working, book)).toEqual({ ok: { original: book, copyDeleted: true } });
+    expect(readFileSync(book, "utf8")).toBe("new");
+  });
+
+  it("knows Word's and Excel's lock file, its name shortened or not", async () => {
+    journal.bindings.grantRead(ROOT, desktop);
+    for (const [file, lock] of [["a.docx", "~$a.docx"], ["Registru test.xlsx", "~$gistru test.xlsx"]] as const) {
+      writeFileSync(join(desktop, file), "x");
+      writeFileSync(join(desktop, lock), "owner");
+      chosenFor.mockReturnValueOnce([join(desktop, file)]);
+      expect(await layer().run(op("outside.trash", { files: [join(desktop, file)] }), never())).toMatchObject({
+        ok: { trashed: [], kept: [{ reason: expect.stringContaining(`${join(desktop, file)} is open in another program (its lock file is ${join(desktop, lock)})`) }] },
+      });
+    }
+  });
+
   it("puts the changes back, sends the old version to the bin and deletes the working copy", async () => {
     folderTools();
     journal.bindings.grantRead(ROOT, desktop);
@@ -819,7 +860,7 @@ describe("outside.trash and outside.put_back", () => {
     writeFileSync(copy, "changed\n");
     writeFileSync(note, "the user's own edit\n");
     expect(await putBack(copy, note)).toEqual({
-      error: { type: "conflict", message: `${note} changed since it was copied. Nothing was replaced; the changes are in ${copy}.` },
+      error: { type: "conflict", message: `${note} changed since it was copied. Nothing was replaced; the changes are in ${copy}. Copy it again and make the change on the new version, then put that back.` },
     });
     expect(readFileSync(note, "utf8")).toBe("the user's own edit\n");
     expect(readFileSync(copy, "utf8")).toBe("changed\n");

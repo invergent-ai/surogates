@@ -87,7 +87,7 @@ const unticked = (requested: unknown, ticked: string[]): string[] =>
 
 // What a copy read: the file's bytes, base64, and, for one from a grant, its revision as read.
 type Source = { data: string; revision?: string };
-type Copied = { copied: Array<{ from: string; to: string }>; skipped: Array<{ from: string; reason: string }> };
+type Copied = { copied: Array<{ from: string; to: string; open?: string }>; skipped: Array<{ from: string; reason: string }> };
 type Moved = {
   moved: Array<{ from: string; to: string }>;
   copied_only: Array<{ from: string; to: string; reason: string }>; // copied, but its original stayed where it is
@@ -334,7 +334,11 @@ export class Outside implements ToolLayer {
         continue;
       }
       try {
-        done.copied.push({ from, to: (await this.copyOne(root, from, to, look, inner)).key });
+        const { key } = await this.copyOne(root, from, to, look, inner);
+        // Copied while open in a program: its user's edits there are not in the copy, and a put back waits for it to close.
+        const grant = look(from);
+        const open = grant === null ? null : this.openIn(root, grant, from);
+        done.copied.push(open === null ? { from, to: key } : { from, to: key, open });
       } catch (error) {
         done.skipped.push({ from, reason: skippedFor(error) });
       }
@@ -549,6 +553,32 @@ export class Outside implements ToolLayer {
     return { ok: done };
   }
 
+  // Whether *file*, in *grant*, is open in an office program, as the lock file it keeps beside it says: LibreOffice's
+  // ".~lock.<name>#", which names who has it open and where, or Word's and Excel's "~$<name>", which drops the name's
+  // first two letters once it is long. How it is said ("open in another program, by monica on monica-ASUS"), or null.
+  // ponytail: a lock left by a program that crashed reads as open; the words say which lock file to delete then.
+  private openIn(root: string, grant: string, file: string): string | null {
+    const dir = posix.dirname(file);
+    const name = posix.basename(file);
+    for (const lock of [`.~lock.${name}#`, `~$${name}`, `~$${name.slice(2)}`]) {
+      const path = `${dir}/${lock}`;
+      try {
+        const who = this.within(root, grant, path, (where): string | null => {
+          const st = this.options.fd.lstat(where);
+          if (!st.isFile()) return null;
+          if (!lock.startsWith(".~lock.")) return "";
+          // ",user,host,date,profile;": its user and computer, where the line is LibreOffice's.
+          const fields = Buffer.from(readFrom({ max_bytes: 1024 }, path, (flags) => this.options.fd.open(where, flags)), "base64").toString("utf8").split(",");
+          return fields.length >= 3 && fields[1] && fields[2] ? ` by ${fields[1]} on ${fields[2]}` : "";
+        });
+        if (who !== null) return `${file} is open in another program${who} (its lock file is ${path})`;
+      } catch {
+        // No lock file of that name, or none that can be looked at: not open by it.
+      }
+    }
+    return null;
+  }
+
   // *file*, in a grant, to the bin; with *revision*, only while it is still the file as it was read then. Or throws.
   private async trashOne(root: string, file: string, look: Look, revision: string | undefined, signal: AbortSignal): Promise<void> {
     if (signal.aborted) throw osFailure("stopped");
@@ -563,6 +593,9 @@ export class Outside implements ToolLayer {
       if (!st.isFile()) throw osFailure("not a file");
       if (revision !== undefined && revisionOf(st) !== revision) throw osFailure(`${file} changed after it was copied, so it was kept where it is`);
     });
+    // Open in a program, it stays where it is: the program would save it again where it was, or lose its edits.
+    const open = this.openIn(root, grant, file);
+    if (open !== null) throw osFailure(`${open}, so it was kept where it is: ask the user to save and close it first`);
     // ponytail: the bin takes a path, so a link swapped in after the look above and before the move is moved itself
     // (a link is moved, never followed); held by a handle once the OS's trash takes one.
     await this.options.trash(hostPathOf(file)).catch((error: unknown) => { throw binError(error); });
@@ -582,7 +615,19 @@ export class Outside implements ToolLayer {
     const { revision } = this.options.bindings.copyOf(root, copy)!;
     const grant = look(original)!;
     const { fd } = this.options;
-    const conflict: Outcome = { error: { type: "conflict", message: `${original} changed since it was copied. Nothing was replaced; the changes are in ${copy}.` } };
+    const conflict: Outcome = {
+      error: { type: "conflict", message: `${original} changed since it was copied. Nothing was replaced; the changes are in ${copy}. Copy it again and make the change on the new version, then put that back.` },
+    };
+    // Open in a program, it is not replaced: its user's unsaved edits would overwrite it, or be lost.
+    const open = this.openIn(root, grant, original);
+    if (open !== null) {
+      return {
+        error: {
+          type: "conflict",
+          message: `${open}. Nothing was replaced; the changes are still in ${copy}. Ask the user to save and close it, then call put_back again. If it is closed and the lock file is still there, a program left it behind: the user can delete it.`,
+        },
+      };
+    }
     const notReplaced = (cause: string): Outcome => ({ error: { type: "os", message: `${original} was not replaced: ${cause}. Nothing was changed; the changes are still in ${copy}.` } });
     const inBin: Outcome = { error: { type: "os", message: `The old version is in the ${BIN}; the changes are still in ${copy}.` } };
     const gone: Outcome = { error: { type: "conflict", message: `${original} is no longer there; the old version may already be in the ${BIN}. The changes are in ${copy}.` } };
