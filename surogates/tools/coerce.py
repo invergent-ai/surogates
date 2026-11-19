@@ -26,23 +26,48 @@ def coerce_tool_args(tool_name: str, args: dict[str, Any], registry: ToolRegistr
     entry = registry.get(tool_name)
     if entry is None:
         return args
-    properties = entry.schema.parameters.get("properties", {})
+    root = entry.schema.parameters
+    properties = root.get("properties", {})
     if not properties:
         return args
 
     for key, value in args.items():
         if not isinstance(value, str):
             continue
-        prop_schema = properties.get(key)
-        if not prop_schema:
-            continue
-        expected = prop_schema.get("type")
+        expected = _declared_type(properties.get(key), root)
         if not expected:
             continue
         coerced = _coerce_value(value, expected)
         if coerced is not value:
             args[key] = coerced
     return args
+
+
+def _declared_type(schema: Any, root: dict[str, Any], depth: int = 0) -> Any:
+    """The ``type`` a property declares, through a local ``$ref`` and nullable unions.
+
+    Pydantic declares a nested model as ``{"$ref": "#/$defs/Model"}`` and an
+    optional one as ``anyOf`` of that and ``null``; neither carries ``type``,
+    so without this a double-encoded nested object reached the tool as a string.
+    """
+    if not isinstance(schema, dict) or depth > 8:
+        return None
+    if "type" in schema:
+        return schema["type"]
+    ref = schema.get("$ref")
+    if isinstance(ref, str) and ref.startswith("#/"):
+        target: Any = root
+        for part in ref[2:].split("/"):
+            target = target.get(part) if isinstance(target, dict) else None
+        return _declared_type(target, root, depth + 1)
+    for combinator in ("anyOf", "oneOf"):
+        branches = [
+            b for b in schema.get(combinator) or []
+            if not (isinstance(b, dict) and b.get("type") == "null")
+        ]
+        if len(branches) == 1:
+            return _declared_type(branches[0], root, depth + 1)
+    return None
 
 
 def _coerce_value(value: str, expected_type: str | list[str]) -> Any:
