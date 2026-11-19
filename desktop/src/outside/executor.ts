@@ -13,7 +13,7 @@
 
 import { randomUUID } from "node:crypto";
 import { type BigIntStats, closeSync, constants, fchmodSync, readSync, writeSync } from "node:fs";
-import { extname } from "node:path";
+import { extname, posix } from "node:path";
 
 import { type Approvals, OUTSIDE, outsideDenied as denied, OUTSIDE_READS as READS, UNKNOWN as unknown } from "../binding/approvals.js";
 import type { FolderGuards } from "../binding/folder.js";
@@ -105,10 +105,10 @@ export interface OutsideOptions {
   /** A look at the folder at the session's path *folder* off the main thread, within a bound (lookApart by default). */
   look?: (folder: string) => Promise<"there" | "gone" | "silent">;
   /**
-   * Chat *root*'s turns followed: *turnEnded* each time one ends, until the stop it returns. Without it, or with nobody
-   * signed in, a grant for one turn lasts until the app restarts.
+   * Chat *root*'s turns followed: *turnEnded* each time one ends, until the stop it returns; undefined where they cannot
+   * be followed (nobody signed in), and then a grant for one turn lasts until the app restarts.
    */
-  following?: (root: string, turnEnded: () => void) => () => void;
+  following?: (root: string, turnEnded: () => void) => (() => void) | undefined;
 }
 
 // Every other member of the tools below, there only where they have it: a caller tells one they lack by its absence.
@@ -128,8 +128,10 @@ export interface Outside extends Pick<ToolLayer, Passed> {}
 // thread (a grant's folder is looked at apart first, a walk has a short budget, a read yields between its pieces); the
 // upgrade is to move this layer's I/O into the file host's process, as a chat's folder's is.
 export class Outside implements ToolLayer {
-  // Each chat with a grant for its turn alone, followed until that turn ends (granted), by the stop of its following.
+  // Each chat with grants for its turn alone, followed until that turn ends (heldForTurn), by the stop of its following,
+  // and how many such grants it had when last told.
   private readonly turns = new Map<string, () => void>();
+  private readonly turnGrants = new Map<string, number>();
 
   constructor(private readonly options: OutsideOptions) {
     const { tools } = options;
@@ -137,6 +139,25 @@ export class Outside implements ToolLayer {
       const member = tools[name] as ((...args: never[]) => unknown) | undefined;
       if (member) Object.assign(this, { [name]: member.bind(tools) });
     }
+    options.bindings.watch((root) => this.heldForTurn(root));
+  }
+
+  // A chat's turn followed from the moment a grant for it alone is made, whoever made it and whether or not its
+  // operation runs: followed anew at each such grant, so a follow that stopped by itself (a sign-out) is started again;
+  // and let go once it has none, its turn over, taken back, or the chat removed.
+  private heldForTurn(root: string): void {
+    const { bindings } = this.options;
+    const held = bindings.reads(root).filter((folder) => bindings.forTurn(root, folder)).length;
+    const before = this.turnGrants.get(root) ?? 0;
+    if (held === before) return;
+    if (held === 0) this.turnGrants.delete(root);
+    else this.turnGrants.set(root, held);
+    if (held > 0 && held < before) return;
+    this.turns.get(root)?.();
+    this.turns.delete(root);
+    if (held === 0) return;
+    const stop = this.options.following?.(root, () => bindings.endTurnReads(root));
+    if (stop) this.turns.set(root, stop);
   }
 
   /**
@@ -237,18 +258,9 @@ export class Outside implements ToolLayer {
     return this.answer(kind, () => this.read(kind, args, grant, key));
   }
 
-  // *folder* granted to *root* by its grant *holder*, and for how long: a grant for the turn ends with it, as followed here.
+  // *folder* granted to *root* by its grant *holder*, and for how long: a grant for the turn ends with it (heldForTurn).
   private granted(root: string, folder: string, holder: string): { folder: string; lasts: "this request" | "this chat" } {
-    if (!this.options.bindings.forTurn(root, holder)) return { folder, lasts: "this chat" };
-    if (!this.turns.has(root)) {
-      const stop = this.options.following?.(root, () => {
-        this.turns.get(root)?.();
-        this.turns.delete(root);
-        this.options.bindings.endTurnReads(root);
-      });
-      if (stop) this.turns.set(root, stop);
-    }
-    return { folder, lasts: "this request" };
+    return { folder, lasts: this.options.bindings.forTurn(root, holder) ? "this request" : "this chat" };
   }
 
   // For one refusal() or run(): the grant of *root*'s that holds a path, no link on its way; null for none. Each path
@@ -382,6 +394,8 @@ export class Outside implements ToolLayer {
       let copied: { key: string; revision?: string };
       try {
         if (this.chatOwns(root, from, look)) throw failureOf(chatsOwn(from));
+        // Moved into its own folder it would be only renamed "name (1)": it is where it is to go already.
+        if (posix.dirname(from) === to.dir) throw osFailure("it is in that folder already");
         copied = await this.copyOne(root, from, to, look, inner);
       } catch (error) {
         done.skipped.push({ from, reason: skippedFor(error) });
@@ -389,11 +403,17 @@ export class Outside implements ToolLayer {
       }
       try {
         await this.trashOne(root, from, this.looker(root), copied.revision, signal);
-        // Its original is in the bin: the copy in the chat's folder is the file now, no working copy to put back.
-        if (to.grant === null) this.options.bindings.forgetCopy(root, copied.key);
-        done.moved.push({ from, to: copied.key });
       } catch (error) {
         done.copied_only.push({ from, to: copied.key, reason: said(error) });
+        continue;
+      }
+      done.moved.push({ from, to: copied.key });
+      // Its original is in the bin: the copy in the chat's folder is the file now, no working copy to put back. One
+      // still remembered is harmless: its put back finds the original gone.
+      try {
+        if (to.grant === null) this.options.bindings.forgetCopy(root, copied.key);
+      } catch {
+        // Kept: see above.
       }
     }
     for (const from of unticked(args.files, ticked)) done.skipped.push({ from, reason: UNTICKED });

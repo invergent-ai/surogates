@@ -242,8 +242,6 @@ prompt.onArmed((now) => {
   armed = now;
   hold();
 });
-prompt.onChanged(() => void prompt.state().then((state) => {
-  waiting(state.waiting);
-  fit();
-}));
+// Not fitted again: a prompt shown keeps its size and its buttons where they are, its middle scrolling if it must.
+prompt.onChanged(() => void prompt.state().then((state) => waiting(state.waiting)));
 void prompt.state().then(draw);

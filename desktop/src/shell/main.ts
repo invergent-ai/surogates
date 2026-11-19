@@ -1037,12 +1037,16 @@ function startStack(agent: Agent, credential: LiveCredential): Promise<DeviceSta
       // Only the folders a grant may name (places.ts), where this computer keeps them.
       getPath: (name) => app.getPath(name),
       trash: (hostPath) => shell.trashItem(hostPath),
-      // A folder's read granted for one turn ends with it, heard on the app's sign-in at that moment.
+      // A folder's read granted for one task ends with it, heard on the app's sign-in at that moment: at the turn's end,
+      // or, where that end was missed, as the user's next message starts another.
       following: (chatId, turnEnded) => {
         const session = signedIn;
-        if (!session) return () => {};
+        if (!session) return undefined;
         return followTurns({
           api: (path, init) => session.api(path, init), onError: report, sessionId: chatId, onTurnEnd: turnEnded, live: () => signedIn === session,
+          onTurnStart: (type) => {
+            if (type === "user.message") turnEnded();
+          },
         }).stop;
       },
     }),

@@ -121,27 +121,46 @@ describe("Outside", () => {
     expect(await outside.run(op("outside.grant", { folder: "Desktop" }), never())).toEqual(noPermission(join(base, "elsewhere")));
   });
 
-  it("ends a grant for one turn when that turn ends, and follows each chat once", async () => {
+  it("follows a chat's turn from the moment a grant for it alone is made, and ends the grant with the turn", async () => {
     let ended: (() => void) | undefined;
-    const stop = vi.fn();
+    const stops: Array<ReturnType<typeof vi.fn>> = [];
+    let signedIn = true;
     const following = vi.fn((_root: string, turnEnded: () => void) => {
+      if (!signedIn) return undefined;
       ended = turnEnded;
+      const stop = vi.fn();
+      stops.push(stop);
       return stop;
     });
     const outside = new Outside({ tools, bindings: journal.bindings, approvals: { chosenFor }, fd: fdPaths, getPath, trash, following });
+    // Followed as it is granted, before its operation runs, or whether it ever does.
     journal.bindings.grantRead(ROOT, desktop, true);
+    expect(following).toHaveBeenCalledTimes(1);
     expect(await outside.run(op("outside.grant", { folder: "Desktop" }), never())).toEqual({ ok: { folder: desktop, lasts: "this request" } });
     expect(await outside.run(op("outside.grant", { folder: join(desktop, "Scan") }), never())).toEqual({ ok: { folder: join(desktop, "Scan"), lasts: "this request" } });
-    expect(following).toHaveBeenCalledTimes(1);
     expect(await outside.run(op("outside.stat", { key: join(desktop, "note.txt") }), never())).not.toHaveProperty("error");
     ended!();
-    expect(stop).toHaveBeenCalledTimes(1);
+    expect(stops[0]).toHaveBeenCalledTimes(1);
     expect(journal.bindings.reads(ROOT)).toEqual([]);
     expect(await outside.run(op("outside.stat", { key: join(desktop, "note.txt") }), never())).toEqual(noPermission(join(desktop, "note.txt")));
-    // Granted for the turn again later: followed again.
+    // Each new grant for the turn follows it anew: a follow that stopped by itself is no reason to stop following.
     journal.bindings.grantRead(ROOT, desktop, true);
-    await outside.run(op("outside.grant", { folder: "Desktop" }), never());
-    expect(following).toHaveBeenCalledTimes(2);
+    journal.bindings.grantRead(ROOT, join(base, "elsewhere"), true);
+    expect(following).toHaveBeenCalledTimes(3);
+    expect(stops[1]).toHaveBeenCalledTimes(1);
+    // Taken back in Settings, its follow is let go; a grant for the chat is never followed.
+    journal.bindings.takeBackRead(ROOT, desktop);
+    journal.bindings.takeBackRead(ROOT, join(base, "elsewhere"));
+    expect(stops[2]).toHaveBeenCalledTimes(1);
+    journal.bindings.grantRead(ROOT, desktop);
+    expect(following).toHaveBeenCalledTimes(3);
+    // Nobody signed in: not followed, and followed as soon as the next grant can be.
+    signedIn = false;
+    journal.bindings.grantRead(ROOT, join(base, "elsewhere"), true);
+    signedIn = true;
+    journal.bindings.grantRead(ROOT, join(base, "home"), true);
+    expect(following).toHaveBeenCalledTimes(5);
+    expect(stops).toHaveLength(4);
   });
 
   it("refuses a grant whose folder does not answer in time, before it is resolved", async () => {
@@ -653,6 +672,47 @@ describe("outside.trash and outside.put_back", () => {
     });
     expect(readFileSync(note, "utf8")).toBe("changed meanwhile, and longer\n");
     expect(readdirSync(bin)).toEqual([]);
+  });
+
+  it("keeps the original of a file it could not copy, and of one whose bin failed, out of the bin", async () => {
+    journal.bindings.grantRead(ROOT, desktop);
+    const documents = join(base, "home", "Documents");
+    mkdirSync(documents, { recursive: true });
+    journal.bindings.grantRead(ROOT, documents);
+    const gone = join(desktop, "gone.txt");
+    const note = join(desktop, "note.txt");
+    const cerere = join(desktop, "Scan", "cerere.pdf");
+    trash = async (path) => {
+      if (path.endsWith("cerere.pdf")) throw new Error("the bin is full");
+      renameSync(path, join(bin, basename(path)));
+    };
+    writeFileSync(gone, "soon gone");
+    chosenFor.mockReturnValueOnce([gone, note, cerere]);
+    const operation = op("outside.move", { files: [gone, note, cerere], to: documents });
+    rmSync(gone);
+    const outcome = await layer().run(operation, never()) as { ok: { moved: unknown[]; copied_only: Array<{ from: string }>; skipped: Array<{ from: string }> } };
+    expect(outcome.ok.skipped.map((s) => s.from)).toEqual([gone]);
+    expect(outcome.ok.moved).toEqual([{ from: note, to: join(documents, "note.txt") }]);
+    expect(outcome.ok.copied_only.map((c) => c.from)).toEqual([cerere]);
+    expect(readdirSync(bin)).toEqual(["note.txt"]);
+    expect(existsSync(cerere)).toBe(true);
+  });
+
+  it("never copies a file of the chat's own folder, even run without its refusal asked, nor one into its own folder", async () => {
+    folderTools();
+    journal.bindings.grantRead(ROOT, desktop);
+    writeFileSync(join(work, "own.txt"), "own");
+    chosenFor.mockReturnValueOnce([join(work, "own.txt")]);
+    expect(await layer().run(op("outside.move", { files: [join(work, "own.txt")], to: desktop }), never())).toMatchObject({
+      ok: { moved: [], copied_only: [], skipped: [{ from: join(work, "own.txt") }] },
+    });
+    expect(existsSync(join(desktop, "own.txt"))).toBe(false);
+    const note = join(desktop, "note.txt");
+    chosenFor.mockReturnValueOnce([note]);
+    expect(await layer().run(op("outside.move", { files: [note], to: desktop }), never())).toEqual({
+      ok: { moved: [], copied_only: [], skipped: [{ from: note, reason: "it is in that folder already" }] },
+    });
+    expect([existsSync(note), existsSync(join(desktop, "note (1).txt")), readdirSync(bin)]).toEqual([true, false, []]);
   });
 
   it("refuses to move a file of the chat's own folder, or into a folder that is not granted", async () => {
