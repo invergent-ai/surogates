@@ -107,6 +107,24 @@ def test_the_office_tools_take_a_windows_chats_folder_as_its_user_names_it():
     assert relative_path("D:\\Scans\\a.docx", session) == "/mnt/d/Scans/a.docx"
 
 
+async def test_move_files_sends_absolute_paths_and_answers_what_was_moved():
+    moved = {
+        "moved": [{"from": "/mnt/d/Scan/a.pdf", "to": "/mnt/d/PONTAJE/a.pdf"}],
+        "copied_only": [{"from": "/mnt/d/Scan/b.pdf", "to": "/mnt/d/PONTAJE/b.pdf", "reason": "changed"}],
+        "skipped": [],
+    }
+    laptop, kwargs = on_the_computer({"ok": moved}, {"ok": {"moved": [], "copied_only": [], "skipped": []}})
+
+    assert json.loads(await call("move_files", {"files": ["/mnt/d/Scan/a.pdf", "/mnt/d/Scan/b.pdf"], "to": "/mnt/d/PONTAJE/"}, **kwargs)) == moved
+    await call("move_files", {"files": ["/mnt/d/Scan/c.pdf"], "to": "."}, **kwargs)
+
+    assert laptop.asked == [
+        ("outside.move", {"files": ["/mnt/d/Scan/a.pdf", "/mnt/d/Scan/b.pdf"], "to": "/mnt/d/PONTAJE"}),
+        ("outside.move", {"files": ["/mnt/d/Scan/c.pdf"], "to": FOLDER}),
+    ]
+    assert "'files' lists the files to move" in json.loads(await call("move_files", {"files": [], "to": "."}, **kwargs))["error"]
+
+
 async def test_move_to_trash_sends_the_files_and_answers_what_was_trashed():
     trashed = {"trashed": ["/mnt/d/Scans/a.pdf"], "kept": [{"file": "/mnt/d/Scans/b.pdf", "reason": "unticked"}]}
     laptop, kwargs = on_the_computer({"ok": trashed})

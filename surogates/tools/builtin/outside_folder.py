@@ -1,4 +1,4 @@
-"""Files outside a desktop chat's folder: ask for a folder, copy files, move them to the trash, put a copy back.
+"""Files outside a desktop chat's folder: ask for a folder, copy or move files, move them to the trash, put a copy back.
 
 Each tool is one operation on the user's computer (surogates.devices.workspace,
 the outside.* kinds), and each shows its user a window there: the answer is
@@ -20,7 +20,7 @@ from surogates.devices.workspace import MAX_MESSAGE_CHARS, TOO_LARGE, DeviceWork
 from surogates.tools.registry import ToolRegistry, ToolSchema
 from surogates.tools.utils.workspace_sandbox import NUL_REFUSED, holds_nul
 
-OUTSIDE_FOLDER_TOOLS: frozenset[str] = frozenset({"request_folder_access", "copy_files", "move_to_trash", "put_back"})
+OUTSIDE_FOLDER_TOOLS: frozenset[str] = frozenset({"request_folder_access", "copy_files", "move_files", "move_to_trash", "put_back"})
 IN_A_THREAD = "Files outside the chat's folder can be used from the main chat, not from a project's thread."
 _NOT_ON_A_COMPUTER = "Files outside the chat's folder are reached only in a chat on a folder of the user's computer."
 
@@ -102,14 +102,24 @@ async def _request_folder_access(arguments: dict[str, Any], **kwargs: Any) -> st
     return await _on_computer("outside.grant", kwargs, build)
 
 
-async def _copy_files(arguments: dict[str, Any], **kwargs: Any) -> str:
+def _files_to(arguments: dict[str, Any], verb: str) -> Callable[[str], dict[str, Any]]:
+    """The args builder of a tool that takes 'files' and the folder 'to' put them in, as copy_files and move_files do."""
+
     def build(root: str) -> dict[str, Any]:
         files, to = _paths(arguments.get("files")), arguments.get("to")
         if files is None or not isinstance(to, str) or not to.strip():
-            raise ValueError("'files' lists the files to copy, and 'to' is the folder to copy them into ('.' is the chat's).")
+            raise ValueError(f"'files' lists the files to {verb}, and 'to' is the folder to {verb} them into ('.' is the chat's).")
         return {"files": [_absolute(f, root) for f in files], "to": _absolute(to.strip(), root)}
 
-    return await _on_computer("outside.copy", kwargs, build)
+    return build
+
+
+async def _copy_files(arguments: dict[str, Any], **kwargs: Any) -> str:
+    return await _on_computer("outside.copy", kwargs, _files_to(arguments, "copy"))
+
+
+async def _move_files(arguments: dict[str, Any], **kwargs: Any) -> str:
+    return await _on_computer("outside.move", kwargs, _files_to(arguments, "move"))
 
 
 async def _move_to_trash(arguments: dict[str, Any], **kwargs: Any) -> str:
@@ -141,7 +151,8 @@ def register(registry: ToolRegistry) -> None:
             "request_folder_access", _request_folder_access,
             "Ask the user to let this chat read a folder outside its own: Desktop, Downloads, Documents, Pictures, "
             "or an absolute path the user named. The user answers in a window on their computer; once allowed, "
-            "list_files and read_file work there with absolute paths, read-only. Returns the folder granted.",
+            "list_files and read_file work there with absolute paths, read-only. Returns the folder granted and how "
+            "long: 'this request' ends when you finish this answer (ask again next time), 'this chat' lasts.",
             {"folder": {"type": "string", "description": "Desktop, Downloads, Documents, Pictures, or an absolute path."}},
             ["folder"],
         ),
@@ -158,9 +169,21 @@ def register(registry: ToolRegistry) -> None:
             ["files", "to"],
         ),
         (
+            "move_files", _move_files,
+            "Move files from a folder outside the chat's folder to another place: each is copied to 'to' (the chat's "
+            "folder or inside a folder already granted), then its original goes to the computer's trash, where the "
+            "user can restore it. The user confirms both in one window and may untick files. Returns what was "
+            "moved, what was copied but whose original stayed ('copied_only', with why), and what was skipped.",
+            {
+                "files": {**_FILES, "description": "Absolute paths of the files to move, each in a granted folder."},
+                "to": {"type": "string", "description": "The folder to move them into: '.' for the chat's folder, or an absolute path."},
+            },
+            ["files", "to"],
+        ),
+        (
             "move_to_trash", _move_to_trash,
-            "Move files outside the chat's folder to the computer's trash (the user can restore them from there); "
-            "the user confirms in a window. After copy_files, trash only the originals listed in its 'copied'. "
+            "Delete files outside the chat's folder by moving them to the computer's trash (the user can restore "
+            "them from there); the user confirms in a window. To move files somewhere else, use move_files. "
             "Returns what was trashed and what was kept.",
             {"files": {**_FILES, "description": "Absolute paths of the files to move to the trash."}},
             ["files"],

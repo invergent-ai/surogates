@@ -133,7 +133,9 @@ def test_a_device_chat_is_told_how_to_work_on_files_outside_its_folder():
         "destination must be the chat's folder or inside a folder already granted."
     ) in context
     assert "then call put_back (the app asks the user)." in context
-    assert "move_to_trash only the originals listed in `copied`" in context
+    assert "To move files, use move_files (one window" in context
+    assert "Use move_to_trash alone only when the user wants files deleted." in context
+    assert 'If the access is for "this request", it ends when you finish answering' in context
     assert "On a Windows computer the tools name `C:\\a\\b` as `/mnt/c/a/b`; tell the user the `C:\\` form." in context
     assert "offer put_back" not in context
     assert "\u2014" not in context and "\u2013" not in context

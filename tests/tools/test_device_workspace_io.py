@@ -946,14 +946,14 @@ async def test_refuses_writes_deletes_and_searches_by_content_outside_the_folder
         with pytest.raises(WorkspaceSandboxError) as refused:
             await call()
         assert str(refused.value) == (
-            "Files outside the chat's folder are read-only: use copy_files, move_to_trash or put_back."
+            "Files outside the chat's folder are read-only: use copy_files, move_files, move_to_trash or put_back."
         )
     # Nothing reached the computer, and the file is as it was.
     assert laptop.sent == []
     assert (elsewhere / "a.txt").read_text() == "one\ntwo\n"
     # write_file's check answers so too, after the computer's own refusals.
     assert await wio.check_write(str(elsewhere / "a.txt")) == (
-        "Files outside the chat's folder are read-only: use copy_files, move_to_trash or put_back."
+        "Files outside the chat's folder are read-only: use copy_files, move_files, move_to_trash or put_back."
     )
     assert await wio.check_write("/etc/passwd") == "Write denied: '/etc/passwd' is a protected system/credential file."
     assert (elsewhere / "a.txt").read_text() == "one\ntwo\n"

@@ -41,9 +41,11 @@ enforces its rules; the worker never touches the folder.
   outside.list_dir    key                                       as list_dir
   outside.walk    key, skip, skip_top, skip_hidden, since       as walk, each file with its mtime, each folder a
                                                                 [path + "/", 0, mtime] row
-  outside.grant   folder ("Desktop", "Downloads", "Documents",  {folder}
+  outside.grant   folder ("Desktop", "Downloads", "Documents",  {folder, lasts: "this request" | "this chat"}
                   "Pictures", or an absolute path)
   outside.copy    files ([path]), to (path)                     {copied: [{from, to}], skipped: [{from, reason}]}
+  outside.move    files ([path]), to (path)                     {moved: [{from, to}], copied_only: [{from, to, reason}],
+                                                                skipped: [{from, reason}]}
   outside.trash   files ([path])                                {trashed: [path], kept: [{file, reason}]}
   outside.put_back  copy, original                              {original, copyDeleted}
 
@@ -52,7 +54,7 @@ granted it (outside.grant).  Their paths are the computer's, absolute,
 normalised and with no trailing slash.  The reads answer as the folder's own
 kinds do; DeviceWorkspaceIO sends one for a path outside its root and for a
 key outside.resolve gave, and refuses anything else there with
-OUTSIDE_READ_ONLY.  outside.copy, outside.trash and outside.put_back are
+OUTSIDE_READ_ONLY.  outside.copy, outside.move, outside.trash and outside.put_back are
 surogates.tools.builtin.outside_folder's, and each shows the user a window.
 A refusal is {"type": "denied"} (the user said no, or the computer will not),
 {"type": "sandbox"} (no grant reaches the path), or {"type": "unsupported"}:
@@ -216,7 +218,7 @@ TOO_LARGE = "Too large for one operation on a local folder (over 1.5 MiB)"
 RESULT_TRANSFERS = frozenset({"read", "outside.read", "browser.screenshot"})
 READ_TOO_LARGE = "File too large to read from a local folder (over 50 MiB)"
 WRITE_TOO_LARGE = "File too large to write to a local folder (over 50 MiB)"
-OUTSIDE_READ_ONLY = "Files outside the chat's folder are read-only: use copy_files, move_to_trash or put_back."
+OUTSIDE_READ_ONLY = "Files outside the chat's folder are read-only: use copy_files, move_files, move_to_trash or put_back."
 # What an app that knows no outside.* kind is answered for one, and what the tools tell the model of it.
 OUTSIDE_OLD_APP = (
     "The Surogate app on this computer cannot work outside the chat's folder yet. Update it, then try again."
