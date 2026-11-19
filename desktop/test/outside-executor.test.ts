@@ -897,6 +897,49 @@ describe("outside.trash and outside.put_back", () => {
     expect(existsSync(fresh)).toBe(true);
   });
 
+  it("keeps a working copy, a refused copy and a file moved out that changed meanwhile, never deleting edits", async () => {
+    folderTools();
+    journal.bindings.grantRead(ROOT, desktop);
+    const note = join(desktop, "note.txt");
+    const outside = layer();
+    const copyOf = async (file: string) => {
+      chosenFor.mockReturnValueOnce([file]);
+      const outcome = await outside.run(op("outside.copy", { files: [file], to: work }), never());
+      return (outcome as { ok: { copied: Array<{ to: string }> } }).ok.copied[0]!.to;
+    };
+    const back = (copy: string) => outside.run(op("outside.put_back", { copy, original: note }), never());
+    const run = tools.run;
+    // Saved to while it is put back: after its bytes are read, before it would be deleted.
+    let editing: string | null = null;
+    tools.run = async (operation) => {
+      const done = await run(operation, never());
+      if (operation.kind === "read" && operation.args.key === editing) writeFileSync(editing!, "saved meanwhile, and longer\n");
+      return done;
+    };
+    const working = await copyOf(note);
+    writeFileSync(working, "the agent's edit\n");
+    editing = working;
+    expect(await back(working)).toMatchObject({ ok: { original: note, copyDeleted: false, copyKept: expect.stringContaining("changed while it was being put back") } });
+    expect([readFileSync(note, "utf8"), readFileSync(working, "utf8")]).toEqual(["the agent's edit\n", "saved meanwhile, and longer\n"]);
+    editing = null;
+    // Refused as out of date, then edited by its user: not deleted with the out-of-date ones.
+    const refused = await copyOf(note);
+    writeFileSync(note, "the user's newer version\n");
+    expect(await back(refused)).toMatchObject({ error: { type: "conflict" } });
+    writeFileSync(refused, "the user kept working here\n");
+    const newer = await copyOf(note);
+    writeFileSync(newer, "on the newer version\n");
+    expect(await back(newer)).toEqual({ ok: { original: note, copyDeleted: true } });
+    expect(readFileSync(refused, "utf8")).toBe("the user kept working here\n");
+    // Moved out of the chat's folder, saved to while it was copied: kept there.
+    writeFileSync(join(work, "draft.txt"), "draft");
+    editing = join(work, "draft.txt");
+    expect(await moveOf([join(work, "draft.txt")], join(desktop, "Scan"))).toMatchObject({
+      ok: { moved: [], copied_only: [{ from: join(work, "draft.txt"), reason: expect.stringContaining("changed while it was being copied") }] },
+    });
+    expect(readFileSync(join(work, "draft.txt"), "utf8")).toBe("saved meanwhile, and longer\n");
+  });
+
   it("puts the changes back, sends the old version to the bin and deletes the working copy", async () => {
     folderTools();
     journal.bindings.grantRead(ROOT, desktop);

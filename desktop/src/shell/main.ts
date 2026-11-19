@@ -1042,7 +1042,12 @@ function startStack(agent: Agent, credential: LiveCredential): Promise<DeviceSta
       following: (chatId, turnEnded) => {
         const session = signedIn;
         if (!session) return undefined;
-        const live = () => signedIn === session;
+        // Signed out, or in as someone else: the turn's end can no longer be heard, so the grant ends now.
+        const live = () => {
+          if (signedIn === session) return true;
+          turnEnded();
+          return false;
+        };
         const { stop } = followTurns({
           api: (path, init) => session.api(path, init), onError: report, sessionId: chatId, onTurnEnd: turnEnded, live,
           onTurnStart: (type) => {

@@ -136,7 +136,7 @@ export class Outside implements ToolLayer {
   private readonly turnGrants = new Map<string, number>();
   // Each root's working copies a put back refused because their original had changed since: out of date, and deleted
   // once a newer copy of that original is put back. In memory alone: after a restart such a copy is left, never lost.
-  private readonly superseded = new Map<string, Set<string>>();
+  private readonly superseded = new Map<string, Map<string, string | null>>();
 
   constructor(private readonly options: OutsideOptions) {
     const { tools } = options;
@@ -320,6 +320,12 @@ export class Outside implements ToolLayer {
     return grant === null || this.reachesChat(root, to, look) ? null : { dir: to, grant };
   }
 
+  // *key*'s revision in the chat's folder, by its own tools; null for none (gone, or not to be looked at).
+  private async revisionIn(inner: Inner, key: string): Promise<string | null> {
+    const found = await inner("stat", { key });
+    return "error" in found ? null : ((found.ok as { revision?: string } | null)?.revision ?? null);
+  }
+
   // *operation*'s own steps by the chat's folder's tools, each an operation of its own, named *prefix* and a new id.
   private inner(operation: Operation, prefix: string, signal: AbortSignal): Inner {
     return (kind, args) => this.options.tools.run({ ...operation, id: `${prefix}-${randomUUID()}`, kind, args, digest: "" }, signal);
@@ -411,14 +417,17 @@ export class Outside implements ToolLayer {
         continue;
       }
       let copied: { key: string; revision?: string };
-      // A file of the chat's own folder, moved out of it: copied, then deleted there by its own tools, as a working copy put back is.
+      // A file of the chat's own folder, moved out of it: copied, then deleted there by its own tools, as a working copy
+      // put back is, only while it is still what was copied.
       let own = false;
+      let ownRevision: string | null = null;
       try {
         if (this.holdsChat(root, from, look)) throw failureOf(chatsOwn(from));
         own = this.sourceOf(root, from, look) === "chat";
         // Moved into its own folder it would be only renamed "name (1)": it is where it is to go already.
         if (posix.dirname(from) === to.dir) throw osFailure("it is in that folder already");
         if (own && to.grant === null) throw osFailure("it is in this chat's folder already: move it there with the chat's own tools");
+        if (own) ownRevision = await this.revisionIn(inner, from);
         copied = await this.copyOne(root, from, to, look, inner);
       } catch (error) {
         done.skipped.push({ from, reason: skippedFor(error) });
@@ -426,6 +435,9 @@ export class Outside implements ToolLayer {
       }
       try {
         if (own) {
+          if (ownRevision === null || (await this.revisionIn(inner, from)) !== ownRevision) {
+            throw osFailure(`${from} changed while it was being copied, so it was kept in the chat's folder`);
+          }
           const deleted = await inner("delete", { key: from });
           if ("error" in deleted) throw new Failure(deleted.error);
           this.options.bindings.forgetCopy(root, from);
@@ -629,9 +641,15 @@ export class Outside implements ToolLayer {
     const conflict: Outcome = {
       error: { type: "conflict", message: `${original} changed since it was copied. Nothing was replaced; the changes are in ${copy}. Copy it again and read that copy first: it holds the user's saved changes, which must all be kept. Make your change on it as a new edit, never by reusing rows, cells or positions from the old copy, then put that back.` },
     };
-    // Refused for an original changed since: this copy is out of date, and goes once a newer one is put back.
+    const inner = this.inner(operation, "outside-put-back", signal);
+    // The copy as it is now: it goes after the put back only while it is still this.
+    const copyRevision = await this.revisionIn(inner, copy);
+    // Refused for an original changed since: this copy is out of date, and goes once a newer one is put back, if
+    // nobody changed it meanwhile.
     const changed = (): Outcome => {
-      this.superseded.set(root, new Set([...(this.superseded.get(root) ?? []), copy]));
+      const refused = this.superseded.get(root) ?? new Map<string, string | null>();
+      refused.set(copy, copyRevision);
+      this.superseded.set(root, refused);
       return conflict;
     };
     // Open in a program, it is not replaced: its user's unsaved edits would overwrite it, or be lost.
@@ -647,7 +665,6 @@ export class Outside implements ToolLayer {
     const notReplaced = (cause: string): Outcome => ({ error: { type: "os", message: `${original} was not replaced: ${cause}. Nothing was changed; the changes are still in ${copy}.` } });
     const inBin: Outcome = { error: { type: "os", message: `The old version is in the ${BIN}; the changes are still in ${copy}.` } };
     const gone: Outcome = { error: { type: "conflict", message: `${original} is no longer there; the old version may already be in the ${BIN}. The changes are in ${copy}.` } };
-    const inner = this.inner(operation, "outside-put-back", signal);
     // The original as it is now, if it is still the file copied; null for one changed since.
     const unchanged = (where: Where): BigIntStats | null => {
       const st = fd.lstat(where);
@@ -725,20 +742,32 @@ export class Outside implements ToolLayer {
       }
       // A second name of the file now in place, where the rename's own removal of it failed.
       removeTemporary();
-      // In place and checked: the working copy goes, by the chat's folder's own tools, and its record with it.
-      const deleted = await inner("delete", { key: copy });
-      this.options.bindings.forgetCopy(root, copy);
+      // In place and checked: the working copy goes, by the chat's folder's own tools, and its record with it; kept if
+      // it changed since it was read, as edits saved to it meanwhile are in neither file otherwise.
       this.superseded.get(root)?.delete(copy);
+      const same = copyRevision !== null && (await this.revisionIn(inner, copy)) === copyRevision;
+      const deleted = same ? await inner("delete", { key: copy }) : null;
+      this.options.bindings.forgetCopy(root, copy);
       // The copies of this original a put back refused as out of date (changed()) go too, so none is left to be taken
-      // for the file. Any other copy of it, one its user keeps, or one with edits of its own, stays.
+      // for the file; each only while it is as it was refused. Any other copy of it stays.
       const older: string[] = [];
       const stale = this.superseded.get(root);
-      for (const old of this.options.bindings.copiesFrom(root, original).filter((made) => stale?.delete(made))) {
+      for (const old of this.options.bindings.copiesFrom(root, original)) {
+        if (!stale?.has(old)) continue;
+        const was = stale.get(old);
+        stale.delete(old);
+        if (was === null || was === undefined || (await this.revisionIn(inner, old)) !== was) continue;
         const gone = await inner("delete", { key: old });
         this.options.bindings.forgetCopy(root, old);
         if (!("error" in gone)) older.push(old);
       }
-      return { ok: { original, copyDeleted: !("error" in deleted), ...(older.length > 0 ? { olderCopiesDeleted: older } : {}) } };
+      return {
+        ok: {
+          original, copyDeleted: deleted !== null && !("error" in deleted),
+          ...(same ? {} : { copyKept: `${copy} changed while it was being put back, so it was kept: the changes made to it since are in it alone` }),
+          ...(older.length > 0 ? { olderCopiesDeleted: older } : {}),
+        },
+      };
     } finally {
       release();
     }
