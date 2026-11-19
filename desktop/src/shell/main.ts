@@ -1042,12 +1042,14 @@ function startStack(agent: Agent, credential: LiveCredential): Promise<DeviceSta
       following: (chatId, turnEnded) => {
         const session = signedIn;
         if (!session) return undefined;
-        return followTurns({
-          api: (path, init) => session.api(path, init), onError: report, sessionId: chatId, onTurnEnd: turnEnded, live: () => signedIn === session,
+        const live = () => signedIn === session;
+        const { stop } = followTurns({
+          api: (path, init) => session.api(path, init), onError: report, sessionId: chatId, onTurnEnd: turnEnded, live,
           onTurnStart: (type) => {
-            if (type !== "ask_user_question.response" && type !== "session.resume") turnEnded();
+            if (type === "user.message" || type === "coordinator.message") turnEnded();
           },
-        }).stop;
+        });
+        return { stop, live };
       },
     }),
     prompts,

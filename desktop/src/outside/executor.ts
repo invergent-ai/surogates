@@ -40,8 +40,8 @@ const noPermission = (path: string): Outcome => ({
 const UNTICKED = "not ticked by the user";
 const byAnotherName = (path: string) => `${path} is in this chat's folder by another name: use its path in the chat's folder.`;
 const chatsOwn = (path: string): Outcome => denied(`${path} is this chat's folder, in it, or holds it: the chat's own files are deleted with its own tools.`);
-const notDestination = (to: string): Outcome => denied(
-  `The destination ${to} is neither this chat's folder nor a folder it may read. Ask for it with request_folder_access, then call this same tool again: a move stays a move.`,
+const notDestination = (to: string, move = false): Outcome => denied(
+  `The destination ${to} is neither this chat's folder nor a folder it may read. Ask for it with request_folder_access, then call this same tool again${move ? ": a move stays a move" : ""}.`,
 );
 // How many numbered names a copy tries past its own, as a download does.
 const NAMES = 100;
@@ -110,7 +110,7 @@ export interface OutsideOptions {
    * Chat *root*'s turns followed: *turnEnded* each time one ends, until the stop it returns; undefined where they cannot
    * be followed (nobody signed in), and then a grant for one turn lasts until the app restarts.
    */
-  following?: (root: string, turnEnded: () => void) => (() => void) | undefined;
+  following?: (root: string, turnEnded: () => void) => { stop: () => void; live: () => boolean } | undefined;
 }
 
 // Every other member of the tools below, there only where they have it: a caller tells one they lack by its absence.
@@ -132,7 +132,7 @@ export interface Outside extends Pick<ToolLayer, Passed> {}
 export class Outside implements ToolLayer {
   // Each chat with grants for its turn alone, followed until that turn ends (heldForTurn), by the stop of its following,
   // and how many such grants it had when last told.
-  private readonly turns = new Map<string, () => void>();
+  private readonly turns = new Map<string, { stop: () => void; live: () => boolean }>();
   private readonly turnGrants = new Map<string, number>();
   // Each root's working copies a put back refused because their original had changed since: out of date, and deleted
   // once a newer copy of that original is put back. In memory alone: after a restart such a copy is left, never lost.
@@ -157,12 +157,12 @@ export class Outside implements ToolLayer {
     if (held === before) return;
     if (held === 0) this.turnGrants.delete(root);
     else this.turnGrants.set(root, held);
-    if (held > 0 && before > 0 && this.turns.has(root)) return;
-    this.turns.get(root)?.();
+    if (held > 0 && before > 0 && this.turns.get(root)?.live() === true) return;
+    this.turns.get(root)?.stop();
     this.turns.delete(root);
     if (held === 0) return;
-    const stop = this.options.following?.(root, () => bindings.endTurnReads(root));
-    if (stop) this.turns.set(root, stop);
+    const follow = this.options.following?.(root, () => bindings.endTurnReads(root));
+    if (follow) this.turns.set(root, follow);
   }
 
   /**
@@ -218,11 +218,13 @@ export class Outside implements ToolLayer {
       const own = (Array.isArray(args.files) ? args.files : []).find((file) => typeof file === "string" && this.holdsChat(root, file, look)) as string | undefined;
       if (own !== undefined) return chatsOwn(own);
       if (typeof args.to === "string" && this.reachesChat(root, args.to, look)) return denied(byAnotherName(args.to));
-      // Nothing to move: a file already in that folder, or the chat's own file moved within its folder.
+      // Nothing to move at all: each file already in that folder, or the chat's own file moved within its folder. A move
+      // where only some stay moves the rest, and says which stayed.
       const to = typeof args.to === "string" ? this.destinationOf(root, args.to, look) : null;
-      const stays = (Array.isArray(args.files) ? args.files : []).find((file) => typeof file === "string" && to !== null
-        && (posix.dirname(file) === to.dir || (to.grant === null && this.sourceOf(root, file, look) === "chat"))) as string | undefined;
-      if (stays !== undefined) return denied(`${stays} is in that folder, or this chat's folder, already: nothing to move.`);
+      const files = Array.isArray(args.files) ? args.files : [];
+      const stays = (file: unknown) => typeof file === "string" && to !== null
+        && (posix.dirname(file) === to.dir || (to.grant === null && this.sourceOf(root, file, look) === "chat"));
+      if (files.length > 0 && files.every(stays)) return denied(`Every file is in that folder, or this chat's folder, already: nothing to move.`);
     }
     if (kind === "outside.put_back") return typeof args.copy === "string" && typeof args.original === "string" ? this.putBackRefusal(root, args.copy, args.original, look) : null;
     if (kind === "outside.copy") {
@@ -235,7 +237,7 @@ export class Outside implements ToolLayer {
       const out = args.files.find((file) => typeof file === "string" && this.sourceOf(root, file, look, kind !== "outside.trash") === null) as string | undefined;
       if (out !== undefined) return noPermission(out);
     }
-    if ((kind === "outside.copy" || kind === "outside.move") && typeof args.to === "string" && this.destinationOf(root, args.to, look) === null) return notDestination(args.to);
+    if ((kind === "outside.copy" || kind === "outside.move") && typeof args.to === "string" && this.destinationOf(root, args.to, look) === null) return notDestination(args.to, kind === "outside.move");
     return null;
   }
 
@@ -379,6 +381,8 @@ export class Outside implements ToolLayer {
     const key = to.grant === null ? await this.intoChat(to.dir, name, read.data, inner) : this.intoGrant(root, to.grant, to.dir, name, read.data);
     // A copy of an outside file is remembered for its put back; any other made at a key once a copy's is no copy.
     if (to.grant === null) {
+      // A new file at a name a refused copy had is no out-of-date copy.
+      this.superseded.get(root)?.delete(key);
       if (source === "chat") this.options.bindings.forgetCopy(root, key);
       else this.options.bindings.recordCopy(root, key, from, read.revision!);
     }
@@ -397,7 +401,7 @@ export class Outside implements ToolLayer {
     const look = this.looker(root);
     if (this.reachesChat(root, args.to, look)) return denied(byAnotherName(args.to));
     const to = this.destinationOf(root, args.to, look);
-    if (to === null) return notDestination(args.to);
+    if (to === null) return notDestination(args.to, true);
     if (ticked === undefined) return denied("Nothing was moved: the files its user chose are not known any more. Ask again.");
     const done: Moved = { moved: [], copied_only: [], skipped: [] };
     const inner = this.inner(operation, "outside-move", signal);
@@ -666,7 +670,7 @@ export class Outside implements ToolLayer {
         before = unchanged(where);
       } catch (error) {
         // Gone: maybe a put back that stopped between the bin and the rename.
-        return (error as NodeJS.ErrnoException).code === "ENOENT" ? gone : changed();
+        return (error as NodeJS.ErrnoException).code === "ENOENT" ? gone : conflict;
       }
       if (before === null) return changed();
       const read = await inner("read", { key: copy, max_bytes: null });
@@ -724,6 +728,7 @@ export class Outside implements ToolLayer {
       // In place and checked: the working copy goes, by the chat's folder's own tools, and its record with it.
       const deleted = await inner("delete", { key: copy });
       this.options.bindings.forgetCopy(root, copy);
+      this.superseded.get(root)?.delete(copy);
       // The copies of this original a put back refused as out of date (changed()) go too, so none is left to be taken
       // for the file. Any other copy of it, one its user keeps, or one with edits of its own, stays.
       const older: string[] = [];

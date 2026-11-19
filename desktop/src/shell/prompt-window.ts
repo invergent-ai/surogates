@@ -158,15 +158,19 @@ export function openPrompt(options: PromptWindowOptions, signal: AbortSignal): P
   // The page's own height, as it measured what it shows: the window takes it, within MAX_FIT. Once measured, it is shown.
   const fitted = Promise.withResolvers<void>();
   handle("prompt:fit", (height) => {
-    if (typeof height === "number" && Number.isFinite(height) && height > 0 && !window.isDestroyed()) {
-      // A window its user cannot resize is resized by this process alone, which some window managers allow only while it may be.
-      window.setResizable(true);
-      // Within the screen the app's window is on, its buttons on it: what does not fit scrolls in its middle.
-      const room = screen.getDisplayMatching(parent.getBounds()).workArea.height - 40;
-      window.setContentSize(WIDTH, Math.max(160, Math.min(Math.ceil(height), MAX_FIT, room)));
-      window.setResizable(false);
+    try {
+      if (typeof height === "number" && Number.isFinite(height) && height > 0 && !window.isDestroyed() && !parent.isDestroyed()) {
+        // A window its user cannot resize is resized by this process alone, which some window managers allow only while it may be.
+        window.setResizable(true);
+        // Within the screen the app's window is on, its buttons on it: what does not fit scrolls in its middle.
+        const room = screen.getDisplayMatching(parent.getBounds()).workArea.height - 40;
+        window.setContentSize(WIDTH, Math.max(160, Math.min(Math.ceil(height), MAX_FIT, room)));
+        window.setResizable(false);
+      }
+    } finally {
+      // Shown however the measure went: a window that cannot be sized is shown at the height it was given.
+      fitted.resolve();
     }
-    fitted.resolve();
   });
   const unheard = options.queue.onChange(() => send("prompt:changed"));
   const reveal = () => {

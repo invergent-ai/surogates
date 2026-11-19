@@ -125,12 +125,15 @@ describe("Outside", () => {
     let ended: (() => void) | undefined;
     const stops: Array<ReturnType<typeof vi.fn>> = [];
     let signedIn = true;
+    // Live while the sign-in it was started under is: a sign-out stops it by itself.
+    let session = 0;
     const following = vi.fn((_root: string, turnEnded: () => void) => {
       if (!signedIn) return undefined;
       ended = turnEnded;
       const stop = vi.fn();
       stops.push(stop);
-      return stop;
+      const under = session;
+      return { stop, live: () => signedIn && session === under };
     });
     const outside = new Outside({ tools, bindings: journal.bindings, approvals: { chosenFor }, fd: fdPaths, getPath, trash, following });
     // Followed as it is granted, before its operation runs, or whether it ever does.
@@ -162,6 +165,10 @@ describe("Outside", () => {
     journal.bindings.grantRead(ROOT, join(base, "home"), true);
     expect(following).toHaveBeenCalledTimes(4);
     expect(stops).toHaveLength(3);
+    // Signed out and in again within the task: its follow stopped by itself, so the next grant follows it anew.
+    session += 1;
+    journal.bindings.grantRead(ROOT, join(base, "data"), true);
+    expect(following).toHaveBeenCalledTimes(5);
   });
 
   it("refuses a grant whose folder does not answer in time, before it is resolved", async () => {
@@ -449,7 +456,7 @@ describe("outside.copy", () => {
     const note = join(desktop, "note.txt");
     const outside = layer();
     for (const to of [join(base, "elsewhere"), join(base, "home")]) {
-      const refused = { error: { type: "denied", message: `The destination ${to} is neither this chat's folder nor a folder it may read. Ask for it with request_folder_access, then call this same tool again: a move stays a move.` } };
+      const refused = { error: { type: "denied", message: `The destination ${to} is neither this chat's folder nor a folder it may read. Ask for it with request_folder_access, then call this same tool again.` } };
       expect(outside.refusal(op("outside.copy", { files: [note], to })), to).toEqual(refused);
       // Run as well, for an operation that came without the question.
       chosenFor.mockReturnValueOnce([note]);
@@ -716,6 +723,9 @@ describe("outside.trash and outside.put_back", () => {
     expect(journal.bindings.copyOf(ROOT, join(work, "note.txt"))).toBeUndefined();
     // Nothing to move: refused before anyone is asked.
     expect(layer().refusal(op("outside.move", { files: [join(desktop, "note.txt")], to: desktop }))).toMatchObject({ error: { type: "denied", message: expect.stringContaining("nothing to move") } });
+    expect(layer().refusal(op("outside.move", { files: [join(desktop, "note.txt"), join(desktop, "Scan", "cerere.pdf")], to: desktop }))).toBeNull();
+    // And a move refused for its destination says a move stays a move.
+    expect(layer().refusal(op("outside.move", { files: [join(desktop, "note.txt")], to: join(base, "elsewhere") }))).toMatchObject({ error: { message: expect.stringContaining("a move stays a move") } });
     writeFileSync(join(work, "c.txt"), "c");
     expect(layer().refusal(op("outside.move", { files: [join(work, "c.txt")], to: work }))).toMatchObject({ error: { type: "denied" } });
     expect(tools.ran.map((ran) => ran.kind)).toContain("delete");
@@ -874,6 +884,17 @@ describe("outside.trash and outside.put_back", () => {
     expect(readFileSync(note, "utf8")).toBe("edit on the new version\n");
     expect([existsSync(kept), existsSync(first), existsSync(second), existsSync(other)]).toEqual([true, false, false, true]);
     expect([journal.bindings.copyOf(ROOT, first), journal.bindings.copyOf(ROOT, kept)?.original]).toEqual([undefined, note]);
+    // Refused again, deleted by the agent, and copied fresh at the same name: that fresh copy is no out-of-date one.
+    const third = await copyOf(note);
+    writeFileSync(note, "saved again by its user\n");
+    expect(await back(third)).toMatchObject({ error: { type: "conflict" } });
+    rmSync(third);
+    const fresh = await copyOf(note);
+    expect(fresh).toBe(third);
+    const fourth = await copyOf(note);
+    writeFileSync(fourth, "the newest edit\n");
+    expect(await back(fourth)).toEqual({ ok: { original: note, copyDeleted: true } });
+    expect(existsSync(fresh)).toBe(true);
   });
 
   it("puts the changes back, sends the old version to the bin and deletes the working copy", async () => {
