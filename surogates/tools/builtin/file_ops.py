@@ -2327,10 +2327,15 @@ def _glob_matches(path: str, pattern: str) -> bool:
     return _glob_regex(pattern).fullmatch(path) is not None
 
 
+_POSIX_CLASSES = {"alpha": "a-zA-Z", "digit": "0-9", "alnum": "a-zA-Z0-9", "upper": "A-Z", "lower": "a-z", "space": "\\s", "xdigit": "0-9a-fA-F"}
+
+
 @functools.lru_cache(maxsize=64)
 def _glob_regex(pattern: str) -> re.Pattern[str]:
     """*pattern* as ripgrep's globs read it: ``*`` and ``?`` within one name, ``**`` across folders (a ``**/``
     matching none), ``[...]`` a character class and ``{a,b}`` either."""
+    # [[:digit:]] as [0-9] before the brackets are read: their body is copied into the regex as it is.
+    pattern = re.sub(r"\[:(alpha|digit|alnum|upper|lower|space|xdigit):\]", lambda m: _POSIX_CLASSES[m[1]], pattern)
     out: list[str] = []
     braces = 0
     i, n = 0, len(pattern)
@@ -2393,8 +2398,6 @@ async def _files_outside(
     mtimes = walk.mtimes or {}
     matched = [path for path, _size in walk.files if _glob_matches(path, pattern)]
     files = [posixpath.join(key, path) for path in matched]
-    # Found under *key*, so outside as *key* is: a later read of one asks for it so.
-    wio.walked_outside(key, [f.rstrip("/") for f in files])
     result = _listed(files, {f: mtimes.get(path, 0) for f, path in zip(files, matched)}, offset, limit)
     if walk.truncated:
         # A note, not the _warning a repeated search says: both reach the model.

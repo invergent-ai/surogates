@@ -110,13 +110,13 @@ def test_tools_path_is_shown_folders_inverse_on_a_windows_computer():
 
 
 def test_a_device_chat_is_told_how_to_work_on_files_outside_its_folder():
-    said = "Files outside the chat's folder: look in the chat's folder first"
+    said = "look in the chat's folder first (list_files on it)"
     assert said in _context({"read_file"}, workspace_path="/home/ana/proj", execution=DEVICE)
     context = _context({"read_file"}, workspace_path="/home/ana/proj", execution=DEVICE)
     assert "never ask for the same thing in the chat instead" in context
     # The chat's own folder first, and a folder outside it only as the user named it: never a guessed one.
     assert (
-        "Files outside the chat's folder: look in the chat's folder first (list_files on it). Only when what the "
+        "Files outside the chat's folder (a project's thread has none of these tools: ask the user to do it from the main chat): look in the chat's folder first (list_files on it). Only when what the "
         "user means is not there, ask once with request_folder_access, for the folder the user named (Desktop, "
         "Downloads, Documents, Pictures, or a path); if the user did not say where, ask them where instead of "
         "guessing a folder."
@@ -136,6 +136,7 @@ def test_a_device_chat_is_told_how_to_work_on_files_outside_its_folder():
     assert "To move files, use move_files (one window" in context
     assert "to make a new file in a folder outside, make it in the chat's folder, then move_files it there" in context
     assert "Use move_to_trash alone only when the user wants files deleted." in context
+    assert "a project's thread has none of these tools: ask the user to do it from the main chat" in context
     assert "when a file is done, delete the scripts, previews, page images and test renders you made only to build or check it" in context
     assert "a name no file in the chat's folder has, so none of the user's files is overwritten or deleted with them." in context
     assert "If copy_files says a file is `open` in another program, tell the user before you change it" in context

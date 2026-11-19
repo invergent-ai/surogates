@@ -239,6 +239,16 @@ def test_offers_the_outside_tools_only_in_a_device_chat(on_device):
     assert (OUTSIDE_FOLDER_TOOLS & unusable_tool_names(**usable)) == (frozenset() if on_device else OUTSIDE_FOLDER_TOOLS)
 
 
+def test_offers_no_outside_tool_to_a_projects_thread_on_a_computer():
+    config = {"execution": {"kind": "device", "device_id": str(uuid4())}, "under_thread": True}
+    from surogates.workstreams import under_a_thread
+    assert under_a_thread(config)
+    harness, session = _harness(config)
+    usable = AgentHarness._tool_usability(harness, session, ())
+    assert usable["on_device"] is False
+    assert OUTSIDE_FOLDER_TOOLS <= unusable_tool_names(**usable)
+
+
 @pytest.mark.parametrize("name", sorted(OUTSIDE_FOLDER_TOOLS))
 async def test_refuses_the_outside_tools_in_a_projects_thread(name):
     registry = ToolRegistry()

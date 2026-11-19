@@ -322,14 +322,14 @@ class DeviceWorkspaceIO:
         path = normal_path(path)
         return None if inside_folder(path, normal_path(self.root)) else path
 
+    def _folder_but_for_case(self, path: str) -> bool:
+        """Whether the normal *path* is in the folder spelled with other capitals: on a drive that ignores case
+        (Windows, macOS) it is the folder's own, on Linux another folder.  The computer, which knows, says which."""
+        return inside_folder(path.casefold(), normal_path(self.root).casefold())
+
     def is_outside(self, key: str) -> bool:
         """Whether *key* is a file outside the folder: one outside.resolve gave."""
         return key in self._outside
-
-    def walked_outside(self, key: str, files: Collection[str]) -> None:
-        """*files*, found by the computer's walk of *key*, a folder outside.resolve gave, are outside too."""
-        if self.is_outside(key):
-            self._outside.update(files)
 
     def _of(self, kind: str, key: str) -> str:
         """The kind that reads *key*: the folder's own, or its outside.* twin."""
@@ -352,6 +352,11 @@ class DeviceWorkspaceIO:
         outside = self._outside_path(path)
         if outside is None:
             return await self._call("resolve", path=path)
+        if self._folder_but_for_case(outside):
+            try:
+                return await self._call("resolve", path=path)
+            except WorkspaceSandboxError:
+                pass  # outside the folder on this computer: a folder of its own, as a grant may hold
         key = await self._call("outside.resolve", path=outside)
         if isinstance(key, str):
             self._outside.add(key)
@@ -362,7 +367,11 @@ class DeviceWorkspaceIO:
         path = tools_path(path, self.root)
         # The computer's own refusal first (a credential file, say), then, outside the folder, read-only.
         refused = await self._call("check_write", path=path)
-        return refused or (OUTSIDE_READ_ONLY if self._outside_path(path) is not None else None)
+        if refused:
+            return refused
+        # Spelled with other capitals, the computer's own check took it as the folder's: it is.
+        outside = self._outside_path(path)
+        return OUTSIDE_READ_ONLY if outside is not None and not self._folder_but_for_case(outside) else None
 
     async def stat(self, key: str) -> FileStat | None:
         if isinstance(key, str) and "\0" in key:

@@ -1003,8 +1003,6 @@ async def test_an_outside_list_is_sorted_by_the_walks_times_with_no_look_a_file(
     assert "note" not in listed
     # The walk and nothing a file: no outside.stat.
     assert [k for k, _ in laptop.sent if k.startswith("outside.")] == ["outside.resolve", "outside.stat", "outside.walk"]
-    # A file it listed is read as outside, as one outside.resolve gave.
-    assert wio.is_outside(str(elsewhere / "f3.txt"))
 
 
 async def test_a_walk_cut_short_is_said_in_a_note_a_repeated_search_does_not_replace(two_folders, monkeypatch):
@@ -1054,8 +1052,6 @@ async def test_an_outside_listing_shows_its_folders_and_matches_names_ignoring_c
         {"path": str(desktop), "pattern": "*PONTAJE*", "target": "files"}, workspace_io=wio,
     )).split("\n\n[Hint")[0])
     assert len(found["matches"]) == 2
-    # A folder it listed is outside as a file it listed is: by its path without the "/".
-    assert wio.is_outside(f"{desktop}/PONTAJE PENTRU STATE/Pontaje octombrie")
     # The chat's own folder is listed as before: its files only, matched as ripgrep matches them.
     assert await listed(chat) == [f"{chat}/Notes/a.txt"]
     assert await listed(chat, pattern="*notes*") == []
@@ -1075,3 +1071,37 @@ def test_an_outside_listing_matches_files_as_ripgreps_globs_do():
     assert matched("a/*") == ["a/b.txt", "a/q.png", "a/r.gif"]
     assert matched("a/**") == ["a/b.txt", "a/x/b.txt", "a/x/y/b.txt", "a/q.png", "a/r.gif"]
     assert matched("[!a]/*") == ["b/c.xlsx"]
+
+
+def test_an_outside_listing_reads_a_posix_class_in_brackets_as_ripgrep_does():
+    names = ["2026 raport.pdf", "raport.pdf", "A1.pdf"]
+    assert [n for n in names if file_ops._glob_matches(n, "[[:digit:]]*.pdf")] == ["2026 raport.pdf"]
+    assert [n for n in names if file_ops._glob_matches(n, "[[:upper:]][[:digit:]].pdf")] == ["A1.pdf"]
+
+
+async def test_a_path_in_the_folder_spelled_with_other_capitals_is_the_folders_where_the_computer_says_so():
+    sent: list[tuple[str, dict]] = []
+
+    class Computer:
+        def __init__(self, ignores_case):
+            self.ignores_case = ignores_case
+
+        async def run(self, kind, args, payload=None):
+            sent.append((kind, args))
+            if kind == "resolve" and not self.ignores_case:
+                return {"error": {"type": "sandbox", "message": "outside the workspace"}}
+            if kind == "check_write":
+                return {"ok": None}
+            return {"ok": args["path"]}
+
+    # Windows (and a Mac): the drive ignores case, so it is the chat's own file, written and read as such.
+    root = "/mnt/c/Users/Monica/Proj"
+    wio = DeviceWorkspaceIO(Computer(True), root=root)
+    assert await wio.resolve("/mnt/c/users/monica/proj/a.txt") == "/mnt/c/users/monica/proj/a.txt"
+    assert await wio.check_write("/mnt/c/users/monica/proj/a.txt") is None
+    assert [kind for kind, _ in sent] == ["resolve", "check_write"]
+    # Linux: another folder, which the computer says is outside: a grant's to read, and read-only.
+    sent.clear()
+    wio = DeviceWorkspaceIO(Computer(False), root="/home/ana/Proj")
+    key = await wio.resolve("/home/ana/proj/a.txt")
+    assert [kind for kind, _ in sent] == ["resolve", "outside.resolve"] and wio.is_outside(key)
