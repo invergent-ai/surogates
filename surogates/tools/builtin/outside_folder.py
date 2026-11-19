@@ -194,7 +194,9 @@ def register(registry: ToolRegistry) -> None:
         (
             "put_back", _put_back,
             "Put a changed copy back in place of its original outside the chat's folder; the user confirms in a "
-            "window. Refused when the original changed since it was copied. The original goes to the trash.",
+            "window. Refused while the original is open in another program (ask the user to save and close it, "
+            "then call again) and when it changed since it was copied (copy it again and redo the change). The "
+            "original goes to the trash.",
             {
                 "working_copy": {"type": "string", "description": "The changed copy, by its path in the chat's folder."},
                 "original": {"type": "string", "description": "The original's absolute path."},

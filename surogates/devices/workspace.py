@@ -43,7 +43,7 @@ enforces its rules; the worker never touches the folder.
                                                                 [path + "/", 0, mtime] row
   outside.grant   folder ("Desktop", "Downloads", "Documents",  {folder, lasts: "this request" | "this chat"}
                   "Pictures", or an absolute path)
-  outside.copy    files ([path]), to (path)                     {copied: [{from, to}], skipped: [{from, reason}]}
+  outside.copy    files ([path]), to (path)                     {copied: [{from, to, open?}], skipped: [{from, reason}]}
   outside.move    files ([path]), to (path)                     {moved: [{from, to}], copied_only: [{from, to, reason}],
                                                                 skipped: [{from, reason}]}
   outside.trash   files ([path])                                {trashed: [path], kept: [{file, reason}]}
