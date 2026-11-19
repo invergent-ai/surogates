@@ -85,6 +85,9 @@ describe("the grant holding a path", () => {
     expect(withinGrant([desktop], join(lower, "a.pdf"), ignoringCase)).toBe(desktop);
     // A folder that only starts like it, in any case, is still no grant's.
     expect(withinGrant([desktop], join(base, "home", "desktop2", "a.pdf"), ignoringCase)).toBeNull();
+    // On Windows by the names alone: its file host answers a folder by the spelling it was bound by.
+    expect(withinGrant([desktop], join(lower, "a.pdf"), fdPaths, true)).toBe(desktop);
+    expect(withinGrant([desktop], join(base, "home", "desktop2", "a.pdf"), fdPaths, true)).toBeNull();
   });
 
   it("finds the grant that holds a path", () => {

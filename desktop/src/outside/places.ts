@@ -44,11 +44,14 @@ export function grantable(folder: string, guards: FolderGuards, chatFolder: stri
 }
 
 // Whether *path* is in *root* spelled with other capitals: its part as long as *root* differs from it in case alone, and
-// is the very folder *root* is, by identity. On a drive that ignores case (Windows, macOS) it is; on Linux, another
-// folder or none. Looked at without following a link: the linkless check that follows holds the rest of the way.
-function sameFolderButCase(path: string, root: string, fd: FdPaths): boolean {
+// is the very folder *root* is. On Windows, whose folders' names never tell case apart, it is by the names alone (its
+// file host looks at a folder by the spelling it was bound by); elsewhere by identity: on Linux it is another folder or
+// none, and a Mac's drive may tell case apart or not. Looked at without following a link: the linkless check that
+// follows holds the rest of the way.
+function sameFolderButCase(path: string, root: string, fd: FdPaths, ignoresCase: boolean): boolean {
   const head = path.slice(0, root.length);
   if (head === root || head.toLowerCase() !== root.toLowerCase() || (path.length > root.length && path[root.length] !== "/")) return false;
+  if (ignoresCase) return true;
   try {
     const [a, b] = [fd.lstat(head), fd.lstat(root)];
     return a.isDirectory() && a.dev === b.dev && a.ino === b.ino;
@@ -64,14 +67,15 @@ function sameFolderButCase(path: string, root: string, fd: FdPaths): boolean {
  * folder must be one *fd* really holds: on Windows a bound one (fd.bind), since a path in no bound folder, or above
  * one, is not looked at there, and would pass for one with nothing in it.
  */
-export function withinGrant(grants: string[], path: string, fd: FdPaths): string | null {
+export function withinGrant(grants: string[], path: string, fd: FdPaths, ignoresCase = process.platform === "win32"): string | null {
   if (resolve(path) !== path) return null;
-  const grant = grants.filter((root) => inside(path, root) || sameFolderButCase(path, root, fd)).sort((a, b) => b.length - a.length)[0];
+  const grant = grants.filter((root) => inside(path, root) || sameFolderButCase(path, root, fd, ignoresCase)).sort((a, b) => b.length - a.length)[0];
   if (grant === undefined) return null;
   try {
     closeSync(fd.hold(grant));
     // ponytail: every link refused, even one that leads back into the grant, as the Windows walk refuses each.
-    return linkless(path, fd) ? grant : null;
+    // By the grant's own spelling above it: the folder the file host bound, whatever the capitals the path came with.
+    return linkless(grant + path.slice(grant.length), fd) ? grant : null;
   } catch {
     return null; // not there, not bound, or a name the file host refuses
   }
