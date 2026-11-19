@@ -563,17 +563,22 @@ function walk(args: Record<string, unknown>, { folder, at }: Context): ReturnTyp
   return walkFrom(args, key, (flags) => fdPaths.open(key, flags));
 }
 
-/** How a walk is bounded, and whether each file comes with its mtime: [path, size, mtime]. */
+/**
+ * How a walk is bounded, whether each file comes with its mtime: [path, size, mtime], and whether each folder it sees
+ * is a row too: its path with a trailing "/" (no name holds one) and size 0, counted as a file toward the bounds, so
+ * an empty folder is seen as well.
+ */
 export interface WalkLimits {
   budgetMs?: number;
   maxFiles?: number;
   times?: boolean;
+  folders?: boolean;
 }
 
 /** walk's answer for *key*, opened by *open*, every folder below it entered through *fd*. */
 export function walkFrom(
   args: Record<string, unknown>, key: string, open: Opener, fd: FdPaths = fdPaths,
-  { budgetMs = WALK_BUDGET_MS, maxFiles = MAX_WALK_FILES, times = false }: WalkLimits = {},
+  { budgetMs = WALK_BUDGET_MS, maxFiles = MAX_WALK_FILES, times = false, folders = false }: WalkLimits = {},
 ): { files: Array<[string, number] | [string, number, number]>; truncated: boolean; cursor: string } {
   const { skip, skip_top: top, skip_hidden: hidden, since } = args;
   if (
@@ -592,6 +597,19 @@ export function walkFrom(
   let cost = 2; // "[]"
   let looks = 0;
   let truncated = false;
+  // *path*'s row, unless the bounds are reached: then the walk is said truncated, and false.
+  const add = (path: string, size: number, st: BigIntStats): boolean => {
+    // A time as JSON writes a double: at most 24 characters, and its ", ".
+    const more = pyJsonLength(path) + 24 + (times ? 26 : 0);
+    if (files.length === maxFiles || cost + more > MAX_PAYLOAD_BYTES) {
+      truncated = true;
+      return false;
+    }
+    files.push(times ? [path, size, mtimeOf(st)] : [path, size]);
+    cost += more;
+    return true;
+  };
+  const changed = (st: BigIntStats) => after === null || st.mtimeNs >= after || st.ctimeNs >= after;
   // The key's own failure is the answer.
   const keyFd = io(key, () => open(constants.O_RDONLY | FLAGS.DIRECTORY | FLAGS.NOFOLLOW));
   let keyDir: Listing;
@@ -629,6 +647,15 @@ export function walkFrom(
       if (entry.isDirectory()) {
         const hides = hidden && name.startsWith(".") && !SHOWN_DOT_FOLDERS.has(name);
         if (skipped.has(name) || (!level.rel && skippedTop.has(name)) || hides) continue;
+        if (folders) {
+          let st: BigIntStats | null = null;
+          try {
+            st = fd.lstat(at);
+          } catch {
+            // Its time unknown, it is no row; the walk still goes in, as it would without folders.
+          }
+          if (st !== null && changed(st) && !add(`${path}/`, 0, st)) break;
+        }
         // The key is the first level: this folder would be levels.length below it.
         if (levels.length > MAX_WALK_DEPTH) {
           truncated = true;
@@ -662,15 +689,8 @@ export function walkFrom(
       } catch {
         continue;
       }
-      if (after !== null && st.mtimeNs < after && st.ctimeNs < after) continue;
-      // A time as JSON writes a double: at most 24 characters, and its ", ".
-      const more = pyJsonLength(path) + 24 + (times ? 26 : 0);
-      if (files.length === maxFiles || cost + more > MAX_PAYLOAD_BYTES) {
-        truncated = true;
-        break;
-      }
-      files.push(times ? [path, Number(st.size), mtimeOf(st)] : [path, Number(st.size)]);
-      cost += more;
+      if (!changed(st)) continue;
+      if (!add(path, Number(st.size), st)) break;
     }
   } finally {
     for (const level of levels) close(level);

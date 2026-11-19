@@ -180,13 +180,20 @@ describe("Outside", () => {
     await same("read", { key: desktop, max_bytes: null }); // EISDIR, in the same words
     await same("read", { key: join(desktop, "gone.txt"), max_bytes: null }); // ENOENT
     expect(await outside.run(op("outside.resolve", { path: `${desktop}/Scan/` }), never())).toEqual({ ok: join(desktop, "Scan") });
+    // Empty folders, as a user keeps one to file things in later.
+    mkdirSync(join(desktop, "PONTAJE PENTRU STATE", "Pontaje octombrie"), { recursive: true });
     const walked = await outside.run(op("outside.walk", { key: desktop, skip: [], skip_top: [], skip_hidden: false, since: null }), never());
     const theirs = await perform("walk", { key: desktop, skip: [], skip_top: [], skip_hidden: false, since: null }, context, never());
-    // The same files and sizes, each with its mtime too, as a stat says it.
+    // The same files and sizes, each with its mtime too, as a stat says it, and each folder too, by a trailing "/".
     const files = (theirs as { ok: { files: Array<[string, number]> } }).ok.files;
-    const mtime = (path: string) => ((perform("stat", { key: join(desktop, path) }, context, never()) as unknown) as Promise<{ ok: { mtime: number } }>);
-    const timed = await Promise.all(files.map(async ([path, size]) => [path, size, (await mtime(path)).ok.mtime]));
-    expect(walked).toMatchObject({ ok: { files: timed, truncated: false, cursor: expect.any(String) } });
+    expect(files.map(([path]) => path).sort()).toEqual(["Scan/cerere.pdf", "note.txt"]);
+    const folders: Array<[string, number]> = [["PONTAJE PENTRU STATE/", 0], ["PONTAJE PENTRU STATE/Pontaje octombrie/", 0], ["Scan/", 0]];
+    const mtime = (path: string) => ((perform("stat", { key: join(desktop, path.replace(/\/$/, "")) }, context, never()) as unknown) as Promise<{ ok: { mtime: number } }>);
+    const timed = await Promise.all([...files, ...folders].map(async ([path, size]) => [path, size, (await mtime(path)).ok.mtime]));
+    const rows = (walked as { ok: { files: Array<[string, number, number]> } }).ok.files;
+    const byPath = (a: unknown[], b: unknown[]) => String(a[0]).localeCompare(String(b[0]));
+    expect([...rows].sort(byPath)).toEqual(timed.sort(byPath));
+    expect(walked).toMatchObject({ ok: { truncated: false, cursor: expect.any(String) } });
     expect(tools.ran).toEqual([]);
   });
 

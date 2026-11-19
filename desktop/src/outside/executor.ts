@@ -649,7 +649,9 @@ export class Outside implements ToolLayer {
         });
       default: // outside.walk
         return this.within(null, grant, key, (where) =>
-          walkFrom(args, key, opener(where), fd, { budgetMs: OUTSIDE_WALK_MS, maxFiles: OUTSIDE_WALK_FILES, times: true }));
+          walkFrom(args, key, opener(where), fd, {
+            budgetMs: OUTSIDE_WALK_MS, maxFiles: OUTSIDE_WALK_FILES, times: true, folders: true,
+          }));
     }
   }
 
