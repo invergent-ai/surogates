@@ -229,9 +229,14 @@ export class Bindings {
     return this.turnReads.get(root)?.has(folder) === true;
   }
 
+  /** A root's grants for its turn alone, in the order granted. */
+  turnFolders(root: string): string[] {
+    return [...(this.turnReads.get(root) ?? [])];
+  }
+
   /** The folders a root's user let its agent read outside its own, in the order granted: the chat's, then the turn's. */
   reads(root: string): string[] {
-    return [...this.chatReads(root), ...(this.turnReads.get(root) ?? [])];
+    return [...this.chatReads(root), ...this.turnFolders(root)];
   }
 
   /** Note that *copy*, in a bound root's folder, was copied from *original* as it was at *revision*; a copy noted before is replaced. */

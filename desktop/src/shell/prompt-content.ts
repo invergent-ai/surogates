@@ -265,10 +265,14 @@ const HOW_LONG: Omit<PromptChoice, "value"> = {
 
 // A copy's or a move's files, each ticked by its path with its size: one From for files all in one folder, shown
 // under the list; each file's own folder by it otherwise, and no From.
-function listed(list: Array<{ from: string; size: number }>): { items: PromptChecks["items"]; from: string | null } {
+// A size of null shows none, as the bin's list has none.
+function listed(list: Array<{ from: string; size: number | null }>): { items: PromptChecks["items"]; from: string | null } {
   const folders = new Set(list.map((f) => posix.dirname(f.from)));
   const from = folders.size === 1 ? [...folders][0]! : null;
-  const items = list.map((f) => ({ value: f.from, label: named(f.from), detail: from === null ? `${shownPath(posix.dirname(f.from))} · ${sizeOf(f.size)}` : sizeOf(f.size) }));
+  const items = list.map((f) => {
+    const parts = [...(from === null ? [shownPath(posix.dirname(f.from))] : []), ...(f.size === null ? [] : [sizeOf(f.size)])];
+    return { value: f.from, label: named(f.from), detail: parts.join(" · ") };
+  });
   return { items, from };
 }
 
@@ -317,13 +321,11 @@ function outsidePrompt(request: Exclude<ApprovalRequest, { kind: "command" | "ch
   }
   if (request.kind === "trash") {
     const one = request.files.length === 1;
-    // One From for files all in one folder; each file's own folder by it otherwise.
-    const folders = new Set(request.files.map((f) => posix.dirname(f)));
-    const from = folders.size === 1 ? [...folders][0]! : null;
+    const { items, from } = listed(request.files.map((f) => ({ from: f, size: null })));
     return {
       ...base, danger: true, detailsBelow: true, focus: "keep", cancel: "keep", title: `Move ${files(request.files.length)} to the ${BIN}?`,
       lead: `You can restore ${one ? "it" : "them"} from the ${BIN}.`,
-      checks: { legend: "Files", items: request.files.map((f) => ({ value: f, label: named(f), detail: from === null ? shownPath(posix.dirname(f)) : "" })) },
+      checks: { legend: "Files", items },
       details: from === null ? [] : [code("From", shownPath(from))],
       buttons: [button("keep", one ? "Keep it" : "Keep them"), button("trash", `Move to the ${BIN}`, true)], height: 420,
     };

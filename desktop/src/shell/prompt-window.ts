@@ -19,7 +19,7 @@ import { ownPage } from "./window-policy.js";
 export const WIDTH = 460;
 // The tallest a prompt grows to fit what it shows; past it, its middle scrolls. And how long a prompt waits to be
 // shown for its page to measure itself, before it is shown at the height it was given.
-export const MAX_FIT = 720;
+const MAX_FIT = 720;
 const FIT_MS = 300;
 // The input protection: how long a prompt is shown, or focused again, before an answer counts.
 export const INPUT_PROTECTION_MS = 500;

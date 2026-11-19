@@ -147,7 +147,7 @@ export class Outside implements ToolLayer {
   // and let go once it has none, its turn over, taken back, or the chat removed.
   private heldForTurn(root: string): void {
     const { bindings } = this.options;
-    const held = bindings.reads(root).filter((folder) => bindings.forTurn(root, folder)).length;
+    const held = bindings.turnFolders(root).length;
     const before = this.turnGrants.get(root) ?? 0;
     if (held === before) return;
     if (held === 0) this.turnGrants.delete(root);
@@ -422,13 +422,8 @@ export class Outside implements ToolLayer {
         continue;
       }
       done.moved.push({ from, to: copied.key });
-      // Its original is in the bin: the copy in the chat's folder is the file now, no working copy to put back. One
-      // still remembered is harmless: its put back finds the original gone.
-      try {
-        if (to.grant === null) this.options.bindings.forgetCopy(root, copied.key);
-      } catch {
-        // Kept: see above.
-      }
+      // Its original is in the bin: the copy in the chat's folder is the file now, no working copy to put back.
+      if (to.grant === null) this.options.bindings.forgetCopy(root, copied.key);
     }
     for (const from of unticked(args.files, ticked)) done.skipped.push({ from, reason: UNTICKED });
     return { ok: done };
@@ -560,7 +555,7 @@ export class Outside implements ToolLayer {
   private openIn(root: string, grant: string, file: string): string | null {
     const dir = posix.dirname(file);
     const name = posix.basename(file);
-    for (const lock of [`.~lock.${name}#`, `~$${name}`, `~$${name.slice(2)}`]) {
+    for (const lock of new Set([`.~lock.${name}#`, `~$${name}`, `~$${name.slice(2)}`])) {
       const path = `${dir}/${lock}`;
       try {
         const who = this.within(root, grant, path, (where): string | null => {

@@ -58,7 +58,7 @@ export function stopOperation(root: string, id: string): Operation {
 
 /** The folders and their chats, from *bindings*; *title* names each chat, and *processes* tells what each runs. */
 export async function listFolders(
-  bindings: Pick<Bindings, "all" | "domains" | "browsing" | "ports" | "reads" | "forTurn">,
+  bindings: Pick<Bindings, "all" | "domains" | "browsing" | "ports" | "reads" | "turnFolders">,
   title: (root: string) => Promise<string>,
   processes: Pick<LiveProcesses, "of">,
 ): Promise<FolderRow[]> {
@@ -72,7 +72,7 @@ export async function listFolders(
       root: binding.root, title: titles[at]!, mode: binding.mode === "free" ? "free" : "ask",
       hosts: bindings.domains(binding.root), browser: bindings.browsing(binding.root), ports: bindings.ports(binding.root),
       reads: bindings.reads(binding.root).map(shownPath),
-      forTask: bindings.reads(binding.root).filter((folder) => bindings.forTurn(binding.root, folder)).map(shownPath),
+      forTask: bindings.turnFolders(binding.root).map(shownPath),
       processes: processes.of(binding.root),
     });
     folders.set(binding.folder, chats);
