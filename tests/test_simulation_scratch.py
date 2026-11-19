@@ -318,6 +318,16 @@ def test_a_name_that_is_not_one_segment_is_faked(key, bad):
     assert not inside_scratch("ONE_DRIVE_ONEDRIVE_UPLOAD_FILE", {**_UP, key: bad}, SCOPE)
 
 
+# U+FF0F fullwidth slash, U+2215 division slash, NBSP-padded dots, U+2024 one dot leader.
+_LOOKALIKE_NAMES = ["a\uff0fb.pdf", "a\u2215b.pdf", "\u00a0..\u00a0", "\u2024\u2024", ".\t.", "\u3000"]
+
+
+@pytest.mark.parametrize("key", ["name", "file_name"])
+@pytest.mark.parametrize("bad", _LOOKALIKE_NAMES)
+def test_a_lookalike_name_is_faked(key, bad):
+    assert not inside_scratch("ONE_DRIVE_ONEDRIVE_UPLOAD_FILE", {**_UP, key: bad}, SCOPE)
+
+
 def test_composio_nested_upload_inside_the_copy_is_real():
     up = {**_UP, "file": {"name": "a.pdf", "mimetype": "application/pdf", "s3key": "k/a.pdf"}}
     assert inside_scratch("ONE_DRIVE_ONEDRIVE_UPLOAD_FILE", up, SCOPE)

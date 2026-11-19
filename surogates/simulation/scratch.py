@@ -22,6 +22,8 @@ is left real; a test fails while a registered builtin is in neither list.
 
 from __future__ import annotations
 
+import re
+import unicodedata
 from typing import Any
 
 FILE_ACTIONS = frozenset({
@@ -163,10 +165,12 @@ _HARMLESS = frozenset({
 
 
 def _one_segment(value: Any) -> bool:
-    return (
-        isinstance(value, str) and bool(value.strip(" ."))
-        and not any(c in value for c in "/\\%")
-    )
+    if not isinstance(value, str):
+        return False
+    # NFKC folds lookalikes (U+FF0F to "/", U+2024 to ".", NBSP to space);
+    # U+2215/U+2044 have no folding, so they are refused by name.
+    v = unicodedata.normalize("NFKC", value)
+    return bool(re.sub(r"[\s.]", "", v)) and not any(c in v for c in "/\\%\u2215\u2044")
 
 
 def _norm(path: str) -> str:
