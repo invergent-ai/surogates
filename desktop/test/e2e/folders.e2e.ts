@@ -281,7 +281,7 @@ describe("Settings → Folders and permissions", () => {
     // refused twice, in the same words, and then go through.
     await shell.evaluate(({ webContents }, folder) => {
       const contents = webContents.getAllWebContents().find((found) => found.getURL().endsWith("/settings.html"))!;
-      const chat = { root: "r-1", title: "Quarterly report", mode: "free", hosts: ["example.com"], ports: [], processes: [{ id: "p-1", command: "npm run serve" }] };
+      const chat = { root: "r-1", title: "Quarterly report", mode: "free", hosts: ["example.com"], ports: [], reads: [], forTask: [], processes: [{ id: "p-1", command: "npm run serve" }] };
       const refusals = { takeBack: 2, stop: 2 };
       for (const channel of ["settings:folders", "settings:take-back", "settings:stop"]) contents.ipc.removeHandler(channel);
       contents.ipc.handle("settings:folders", () => [{ folder, chats: [chat] }]);
@@ -405,7 +405,7 @@ describe("Settings → Folders and permissions", () => {
     // The list as the main process would answer it, the test's own: a chat with two hosts, the browser and a process.
     await shell.evaluate(({ webContents }, folder) => {
       const contents = webContents.getAllWebContents().find((found) => found.getURL().endsWith("/settings.html"))!;
-      const chat = { root: "r-1", title: "Quarterly report", mode: "free", hosts: ["example.com", "example.org"], browser: true, ports: [3000, 8000], processes: [{ id: "p-1", command: "npm run serve" }] };
+      const chat = { root: "r-1", title: "Quarterly report", mode: "free", hosts: ["example.com", "example.org"], browser: true, ports: [3000, 8000], reads: [], forTask: [], processes: [{ id: "p-1", command: "npm run serve" }] };
       for (const channel of ["settings:folders", "settings:take-back", "settings:take-back-browser", "settings:take-back-port", "settings:stop"]) contents.ipc.removeHandler(channel);
       contents.ipc.handle("settings:folders", () => [{ folder, chats: [chat] }]);
       contents.ipc.handle("settings:take-back", (_event, _root, host) => {
@@ -464,8 +464,8 @@ describe("Settings → Folders and permissions", () => {
     await shell.evaluate(({ webContents }, folder) => {
       const contents = webContents.getAllWebContents().find((found) => found.getURL().endsWith("/settings.html"))!;
       const chats = [
-        { root: "r-2", title: "Alpha", mode: "free", hosts: ["alpha.example"], ports: [], processes: [] },
-        { root: "r-3", title: "Beta", mode: "free", hosts: ["beta.example"], ports: [], processes: [] },
+        { root: "r-2", title: "Alpha", mode: "free", hosts: ["alpha.example"], ports: [], reads: [], forTask: [], processes: [] },
+        { root: "r-3", title: "Beta", mode: "free", hosts: ["beta.example"], ports: [], reads: [], forTask: [], processes: [] },
       ];
       for (const channel of ["settings:folders", "settings:take-back"]) contents.ipc.removeHandler(channel);
       contents.ipc.handle("settings:folders", () => [{ folder, chats }]);
