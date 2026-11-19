@@ -449,7 +449,7 @@ describe("outside.copy", () => {
     const note = join(desktop, "note.txt");
     const outside = layer();
     for (const to of [join(base, "elsewhere"), join(base, "home")]) {
-      const refused = { error: { type: "denied", message: `The destination ${to} is neither this chat's folder nor a folder it may read.` } };
+      const refused = { error: { type: "denied", message: `The destination ${to} is neither this chat's folder nor a folder it may read. Ask for it with request_folder_access, then call this same tool again: a move stays a move.` } };
       expect(outside.refusal(op("outside.copy", { files: [note], to })), to).toEqual(refused);
       // Run as well, for an operation that came without the question.
       chosenFor.mockReturnValueOnce([note]);

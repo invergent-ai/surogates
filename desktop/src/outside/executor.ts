@@ -40,7 +40,9 @@ const noPermission = (path: string): Outcome => ({
 const UNTICKED = "not ticked by the user";
 const byAnotherName = (path: string) => `${path} is in this chat's folder by another name: use its path in the chat's folder.`;
 const chatsOwn = (path: string): Outcome => denied(`${path} is this chat's folder, in it, or holds it: the chat's own files are deleted with its own tools.`);
-const notDestination = (to: string): Outcome => denied(`The destination ${to} is neither this chat's folder nor a folder it may read.`);
+const notDestination = (to: string): Outcome => denied(
+  `The destination ${to} is neither this chat's folder nor a folder it may read. Ask for it with request_folder_access, then call this same tool again: a move stays a move.`,
+);
 // How many numbered names a copy tries past its own, as a download does.
 const NAMES = 100;
 const TOO_LARGE = "too large";
