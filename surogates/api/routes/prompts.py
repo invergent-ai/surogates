@@ -53,6 +53,10 @@ MAX_PROMPT_LENGTH = 200_000
 # the same per-org key space: a client's key there could replay into a
 # case's session, so no client may use one.
 _KEEL_KEY_PREFIX = "keel:"
+# Bumped when test_mode's meaning changes.  A runtime that predates test
+# mode has no capabilities route, and its PromptRequest silently drops the
+# unknown field, so a client must check this before sending a test chat.
+TEST_MODE_VERSION = 1
 
 
 # ---------------------------------------------------------------------------
@@ -131,6 +135,9 @@ class PromptAccepted(BaseModel):
     event_id: int | None = None
     deduplicated: bool = False
     error: str | None = None
+    # True only when the session carries config["test_mode"]: the caller's
+    # proof that the chat really runs in test mode.
+    test_mode_applied: bool = False
 
 
 class BatchPromptRequest(BaseModel):
@@ -208,6 +215,15 @@ def _refuse_a_case_session(existing: Session) -> None:
         )
 
 
+def _deduplicated(existing: Session) -> PromptAccepted:
+    return PromptAccepted(
+        session_id=existing.id,
+        event_id=None,
+        deduplicated=True,
+        test_mode_applied="test_mode" in (existing.config or {}),
+    )
+
+
 async def _submit_one(
     body: PromptRequest,
     *,
@@ -242,11 +258,7 @@ async def _submit_one(
         )
         if existing is not None:
             _refuse_a_case_session(existing)
-            return PromptAccepted(
-                session_id=existing.id,
-                event_id=None,
-                deduplicated=True,
-            )
+            return _deduplicated(existing)
 
     config: dict = {
         "service_account_id": str(service_account_id),
@@ -312,11 +324,7 @@ async def _submit_one(
             # Truly exceptional: constraint fired but row not visible.
             raise
         _refuse_a_case_session(existing)
-        return PromptAccepted(
-            session_id=existing.id,
-            event_id=None,
-            deduplicated=True,
-        )
+        return _deduplicated(existing)
 
     event_id = await store.emit_event(
         session.id,
@@ -332,12 +340,25 @@ async def _submit_one(
         priority=session_queue_priority(session),
     )
 
-    return PromptAccepted(session_id=session.id, event_id=event_id)
+    return PromptAccepted(
+        session_id=session.id,
+        event_id=event_id,
+        test_mode_applied="test_mode" in config,
+    )
 
 
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
+
+
+@router.get("/api/prompts/capabilities")
+async def prompt_capabilities(
+    tenant: TenantContext = Depends(get_current_tenant),
+) -> dict[str, int]:
+    """What this runtime's prompt API understands, by integer version."""
+    _require_service_account(tenant)
+    return {"test_mode": TEST_MODE_VERSION}
 
 
 @router.post(
