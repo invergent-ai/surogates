@@ -74,6 +74,7 @@ class Walk:
     computer that holds the files; None where nothing keeps one.
     ``mtimes`` is each file's modification time by its path, where the walk
     carries them (a computer's walk of a folder outside the chat's); else None.
+    That walk lists each folder too, as its path with a trailing ``/`` and size 0.
     """
 
     files: list[tuple[str, int]]

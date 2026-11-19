@@ -39,7 +39,8 @@ enforces its rules; the worker never touches the folder.
   outside.read    key, max_bytes                                as read
   outside.read_lines  key, encoding, offset, limit, max_bytes   as read_lines
   outside.list_dir    key                                       as list_dir
-  outside.walk    key, skip, skip_top, skip_hidden, since       as walk
+  outside.walk    key, skip, skip_top, skip_hidden, since       as walk, each file with its mtime, each folder a
+                                                                [path + "/", 0, mtime] row
   outside.grant   folder ("Desktop", "Downloads", "Documents",  {folder}
                   "Pictures", or an absolute path)
   outside.copy    files ([path]), to (path)                     {copied: [{from, to}], skipped: [{from, reason}]}

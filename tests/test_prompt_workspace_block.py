@@ -110,10 +110,22 @@ def test_tools_path_is_shown_folders_inverse_on_a_windows_computer():
 
 
 def test_a_device_chat_is_told_how_to_work_on_files_outside_its_folder():
-    said = "Files outside the chat's folder: ask once with request_folder_access"
+    said = "Files outside the chat's folder: look in the chat's folder first"
     assert said in _context({"read_file"}, workspace_path="/home/ana/proj", execution=DEVICE)
     context = _context({"read_file"}, workspace_path="/home/ana/proj", execution=DEVICE)
     assert "never ask for the same thing in the chat instead" in context
+    # The chat's own folder first, and a folder outside it only as the user named it: never a guessed one.
+    assert (
+        "Files outside the chat's folder: look in the chat's folder first (list_files on it). Only when what the "
+        "user means is not there, ask once with request_folder_access, for the folder the user named (Desktop, "
+        "Downloads, Documents, Pictures, or a path); if the user did not say where, ask them where instead of "
+        "guessing a folder."
+    ) in context
+    # Folders outside show in a listing, and one may be a copy's destination.
+    assert (
+        "There list_files shows folders too, each with a trailing `/` (an empty one as well), and matches its "
+        "pattern ignoring case; such a folder may be copy_files' `to`."
+    ) in context
     # The direct move between two outside folders is offered, put_back is the agent's to call, and a move trashes
     # only what was copied.
     assert (

@@ -843,9 +843,19 @@ class OutsideToo:
         if kind.startswith("outside."):
             outcome = await self.elsewhere.run(kind.removeprefix("outside."), args, payload)
             if kind == "outside.walk" and "ok" in outcome:
-                # The app's outside walk carries each file's mtime too.
+                # The app's outside walk carries each file's mtime too, and each folder as a row of its own, by a
+                # trailing "/" (an empty one too), as the app's walkFrom with folders does.
                 root = Path(args["key"])
-                outcome["ok"]["files"] = [[p, size, (root / p).lstat().st_mtime] for p, size in outcome["ok"]["files"]]
+                folders = [
+                    f"{Path(at, name).relative_to(root).as_posix()}/"
+                    for at, names, _ in os.walk(root)
+                    for name in names
+                    if not (args["skip_hidden"] and name.startswith("."))
+                ]
+                outcome["ok"]["files"] = [
+                    [p, size, (root / p).lstat().st_mtime]
+                    for p, size in [*outcome["ok"]["files"], *((f, 0) for f in folders)]
+                ]
             return outcome
         return await self.chat.run(kind, args, payload)
 
@@ -872,7 +882,8 @@ async def test_routes_reads_of_a_path_outside_the_folder_to_outside_kinds(two_fo
     assert await wio.read(key) == b"one\ntwo\n"
     assert (await wio.read_lines(key, encoding="utf-8", offset=2, limit=1, max_bytes=100)).data == b"two\n"
     assert sorted(await wio.list_dir(folder)) == ["a.txt", "sub"]
-    assert sorted((await wio.walk(folder, skip=())).files) == [("a.txt", 8), ("sub/b.txt", 1)]
+    # Each folder a row too, by a trailing "/".
+    assert sorted((await wio.walk(folder, skip=())).files) == [("a.txt", 8), ("sub/", 0), ("sub/b.txt", 1)]
     assert wio.is_outside(key) and wio.is_outside(folder)
 
     assert [kind for kind, _ in laptop.sent] == [
@@ -1010,6 +1021,44 @@ async def test_a_walk_cut_short_is_said_in_a_note_a_repeated_search_does_not_rep
         )).split("\n\n[Hint")[0])
     assert "stopped listing this folder" in listed["note"]
     assert "run this exact search 3 times" in listed["_warning"]
+
+
+async def test_an_outside_listing_shows_its_folders_and_matches_names_ignoring_case(tmp_path):
+    # As a user's Desktop was: empty folders to file things in, and names in capitals.
+    chat, desktop = tmp_path / "chat", tmp_path / "Desktop"
+    (chat / "Notes").mkdir(parents=True)
+    (chat / "Notes" / "a.txt").write_text("a")
+    (desktop / "PONTAJE PENTRU STATE" / "Pontaje octombrie").mkdir(parents=True)
+    (desktop / "Scan").mkdir()
+    (desktop / "Scan" / "cerere de avans.pdf").write_text("pdf")
+    (desktop / "Facturi test").mkdir()
+    (desktop / "Facturi test" / "Factura 12.pdf").write_text("pdf")
+    (desktop / "Registru test.xlsx").write_text("x")
+    wio = DeviceWorkspaceIO(OutsideToo(chat, desktop), root=str(chat))
+
+    async def listed(path, **more):
+        found = await file_ops._list_files_handler({"path": str(path), **more}, workspace_io=wio)
+        return sorted(json.loads(found.split("\n\n[Hint")[0])["matches"])
+
+    assert await listed(desktop) == sorted([
+        f"{desktop}/Facturi test/", f"{desktop}/Facturi test/Factura 12.pdf",
+        f"{desktop}/PONTAJE PENTRU STATE/", f"{desktop}/PONTAJE PENTRU STATE/Pontaje octombrie/",
+        f"{desktop}/Registru test.xlsx", f"{desktop}/Scan/", f"{desktop}/Scan/cerere de avans.pdf",
+    ])
+    assert await listed(desktop, pattern="*pontaje*") == [
+        f"{desktop}/PONTAJE PENTRU STATE/", f"{desktop}/PONTAJE PENTRU STATE/Pontaje octombrie/",
+    ]
+    assert await listed(desktop, pattern="*facturi*") == [f"{desktop}/Facturi test/"]
+    assert await listed(desktop, pattern="*FACTUR*") == [f"{desktop}/Facturi test/", f"{desktop}/Facturi test/Factura 12.pdf"]
+    found = json.loads((await file_ops._search_files_handler(
+        {"path": str(desktop), "pattern": "*PONTAJE*", "target": "files"}, workspace_io=wio,
+    )).split("\n\n[Hint")[0])
+    assert len(found["matches"]) == 2
+    # A folder it listed is outside as a file it listed is: by its path without the "/".
+    assert wio.is_outside(f"{desktop}/PONTAJE PENTRU STATE/Pontaje octombrie")
+    # The chat's own folder is listed as before: its files only, matched as ripgrep matches them.
+    assert await listed(chat) == [f"{chat}/Notes/a.txt"]
+    assert await listed(chat, pattern="*notes*") == []
 
 
 def test_an_outside_listing_matches_files_as_ripgreps_globs_do():

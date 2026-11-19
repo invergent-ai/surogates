@@ -2314,11 +2314,14 @@ def _listed(files: list[str], mtimes: dict[str, float] | None, offset: int, limi
 
 
 def _glob_matches(path: str, pattern: str) -> bool:
-    """Whether *path*, under the folder listed, matches *pattern* as ripgrep's ``-g`` would.
+    """Whether *path*, under a folder outside the chat's, matches *pattern* as ripgrep's ``-g`` would, ignoring case.
 
     A pattern without a slash matches a file's name at any depth, one with a
-    slash its path under the folder.
+    slash its path under the folder; a folder's row, with its trailing ``/``,
+    by its name or path without it.  Case is ignored as Windows and macOS
+    ignore it in a name: a user's "Facturi" is found by ``*facturi*``.
     """
+    path = path.rstrip("/")
     if "/" not in pattern:
         path = posixpath.basename(path)
     return _glob_regex(pattern).fullmatch(path) is not None
@@ -2366,8 +2369,8 @@ def _glob_regex(pattern: str) -> re.Pattern[str]:
         i += 1
     if braces:
         # An unclosed brace is no alternation: matched as it is written.
-        return re.compile(re.escape(pattern))
-    return re.compile("".join(out), re.DOTALL)
+        return re.compile(re.escape(pattern), re.IGNORECASE)
+    return re.compile("".join(out), re.DOTALL | re.IGNORECASE)
 
 
 async def _files_outside(
@@ -2377,12 +2380,13 @@ async def _files_outside(
     offset: int,
     limit: int,
 ) -> dict[str, Any]:
-    """Find files matching glob *pattern* under *key*, a folder outside the chat's, from the computer's walk.
+    """Find files and folders matching glob *pattern* under *key*, a folder outside the chat's, from the computer's walk.
 
-    Matched as ripgrep's ``-g`` does: a pattern without a slash by the file's
-    name at any depth, one with a slash by its path under *key*, where a
-    ``**/`` matches no folder too.  Newest first, as in the folder, by the
-    times the walk carries.
+    Matched as ripgrep's ``-g`` does, but ignoring case: a pattern without a
+    slash by the name at any depth, one with a slash by its path under *key*,
+    where a ``**/`` matches no folder too.  A folder is listed with a trailing
+    ``/``, an empty one too, so the model sees where a file could go.  Newest
+    first, as in the folder, by the times the walk carries.
     """
     walk = await wio.walk(key, skip=(), skip_hidden=True)
     pattern = pattern.strip("/")
@@ -2390,7 +2394,7 @@ async def _files_outside(
     matched = [path for path, _size in walk.files if _glob_matches(path, pattern)]
     files = [posixpath.join(key, path) for path in matched]
     # Found under *key*, so outside as *key* is: a later read of one asks for it so.
-    wio.walked_outside(key, files)
+    wio.walked_outside(key, [f.rstrip("/") for f in files])
     result = _listed(files, {f: mtimes.get(path, 0) for f, path in zip(files, matched)}, offset, limit)
     if walk.truncated:
         # A note, not the _warning a repeated search says: both reach the model.
