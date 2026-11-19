@@ -172,12 +172,13 @@ def register(registry: ToolRegistry) -> None:
         ),
         (
             "move_files", _move_files,
-            "Move files from a folder outside the chat's folder to another place: each is copied to 'to' (the chat's "
-            "folder or inside a folder already granted), then its original goes to the computer's trash, where the "
-            "user can restore it. The user confirms both in one window and may untick files. Returns what was "
-            "moved, what was copied but whose original stayed ('copied_only', with why), and what was skipped.",
+            "Move files to another place: each is copied to 'to' (the chat's folder or inside a folder already "
+            "granted), then its original goes to the computer's trash, where the user can restore it; a file moved "
+            "out of the chat's folder is deleted there instead. The user confirms in one window and may untick "
+            "files. Returns what was moved, what was copied but whose original stayed ('copied_only', with why), and "
+            "what was skipped.",
             {
-                "files": {**_FILES, "description": "Absolute paths of the files to move, each in a granted folder."},
+                "files": {**_FILES, "description": "The files to move: in a granted folder, or in the chat's folder (absolute or relative to it)."},
                 "to": {"type": "string", "description": "The folder to move them into: '.' for the chat's folder, or an absolute path."},
             },
             ["files", "to"],

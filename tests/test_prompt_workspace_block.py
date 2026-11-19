@@ -134,6 +134,7 @@ def test_a_device_chat_is_told_how_to_work_on_files_outside_its_folder():
     ) in context
     assert "then call put_back (the app asks the user)." in context
     assert "To move files, use move_files (one window" in context
+    assert "to make a new file in a folder outside, make it in the chat's folder, then move_files it there" in context
     assert "Use move_to_trash alone only when the user wants files deleted." in context
     assert 'If the access is for "this request", it ends when you finish this task' in context
     assert "ask the user anything you need with ask_user_question" in context
