@@ -137,7 +137,7 @@ def test_a_device_chat_is_told_how_to_work_on_files_outside_its_folder():
     assert "to make a new file in a folder outside, make it in the chat's folder, then move_files it there" in context
     assert "Use move_to_trash alone only when the user wants files deleted." in context
     assert "If copy_files says a file is `open` in another program, tell the user before you change it" in context
-    assert "if it says the original changed, copy it again, make the change on the new version, and put that back." in context
+    assert "keep every change the user made, add yours to it (find where by reading it, never by the row or cell numbers you used on the old copy)" in context
     assert 'If the access is for "this request", it ends when you finish this task' in context
     assert "ask the user anything you need with ask_user_question" in context
     assert "On a Windows computer the tools name `C:\\a\\b` as `/mnt/c/a/b`; tell the user the `C:\\` form." in context
