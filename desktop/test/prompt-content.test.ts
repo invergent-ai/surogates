@@ -444,16 +444,18 @@ describe("the windows for files outside the chat's folder", () => {
     expect([one.title, one.lead]).toEqual(["Move 1 file?", `The file will be copied to the new folder. Then the original goes to the ${bin}, where you can restore it if you need it.`]);
   });
 
-  it("lists each file to copy, ticked by its path, with its folder and size", () => {
+  it("copies files in the move's layout: the files ticked, then From and To in one box under them", () => {
     const c = approval({ kind: "copy", chat: CHAT, to: "/home/me/out", files: [{ from: "/home/me/docs/a.txt", size: 10 }, { from: "/home/me/x/b.txt", size: 2048 }] });
-    expect(c.title).toBe("Copy 2 files?");
-    expect(c.lead).toBe("acme.surogate.ai asks to copy these files to /home/me/out. A file whose name is taken there is saved with a number added; nothing is overwritten.");
+    expect([c.title, c.danger ?? false, c.focus, c.detailsBelow]).toEqual(["Copy 2 files?", false, "deny", true]);
+    expect(c.lead).toBe("Each file will be copied to the new folder. A name already taken there gets a number added, so nothing is overwritten.");
     expect(c.checks?.items).toEqual([
       { value: "/home/me/docs/a.txt", label: "a.txt", detail: "/home/me/docs · 10 bytes" },
       { value: "/home/me/x/b.txt", label: "b.txt", detail: "/home/me/x · 2 KB" },
     ]);
-    expect(c.buttons.map((b) => [b.id, b.label])).toEqual([["deny", "Deny"], ["allow", "Copy the ticked files"]]);
-    expect(approval({ kind: "copy", chat: CHAT, to: "/o", files: [{ from: "/a/b", size: 1 }] }).title).toBe("Copy 1 file?");
+    expect(c.details.map((d) => [d.label, d.value])).toEqual([["To", "/home/me/out"]]);
+    expect(c.buttons.map((b) => [b.id, b.label])).toEqual([["deny", "Cancel"], ["allow", "Copy"]]);
+    const one = approval({ kind: "copy", chat: CHAT, to: "/o", files: [{ from: "/a/b", size: 1 }] });
+    expect([one.title, one.checks?.items[0]?.detail, one.details.map((d) => [d.label, d.value])]).toEqual(["Copy 1 file?", "1 byte", [["From", "/a"], ["To", "/o"]]]);
   });
 
   it("warns, and focuses Keep them, for files going to the bin", () => {

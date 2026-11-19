@@ -263,6 +263,15 @@ const HOW_LONG: Omit<PromptChoice, "value"> = {
   ],
 };
 
+// A copy's or a move's files, each ticked by its path with its size: one From for files all in one folder, shown
+// under the list; each file's own folder by it otherwise, and no From.
+function listed(list: Array<{ from: string; size: number }>): { items: PromptChecks["items"]; from: string | null } {
+  const folders = new Set(list.map((f) => posix.dirname(f.from)));
+  const from = folders.size === 1 ? [...folders][0]! : null;
+  const items = list.map((f) => ({ value: f.from, label: named(f.from), detail: from === null ? `${shownPath(posix.dirname(f.from))} · ${sizeOf(f.size)}` : sizeOf(f.size) }));
+  return { items, from };
+}
+
 const files = (n: number) => `${n} ${n === 1 ? "file" : "files"}`;
 // The prompts of the files outside the chat's folder: Deny is focused and what Escape answers, and none offers to stop asking.
 function outsidePrompt(request: Exclude<ApprovalRequest, { kind: "command" | "change" | "input" | "network" | "browser" }>): PromptContent {
@@ -278,11 +287,14 @@ function outsidePrompt(request: Exclude<ApprovalRequest, { kind: "command" | "ch
     };
   }
   if (request.kind === "copy") {
+    const one = request.files.length === 1;
+    const { items, from } = listed(request.files);
     return {
-      ...base, title: `Copy ${files(request.files.length)}?`,
-      lead: `${chat.agent} asks to copy these files to ${shownPath(request.to)}. A file whose name is taken there is saved with a number added; nothing is overwritten.`,
-      checks: { legend: "Files", items: request.files.map((f) => ({ value: f.from, label: named(f.from), detail: `${shownPath(posix.dirname(f.from))} · ${sizeOf(f.size)}` })) },
-      buttons: [button("deny", "Deny"), button("allow", "Copy the ticked files", true)], height: 420,
+      ...base, detailsBelow: true, title: `Copy ${files(request.files.length)}?`,
+      lead: `${one ? "The file" : "Each file"} will be copied to the new folder. A name already taken there gets a number added, so nothing is overwritten.`,
+      checks: { legend: "Files", items },
+      details: [...(from === null ? [] : [code("From", shownPath(from))]), code("To", shownPath(request.to))],
+      buttons: [button("deny", "Cancel"), button("allow", "Copy", true)], height: 470,
     };
   }
   if (request.kind === "move") {
@@ -294,16 +306,11 @@ function outsidePrompt(request: Exclude<ApprovalRequest, { kind: "command" | "ch
       : own === request.files.length
         ? `Then ${one ? "it is" : "each is"} removed from this chat's folder.`
         : `Then the originals in this chat's folder are removed from it, and the others go to the ${BIN}, where you can restore them.`;
-    // One From for files all in one folder; each file's own folder by it otherwise.
-    const folders = new Set(request.files.map((f) => posix.dirname(f.from)));
-    const from = folders.size === 1 ? [...folders][0]! : null;
+    const { items, from } = listed(request.files);
     return {
       ...base, danger: true, detailsBelow: true, title: `Move ${files(request.files.length)}?`,
       lead: `${one ? "The file" : "Each file"} will be copied to the new folder. ${then}`,
-      checks: {
-        legend: "Files",
-        items: request.files.map((f) => ({ value: f.from, label: named(f.from), detail: from === null ? `${shownPath(posix.dirname(f.from))} · ${sizeOf(f.size)}` : sizeOf(f.size) })),
-      },
+      checks: { legend: "Files", items },
       details: [...(from === null ? [] : [code("From", shownPath(from))]), code("To", shownPath(request.to))],
       buttons: [button("deny", "Cancel"), button("allow", "Move", true)], height: 470,
     };
