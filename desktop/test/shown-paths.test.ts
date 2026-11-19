@@ -75,7 +75,7 @@ describe("a folder or a file the app shows its person", () => {
   it("is listed in Settings' folders by its Windows path on Windows, its chats under it", async () => {
     const bindings = {
       all: () => [{ root: "r1", folder: SHOP, mode: "ask" }, { root: "r2", folder: SHOP, mode: "free" }],
-      domains: () => [], browsing: () => false, ports: () => [],
+      domains: () => [], browsing: () => false, ports: () => [], reads: () => [], turnFolders: () => [],
     } as never;
     const list = async (os: NodeJS.Platform) =>
       (await importedOn(os, () => import("../src/shell/folders.js"))).listFolders(bindings, (root) => Promise.resolve(root), { of: () => [] });
