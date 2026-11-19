@@ -616,7 +616,7 @@ export class Outside implements ToolLayer {
     const grant = look(original)!;
     const { fd } = this.options;
     const conflict: Outcome = {
-      error: { type: "conflict", message: `${original} changed since it was copied. Nothing was replaced; the changes are in ${copy}. Copy it again and make the change on the new version, then put that back.` },
+      error: { type: "conflict", message: `${original} changed since it was copied. Nothing was replaced; the changes are in ${copy}. Copy it again and read that copy first: it holds the user's saved changes, which must all be kept. Make your change on it as a new edit, never by reusing rows, cells or positions from the old copy, then put that back.` },
     };
     // Open in a program, it is not replaced: its user's unsaved edits would overwrite it, or be lost.
     const open = this.openIn(root, grant, original);

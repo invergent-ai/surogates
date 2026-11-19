@@ -880,7 +880,7 @@ describe("outside.trash and outside.put_back", () => {
     writeFileSync(copy, "changed\n");
     writeFileSync(note, "the user's own edit\n");
     expect(await putBack(copy, note)).toEqual({
-      error: { type: "conflict", message: `${note} changed since it was copied. Nothing was replaced; the changes are in ${copy}. Copy it again and make the change on the new version, then put that back.` },
+      error: { type: "conflict", message: `${note} changed since it was copied. Nothing was replaced; the changes are in ${copy}. Copy it again and read that copy first: it holds the user's saved changes, which must all be kept. Make your change on it as a new edit, never by reusing rows, cells or positions from the old copy, then put that back.` },
     });
     expect(readFileSync(note, "utf8")).toBe("the user's own edit\n");
     expect(readFileSync(copy, "utf8")).toBe("changed\n");
