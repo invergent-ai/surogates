@@ -17,6 +17,7 @@ import re
 import secrets
 import uuid
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -41,6 +42,102 @@ _PORT_CONFLICT_RE = re.compile(
     r"(port is already allocated|Bind for .* failed|failed to bind host port .*address already in use)", re.IGNORECASE,
 )
 _MAX_PORT_ATTEMPTS = 25
+#: The most processes and threads a sandbox container may hold at once (``--pids-limit``), unless configured.
+DEFAULT_PIDS_LIMIT = 4096
+# Docker refuses a memory limit under 6 MiB, and --cpus under 0.01; it takes --cpus in nanoCPUs.
+_MIN_MEMORY_BYTES = 6 * 2**20
+_MIN_CPUS = Decimal("0.01")
+_CPU_STEP = Decimal("0.001")
+
+# Kubernetes quantity suffixes, the form SandboxSpec's limits are written in ("8Gi", "512Mi", "500m").
+_BINARY_SUFFIXES = {"Ki": 2**10, "Mi": 2**20, "Gi": 2**30, "Ti": 2**40, "Pi": 2**50, "Ei": 2**60}
+_DECIMAL_SUFFIXES = {"k": 10**3, "M": 10**6, "G": 10**9, "T": 10**12, "P": 10**15, "E": 10**18}
+
+
+def _quantity(value: str, what: str, example: str) -> Decimal | None:
+    """The number in the Kubernetes quantity *value*, suffix applied; ``None`` for no limit ("" or any zero)."""
+    text = str(value).strip()
+    if not text:
+        return None
+    number, factor = text, Decimal(1)
+    for suffix, scale in (*_BINARY_SUFFIXES.items(), *_DECIMAL_SUFFIXES.items(), ("m", Decimal("0.001"))):
+        if text.endswith(suffix):
+            number, factor = text[: -len(suffix)], Decimal(scale)
+            break
+    try:
+        amount = Decimal(number) * factor
+    except InvalidOperation:
+        amount = Decimal(-1)
+    if not amount.is_finite() or amount < 0:
+        raise SandboxUnavailableError(
+            f"The sandbox {what} {value!r} is not a quantity such as {example}", classification="config",
+        )
+    return amount if amount else None
+
+
+@dataclass(frozen=True, slots=True)
+class DockerHost:
+    """What the Docker daemon can hold a container to (``docker info``); *answered* when the daemon said."""
+
+    cpus: int | None = None
+    cpu_quota: bool = True
+    memory_limit: bool = True
+    swap_limit: bool = True
+    pids_limit: bool = True
+    answered: bool = True
+
+
+def limit_args(spec: SandboxSpec, *, pids_limit: int, host: DockerHost | None = None) -> list[str]:
+    """``docker run`` flags that hold a container to *spec*'s limits.
+
+    ``memory_limit`` caps memory, swap included (``--memory`` = ``--memory-swap``:
+    no swap past the limit), so a runaway command is killed by the kernel inside
+    the container instead of filling the host.  ``cpu_limit`` becomes ``--cpus``
+    (at most the daemon's CPUs, which Docker refuses past; none where the daemon
+    has no CPU quota, which Docker refuses too), *pids_limit* ``--pids-limit``.
+    A limit of "" or zero (``pids_limit`` 0) sets none.
+    """
+    host = host or DockerHost()
+    args: list[str] = []
+    memory = _quantity(spec.memory_limit, "memory limit", "8Gi or 512Mi")
+    if memory is not None:
+        if memory < _MIN_MEMORY_BYTES:
+            # "500m" is half a byte: Docker would read the 0 it rounds to as no limit at all.
+            raise SandboxUnavailableError(
+                f"The sandbox memory limit {spec.memory_limit!r} is under the 6Mi Docker allows (500Mi, not 500m?)",
+                classification="config",
+            )
+        memory_bytes = str(int(memory))
+        args += ["--memory", memory_bytes, "--memory-swap", memory_bytes]
+    cpus = _quantity(spec.cpu_limit, "CPU limit", "2 or 500m")
+    if cpus is not None:
+        if host.cpu_quota:
+            if host.cpus:
+                cpus = min(cpus, Decimal(host.cpus))
+            cpus = max(cpus.quantize(_CPU_STEP), _MIN_CPUS)
+            args += ["--cpus", format(cpus.normalize(), "f")]
+    if pids_limit > 0:
+        args += ["--pids-limit", str(pids_limit)]
+    return args
+
+
+async def docker_host(docker: _DockerDriver) -> DockerHost:
+    """The daemon's CPUs and the limits it can apply; unknown (all assumed, the worker's CPUs) when it does not say."""
+    code, stdout, stderr = await docker.run(
+        ["info", "--format", "{{.NCPU}} {{.CPUCfsQuota}} {{.MemoryLimit}} {{.SwapLimit}} {{.PidsLimit}}"],
+    )
+    fields = stdout.decode(errors="replace").split() if code == 0 else []
+    if len(fields) != 5 or not fields[0].isdigit():
+        logger.warning("docker info did not say what limits the daemon applies (%s); assuming all",
+                       stderr.decode(errors="replace").strip() or "no answer")
+        return DockerHost(cpus=os.cpu_count(), answered=False)
+    host = DockerHost(int(fields[0]), *(field == "true" for field in fields[1:]))
+    for applies, what in (
+        (host.cpu_quota, "CPU"), (host.memory_limit, "memory"), (host.swap_limit, "swap"), (host.pids_limit, "process"),
+    ):
+        if not applies:
+            logger.warning("The Docker daemon cannot apply a %s limit: sandbox containers run without it", what)
+    return host
 
 
 def _rewrite_host_for_container(url: str) -> str:
@@ -87,6 +184,7 @@ class DockerSandbox:
         network: str = "bridge",
         mcp_proxy_url: str = "",
         storage_settings: Any = None,
+        pids_limit: int = DEFAULT_PIDS_LIMIT,
         docker: _DockerDriver | None = None,
         httpx_transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
@@ -94,6 +192,8 @@ class DockerSandbox:
         self._port_base = executor_port_base
         self._ready_timeout = ready_timeout
         self._network = network
+        self._pids_limit = pids_limit
+        self._host: DockerHost | None = None
         self._mcp_proxy_url = mcp_proxy_url
         self._storage = storage_settings
         self._docker = docker or _RealDocker()
@@ -106,6 +206,19 @@ class DockerSandbox:
         #: (``claim_as``).  Unset: one worker, whose sweeps of a session take all its containers.
         self._worker: str | None = None
         self._worker_alive: Any = None
+
+    @classmethod
+    def from_settings(cls, sandbox: Any, *, mcp_proxy_url: str = "", storage_settings: Any = None) -> DockerSandbox:
+        """The backend a worker runs, from its :class:`~surogates.config.SandboxSettings`."""
+        return cls(
+            image=sandbox.docker_image,
+            executor_port_base=sandbox.docker_executor_port_base,
+            ready_timeout=sandbox.docker_ready_timeout,
+            network=sandbox.docker_network,
+            mcp_proxy_url=mcp_proxy_url,
+            storage_settings=storage_settings,
+            pids_limit=sandbox.docker_pids_limit,
+        )
 
     # ------------------------------------------------------------------
     # Sandbox protocol
@@ -128,6 +241,12 @@ class DockerSandbox:
             )
         sandbox_id = uuid.uuid4().hex
         token = secrets.token_urlsafe(32)
+        # Before anything starts: a limit that is no quantity fails the provision, and no container runs unbounded.
+        # Asked until the daemon answers: one that is still starting must not pin a guess for the worker's life.
+        host = self._host or await docker_host(self._docker)
+        if host.answered:
+            self._host = host
+        limits = limit_args(spec, pids_limit=self._pids_limit, host=host)
 
         # Reap stale containers left by a previous worker for this root
         # session before claiming a new one: a live worker's are its own.
@@ -168,6 +287,7 @@ class DockerSandbox:
                 args += ["--label", f"surogates.session_id={spec.session_id}"]
             if self._worker:
                 args += ["--label", f"surogates.worker={self._worker}"]
+            args += limits
             if mode == "s3fs":
                 # geesefs needs FUSE inside the container.
                 args += [
@@ -195,6 +315,12 @@ class DockerSandbox:
                     classification="docker",
                 )
             container_id = stdout.decode().strip().splitlines()[0]
+            if stderr.strip():
+                # A limit the host cannot apply is a warning, and the container runs without it; an image pull's
+                # progress is not.
+                said = stderr.decode(errors="replace").strip()
+                logger.log(logging.WARNING if "WARNING" in said else logging.INFO, "docker run for sandbox %s: %s",
+                           sandbox_id, said)
             break
         else:
             raise SandboxUnavailableError(

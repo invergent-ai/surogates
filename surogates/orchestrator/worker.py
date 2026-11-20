@@ -1477,13 +1477,8 @@ async def run_worker(settings: Settings) -> None:
     elif settings.sandbox.backend == "docker":
         from surogates.sandbox.docker import DockerSandbox
 
-        sandbox_backend = DockerSandbox(
-            image=settings.sandbox.docker_image,
-            executor_port_base=settings.sandbox.docker_executor_port_base,
-            ready_timeout=settings.sandbox.docker_ready_timeout,
-            network=settings.sandbox.docker_network,
-            mcp_proxy_url=settings.mcp_proxy_url,
-            storage_settings=settings.storage,
+        sandbox_backend = DockerSandbox.from_settings(
+            settings.sandbox, mcp_proxy_url=settings.mcp_proxy_url, storage_settings=settings.storage,
         )
     else:
         sandbox_backend = ProcessSandbox()

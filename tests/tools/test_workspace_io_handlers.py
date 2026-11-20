@@ -554,6 +554,14 @@ class TestTerminal:
         assert out["exit_code"] == 1
         assert out["exit_code_meaning"] == "No matches found (not an error)"
 
+    @pytest.mark.parametrize("command", ["kill -9 $$", "sh -c 'kill -9 $$'"], ids=["the shell", "its command"])
+    async def test_a_command_killed_by_sigkill_is_told_it_most_likely_ran_out_of_memory(self, ws, command):
+        """The kernel's kill at a sandbox's memory limit is a SIGKILL: the model is told what it most likely was."""
+        out = await call(terminal._terminal_handler, ws, command=command)
+        assert out["exit_code"] in (137, -9)
+        assert out["exit_code_meaning"].startswith("Killed (SIGKILL). Unless the command sent it itself")
+        assert "it most likely ran out of memory" in out["exit_code_meaning"]
+
     async def test_long_output_spills_into_the_workspace(self, ws, monkeypatch):
         monkeypatch.setattr(terminal, "get_max_bytes", lambda: 1000)
         out = await call(terminal._terminal_handler, ws, command="yes x | head -n 5000")

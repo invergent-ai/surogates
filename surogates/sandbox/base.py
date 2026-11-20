@@ -89,6 +89,8 @@ class SandboxSpec:
     ``cpu_limit`` / ``memory_limit`` are Kubernetes *limits* (burst ceiling).
     Separating them lets the sandbox burst above its request when the node
     has spare capacity, while keeping the scheduler honest about placement.
+    The Docker backend holds its container to the limits (``--memory``, swap
+    included, and ``--cpus``); it has no scheduler, so the requests do not apply.
     """
 
     image: str = "ghcr.io/invergent-ai/surogates-agent-sandbox:latest"
