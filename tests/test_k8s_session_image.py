@@ -602,3 +602,29 @@ async def test_a_pod_this_provision_made_whose_create_answer_was_lost_is_its_own
     with patch("surogates.sandbox.kubernetes_image.asyncio.sleep", AsyncMock()):
         sid = await k8s.provision(_spec())
     assert k8s.created(sid)
+
+
+async def test_a_delete_the_api_is_unsure_of_keeps_the_pod_and_asks_again(k8s):
+    """An ended pod whose delete is answered 503: kept this pass, deleted on the next."""
+    k8s._api = _api(_pod(False, uid="old", phase="Failed"), _pod(False, uid="old", phase="Failed"), GONE,
+                    _pod(uid="new", mine=True), create={"return_value": _pod(uid="new")})
+    k8s._api.delete_namespaced_pod = AsyncMock(side_effect=[ApiException(status=503, reason="Unavailable"), None])
+    with patch("surogates.sandbox.kubernetes_image.asyncio.sleep", AsyncMock()):
+        sid = await k8s.provision(_spec())
+    assert k8s._api.delete_namespaced_pod.await_count == 2 and k8s._pods[sid].uid == "new"
+
+
+async def test_a_stop_whose_re_read_the_api_cannot_answer_keeps_the_pod(k8s, monkeypatch):
+    import httpx
+
+    real = httpx.AsyncClient
+
+    def client(*a, **kw):
+        def answer(request):
+            raise httpx.ConnectError("refused")
+        return real(transport=httpx.MockTransport(answer), timeout=5.0)
+    monkeypatch.setattr(httpx, "AsyncClient", client)
+    k8s._api = _api(_pod(uid="stuck"), ApiException(status=503, reason="Unavailable"))
+    with patch("surogates.sandbox.kubernetes_image.asyncio.sleep", AsyncMock()):
+        await k8s.stop_image_of_session(SESSION)
+    k8s._api.delete_namespaced_pod.assert_not_awaited()
