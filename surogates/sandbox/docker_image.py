@@ -458,22 +458,27 @@ class ImageSessions:
         for key, value in env.items():
             args += ["-e", f"{key}={value}"]
         args += [run.image_id or run.image, *run.command]
-        try:
-            code, stdout, stderr = await self._docker.run(args)
-        except BaseException:
-            # Cut off mid-run (a provision cancelled): a container it may have left under the session's name is this
-            # run's, never started for any work.
-            await asyncio.shield(self._remove_ours(name, sandbox_id))
-            raise
-        if code != 0:
+        for attempt in (1, 2):
+            try:
+                code, stdout, stderr = await self._docker.run(args)
+            except BaseException:
+                # Cut off mid-run (a provision cancelled): a container it may have left under the session's name is
+                # this run's, never started for any work.
+                await asyncio.shield(self._remove_ours(name, sandbox_id))
+                raise
             said = stderr.decode(errors="replace")
-            if _NAME_TAKEN_RE.search(said):
-                # Another worker started the session's container just now: it is the session's, taken over.
-                taken = await self._take_over(spec, sandbox_id, name)
-                if taken is not None:
-                    return taken
+            if code == 0 or not _NAME_TAKEN_RE.search(said):
+                break
+            # Another worker started the session's container just now: it is the session's, taken over.
+            taken = await self._take_over(spec, sandbox_id, name)
+            if taken is not None:
+                return taken
+            if attempt == 2:
                 raise SandboxUnavailableError(f"The session's container {name} could not be taken over",
                                               classification="docker")
+            # Not listed yet (Docker holds the name before the container shows), or gone again: once more.
+            await asyncio.sleep(0.5)
+        if code != 0:
             # A run that failed at its start may leave its container created: removed, only if it is this run's.
             await self._remove_ours(name, sandbox_id)
             raise SandboxUnavailableError(f"docker run of {run.image} failed (exit {code}): {said}",
@@ -539,7 +544,8 @@ class ImageSessions:
         (``_TAKE_OVER_S`` at most for it to run).  ``None``: start a new one, the session's container being set aside
         (its files kept) when it answers but not to this deployment's token (the signing secret rotated), or when
         this provision started it again (*started*, its id) and its executor never came up (a crash at its start, not
-        a Stop meanwhile).  One that someone else started and whose executor never answers is stopped, its files
+        a Stop meanwhile); or there being none (gone, or not listed yet), or one never started removed at the
+        deadline.  One that someone else started and whose executor never answers is stopped, its files
         kept, and the call fails."""
         deadline = time.monotonic() + _TAKE_OVER_S
         token = session_token(spec.session_id)

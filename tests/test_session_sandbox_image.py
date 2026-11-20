@@ -571,15 +571,23 @@ async def test_a_take_over_that_meets_a_retired_executor_starts_a_new_container_
         monkeypatch):
     from surogates.sandbox import docker_image
 
-    monkeypatch.setattr(docker_image, "_RETIRED_WAIT_S", 0.3)
+    monkeypatch.setattr(docker_image, "_RETIRED_WAIT_S", 2.0)
     docker = ImageDocker(images={TASK_IMAGE: _image(), BUNDLE: _image()})
     docker.named["surogates-sbx-root-1"] = ["cid-retired", "running", "root-1", "x"]
+    real = docker.run
+    looks = {"n": 0}
+
+    async def run(args):
+        if args[:1] == ["inspect"] and "cid-retired" in args and "NetworkSettings.Ports" in " ".join(args):
+            looks["n"] += 1
+            if looks["n"] == 3:  # the reaper's stop and rm, while this waits for them
+                docker.named.pop("surogates-sbx-root-1", None)
+        return await real(args)
+    docker.run = run
 
     def executor(request):
-        if docker.named.get("surogates-sbx-root-1", [""])[0] == "cid-retired":
-            docker.named.pop("surogates-sbx-root-1")  # the reaper's stop and rm, while this waits
-            return httpx.Response(410)
-        return httpx.Response(200)
+        return httpx.Response(410 if "surogates-sbx-root-1" in docker.named
+                              and docker.named["surogates-sbx-root-1"][0] == "cid-retired" else 200)
     sid = await _docker_backend(docker, httpx.MockTransport(executor)).provision(
         SandboxSpec(session_id="root-1", session_image=TASK_IMAGE))
     assert docker.named["surogates-sbx-root-1"][0] != "cid-retired" and sid
@@ -1556,3 +1564,45 @@ async def test_a_start_again_that_someone_else_restarted_meanwhile_waits_at_its_
     backend._client.execute = fake_execute
     assert json.loads(await backend.execute(sid, "read_file", "{}")) == {"port": 33500}
     assert not any(c[:1] == ["rename"] for c in docker.calls)
+
+
+async def test_a_take_over_takes_back_a_retired_container_the_reaper_kept(monkeypatch):
+    from surogates.sandbox import docker_image
+
+    monkeypatch.setattr(docker_image, "_RETIRED_WAIT_S", 0.05)
+    docker = ImageDocker(images={TASK_IMAGE: _image(), BUNDLE: _image()})
+    docker.named["surogates-sbx-root-1"] = ["cid-kept", "running", "root-1", "x"]
+    asked: list[str] = []
+
+    def executor(request):
+        asked.append(request.url.path)
+        return httpx.Response(200 if "/unretire" in asked else 410)
+    backend = _docker_backend(docker, httpx.MockTransport(executor))
+    sid = await backend.provision(SandboxSpec(session_id="root-1", session_image=TASK_IMAGE))
+    assert backend._entries[sid].container_id == "cid-kept" and not backend.created(sid)
+    assert "/unretire" in asked and not any(c[:1] in (["stop"], ["rename"], ["rm"]) for c in docker.calls)
+
+
+async def test_a_name_held_before_its_container_shows_is_run_once_more_then_taken_over(monkeypatch):
+    """Docker holds the name before the other worker's container shows in docker ps: the conflict's first look finds
+    none; the run once more conflicts again, and the container, listed by then, is taken over."""
+    from surogates.sandbox import docker_image
+
+    monkeypatch.setattr(docker_image, "_TAKE_OVER_S", 2.0)
+    docker = ImageDocker(images={TASK_IMAGE: _image(), BUNDLE: _image()})
+    conflict = b'docker: Error response from daemon: Conflict. The container name "/surogates-sbx-root-1" is already in use'
+    docker.run_answers = [(125, b"", conflict), (125, b"", conflict)]
+    real = docker.run
+    runs = {"n": 0}
+
+    async def run(args):
+        out = await real(args)
+        if args[:2] == ["run", "-d"]:
+            runs["n"] += 1
+            if runs["n"] == 2:  # by the second run the other worker's container is listed
+                docker.named["surogates-sbx-root-1"] = ["cid-theirs", "running", "root-1", "x"]
+        return out
+    docker.run = run
+    backend = _docker_backend(docker)
+    sid = await backend.provision(SandboxSpec(session_id="root-1", session_image=TASK_IMAGE))
+    assert backend._entries[sid].container_id == "cid-theirs" and runs["n"] == 2
