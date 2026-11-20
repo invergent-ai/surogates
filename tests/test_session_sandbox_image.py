@@ -392,6 +392,8 @@ async def test_a_session_image_runs_the_bundles_executor_in_the_image():
     assert _flag(args, "--security-opt") == ["no-new-privileges"]
     assert _flag(args, "--cap-drop") == ["NET_RAW", "MKNOD", "SETFCAP"]
     assert "--no-healthcheck" in args
+    # Our tini takes SIGTERM whatever the image's STOPSIGNAL; the image inspected is the one that runs.
+    assert _flag(args, "--stop-signal") == ["SIGTERM"] and _flag(args, "--pull") == ["never"]
     labels = _flag(args, "--label")
     assert "surogates.sandbox_image=1" in labels and "surogates.session_id=root-1" in labels
     # Never the agent-sandbox's label: no sweep of the session's sandbox containers takes it.
@@ -1373,8 +1375,9 @@ async def test_a_command_inside_the_sandbox_cannot_retire_it():
     async with inside:
         r = await inside.post("/retire", json={"min_idle_seconds": 0}, headers=auth)
     assert r.status_code == 403
-    outside = httpx.AsyncClient(transport=httpx.ASGITransport(app=app, client=("172.17.0.1", 40000)),
-                                base_url="http://172.17.0.5:8071")
+    # RFC 5737 addresses: never one of this host's (the guard's bind probe).
+    outside = httpx.AsyncClient(transport=httpx.ASGITransport(app=app, client=("198.51.100.1", 40000)),
+                                base_url="http://198.51.100.2:8071")
     async with outside:
         r = await outside.post("/retire", json={"min_idle_seconds": 0}, headers=auth)
     assert r.status_code == 200 and r.json()["retired"] is True
@@ -1383,8 +1386,23 @@ async def test_a_command_inside_the_sandbox_cannot_retire_it():
 def test_the_daemons_switches_declared_by_an_image_never_reach_it():
     from surogates.sandbox.docker_image import is_control
 
-    for name in ("TOOL_EXECUTOR_ALLOW_LOCAL", "TOOL_EXECUTOR_TOKEN_SHA256", "FORWARDED_ALLOW_IPS"):
+    for name in ("TOOL_EXECUTOR_ALLOW_LOCAL", "TOOL_EXECUTOR_TOKEN_SHA256", "FORWARDED_ALLOW_IPS", "WEB_CONCURRENCY"):
         assert is_control(name)
+
+
+async def test_the_inspected_image_runs_by_its_id_and_the_digest_setting_holds():
+    from surogates.sandbox.docker_image import session_token
+    from surogates.sandbox.executor_server import token_sha256
+
+    docker = ImageDocker(images={TASK_IMAGE: {**_image(), "Id": "sha256:" + "ab" * 32}, BUNDLE: _image()})
+    backend = _docker_backend(docker)
+    backend._token_env = "sha256"
+    await backend.provision(SandboxSpec(session_id="root-1", session_image=TASK_IMAGE))
+    args = docker.run_args()
+    assert "sha256:" + "ab" * 32 in args and TASK_IMAGE not in args
+    env = _env(args)
+    assert "TOOL_EXECUTOR_TOKEN" not in env
+    assert env["TOOL_EXECUTOR_TOKEN_SHA256"] == token_sha256(session_token("root-1"))
 
 
 async def test_a_stop_meanwhile_is_no_crash_the_container_stays_the_sessions():
@@ -1401,3 +1419,20 @@ async def test_a_stop_meanwhile_is_no_crash_the_container_stays_the_sessions():
         await backend.provision(SandboxSpec(session_id="r", session_image=TASK_IMAGE))
     assert ["start", "cid-old"] in docker.calls
     assert not any(c[:1] == ["rename"] for c in docker.calls) and "surogates-sbx-r" in docker.named
+
+
+async def test_a_container_that_ends_at_once_after_its_start_again_is_set_aside_and_a_new_one_starts():
+    docker = ImageDocker(images={TASK_IMAGE: _image(), BUNDLE: _image()})
+    docker.named["surogates-sbx-r"] = ["cid-old", "exited", "r", "sbx-old", 0]
+    real = docker.run
+
+    async def run(args):
+        out = await real(args)
+        if args == ["start", "cid-old"]:
+            c = docker._by_id("cid-old")[1]
+            c[1], c[4:] = "exited", [1]  # its executor died at once (exit 1)
+        return out
+    docker.run = run
+    sid = await _docker_backend(docker).provision(SandboxSpec(session_id="r", session_image=TASK_IMAGE))
+    assert any(c[:2] == ["rename", "cid-old"] for c in docker.calls)
+    assert docker.named["surogates-sbx-r"][0] != "cid-old" and sid

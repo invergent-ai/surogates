@@ -66,7 +66,8 @@ IMAGE_APP = "surogates-image-sandbox"
 #: and its own value back in the commands' environment.
 _CONTROL_PREFIXES = ("SUROGATES_", "TOOL_EXECUTOR_", "TERMINAL_", "HISTORY_", "MCP_PROXY_", "SANDBOX_", "S3_",
                      "GEESEFS_")
-_CONTROL_NAMES = frozenset({"PROJECT_DIR", "WORKSPACE_DIR", "USER_ID", "ORG_ID", "FORWARDED_ALLOW_IPS"})
+_CONTROL_NAMES = frozenset({"PROJECT_DIR", "WORKSPACE_DIR", "USER_ID", "ORG_ID", "FORWARDED_ALLOW_IPS",
+                            "WEB_CONCURRENCY"})
 #: Capabilities a task never needs, of Docker's default set: raw packets on a shared bridge, device nodes, file caps.
 _DROPPED_CAPS = ("NET_RAW", "MKNOD", "SETFCAP")
 #: How long a failed pull answers the sessions that waited on it, without a pull of their own.
@@ -110,6 +111,8 @@ class ImageRun:
     env: tuple[tuple[str, str], ...]
     run_args: tuple[str, ...]
     command: tuple[str, ...]
+    #: What ``docker run`` runs: the inspected image's id (its name when Docker gave none).
+    image_id: str = ""
 
 
 def _secret() -> bytes:
@@ -326,13 +329,19 @@ class ImageSessions:
             "--security-opt", "no-new-privileges",
             *(arg for cap in _DROPPED_CAPS for arg in ("--cap-drop", cap)),
             "--no-healthcheck",
+            # The entrypoint is ours: a Stop sends it SIGTERM whatever STOPSIGNAL the image names.
+            "--stop-signal", "SIGTERM",
+            # The image inspected above runs (by its id: its environment is the one cleared for the daemon), never
+            # one a tag points at by then.
+            "--pull", "never",
             "--workdir", workdir,
             "--entrypoint", BUNDLE_TINI,
         )
         # -I: the image's PYTHONPATH / PYTHONHOME, and a module in the workspace, never reach the daemon;
         # surogates.image_entry clears the image's names for the executor's controls before it starts.
         command = ("--", BUNDLE_PYTHON, "-I", "-m", "surogates.image_entry")
-        return ImageRun(image=image, workdir=workdir, env=tuple(declared.items()), run_args=run_args, command=command)
+        return ImageRun(image=image, workdir=workdir, env=tuple(declared.items()), run_args=run_args, command=command,
+                        image_id=str(found.get("Id") or image))
 
     # -- one container per session ----------------------------------------------------------------------------------
 
@@ -356,11 +365,15 @@ class ImageSessions:
     async def _port_of(self, container_id: str, name: str = "") -> tuple[bool, int | None] | None:
         """(running, its host port) of *container_id* (Docker picks the port at each start); ``None``: gone, or, with
         *name*, no longer under the session's name (set aside: never worked in again)."""
-        code, stdout, _ = await self._docker.run(
+        code, stdout, stderr = await self._docker.run(
             ["inspect", "--format", "{{.Name}}\n{{.State.Running}}\n{{json .NetworkSettings.Ports}}", container_id],
         )
         if code != 0:
-            return None
+            if b"No such" in stderr:
+                return None
+            raise SandboxUnavailableError(  # Docker unsure: never read as "gone"
+                f"docker inspect failed: {stderr.decode(errors='replace').strip()[:300]}", classification="docker",
+            )
         try:
             # One JSON document a line: JSON never holds a raw newline.
             named, running, ports_json = stdout.decode(errors="replace").strip().split("\n", 2)
@@ -442,7 +455,7 @@ class ImageSessions:
         args += limits + run_args
         for key, value in env.items():
             args += ["-e", f"{key}={value}"]
-        args += [run.image, *run.command]
+        args += [run.image_id or run.image, *run.command]
         try:
             code, stdout, stderr = await self._docker.run(args)
         except BaseException:
@@ -530,6 +543,15 @@ class ImageSessions:
         revived = False
         while time.monotonic() < deadline:
             for cid, state in await self._session_containers(name):
+                if state in ("exited", "dead") and cid == started and await self._crashed(cid):
+                    # Ended at once after this provision started it: it will not start (its files kept aside).
+                    await asyncio.shield(self._set_aside(cid, spec.session_id))
+                    return None
+                if state == "exited" and revived and not started:
+                    # Brought back from retired but stopped meanwhile: started once more, as this provision's.
+                    if (await self._docker.run(["start", cid]))[0] == 0:
+                        started = cid
+                    continue
                 if state != "running":
                     continue
                 seen = await self._port_of(cid)
@@ -660,16 +682,24 @@ class ImageSessions:
                 return False
             await asyncio.sleep(0.5)
         locks = self.__dict__.setdefault("_restarts", {})
-        async with locks.setdefault(cid, asyncio.Lock()):
-            seen = await self._port_of(cid, name)
-            if seen is None:
-                return False
-            running, port = seen
-            if running and port is not None and await self._health(port) == 200:
-                return True  # restarted already (another call, another worker)
-            if running:
-                await self._docker.run(["restart", "-t", "2", cid])
-            locks.pop(cid, None)
+        lock = locks.setdefault(cid, asyncio.Lock())
+        try:
+            async with lock:
+                seen = await self._port_of(cid, name)
+                if seen is None:
+                    return False
+                running, port = seen
+                if running and port is not None and await self._health(port) == 200:
+                    return True  # restarted already (another call, another worker)
+                if running:
+                    await self._docker.run(["restart", "-t", "2", cid])
+                    # Ready before the lock goes: the next waiter finds it answering, never restarts it again.
+                    seen = await self._port_of(cid, name)
+                    if seen is not None and seen[0] and seen[1] is not None:
+                        await self._wait_ready(seen[1], cid)
+        finally:
+            if not lock.locked():
+                locks.pop(cid, None)
         return await self._port_of(cid, name) is not None
 
     async def _health(self, host_port: int) -> int | None:
@@ -689,7 +719,14 @@ class ImageSessions:
         if code != 0:
             return False
         status, _, exit_code = out.decode(errors="replace").strip().partition(" ")
-        return status == "running" or exit_code.strip() not in ("0", "137", "143")
+        if status == "running":
+            # Started again meanwhile (another call, another worker) at a port of its own: answering, no crash.
+            try:
+                seen = await self._port_of(cid)
+            except SandboxUnavailableError:
+                return False
+            return not (seen and seen[1] is not None and await self._health(seen[1]) == 200)
+        return exit_code.strip() not in ("0", "137", "143")
 
     async def _start_again(self, entry: Any) -> int:
         """Start the session's stopped container again (one running already: as it is) and wait for its executor;
