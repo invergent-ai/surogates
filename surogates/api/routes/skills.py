@@ -572,8 +572,12 @@ async def view_skill(
     request: Request,
     tenant: TenantContext = Depends(get_current_tenant),
     session_id: UUID | None = None,
+    stage: bool = True,
 ) -> SkillDetail:
     """View full skill content and linked files listing.
+
+    ``stage=false`` stages nothing and names no staged folder: for a session
+    that has no terminal in its sandbox to run the skill's files with.
 
     When ``session_id`` is provided and the skill has supporting files,
     the skill tree is auto-staged into ``sessions/{session_id}/.skills/
@@ -664,7 +668,7 @@ async def view_skill(
     # files beyond SKILL.md itself.  A chat on a local folder has them put
     # in its folder by the tool call that views the skill
     # (``surogates.tools.builtin.skills``), never in the cloud.
-    if session is not None and device_of(session.config) is None:
+    if stage and session is not None and device_of(session.config) is None:
         staged_at = await _stage_skill_for_session(
             request=request,
             tenant=tenant,
@@ -689,6 +693,7 @@ async def read_skill_file(
     request: Request,
     tenant: TenantContext = Depends(get_current_tenant),
     session_id: UUID | None = None,
+    stage: bool = True,
     raw: bool = False,
 ) -> Any:
     """Read a linked file from a skill directory.
@@ -760,13 +765,13 @@ async def read_skill_file(
     def _placeholder() -> dict[str, Any]:
         """A binary file's answer when it is not staged; a local folder's says how to have it there."""
         answer: dict[str, Any] = {"file_path": path, "content": "[Binary file]", "binary": True}
-        if session_for_staging is not None and device_of(session_for_staging.config) is not None:
+        if stage and session_for_staging is not None and device_of(session_for_staging.config) is not None:
             answer["hint"] = f'Call skill_view("{name}") to put this skill\'s files in the folder.'
         return answer
 
     async def _redirect_to_staged(skill_def_to_stage: Any) -> dict[str, Any] | None:
-        """Stage the skill and return a redirect response, or ``None``."""
-        if session_id is None or session_for_staging is None or device_of(session_for_staging.config) is not None:
+        """Stage the skill and return a redirect response, or ``None`` (also with ``stage=false``)."""
+        if not stage or session_id is None or session_for_staging is None or device_of(session_for_staging.config) is not None:
             return None
         staged_at = await _stage_skill_for_session(
             request=request,
