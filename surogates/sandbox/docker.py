@@ -35,6 +35,8 @@ logger = logging.getLogger(__name__)
 # The image's TOOL_EXECUTOR_PORT default; the daemon always binds this
 # fixed in-container port and only the published host port varies.
 _IN_CONTAINER_PORT = 8071
+# The host address the daemon's port is published on: the worker reaches it at 127.0.0.1 (``execute``).
+_PUBLISH_HOST = "127.0.0.1"
 _WORKSPACE_SENTINEL = "/workspace"
 # A port another process took: older Docker says it is "already allocated", newer that binding it failed as the
 # address is "already in use".
@@ -276,7 +278,9 @@ class DockerSandbox:
                 self._next_offset += 1
             host_port = self._port_base + offset
 
-            args = ["run", "-d", "--rm", "-p", f"{host_port}:{_IN_CONTAINER_PORT}"]
+            # Published on the loopback only, where the worker calls it: on every interface, the host's
+            # network, and any container through the gateway, could reach the daemon (its token aside).
+            args = ["run", "-d", "--rm", "-p", f"{_PUBLISH_HOST}:{host_port}:{_IN_CONTAINER_PORT}"]
             if self._network:
                 args += ["--network", self._network]
             args += [

@@ -101,12 +101,14 @@ class ProcessBrowserBackend:
                 "run",
                 "-d",
                 "--rm",
+                # On the loopback only, where the worker reaches them (the urls below): on every interface, any
+                # sandbox could drive the browser through the gateway (CDP takes no token), and so could the network.
                 "-p",
-                f"{rest_port}:10001",
+                f"127.0.0.1:{rest_port}:10001",
                 "-p",
-                f"{cdp_port}:9222",
+                f"127.0.0.1:{cdp_port}:9222",
                 "-p",
-                f"{live_view_port}:8080",
+                f"127.0.0.1:{live_view_port}:8080",
                 "--shm-size",
                 "2g",
                 # As the sandbox: a local server (a dev app the agent posts from) is host.docker.internal.

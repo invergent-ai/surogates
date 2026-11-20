@@ -126,7 +126,7 @@ Implements the `Sandbox` protocol (`provision` / `execute` / `destroy` /
      default); only the published host port varies. The client connects to the
      host port.
   4. `docker run -d --rm` with:
-     - `-p {host_port}:8071` (host port → fixed in-container daemon port)
+     - `-p 127.0.0.1:{host_port}:8071` (host port → fixed in-container daemon port)
      - `--label app=surogates-sandbox --label surogates.session_id={spec.session_id}`
        when `spec.session_id` is present
      - `--network {docker_network}` when configured (default `bridge`)
