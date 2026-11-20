@@ -57,6 +57,11 @@ RUN cd /build \
     && uv pip install --python /opt/surogates/bin/python3 --break-system-packages --only-binary :all: -r /tmp/tz.txt \
     && uv pip install --python /opt/surogates/bin/python3 --break-system-packages --no-deps /build \
     && rm -rf /build /tmp/requirements.txt /tmp/tz.txt
+# python-build-standalone's musl CPython names its ABI x86_64-linux-gnu (SOABI), so it looks for
+# *.cpython-312-x86_64-linux-gnu.so, while musllinux wheels ship *.cpython-312-x86_64-linux-musl.so: each such
+# extension gets the name the interpreter imports, as a link beside it.
+RUN find /opt/surogates/python -name '*.cpython-312-x86_64-linux-musl.so' -exec sh -c \
+        'ln -s "$(basename "$1")" "${1%.cpython-312-x86_64-linux-musl.so}.cpython-312-x86_64-linux-gnu.so"' _ {} \;
 COPY --from=static /static/ /opt/surogates/bin/
 # As in Dockerfile: byte-compiled for a read-only tree; the executor and every tool it registers must import from the
 # bundle alone, here on musl.
