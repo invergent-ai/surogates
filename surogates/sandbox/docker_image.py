@@ -544,8 +544,8 @@ class ImageSessions:
         (``_TAKE_OVER_S`` at most for it to run).  ``None``: start a new one, the session's container being set aside
         (its files kept) when it answers but not to this deployment's token (the signing secret rotated), or when
         this provision started it again (*started*, its id) and its executor never came up (a crash at its start, not
-        a Stop meanwhile); or there being none (gone, or not listed yet), or one never started removed at the
-        deadline.  One that someone else started and whose executor never answers is stopped, its files
+        a Stop meanwhile), or when it is retired again after a take-back; or there being none (gone, or not listed
+        yet), or one never started removed at the deadline.  One that someone else started and whose executor never answers is stopped, its files
         kept, and the call fails."""
         deadline = time.monotonic() + _TAKE_OVER_S
         token = session_token(spec.session_id)

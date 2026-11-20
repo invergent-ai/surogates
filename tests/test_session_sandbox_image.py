@@ -1606,3 +1606,37 @@ async def test_a_name_held_before_its_container_shows_is_run_once_more_then_take
     backend = _docker_backend(docker)
     sid = await backend.provision(SandboxSpec(session_id="root-1", session_image=TASK_IMAGE))
     assert backend._entries[sid].container_id == "cid-theirs" and runs["n"] == 2
+
+
+async def test_a_conflict_whose_name_was_freed_starts_the_sessions_container_on_the_run_once_more(monkeypatch):
+    from surogates.sandbox import docker_image
+
+    monkeypatch.setattr(docker_image, "_TAKE_OVER_S", 0.3)
+    docker = ImageDocker(images={TASK_IMAGE: _image(), BUNDLE: _image()})
+    conflict = b'docker: Error response from daemon: Conflict. The container name "/surogates-sbx-root-1" is already in use'
+    docker.run_answers = [(125, b"", conflict)]  # then the default run: ours
+    backend = _docker_backend(docker)
+    sid = await backend.provision(SandboxSpec(session_id="root-1", session_image=TASK_IMAGE))
+    assert backend.created(sid) and sum(1 for c in docker.calls if c[:2] == ["run", "-d"]) == 2
+
+
+async def test_two_conflicts_with_nothing_to_take_over_fail_the_call(monkeypatch):
+    from surogates.sandbox import docker_image
+
+    monkeypatch.setattr(docker_image, "_TAKE_OVER_S", 0.3)
+    docker = ImageDocker(images={TASK_IMAGE: _image(), BUNDLE: _image()})
+    conflict = b'docker: Error response from daemon: Conflict. The container name "/surogates-sbx-root-1" is already in use'
+    docker.run_answers = [(125, b"", conflict), (125, b"", conflict)]
+    with pytest.raises(SandboxUnavailableError, match="could not be taken over"):
+        await _docker_backend(docker).provision(SandboxSpec(session_id="root-1", session_image=TASK_IMAGE))
+
+
+async def test_a_conflict_then_another_failure_reports_the_second(monkeypatch):
+    from surogates.sandbox import docker_image
+
+    monkeypatch.setattr(docker_image, "_TAKE_OVER_S", 0.3)
+    docker = ImageDocker(images={TASK_IMAGE: _image(), BUNDLE: _image()})
+    conflict = b'docker: Error response from daemon: Conflict. The container name "/surogates-sbx-root-1" is already in use'
+    docker.run_answers = [(125, b"", conflict), (125, b"", b"docker: no space left on device")]
+    with pytest.raises(SandboxUnavailableError, match="no space left on device"):
+        await _docker_backend(docker).provision(SandboxSpec(session_id="root-1", session_image=TASK_IMAGE))
