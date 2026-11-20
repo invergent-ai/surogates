@@ -30,6 +30,7 @@ from kubernetes_asyncio import client, config, watch
 from kubernetes_asyncio.client import ApiException
 
 from surogates.sandbox._executor_client import ExecutorHTTPClient
+from surogates.sandbox.kubernetes_image import ImagePods
 from surogates.sandbox.history import THREAD_POD_DEADLINE
 from surogates.sandbox.base import (
     SandboxSpec,
@@ -95,7 +96,7 @@ _THREAD_POD_READY = 600
 _RUNNING_STATUS_TTL_SECONDS = 10.0
 
 
-class K8sSandbox:
+class K8sSandbox(ImagePods):
     """Kubernetes sandbox backend.
 
     Creates one K8s pod per sandbox instance.  Implements the
@@ -131,7 +132,9 @@ class K8sSandbox:
         ssh_egress_enforced: bool = False,
         ssh_egress_baseline_cidrs: list[str] | None = None,
         token_env: str = "plain",
+        executor_bundle_image: str = "",
     ) -> None:
+        self._init_image_pods(bundle_image=executor_bundle_image)
         self._namespace = namespace
         # "sha256": the pod's environment (and its spec) holds the token's digest, not the token.
         self._token_env = token_env
@@ -197,10 +200,8 @@ class K8sSandbox:
     async def provision(self, spec: SandboxSpec) -> str:
         """Create a sandbox pod and wait for it to become ready."""
         if spec.session_image:
-            # Not in a pod yet: refused rather than run in the agent-sandbox image, which has none of the task's files.
-            raise SandboxUnavailableError(
-                "A session's own sandbox image needs the Docker sandbox backend for now", classification="config",
-            )
+            # A session's own image: one pod per session, the executor bundle copied in by an init container.
+            return await self._provision_image_pod(spec, uuid.uuid4().hex, secrets.token_urlsafe(32))
         api = await self._get_api()
         sandbox_id = uuid.uuid4().hex
         pod_name = f"sandbox-{sandbox_id[:12]}"
@@ -415,6 +416,26 @@ class K8sSandbox:
     # Pod manifest builder
     # ------------------------------------------------------------------
 
+    def _mcp_env(self, spec: SandboxSpec, sandbox_id: str) -> list[client.V1EnvVar]:
+        """The MCP proxy's URL and a sandbox token for it."""
+        # Mint a sandbox token for MCP proxy authentication.
+        from surogates.tenant.auth.jwt import create_sandbox_token
+        sandbox_token = create_sandbox_token(
+            org_id=uuid.UUID(spec.env.get("ORG_ID", "00000000-0000-0000-0000-000000000000")),
+            user_id=uuid.UUID(spec.env.get("USER_ID", "00000000-0000-0000-0000-000000000000")),
+            session_id=uuid.UUID(sandbox_id),
+            # Binds the sandbox token to its agent so the proxy can
+            # reject a spoofed ``?agent_id=``.  Absent → unbound (the
+            # proxy trusts the query param, as before).
+            agent_id=spec.env.get("SUROGATES_AGENT_ID") or None,
+            is_service_account=spec.env.get("SUROGATES_IS_SERVICE_ACCOUNT") == "1",
+            simulated=spec.simulated,
+        )
+        return [
+            client.V1EnvVar(name="MCP_PROXY_URL", value=self._mcp_proxy_url),
+            client.V1EnvVar(name="MCP_PROXY_TOKEN", value=sandbox_token),
+        ]
+
     def _build_pod_manifest(
         self,
         sandbox_id: str,
@@ -463,25 +484,7 @@ class K8sSandbox:
         else:
             env_vars.append(client.V1EnvVar(name="TOOL_EXECUTOR_TOKEN", value=executor_token))
         if self._mcp_proxy_url:
-            env_vars.append(client.V1EnvVar(
-                name="MCP_PROXY_URL", value=self._mcp_proxy_url,
-            ))
-            # Mint a sandbox token for MCP proxy authentication.
-            from surogates.tenant.auth.jwt import create_sandbox_token
-            sandbox_token = create_sandbox_token(
-                org_id=uuid.UUID(spec.env.get("ORG_ID", "00000000-0000-0000-0000-000000000000")),
-                user_id=uuid.UUID(spec.env.get("USER_ID", "00000000-0000-0000-0000-000000000000")),
-                session_id=uuid.UUID(sandbox_id),
-                # Binds the sandbox token to its agent so the proxy can
-                # reject a spoofed ``?agent_id=``.  Absent → unbound (the
-                # proxy trusts the query param, as before).
-                agent_id=spec.env.get("SUROGATES_AGENT_ID") or None,
-                is_service_account=spec.env.get("SUROGATES_IS_SERVICE_ACCOUNT") == "1",
-                simulated=spec.simulated,
-            )
-            env_vars.append(client.V1EnvVar(
-                name="MCP_PROXY_TOKEN", value=sandbox_token,
-            ))
+            env_vars += self._mcp_env(spec, sandbox_id)
         for k, v in spec.env.items():
             if k in _DAEMON_SWITCHES:
                 continue  # the daemon's own switches: never from a tenant's spec or a skill's passthrough
@@ -992,7 +995,8 @@ class K8sSandbox:
             if exc.status != 404:
                 logger.warning("Failed to delete pod %s: %s", entry.pod_name, exc)
 
-        await self._delete_secret_safe(api, entry.secret_name)
+        if entry.secret_name:  # a session image's pod has none
+            await self._delete_secret_safe(api, entry.secret_name)
         if entry.ssh_secret_name:
             await self._delete_secret_safe(api, entry.ssh_secret_name)
         if entry.ssh_netpol_name:
