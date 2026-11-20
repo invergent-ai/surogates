@@ -546,8 +546,8 @@ class ImageSessions:
         revived = looked_again = False
         while time.monotonic() < deadline:
             listed = await self._session_containers(name)
-            if not listed and revived:
-                return None  # removed after all (a late reaper): a new one starts
+            if not listed:
+                return None  # gone meanwhile (a late reaper, another worker's failed run): a new one starts
             for cid, state in listed:
                 if state in ("exited", "dead") and cid == started:
                     if await self._crashed(cid):

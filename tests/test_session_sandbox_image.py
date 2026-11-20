@@ -262,6 +262,8 @@ class ImageDocker:
             _name, c = self._by_id(args[-1])
             if c is None:
                 return 1, b"", b"No such object"
+            if c[1] == "created":
+                return 0, b"0001-01-01T00:00:00Z\n", b""  # Docker's stamp of one that never started
             return 0, f"2026-11-20T10:00:{self.starts.get(c[0], 1):02d}Z\n".encode(), b""
         if args[:1] == ["restart"]:
             _name, c = self._by_id(args[-1])
@@ -552,15 +554,52 @@ async def test_ssh_is_not_offered_in_a_session_image():
         await _docker_backend(docker).provision(spec)
 
 
-async def test_a_container_of_the_session_being_created_is_waited_for_never_removed(monkeypatch):
+async def test_a_container_of_the_session_being_created_is_waited_for_then_one_never_started_goes(monkeypatch):
+    """Another worker's container still being created is waited for; one still never started at the deadline (a run
+    cut off between its create and its start) held no work: removed without -f, and a new one starts."""
     from surogates.sandbox import docker_image
 
     monkeypatch.setattr(docker_image, "_TAKE_OVER_S", 0.3)
     docker = ImageDocker(images={TASK_IMAGE: _image(), BUNDLE: _image()})
     docker.named["surogates-sbx-root-1"] = ["cid-other", "created", "root-1", "x"]
-    with pytest.raises(SandboxUnavailableError, match="never came to run"):
-        await _docker_backend(docker).provision(SandboxSpec(session_id="root-1", session_image=TASK_IMAGE))
-    assert not any(c[:1] in (["rm"], ["stop"]) for c in docker.calls)
+    sid = await _docker_backend(docker).provision(SandboxSpec(session_id="root-1", session_image=TASK_IMAGE))
+    assert ["rm", "-v", "cid-other"] in docker.calls and not any(c[:1] == ["stop"] for c in docker.calls)
+    assert docker.named["surogates-sbx-root-1"][0] != "cid-other" and sid
+
+
+async def test_a_take_over_that_meets_a_retired_executor_starts_a_new_container_once_the_reaper_removed_it(
+        monkeypatch):
+    from surogates.sandbox import docker_image
+
+    monkeypatch.setattr(docker_image, "_RETIRED_WAIT_S", 0.3)
+    docker = ImageDocker(images={TASK_IMAGE: _image(), BUNDLE: _image()})
+    docker.named["surogates-sbx-root-1"] = ["cid-retired", "running", "root-1", "x"]
+
+    def executor(request):
+        if docker.named.get("surogates-sbx-root-1", [""])[0] == "cid-retired":
+            docker.named.pop("surogates-sbx-root-1")  # the reaper's stop and rm, while this waits
+            return httpx.Response(410)
+        return httpx.Response(200)
+    sid = await _docker_backend(docker, httpx.MockTransport(executor)).provision(
+        SandboxSpec(session_id="root-1", session_image=TASK_IMAGE))
+    assert docker.named["surogates-sbx-root-1"][0] != "cid-retired" and sid
+
+
+async def test_a_take_over_follows_a_container_another_worker_started_again_to_its_new_port(monkeypatch):
+    docker = ImageDocker(images={TASK_IMAGE: _image(), BUNDLE: _image()})
+    docker.named["surogates-sbx-root-1"] = ["cid-x", "running", "root-1", "x"]
+
+    def executor(request):
+        if request.url.port == 33000:
+            docker.starts["cid-x"] = 5  # another worker's Stop and start meanwhile: a new start, a new port
+            docker.ports["cid-x"] = 33600
+            return httpx.Response(503)
+        return httpx.Response(200 if request.url.port == 33600 else 503)
+    backend = _docker_backend(docker, httpx.MockTransport(executor))
+    backend._ready_timeout = 1
+    sid = await backend.provision(SandboxSpec(session_id="root-1", session_image=TASK_IMAGE))
+    assert backend._entries[sid].host_port == 33600 and not backend.created(sid)
+    assert not any(c[:1] in (["stop"], ["rename"], ["rm"]) for c in docker.calls)
 
 
 async def test_a_running_container_whose_executor_never_answers_is_stopped_not_removed():
