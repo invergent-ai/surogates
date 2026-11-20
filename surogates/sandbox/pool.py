@@ -21,6 +21,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+#: Session-image keys whose "made new" marks the pool keeps for sessions it holds no sandbox for.
+_IMAGE_MARKS_KEPT = 5000
+
 
 def sandbox_session_key(session: Any) -> str:
     """Return the :class:`SandboxPool` key for *session*.
@@ -342,7 +345,11 @@ class SandboxPool:
             self._mapping.pop(key, None)
             self._specs.pop(key, None)
             self._used.pop(key, None)
-            self._drop_image_marks(key)
+            # The marks stay: a container taken over or started again next is no news; a new one is.  Bounded: past
+            # a few thousand keys, those of sessions this pool holds no sandbox for go.
+            if len(self._image_made) > _IMAGE_MARKS_KEPT:
+                for gone_key in [k for k in self._image_made if k not in self._mapping]:
+                    self._drop_image_marks(gone_key)
 
     def _in_its_image(self, key: str) -> bool:
         spec = self._specs.get(key)

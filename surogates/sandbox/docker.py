@@ -420,6 +420,10 @@ class DockerSandbox(ImageSessions):
         entry = self._entries.get(sandbox_id)
         if entry is None:
             return SandboxStatus.TERMINATED
+        if entry.image and await self.gone(sandbox_id):
+            # A session image's container removed, stopped, or renamed aside (never worked in again): the pool's
+            # ensure takes the session's container over by its name, or starts it again.
+            return SandboxStatus.TERMINATED
         code, stdout, _stderr = await self._docker.run(
             ["inspect", "--format", "{{.State.Status}}", entry.container_id],
         )
@@ -689,7 +693,7 @@ class DockerSandbox(ImageSessions):
                 except Exception as exc:  # noqa: BLE001
                     last_detail = type(exc).__name__
                 looked += 1
-                if container_id is not None and looked % 4 == 0 and not await self._running(container_id):
+                if container_id is not None and looked % 4 == 0 and not await self._still_runs(container_id):
                     raise SandboxUnavailableError(
                         "The sandbox's container stopped before its executor became ready", classification="readiness",
                     )

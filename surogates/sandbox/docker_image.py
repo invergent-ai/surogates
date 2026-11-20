@@ -66,7 +66,7 @@ IMAGE_APP = "surogates-image-sandbox"
 #: and its own value back in the commands' environment.
 _CONTROL_PREFIXES = ("SUROGATES_", "TOOL_EXECUTOR_", "TERMINAL_", "HISTORY_", "MCP_PROXY_", "SANDBOX_", "S3_",
                      "GEESEFS_")
-_CONTROL_NAMES = frozenset({"PROJECT_DIR", "WORKSPACE_DIR", "USER_ID", "ORG_ID"})
+_CONTROL_NAMES = frozenset({"PROJECT_DIR", "WORKSPACE_DIR", "USER_ID", "ORG_ID", "FORWARDED_ALLOW_IPS"})
 #: Capabilities a task never needs, of Docker's default set: raw packets on a shared bridge, device nodes, file caps.
 _DROPPED_CAPS = ("NET_RAW", "MKNOD", "SETFCAP")
 #: How long a failed pull answers the sessions that waited on it, without a pull of their own.
@@ -418,7 +418,7 @@ class ImageSessions:
             code, _out, err = await self._docker.run(["start", cid])
             if code == 0:
                 logger.info("Started the stopped container %s of session %s again", cid, spec.session_id)
-                taken = await self._take_over(spec, sandbox_id, name, started=True)
+                taken = await self._take_over(spec, sandbox_id, name, started=cid)
                 if taken is not None:
                     return taken
                 break
@@ -499,11 +499,12 @@ class ImageSessions:
         return sandbox_id
 
     async def _discard_new(self, cid: str, session: str) -> None:
-        seen = await self._port_of(cid)
-        if seen is not None and seen[0]:
-            await self._set_aside(cid, session)
-        else:
+        """A new container whose provision failed: removed only if Docker says it is not running (it never served
+        a call); running, or unsure, set aside (another worker may have taken it over and worked in it)."""
+        if not await self._still_runs(cid):
             await self._remove(cid)
+        else:
+            await self._set_aside(cid, session)
 
     async def _remove_ours(self, name: str, sandbox_id: str) -> None:
         code, stdout, _ = await self._docker.run(
@@ -517,12 +518,13 @@ class ImageSessions:
 
         self._entries[sandbox_id] = _Entry(sandbox_id, cid, host_port, token, spec, image=True, created=created)
 
-    async def _take_over(self, spec: SandboxSpec, sandbox_id: str, name: str, *, started: bool = False) -> str | None:
+    async def _take_over(self, spec: SandboxSpec, sandbox_id: str, name: str, *, started: str = "") -> str | None:
         """The session's container, running or starting: taken over once its executor answers its token
         (``_TAKE_OVER_S`` at most for it to run).  ``None``: start a new one, the session's container being set aside
         (its files kept) when it answers but not to this deployment's token (the signing secret rotated), or when
-        this provision started it again (*started*) and its executor never came up.  One that someone else started
-        and whose executor never answers is stopped, its files kept, and the call fails."""
+        this provision started it again (*started*, its id) and its executor never came up (a crash at its start, not
+        a Stop meanwhile).  One that someone else started and whose executor never answers is stopped, its files
+        kept, and the call fails."""
         deadline = time.monotonic() + _TAKE_OVER_S
         token = session_token(spec.session_id)
         revived = False
@@ -540,10 +542,11 @@ class ImageSessions:
                     if exc.classification == "retired" and not revived:
                         # Retired for the reaper: removed in a moment, or kept (it failed); kept, it comes back.
                         revived = True
-                        if await self._back_from_retired(cid):
+                        if await self._back_from_retired(cid, name):
+                            deadline = time.monotonic() + _TAKE_OVER_S
                             break
                         return None
-                    if started or exc.classification == "retired":
+                    if (started == cid and await self._crashed(cid)) or exc.classification == "retired":
                         await asyncio.shield(self._set_aside(cid, spec.session_id))
                         return None
                     await asyncio.shield(self._docker.run(["stop", cid]))
@@ -552,7 +555,7 @@ class ImageSessions:
                         "next call starts it again", classification="readiness",
                     ) from exc
                 except Exception as exc:
-                    if started:
+                    if started == cid and await self._crashed(cid):
                         await asyncio.shield(self._set_aside(cid, spec.session_id))
                         return None
                     await asyncio.shield(self._docker.run(["stop", cid]))
@@ -608,6 +611,9 @@ class ImageSessions:
         named = container_name(entry.spec, entry.sandbox_id)
         seen = await self._port_of(entry.container_id, named)
         if seen is None:
+            if name == "process" and _is_kill(input):
+                return json.dumps({"status": "already_exited", "note": "The command's container is gone: it ended "
+                                   "with it."})
             raise SandboxUnavailableError(f"The session's container {entry.container_id} is gone")
         running, port = seen
         if not running:
@@ -633,7 +639,7 @@ class ImageSessions:
         # Retired for the reaper (the session was at rest): it removes the container in a moment.  The call never
         # ran.  Removed: the next call makes a new one.  Kept (the reaper failed, or a turn came first): its
         # executor comes back, its files as they were, and the call runs.
-        if not await self._back_from_retired(entry.container_id):
+        if not await self._back_from_retired(entry.container_id, named):
             raise SandboxUnavailableError("The session's container was removed at rest: the next call starts a new "
                                           "one from its image")
         port = await self._start_again(entry)
@@ -643,20 +649,47 @@ class ImageSessions:
             timeout=timeout or entry.spec.timeout,
         )
 
-    async def _back_from_retired(self, cid: str) -> bool:
-        """After a 410: wait for the reaper to remove *cid* (False); still there after ``_RETIRED_WAIT_S``, it kept
-        it: stopped and started again, a fresh executor, its files as they were (True; a stopped one is left to the
-        caller's start)."""
+    async def _back_from_retired(self, cid: str, name: str) -> bool:
+        """After a 410: wait for the reaper to remove *cid* (False: gone, or no longer under the session's *name*);
+        still there after ``_RETIRED_WAIT_S``, the reaper kept it: its executor restarted once (a fresh one, the files
+        as they were) unless someone did meanwhile (True; a stopped one is left to the caller's start).  One restart
+        however many calls of this worker wait on it."""
         deadline = time.monotonic() + _RETIRED_WAIT_S
         while time.monotonic() < deadline:
-            if await self._port_of(cid) is None:
+            if await self._port_of(cid, name) is None:
                 return False
             await asyncio.sleep(0.5)
-        if await self._port_of(cid) is None:
+        locks = self.__dict__.setdefault("_restarts", {})
+        async with locks.setdefault(cid, asyncio.Lock()):
+            seen = await self._port_of(cid, name)
+            if seen is None:
+                return False
+            running, port = seen
+            if running and port is not None and await self._health(port) == 200:
+                return True  # restarted already (another call, another worker)
+            if running:
+                await self._docker.run(["restart", "-t", "2", cid])
+            locks.pop(cid, None)
+        return await self._port_of(cid, name) is not None
+
+    async def _health(self, host_port: int) -> int | None:
+        import httpx
+
+        try:
+            async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{host_port}", transport=self._transport,
+                                         timeout=5.0) as client:
+                return (await client.get("/healthz")).status_code
+        except Exception:  # noqa: BLE001
+            return None
+
+    async def _crashed(self, cid: str) -> bool:
+        """Whether *cid* ended by itself (an executor that could not start) or runs without answering, not stopped
+        by a Stop or a pause meanwhile (exit 0, 137, 143: its files stay the session's)."""
+        code, out, _ = await self._docker.run(["inspect", "--format", "{{.State.Status}} {{.State.ExitCode}}", cid])
+        if code != 0:
             return False
-        await self._docker.run(["stop", cid])
-        code, _out, _err = await self._docker.run(["start", cid])
-        return code == 0 or await self._port_of(cid) is not None
+        status, _, exit_code = out.decode(errors="replace").strip().partition(" ")
+        return status == "running" or exit_code.strip() not in ("0", "137", "143")
 
     async def _start_again(self, entry: Any) -> int:
         """Start the session's stopped container again (one running already: as it is) and wait for its executor;
@@ -674,7 +707,10 @@ class ImageSessions:
                 raise SandboxUnavailableError("The session's container did not come back")
             await self._wait_ready(port, entry.container_id)
         except Exception:
-            await asyncio.shield(self._set_aside(entry.container_id, entry.spec.session_id))
+            # One that crashed at its start is set aside (its files kept), so the next call makes a new one; one
+            # stopped meanwhile (a Stop) stays the session's.
+            if await self._crashed(entry.container_id):
+                await asyncio.shield(self._set_aside(entry.container_id, entry.spec.session_id))
             raise
         return port
 
@@ -799,7 +835,7 @@ class ImageSessions:
         await self._docker.run(["stop", "-t", "2", cid])
         return await self._remove(cid, force=False)
 
-    async def _running(self, container_id: str) -> bool:
+    async def _still_runs(self, container_id: str) -> bool:
         """Whether *container_id* still runs (unsure: it does; gone: it does not)."""
         code, stdout, stderr = await self._docker.run(["inspect", "--format", "{{.State.Running}}", container_id])
         if code != 0:

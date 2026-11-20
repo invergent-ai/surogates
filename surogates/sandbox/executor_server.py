@@ -725,6 +725,12 @@ def create_app(
         """Retire this sandbox if nothing runs or is waited on in it and it went unused ``min_idle_seconds``: from
         then on every call is refused (410), so a reaper that removes it next takes no call with it.  Atomic with
         the calls: no await between the look and the mark."""
+        if not allow_local:
+            peer = request.client.host if request.client else None
+            server = request.scope.get("server")
+            if from_inside(peer, server[0] if server else None):
+                # A command that read the token must not retire its own sandbox either.
+                return Response(content="calls from inside the sandbox are refused", status_code=403)
         if not _token_ok(request.headers.get("authorization", ""), token):
             return Response(content="unauthorized", status_code=401)
         try:
