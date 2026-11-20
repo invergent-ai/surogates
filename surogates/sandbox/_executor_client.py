@@ -87,6 +87,10 @@ class ExecutorHTTPClient:
                         f"Executor daemon at {host}:{port} rejected the "
                         f"sandbox token",
                     )
+                if resp.status == 410:
+                    # Retired for its reaper (a session's own image at rest): the next call gets a sandbox again.
+                    raise SandboxUnavailableError(f"The sandbox at {host}:{port} was retired at rest",
+                                                  classification="retired")
                 if resp.status != 200:
                     logger.error(
                         "Executor daemon at %s:%s returned HTTP %s: %s",

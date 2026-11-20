@@ -1265,12 +1265,16 @@ class ArtifactCompletionMixin:
         from surogates.harness.background_watch import background_watch
 
         from surogates.harness.subagents import agents_run_in_its_sandbox
+        from surogates.sandbox.session_image import IMAGE_KEY
 
         # A sandbox that runs a background command the session waits to hear
         # the end of stays up: the watch lets it go once the command ends.  So
         # does one an agent below it still runs in: a later turn end lets it go.
+        # And one in the session's own image, which is its workspace: the
+        # reaper lets it go once the session has been at rest a while.
         if (
             self._sandbox_pool is not None and not background_watch.holds(str(session.id))
+            and not (session.config or {}).get(IMAGE_KEY)
             and not await agents_run_in_its_sandbox(self._session_factory, session)
         ):
             try:

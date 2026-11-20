@@ -206,6 +206,19 @@ async def _build_session_sandbox_spec(
     from surogates.simulation.side_effects import is_simulated
 
     sandbox_spec.simulated = is_simulated(session.config)
+    # A session's own image: held to the operator's list again here, where the sandbox is made, whatever path its
+    # config came by.  A sub-agent carries its root's (create_child_session), so a reprovision under it runs the same.
+    from surogates.sandbox.session_image import SessionImageRefused, names_image, session_image_of
+
+    if names_image(session.config):
+        from surogates.config import load_settings
+
+        try:
+            image = session_image_of(session.config, load_settings().sandbox)
+        except SessionImageRefused as exc:
+            raise SandboxUnavailableError(str(exc), classification="config") from None
+        if image is not None:
+            sandbox_spec.session_image, sandbox_spec.image_workdir = image.image, image.workdir
     await _apply_ssh_access(session, tenant, sandbox_spec, credential_vault)
     return sandbox_spec
 
@@ -225,6 +238,34 @@ COPY_REMADE_HANDED_ON = (
     "Changes it made after that are not in it. "
     "Check the files before making any of those changes again.]"
 )
+
+
+#: The first tool result after a session's own-image container was made again from its image (its container was
+#: reaped at rest, or died): what the session did in the container before is not in the new one.
+IMAGE_REMADE = (
+    "This session's container was started again from its image. Changes made in the container before are not "
+    "in it. Check the files before relying on earlier work."
+)
+
+
+async def _worked_in_a_sandbox_before(store: Any, session: Any, before: int | None) -> bool:
+    """Whether *session* had a sandbox tool's result before the call *before*: a call of the same step, run beside
+    it, has none yet, and is no earlier work.  Each session sharing a sandbox (the root, its sub-agents) is asked
+    for itself."""
+    from surogates.tools.router import TOOL_LOCATIONS, ToolLocation
+
+    def in_sandbox(event: Any) -> bool:
+        name = str((event.data or {}).get("name") or "")
+        return not name.startswith("mcp__") and TOOL_LOCATIONS.get(name, ToolLocation.SANDBOX) == ToolLocation.SANDBOX
+
+    try:
+        until = before - 1 if before is not None else None
+        events = await store.get_events(session.id, types=[EventType.TOOL_RESULT], until=until)
+        if any(in_sandbox(e) for e in events):
+            return True
+    except Exception:
+        logger.debug("Could not tell whether session %s worked in a sandbox before", session.id, exc_info=True)
+    return False
 
 
 def _noted(content: str, note: str) -> str:
@@ -1794,6 +1835,18 @@ async def _run_single_tool(
         tool_use_id=tool_call_id,
         writer=spill_writer,
     )
+    # A session in its own image whose container was just made new from the image, when it had worked in one before
+    # (its container was reaped at rest, or could not start again): that work is not there.  After the spill, so a
+    # long result's preview keeps it.
+    from surogates.sandbox.pool import SandboxPool
+    from surogates.sandbox.session_image import IMAGE_KEY
+
+    if isinstance(sandbox_pool, SandboxPool) and (session.config or {}).get(IMAGE_KEY):
+        from surogates.sandbox.pool import sandbox_session_key
+        if sandbox_pool.image_new(sandbox_session_key(session), str(session.id)) and await _worked_in_a_sandbox_before(
+            store, session, _call_event_id,
+        ):
+            result_content = _noted(result_content, IMAGE_REMADE)
     if replay_of is not None and device_call is not None and await device_call.diverged():
         result_content = interrupted(tool_name)
         await device_call.close_open()

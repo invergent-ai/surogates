@@ -1507,6 +1507,7 @@ async def run_worker(settings: Settings) -> None:
     sandbox_pool.start_reaping(
         partial(sandbox_key_at_rest, session_factory),
         every=settings.sandbox.reap_every_seconds, idle_seconds=max(idle, 30) if idle > 0 else 0,
+        image_idle_seconds=settings.sandbox.image_idle_seconds,
     )
 
     # 4b. Browser pool -- one browser per session, lazily provisioned.

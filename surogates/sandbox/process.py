@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from surogates.sandbox.base import SandboxSpec, SandboxStatus
+from surogates.sandbox.base import SandboxSpec, SandboxStatus, SandboxUnavailableError
 from surogates.tools.utils.checkpoint_manager import CheckpointManager
 
 logger = logging.getLogger(__name__)
@@ -55,6 +55,11 @@ class ProcessSandbox:
 
         Returns a UUID sandbox identifier used in all subsequent calls.
         """
+        if spec.session_image:
+            # A host folder is no image: a session that names its own must not run its tools on the worker instead.
+            raise SandboxUnavailableError(
+                "A session's own sandbox image needs the Docker sandbox backend", classification="config",
+            )
         sandbox_id = uuid.uuid4().hex
         workdir = Path(tempfile.mkdtemp(prefix=f"sbx-{sandbox_id[:8]}-"))
 

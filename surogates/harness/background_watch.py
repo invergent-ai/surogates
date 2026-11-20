@@ -841,6 +841,15 @@ class BackgroundWatch:
             return
         self._releases.pop(owner, None)
         self._holdable.pop(owner, None)
+        from surogates.sandbox.session_image import IMAGE_KEY
+
+        try:
+            in_its_image = bool(((await self._store.get_session(UUID(owner))).config or {}).get(IMAGE_KEY))
+        except Exception:
+            in_its_image = False
+        if in_its_image:
+            # In the session's own image the container is the workspace: the reaper lets it go, at rest.
+            return
         released = await self._sandbox_pool.release_for_session(owner, only=sandbox_id)
         if released is not None:
             try:

@@ -46,6 +46,7 @@ import multiprocessing
 import os
 import subprocess
 import sys
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -67,6 +68,10 @@ logger = logging.getLogger("tool-executor")
 DEFAULT_PORT = 8071
 DEFAULT_TIMEOUT = 300
 MAX_CONCURRENCY = 8
+# How long a background command a session waits on counts as use of its sandbox: as long as the worker watches one.
+_WATCHED_AT_MOST_S = 3600.0
+# How long ends of such commands, not drained by any worker, count as use.
+_UNDRAINED_AT_MOST_S = 600.0
 # How often a running call looks whether its caller has hung up.
 _DISCONNECT_POLL_S = 0.5
 
@@ -642,6 +647,9 @@ def create_app(
     # No /docs or /openapi.json: nothing for a command to find the daemon's calls by.
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     sem = asyncio.Semaphore(max_concurrency)
+    # When a call last ended, and the calls running now: the sandbox's own clock of its use (``/activity``), which a
+    # worker other than the one that made the sandbox can ask (a session's own image is shared by its workers).
+    activity = {"last": time.monotonic(), "running": 0, "retired": False}
     mount = str(history.project) if history is not None else workspace
     # A master's pod has nothing to open: its workspace is the real files.
     opened = history is None or history.copy is None
@@ -652,6 +660,8 @@ def create_app(
     @app.get("/healthz")
     async def healthz() -> Response:
         nonlocal opened, failed
+        if activity["retired"]:
+            return Response(content="retired", status_code=410)
         # When the workspace is not a FUSE mount (Docker bind-mount or
         # ephemeral), the FUSE check is the wrong readiness signal; the
         # backend disables it via require_fuse=False.
@@ -676,6 +686,78 @@ def create_app(
             return Response(content=f"copy not made: {failed}", status_code=503)
         return Response(content="ok", status_code=200)
 
+    def waited_on() -> int:
+        """What a session still waits on here: background commands running that it waits to hear the end of (or a
+        monitor watches), for at most the hour a watch lasts, and ends not yet drained by the worker.  A forgotten
+        server or ``tail -f`` nobody waits on does not keep a sandbox in use."""
+        from surogates.tools.utils.process_registry import process_registry
+
+        with process_registry._lock:
+            running = list(process_registry._running.values())
+        now = time.time()
+        watched = sum(1 for p in running if not p.exited and (p.notify_on_complete or p.watch_lines)
+                      and now - (p.started_at or now) < _WATCHED_AT_MOST_S)
+        # Ends not drained yet count while they are fresh: one nobody will ever drain (its watch gone) must not pin
+        # the sandbox for good.
+        queued = process_registry.completion_queue.qsize()
+        if not queued:
+            activity["queued_since"] = None
+        elif activity.get("queued_since") is None:
+            activity["queued_since"] = now
+        fresh = queued if queued and now - activity["queued_since"] < _UNDRAINED_AT_MOST_S else 0
+        return watched + fresh
+
+    def activity_now() -> dict:
+        idle = 0.0 if activity["running"] else time.monotonic() - activity["last"]
+        return {"idle_seconds": round(idle, 1), "running": activity["running"], "background_running": waited_on()}
+
+    @app.get("/activity")
+    async def activity_of(request: Request) -> Response:
+        """Seconds since a call last ended (0 while one runs), the calls running, and the background commands a
+        session waits on.  The worker's own drains of finished commands are no use of the sandbox and are not
+        counted."""
+        if not _token_ok(request.headers.get("authorization", ""), token):
+            return Response(content="unauthorized", status_code=401)
+        return Response(content=json.dumps(activity_now()), media_type="application/json")
+
+    @app.post("/retire")
+    async def retire(request: Request) -> Response:
+        """Retire this sandbox if nothing runs or is waited on in it and it went unused ``min_idle_seconds``: from
+        then on every call is refused (410), so a reaper that removes it next takes no call with it.  Atomic with
+        the calls: no await between the look and the mark."""
+        if not allow_local:
+            peer = request.client.host if request.client else None
+            server = request.scope.get("server")
+            if from_inside(peer, server[0] if server else None):
+                # A command that read the token must not retire its own sandbox either.
+                return Response(content="calls from inside the sandbox are refused", status_code=403)
+        if not _token_ok(request.headers.get("authorization", ""), token):
+            return Response(content="unauthorized", status_code=401)
+        try:
+            body = await request.json()
+            min_idle = float((body or {}).get("min_idle_seconds") or 0)
+        except (ValueError, TypeError, AttributeError):
+            return Response(content="bad request", status_code=400)
+        now = activity_now()
+        if not activity["retired"]:
+            activity["retired"] = not now["running"] and not now["background_running"] and now["idle_seconds"] >= min_idle
+        return Response(content=json.dumps({**now, "retired": activity["retired"]}), media_type="application/json")
+
+    @app.post("/unretire")
+    async def unretire(request: Request) -> Response:
+        """Take a retired sandbox back: its reaper did not remove it (the worker that met the 410 waited for that),
+        and a session works in it again.  Idempotent."""
+        if not allow_local:
+            peer = request.client.host if request.client else None
+            server = request.scope.get("server")
+            if from_inside(peer, server[0] if server else None):
+                return Response(content="calls from inside the sandbox are refused", status_code=403)
+        if not _token_ok(request.headers.get("authorization", ""), token):
+            return Response(content="unauthorized", status_code=401)
+        activity["retired"] = False
+        activity["last"] = time.monotonic()
+        return Response(content=json.dumps(activity_now()), media_type="application/json")
+
     @app.post("/execute")
     async def execute(request: Request) -> Response:
         if not allow_local:
@@ -687,13 +769,48 @@ def create_app(
         auth = request.headers.get("authorization", "")
         if not _token_ok(auth, token):
             return Response(content="unauthorized", status_code=401)
+        if activity["retired"]:
+            # Retired for its reaper (``/retire``): a call now would be lost with it.
+            return Response(content="this sandbox is retired", status_code=410)
+        # Counted before any await: a /retire between the look above and the count could not see it.
+        activity["running"] += 1
 
-        payload = await request.json()
-        name = payload.get("name") or ""
-        args = payload.get("args") or {}
-        timeout = float(payload.get("timeout") or default_timeout)
+        def uncount(used: bool = True) -> None:
+            activity["running"] -= 1
+            if used:
+                activity["last"] = time.monotonic()
+
+        try:
+            payload = await request.json()
+            name = payload.get("name") or ""
+            args = payload.get("args") or {}
+            timeout = float(payload.get("timeout") or default_timeout)
+        except BaseException:
+            uncount()
+            raise
+
+        if name == "_background":
+            # A drain reads memory and never waits on a tool: no slot, so the
+            # worker's watch is answered while long calls fill them.  The
+            # worker's own look is no use of the sandbox, unless it hands out
+            # ends or lines a session waits on: their turn is coming.
+            result = "{}"
+            try:
+                result = drain_background(args)
+            finally:
+                try:
+                    handed = json.loads(result)
+                except ValueError:
+                    handed = {}
+                uncount(used=bool(isinstance(handed, dict) and (handed.get("events") or handed.get("lines"))))
+                from surogates.tools.utils.process_registry import process_registry
+
+                if process_registry.completion_queue.qsize() == 0:
+                    activity["queued_since"] = None  # the next end left undrained counts from when it is seen
+            return Response(content=result, media_type="application/json")
 
         if not name:
+            uncount()
             return Response(
                 content=json.dumps({
                     "exit_code": 1,
@@ -714,16 +831,12 @@ def create_app(
         if name == "_history" and history is not None and require_fuse and not workspace_mounted(mount, mounts_path):
             # The sidecar went, and /project is an empty folder: a landing
             # written there would never reach the bucket.
+            uncount()
             return Response(
                 content=json.dumps({"error": f"The project's files are not mounted at {mount}"}),
                 media_type="application/json",
             )
 
-        if name == "_background":
-            # A drain reads memory and never waits on a tool: no slot, so the
-            # worker's watch is answered while long calls fill them.
-            result = drain_background(args)
-            return Response(content=result, media_type="application/json")
         async def run() -> str:
             async with sem:
                 if runs_in_daemon(name, args):
@@ -737,7 +850,13 @@ def create_app(
 
         # A caller that hangs up (a stopped agent's call, cancelled) wants no result: the call stops, its child
         # killed, and frees its slot, instead of running on to its own timeout.
-        work = asyncio.ensure_future(run())
+        async def counted() -> str:
+            try:
+                return await run()
+            finally:
+                uncount()
+
+        work = asyncio.ensure_future(counted())
         while not work.done():
             await asyncio.wait({work}, timeout=_DISCONNECT_POLL_S)
             if not work.done() and await request.is_disconnected():

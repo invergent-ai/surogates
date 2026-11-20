@@ -1528,6 +1528,9 @@ class AgentHarness(
 
                 await background_watch.stop_session_elsewhere(session.id)
                 await self._sandbox_pool.destroy_for_session(str(session.id))
+                if (session.config or {}).get("sandbox_image"):
+                    # Its own image's container stops even where this worker held none for it; its files stay.
+                    await self._sandbox_pool.stop_image_session(str(session.id))
             except Exception:
                 logger.debug(
                     "Sandbox cleanup on interrupt failed", exc_info=True,
@@ -6549,11 +6552,13 @@ class AgentHarness(
         from surogates.harness.background_watch import background_watch
 
         from surogates.harness.subagents import agents_run_in_its_sandbox
+        from surogates.sandbox.session_image import IMAGE_KEY
 
         # One that runs a background command the session waits to hear the end of stays up, as at a model's turn
-        # end, and so does one an agent below it still runs in.
+        # end, and so does one an agent below it still runs in, and one in the session's own image.
         if (
             self._sandbox_pool is not None and not background_watch.holds(str(session.id))
+            and not (session.config or {}).get(IMAGE_KEY)
             and not await agents_run_in_its_sandbox(self._session_factory, session)
         ):
             try:
@@ -6638,6 +6643,8 @@ class AgentHarness(
 
                 await background_watch.stop_session_elsewhere(session.id)
                 await self._sandbox_pool.destroy_for_session(str(session.id))
+                if (session.config or {}).get("sandbox_image"):
+                    await self._sandbox_pool.stop_image_session(str(session.id))
             except Exception:
                 logger.debug("Sandbox cleanup on /clear failed", exc_info=True)
 

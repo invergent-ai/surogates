@@ -9,6 +9,7 @@ from uuid import UUID, uuid4
 from surogates.channels.memory_boundary import CASE_AGENT_KEY, CASE_RERUN_KEY, MANAGED_CHANNELS
 from surogates.keel.steps import CASE_ITEM_KEY, CASE_SCOPE_KEY, CASE_STEP_KEY
 from surogates.sandbox.pool import sandbox_session_key
+from surogates.sandbox.session_image import SANDBOX_SHARING_FIELDS
 from surogates.session.execution_context import CONTEXT_FIELDS, inherit_context
 from surogates.session.models import Session
 from surogates.session.store import SessionStore
@@ -290,6 +291,12 @@ async def create_child_session(
     # A boundary comes from the parent only: one named in *config* would
     # reach another conversation's or project's memory.
     for field in _BOUNDARY_SHARING_FIELDS:
+        merged_config.pop(field, None)
+        if field in parent_config:
+            merged_config[field] = parent_config[field]
+    # So does the session's own image and its workspace folder: the child works in its root's sandbox, and one
+    # it named itself would run another image under the root's sandbox, or none where the root has one.
+    for field in SANDBOX_SHARING_FIELDS:
         merged_config.pop(field, None)
         if field in parent_config:
             merged_config[field] = parent_config[field]

@@ -7,6 +7,7 @@ Moving code here must not change what a cloud session sees.
 from __future__ import annotations
 
 import asyncio
+import base64
 import codecs
 import contextlib
 import errno
@@ -299,17 +300,48 @@ _ALWAYS_INHERIT = frozenset({
 })
 
 
+def in_session_image() -> bool:
+    """Whether this sandbox runs a session's own image (``surogates.sandbox.session_image``), not the sandbox image.
+
+    There the commands are the image's: its environment (PATH, PYTHONPATH, GOPATH, ...) and its user's HOME, as
+    its own tests see them, and the workspace is a folder of the image, not storage to keep HOME in.
+    """
+    return os.environ.get("SUROGATES_IMAGE_SESSION") == "1"
+
+
+def _image_env_keys() -> frozenset[str]:
+    """The environment names a session's own image declared (the backend passes them); none elsewhere."""
+    if not in_session_image():
+        return frozenset()
+    return frozenset(key for key in os.environ.get("SUROGATES_IMAGE_ENV_KEYS", "").split(",") if key)
+
+
+def _image_env_shadowed() -> dict[str, str]:
+    """The image's own values of the names the harness holds for the daemon (its control names, and those it sets):
+    the commands get the image's.  None elsewhere."""
+    if not in_session_image():
+        return {}
+    try:
+        values = json.loads(base64.b64decode(os.environ.get("SUROGATES_IMAGE_ENV_SHADOWED", "") or b"e30="))
+    except ValueError:
+        return {}
+    return {str(k): str(v) for k, v in values.items()} if isinstance(values, dict) else {}
+
+
 def _build_child_env() -> dict[str, str]:
     """Build a restricted environment dict for the child process.
 
     Starts from the current process environment but strips variables that
     are not in the always-inherit set or the passthrough allowlist.  This
-    prevents secrets from leaking into commands the model runs.
+    prevents secrets from leaking into commands the model runs.  In a
+    session's own image the names the image itself declared are kept too.
     """
     env: dict[str, str] = {}
+    image_keys = _image_env_keys()
     for key, value in os.environ.items():
-        if key in _ALWAYS_INHERIT or is_env_passthrough(key):
+        if key in _ALWAYS_INHERIT or key in image_keys or is_env_passthrough(key):
             env[key] = value
+    env.update(_image_env_shadowed())
     return env
 
 
@@ -510,7 +542,16 @@ def _check_sensitive_path(filepath: str, shown: str | None = None) -> str | None
 # socat, so callers can rely on it being present.  If it's missing we
 # raise from the handler with a clear "install ripgrep" message rather
 # than silently degrading to a slow Python loop.
-_RIPGREP_PATH: str | None = shutil.which("rg")
+def _find_ripgrep() -> str | None:
+    """rg on PATH; in a session's own image, which has none, the executor bundle's."""
+    found = shutil.which("rg")
+    bundle = os.environ.get("SUROGATES_EXECUTOR_HOME")
+    if found is None and os.environ.get("SUROGATES_IMAGE_SESSION") == "1" and bundle:
+        found = shutil.which("rg", path=os.path.join(bundle, "bin"))
+    return found
+
+
+_RIPGREP_PATH: str | None = _find_ripgrep()
 
 
 # The codecs read_file decodes text in, which read_lines pages, and their code
@@ -1220,8 +1261,9 @@ class LocalWorkspaceIO:
         # Sandbox the environment when a workspace is set.
         # Override HOME so `cd ~`, `~/...` paths, and `$HOME` all resolve
         # inside the workspace.  Clear CDPATH to prevent `cd` from jumping
-        # to directories outside the workspace.
-        if self.root:
+        # to directories outside the workspace.  Not in a session's own
+        # image: its toolchain's caches and config are under its user's HOME.
+        if self.root and not in_session_image():
             env["HOME"] = self.root
             env.pop("CDPATH", None)
             # Prevent git from reading/writing config files that srt
@@ -1265,7 +1307,7 @@ class LocalWorkspaceIO:
         refuse_nul(command, workdir)
         cwd = self._workdir(workdir)
         env = _build_child_env()
-        if self.root:
+        if self.root and not in_session_image():
             env["HOME"] = self.root
             env.pop("CDPATH", None)
         _setup_ssh_home(env)

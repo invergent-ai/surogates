@@ -91,6 +91,26 @@ def _find_shell() -> str:
     return "/bin/bash"
 
 
+def _in_session_image() -> bool:
+    """Whether this sandbox runs a session's own image (``surogates.sandbox.session_image``)."""
+    return os.environ.get("SUROGATES_IMAGE_SESSION") == "1"
+
+
+def _shell_argv(command: str) -> list[str]:
+    """How a background command starts.  In a session's own image as the image's commands start (``bash -c``, else
+    ``sh -c``): a login shell would read the image's profile, which resets PATH (go, cargo, conda gone).  Elsewhere,
+    the user's shell as a login, interactive one."""
+    if _in_session_image():
+        return ["/bin/bash" if os.path.isfile("/bin/bash") else "/bin/sh", "-c", command]
+    return [_find_shell(), "-lic", command]
+
+
+def _base_env() -> dict[str, str] | os._Environ:
+    """What a background command's environment starts from: the daemon's, or in a session's own image nothing (its
+    caller's ``env_vars`` are the image's own environment, without the harness's)."""
+    return {} if _in_session_image() else os.environ
+
+
 def _sanitize_subprocess_env(
     base_env: os._Environ | dict[str, str],
     extra: dict[str, str] | None = None,
@@ -317,11 +337,10 @@ class ProcessRegistry:
                     from winpty import PtyProcess as _PtyProcessCls
                 else:
                     from ptyprocess import PtyProcess as _PtyProcessCls
-                user_shell = _find_shell()
-                pty_env = _sanitize_subprocess_env(os.environ, env_vars)
+                pty_env = _sanitize_subprocess_env(_base_env(), env_vars)
                 pty_env["PYTHONUNBUFFERED"] = "1"
                 pty_proc = _PtyProcessCls.spawn(
-                    [user_shell, "-lic", command],
+                    _shell_argv(command),
                     cwd=session.cwd,
                     env=pty_env,
                     dimensions=(30, 120),
@@ -359,13 +378,12 @@ class ProcessRegistry:
                 )
 
         # Standard Popen path (non-PTY or PTY fallback)
-        user_shell = _find_shell()
         # Force unbuffered output for Python scripts so progress is visible
         # during background execution.
-        bg_env = _sanitize_subprocess_env(os.environ, env_vars)
+        bg_env = _sanitize_subprocess_env(_base_env(), env_vars)
         bg_env["PYTHONUNBUFFERED"] = "1"
         proc = subprocess.Popen(
-            [user_shell, "-lic", command],
+            _shell_argv(command),
             text=True,
             cwd=session.cwd,
             env=bg_env,

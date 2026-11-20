@@ -326,3 +326,50 @@ async def test_a_threads_pod_is_never_kept_past_its_turn(api):  # noqa: F811
         assert await watch.running_for(chat) == [{"id": "proc_t", "command": "make serve", "status": "running"}]
     finally:
         await watch.close()
+
+
+async def test_a_session_in_its_own_image_keeps_its_sandbox_past_its_turn(watched, monkeypatch):
+    """Its container is its workspace: the turn's end leaves it (for its next turn, and for whoever reads the work).
+    A session of the same chat app without an image is unchanged (the test above: its sandbox goes at the turn's
+    end)."""
+    from functools import partial
+
+    from surogates.harness.subagents import sandbox_key_at_rest
+
+    chats, daemon = watched
+    image = "registry.example/tasks/repo-fix:1"
+    monkeypatch.setenv("SUROGATES_SANDBOX_ALLOWED_IMAGES", '["registry.example/tasks/*"]')
+    monkeypatch.setattr(chats.api.app.state.settings.sandbox, "allowed_images", ["registry.example/tasks/*"])
+    monkeypatch.setattr(chats.api.app.state.settings.sandbox, "backend", "docker")
+    created = await chats.api.client.post(
+        "/v1/sessions", json={"config": {"sandbox_image": image, "sandbox_workdir": "/app"}}, headers=chats.api.auth())
+    assert created.status_code == 201, created.text
+    chat = UUID(created.json()["id"])
+    chats.replies = [call("terminal", "call_run", command="echo built > out.txt"), _final_response("Built.")]
+    await chats.says(chat, "Build it.")
+    await chats.wake(chat)
+    assert await chats.status(chat) == "completed"
+    assert len(daemon.provisioned) == 1 and daemon.destroyed == []
+    assert chats.sandbox_pool.sandbox_of(str(chat)) == daemon.provisioned[0]
+    # At rest, the pool's reaper leaves it to the backend's (by the container's own clock; this backend has none).
+    at_rest = partial(sandbox_key_at_rest, chats.api.app.state.session_factory)
+    assert await at_rest(str(chat))
+    assert await chats.sandbox_pool.reap_at_rest(at_rest, idle_seconds=0) == []
+    assert daemon.destroyed == []
+
+
+async def test_a_session_image_off_the_list_is_refused_at_creation(watched, monkeypatch):
+    chats, _daemon = watched
+    monkeypatch.setattr(chats.api.app.state.settings.sandbox, "allowed_images", [])
+    created = await chats.api.client.post(
+        "/v1/sessions", json={"config": {"sandbox_image": "registry.example/tasks/x:1"}}, headers=chats.api.auth())
+    assert created.status_code == 400 and "allowed_images" in created.text
+
+
+async def test_a_session_image_on_a_backend_without_them_is_refused_at_creation(watched, monkeypatch):
+    chats, _daemon = watched
+    monkeypatch.setattr(chats.api.app.state.settings.sandbox, "allowed_images", ["registry.example/tasks/*"])
+    monkeypatch.setattr(chats.api.app.state.settings.sandbox, "backend", "kubernetes")
+    created = await chats.api.client.post(
+        "/v1/sessions", json={"config": {"sandbox_image": "registry.example/tasks/x:1"}}, headers=chats.api.auth())
+    assert created.status_code == 400 and "Docker sandbox backend" in created.text

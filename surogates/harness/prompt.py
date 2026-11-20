@@ -28,6 +28,7 @@ from surogates.harness.loop_context_replay import sanitize_sender_name
 from surogates.harness.model_metadata import get_model_info
 from surogates.harness.prompt_library import PromptLibrary, default_library
 from surogates.runtime.context import SlashCommandConfig
+from surogates.sandbox.session_image import IMAGE_KEY, WORKDIR_KEY
 from surogates.tools.loader import AGENT_SOURCE_PLATFORM
 from surogates.tools.skill_visibility import fallback_hidden, needs_unavailable_tool
 from surogates.session.execution_context import platform_hint_channel
@@ -962,6 +963,12 @@ class PromptBuilder:
                     f"`{shown_folder(workspace)}` (your working directory)"
                 )
                 parts.append("\n" + self._prompts.get("identity/workspace_rules_device"))
+            elif self._session.config.get(IMAGE_KEY):
+                # The session's own image (a task's repository): its folder is the workspace, its HOME the image's.
+                folder = self._session.config.get(WORKDIR_KEY)
+                shown = f"`{folder}`" if folder else "the image's working folder"
+                parts.append(f"- **Workspace**: {shown} (your working directory), in this session's own container")
+                parts.append("\n" + self._prompts.get("identity/workspace_rules_image"))
             else:
                 parts.append("- **Workspace**: `$HOME` (your working directory)")
                 parts.append("\n" + self._prompts.get("identity/workspace_rules"))

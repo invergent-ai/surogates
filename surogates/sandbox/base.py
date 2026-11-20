@@ -119,6 +119,10 @@ class SandboxSpec:
     # proxy fakes a simulated conversation's changes, and the agent must
     # not be able to tell.
     simulated: bool = False
+    # A session's own image (session config ``sandbox_image``): the sandbox runs it, the executor bundle mounted in it,
+    # with ``image_workdir`` ("" = the image's own working directory) as its workspace.  Empty: the backend's own image.
+    session_image: str = ""
+    image_workdir: str = ""
 
 
 def default_sandbox_spec() -> SandboxSpec:

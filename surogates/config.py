@@ -479,6 +479,25 @@ class SandboxSettings(BaseSettings):
     # this long: the safety net behind the turn ends' teardown.  0 turns it off.
     reap_idle_seconds: int = Field(300, ge=0)
     reap_every_seconds: int = Field(60, gt=0)
+    # A session's own image (sandbox_image) keeps its workspace in its container: removed once the session has been
+    # at rest this long by the container's own clock (its executor's last call, or its stop).
+    image_idle_seconds: int = Field(1800, ge=30)
+    # This deployment's mark on its session-image containers (letters, digits, . _ -): its reapers take only these.
+    # Required for session images; every stack on one Docker host must have its own.
+    image_deployment: str = ""
+
+    # A session's own image (session config ``sandbox_image``, ``surogates.sandbox.session_image``): the images a
+    # session may name, as fnmatch patterns ("ghcr.io/acme/tasks:*").  Empty: no session may name one.
+    allowed_images: list[str] = Field(default_factory=list)
+    # Whether such an image must be pinned by digest (``name@sha256:...``).
+    require_image_digest: bool = False
+    # The executor bundle (images/executor-bundle) mounted read-only in a session's own image to run its tool executor:
+    # a tag or digest of the worker's own version (the executor in the image is the worker's peer).  Unset: refused.
+    executor_bundle_image: str = ""
+    # Docker: whether a session's image (and the bundle) missing on the host is pulled ("missing") or refused ("never"),
+    # and how long a pull may take.
+    docker_image_pull: Literal["missing", "never"] = "missing"
+    docker_image_pull_timeout: int = Field(900, gt=0)
 
     # Docker sandbox backend settings (only used when backend == "docker").
     # Local-development backend: one container per root session, talking to

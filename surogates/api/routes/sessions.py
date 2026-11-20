@@ -988,6 +988,15 @@ async def _create_session(
     )
     if rejection:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=rejection)
+    # The session's own sandbox image, held to the operator's list before anything is made (the worker holds it
+    # to the list again where it makes the sandbox).
+    from surogates.sandbox.session_image import refusal as image_refusal
+
+    refused = image_refusal(body.config, settings.sandbox)
+    if not refused and body.config.get("sandbox_image") and settings.sandbox.backend != "docker":
+        refused = "A session's own sandbox image needs the Docker sandbox backend"
+    if refused:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=refused)
 
     # Checked before creating anything: a refusal afterwards would leave a
     # session row and a workspace nobody uses.

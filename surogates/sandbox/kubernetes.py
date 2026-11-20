@@ -196,6 +196,11 @@ class K8sSandbox:
 
     async def provision(self, spec: SandboxSpec) -> str:
         """Create a sandbox pod and wait for it to become ready."""
+        if spec.session_image:
+            # Not in a pod yet: refused rather than run in the agent-sandbox image, which has none of the task's files.
+            raise SandboxUnavailableError(
+                "A session's own sandbox image needs the Docker sandbox backend for now", classification="config",
+            )
         api = await self._get_api()
         sandbox_id = uuid.uuid4().hex
         pod_name = f"sandbox-{sandbox_id[:12]}"

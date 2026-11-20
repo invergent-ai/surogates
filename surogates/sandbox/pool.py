@@ -21,6 +21,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+#: Session-image keys whose "made new" marks the pool keeps for sessions it holds no sandbox for.
+_IMAGE_MARKS_KEPT = 5000
+
 
 def sandbox_session_key(session: Any) -> str:
     """Return the :class:`SandboxPool` key for *session*.
@@ -72,6 +75,12 @@ class SandboxPool:
         # Threads whose copy this pool has just made from the real files,
         # not yet asked about: whether that loses work is the session's log's to say.
         self._fresh: set[str] = set()
+        # Sessions in their own image whose container the backend has just made new from the image, not yet asked
+        # about (``image_new``): work the session did in a container before is not in it.
+        # Session-image keys: how many times this pool made the key's container new from its image, and, per
+        # session sharing it (the root, its sub-agents), the last of those it was told about.
+        self._image_made: dict[str, int] = {}
+        self._image_told: dict[str, dict[str, int]] = {}
         # session_id -> when its sandbox was last asked for or a call in it ended (monotonic), and the calls in it now.
         self._used: dict[str, float] = {}
         self._busy: dict[str, int] = {}
@@ -120,7 +129,13 @@ class SandboxPool:
                     session_id,
                     status.value,
                 )
-                await self._backend.destroy(sandbox_id)
+                forget = getattr(self._backend, "forget", None)
+                if self._in_its_image(session_id) and forget is not None:
+                    # Its container is the session's work, and another worker may be calling into it: never stopped
+                    # here.  The provision takes it over, starts it again, or makes a new one.
+                    forget(sandbox_id)
+                else:
+                    await self._backend.destroy(sandbox_id)
 
             # Provision a new sandbox.
             sandbox_id = await self._backend.provision(spec)
@@ -130,6 +145,9 @@ class SandboxPool:
                 self._used[session_id] = time.monotonic()
                 if "PROJECT_DIR" in spec.env:
                     self._fresh.add(session_id)
+                created = getattr(self._backend, "created", None)
+                if spec.session_image and created is not None and created(sandbox_id):
+                    self._image_made[session_id] = self._image_made.get(session_id, 0) + 1
             logger.info(
                 "Session %s mapped to sandbox %s", session_id, sandbox_id
             )
@@ -193,6 +211,22 @@ class SandboxPool:
         spec = self._specs.get(session_id)
         return spec is not None and "PROJECT_DIR" in spec.env
 
+    def image_new(self, session_id: str, asking: str | None = None) -> bool:
+        """Whether the own-image container of the sandbox key *session_id* was made new from its image (not taken
+        over, not started again) since the session *asking* (default: the key's own) last asked: whatever that
+        session did in a container before is not in it.  Each session sharing the key asks for itself."""
+        made = self._image_made.get(session_id, 0)
+        told = self._image_told.setdefault(session_id, {}) if made else {}
+        who = asking or session_id
+        if not made or told.get(who, 0) >= made:
+            return False
+        told[who] = made
+        return True
+
+    def _drop_image_marks(self, key: str) -> None:
+        self._image_made.pop(key, None)
+        self._image_told.pop(key, None)
+
     async def release_for_session(self, session_id: str, *, only: str | None = None) -> str | None:
         """Detach the sandbox from *session_id*, returning its id.
 
@@ -212,10 +246,11 @@ class SandboxPool:
             self._specs.pop(session_id, None)
             self._fresh.discard(session_id)
             self._used.pop(session_id, None)
+            self._drop_image_marks(session_id)
             return self._mapping.pop(session_id, None)
 
     async def reap_at_rest(
-        self, at_rest: Callable[[str], Awaitable[bool]], *, idle_seconds: float,
+        self, at_rest: Callable[[str], Awaitable[bool]], *, idle_seconds: float, image_idle_seconds: float | None = None,
     ) -> list[str]:
         """Destroy the sandboxes this pool holds for sessions at rest, unused for *idle_seconds*; their keys.
 
@@ -233,7 +268,9 @@ class SandboxPool:
         reaped: list[str] = []
         unsure = 0
         for key, sandbox_id in list(self._mapping.items()):
-            if not self._idle(key, idle_seconds) or self.holds_copy(key):
+            if not self._idle(key, idle_seconds) or self.holds_copy(key) or self._in_its_image(key):
+                # A session's own image is the backend's to reap, by the container's own clock (below): another
+                # worker may work in it, which this pool's clock never sees.
                 continue
             try:
                 if not await at_rest(key):
@@ -272,7 +309,51 @@ class SandboxPool:
             reaped.append(key)
         if unsure:
             logger.warning("Could not tell whether %d sessions are at rest; their sandboxes stay", unsure)
+        reap_images = getattr(self._backend, "reap_images", None)
+        image_idle = idle_seconds if image_idle_seconds is None else image_idle_seconds
+        if reap_images is not None and image_idle > 0:
+            for key, _container in await reap_images(at_rest, idle_seconds=image_idle):
+                reaped.append(key)
+                if key in self._mapping:
+                    await self._forget_if_gone(key)
+        # This pool's own entries of image sandboxes whose container is gone (reaped by another worker, removed by
+        # hand): dropped, so nothing of them stays in memory.
+        for key in [k for k in list(self._mapping) if self._in_its_image(k)]:
+            await self._forget_if_gone(key)
         return reaped
+
+    async def _forget_if_gone(self, key: str) -> None:
+        """Drop *key*'s mapping when its own-image sandbox no longer runs (reaped, maybe by another worker, or
+        stopped): its next call takes it over, starts it again or makes a new one.  Nothing is destroyed here."""
+        lock = await self._session_lock(key)
+        async with lock:
+            sandbox_id = self._mapping.get(key)
+            if sandbox_id is None or self._busy.get(key):
+                return
+            gone = getattr(self._backend, "gone", None)
+            try:
+                if gone is not None:
+                    if not await gone(sandbox_id):
+                        return
+                elif await self._backend.status(sandbox_id) == SandboxStatus.RUNNING:
+                    return
+            except Exception:
+                return
+            forget = getattr(self._backend, "forget", None)
+            if forget is not None:
+                forget(sandbox_id)
+            self._mapping.pop(key, None)
+            self._specs.pop(key, None)
+            self._used.pop(key, None)
+            # The marks stay: a container taken over or started again next is no news; a new one is.  Bounded: past
+            # a few thousand keys, those of sessions this pool holds no sandbox for go.
+            if len(self._image_made) > _IMAGE_MARKS_KEPT:
+                for gone_key in [k for k in self._image_made if k not in self._mapping]:
+                    self._drop_image_marks(gone_key)
+
+    def _in_its_image(self, key: str) -> bool:
+        spec = self._specs.get(key)
+        return spec is not None and bool(spec.session_image)
 
     def _idle(self, key: str, idle_seconds: float) -> bool:
         """Whether *key*'s sandbox has no call in flight and went unused for *idle_seconds*."""
@@ -289,17 +370,27 @@ class SandboxPool:
 
     def start_reaping(
         self, at_rest: Callable[[str], Awaitable[bool]], *, every: float = 60.0, idle_seconds: float = 300.0,
+        image_idle_seconds: float | None = None,
     ) -> None:
-        """Run :meth:`reap_at_rest` every *every* seconds; *idle_seconds* 0 or less (or *every*) runs none."""
-        if idle_seconds <= 0 or every <= 0 or (self._reaper is not None and not self._reaper.done()):
+        """Run :meth:`reap_at_rest` every *every* seconds; *idle_seconds* 0 or less (or *every*) runs none, unless
+        *image_idle_seconds* (the sessions in their own image) is above 0."""
+        image_idle = idle_seconds if image_idle_seconds is None else image_idle_seconds
+        if (idle_seconds <= 0 and image_idle <= 0) or every <= 0 or (self._reaper is not None and not self._reaper.done()):
             return
-        self._reaper = asyncio.create_task(self._reap_every(at_rest, every, idle_seconds), name="sandbox-reaper")
+        self._reaper = asyncio.create_task(
+            self._reap_every(at_rest, every, idle_seconds, image_idle), name="sandbox-reaper",
+        )
 
-    async def _reap_every(self, at_rest: Callable[[str], Awaitable[bool]], every: float, idle_seconds: float) -> None:
+    async def _reap_every(
+        self, at_rest: Callable[[str], Awaitable[bool]], every: float, idle_seconds: float, image_idle: float,
+    ) -> None:
         while True:
             await asyncio.sleep(every)
             try:
-                reaped = await self.reap_at_rest(at_rest, idle_seconds=idle_seconds)
+                reaped = await self.reap_at_rest(
+                    at_rest, idle_seconds=idle_seconds if idle_seconds > 0 else float("inf"),
+                    image_idle_seconds=image_idle,
+                )
             except Exception:
                 logger.warning("The sandbox reaper's round failed", exc_info=True)
                 continue
@@ -376,6 +467,13 @@ class SandboxPool:
         sandbox_id = await self.release_for_session(session_id)
         await self.destroy_released(sandbox_id, session_id)
 
+    async def stop_image_session(self, session_id: str) -> None:
+        """Stop *session_id*'s own-image container wherever it runs (a Stop, ``/clear``): its commands end, its
+        files stay for the session's next call (the backend's, when it has session images)."""
+        stop = getattr(self._backend, "stop_image_of_session", None)
+        if stop is not None:
+            await stop(session_id)
+
     async def destroy_all(self) -> None:
         """Tear down every sandbox managed by this pool.
 
@@ -386,6 +484,10 @@ class SandboxPool:
             session_ids = list(self._mapping.keys())
 
         for session_id in session_ids:
+            if self._in_its_image(session_id):
+                # Another worker may be working in it: a worker's shutdown never ends a session's own image.
+                await self.release_for_session(session_id)
+                continue
             try:
                 await self.destroy_for_session(session_id)
             except Exception:
