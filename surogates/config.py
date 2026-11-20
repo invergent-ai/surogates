@@ -494,6 +494,9 @@ class SandboxSettings(BaseSettings):
     # The executor bundle (images/executor-bundle) mounted read-only in a session's own image to run its tool executor:
     # a tag or digest of the worker's own version (the executor in the image is the worker's peer).  Unset: refused.
     executor_bundle_image: str = ""
+    # Docker: the executor bundle for musl images (images/executor-bundle/Dockerfile.musl), used for an image the
+    # main bundle could not start in (Alpine), and for that image from then on.  Unset: such images are refused.
+    executor_bundle_image_musl: str = ""
     # Docker: whether a session's image (and the bundle) missing on the host is pulled ("missing") or refused ("never"),
     # and how long a pull may take.
     docker_image_pull: Literal["missing", "never"] = "missing"

@@ -1,0 +1,84 @@
+# Surogates executor bundle for musl images (Alpine and the like)
+#
+# The same /opt/surogates as Dockerfile (read it first), for task images whose C
+# library is musl: their loader cannot run the glibc CPython of the main bundle
+# ("exec /opt/surogates/bin/python3 failed: No such file or directory", or, with
+# gcompat, "Error relocating ...: symbol not found"). Here:
+#
+#   bin/python3   python-build-standalone's CPython 3.12 for musl (dynamic, so it loads
+#                 extension modules) with the locked dependencies as musllinux wheels,
+#                 built and checked on Alpine
+#   bin/tini      the same static tini; bin/rg the same static ripgrep
+#
+# Left out, as the executor never imports them (they serve the API and the worker) and
+# they publish no musllinux wheels: surogate-hub-sdk (duckdb) and outlines (outlines-core).
+#
+# The Docker sandbox backend uses it, when sandbox.executor_bundle_image_musl names it,
+# for an image the main bundle could not start in (and for that image from then on).
+#
+# Build (from repo root):
+#   docker build -t ghcr.io/invergent-ai/surogates-executor-bundle-musl:latest -f images/executor-bundle/Dockerfile.musl .
+
+# ── tini and ripgrep, by architecture, checked by hash (as in Dockerfile) ──
+FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS static-amd64
+ADD --checksum=sha256:c5b0666b4cb676901f90dfcb37106783c5fe2077b04590973b885950611b30ee \
+    https://github.com/krallin/tini/releases/download/v0.19.0/tini-static-amd64 /static/tini
+ADD --checksum=sha256:4cf9f2741e6c465ffdb7c26f38056a59e2a2544b51f7cc128ef28337eeae4d8e \
+    https://github.com/BurntSushi/ripgrep/releases/download/14.1.1/ripgrep-14.1.1-x86_64-unknown-linux-musl.tar.gz /tmp/rg.tar.gz
+
+FROM static-amd64 AS static
+RUN mkdir -p /tmp/rg && tar -xzf /tmp/rg.tar.gz -C /tmp/rg --strip-components=1 \
+    && mv /tmp/rg/rg /static/rg && chown root:root /static/tini /static/rg && chmod 0755 /static/tini /static/rg \
+    && rm -rf /tmp/rg /tmp/rg.tar.gz
+
+# ── The interpreter and the surogates package, on musl ───────────────
+FROM alpine@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf AS build
+ARG TARGETARCH
+COPY --from=ghcr.io/astral-sh/uv:0.9.5@sha256:f459f6f73a8c4ef5d69f4e6fbbdb8af751d6fa40ec34b39a1ab469acd6e289b7 /uv /usr/local/bin/uv
+RUN apk add --no-cache ca-certificates
+ENV UV_PYTHON_INSTALL_DIR=/opt/surogates/python \
+    UV_NO_CACHE=1
+RUN test "$TARGETARCH" = amd64 || { echo "no musl executor bundle for $TARGETARCH" >&2; exit 1; } \
+    && uv python install --no-bin cpython-3.12-linux-x86_64-musl \
+    && py=$(uv python find --managed-python cpython-3.12-linux-x86_64-musl) \
+    && mkdir -p /opt/surogates/bin \
+    && ln -s "../${py#/opt/surogates/}" /opt/surogates/bin/python3
+COPY pyproject.toml uv.lock /build/
+COPY surogates/ /build/surogates/
+# The locked dependencies (hashes checked) as musllinux wheels, but the ones named above; then the time zone
+# database (task images may have none) and the project itself, without its dependencies.
+RUN cd /build \
+    && uv export --frozen --no-dev --no-emit-project \
+        --no-emit-package surogate-hub-sdk --no-emit-package duckdb \
+        --no-emit-package outlines --no-emit-package outlines-core -o /tmp/requirements.txt \
+    && uv pip install --python /opt/surogates/bin/python3 --break-system-packages --only-binary :all: \
+        --python-platform x86_64-unknown-linux-musl -r /tmp/requirements.txt \
+    && printf 'tzdata==2025.2 --hash=sha256:1a403fada01ff9221ca8044d701868fa132215d84beb92242d9acd2147f667a8\n' > /tmp/tz.txt \
+    && uv pip install --python /opt/surogates/bin/python3 --break-system-packages --only-binary :all: -r /tmp/tz.txt \
+    && uv pip install --python /opt/surogates/bin/python3 --break-system-packages --no-deps /build \
+    && rm -rf /build /tmp/requirements.txt /tmp/tz.txt
+# python-build-standalone's musl CPython names its ABI x86_64-linux-gnu (SOABI), so it looks for
+# *.cpython-312-x86_64-linux-gnu.so, while musllinux wheels ship *.cpython-312-x86_64-linux-musl.so: each such
+# extension gets the name the interpreter imports, as a link beside it.
+RUN abi=$(/opt/surogates/bin/python3 -I -c "import sys; print(f'cpython-{sys.version_info[0]}{sys.version_info[1]}')") \
+    && found=$(find /opt/surogates/python -name "*.$abi-x86_64-linux-musl.so" | wc -l) \
+    && test "$found" -gt 0 \
+    && find /opt/surogates/python -name "*.$abi-x86_64-linux-musl.so" -exec sh -c \
+        'ln -s "$(basename "$1")" "${1%.$2-x86_64-linux-musl.so}.$2-x86_64-linux-gnu.so"' _ {} "$abi" \;
+COPY --from=static /static/ /opt/surogates/bin/
+# As in Dockerfile: byte-compiled for a read-only tree; the executor and every tool it registers must import from the
+# bundle alone, here on musl.
+RUN (/opt/surogates/bin/python3 -m compileall -qq -j 4 --invalidation-mode unchecked-hash /opt/surogates/python || true) \
+    && /opt/surogates/bin/python3 -I -c "import surogates.image_entry; from surogates.sandbox.executor_server import init_registry; init_registry()" \
+    && /opt/surogates/bin/python3 -I -c "import importlib.util, sys; sys.exit(importlib.util.find_spec('tzdata') is None)" \
+    && /opt/surogates/bin/python3 -I -c "import json, platform; json.dump({'python': platform.python_version(), 'libc': 'musl', 'arch': platform.machine()}, open('/opt/surogates/bundle.json', 'w'))"
+
+# ── The bundle ──────────────────────────────────────────────────────
+# On a Debian base, as the main bundle (whose Kubernetes init container copies the tree with cp; the Kubernetes backend
+# does not use a musl bundle yet).
+FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS bundle
+LABEL org.opencontainers.image.title="surogates-executor-bundle-musl" \
+      org.opencontainers.image.description="The Surogates tool executor, self-contained, for a session's own sandbox image built on musl" \
+      org.opencontainers.image.vendor="Invergent SA" \
+      org.opencontainers.image.source="https://github.com/invergent-ai/surogates"
+COPY --from=build /opt/surogates /opt/surogates

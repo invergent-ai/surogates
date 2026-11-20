@@ -69,7 +69,6 @@ from surogates.image_entry import is_control  # noqa: E402  (the one list, also 
 _DROPPED_CAPS = ("NET_RAW", "MKNOD", "SETFCAP")
 #: How long a failed pull answers the sessions that waited on it, without a pull of their own.
 _FAILED_PULL_HOLD_S = 60.0
-#: A log that says the bundle's programs could not run in the image (no glibc, another architecture).
 #: Docker's refusal of a second container under a name in use.
 _NAME_TAKEN_RE = re.compile(r"Conflict\. The container name .* is already in use", re.IGNORECASE)
 #: Rounds at rest a running container's executor may leave unanswered before the reaper stops it.
@@ -78,10 +77,21 @@ _UNANSWERED_ROUNDS = 5
 _TAKE_OVER_S = 30.0
 # How long a worker whose call met a retired executor waits for the reaper to remove its container.
 _RETIRED_WAIT_S = 20.0
-_CANNOT_RUN_RE = re.compile(r"/opt/surogates/bin/(python3|tini)\S*.*(no such file|not found|exec format error)",
-                            re.IGNORECASE)
+#: A log that says the bundle's programs could not run in the image (no glibc, another architecture).
+_CANNOT_RUN_RE = re.compile(r"/opt/surogates/bin/(python3|tini)\S*.*(no such file|not found|exec format error)|"
+                            r"Error relocating /opt/surogates/", re.IGNORECASE)
+#: What the main (glibc) bundle's start says in a musl image: no glibc loader, or gcompat's half of one.
+_MUSL_RE = re.compile(r"exec /opt/surogates/bin/python3 failed: No such file or directory|"
+                      r"Error relocating /opt/surogates/.*symbol not found", re.IGNORECASE)
 
 
+
+
+class _NeedsMusl(SandboxUnavailableError):
+    """The main bundle could not start in the image: its C library is musl."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason, classification="readiness")
 
 
 def _stopped_for(finished: str, seconds: float) -> bool:
@@ -194,8 +204,12 @@ class ImageSessions:
     _entries: dict
     _lock: asyncio.Lock
 
-    def _init_image_sessions(self, *, bundle_image: str, pull: str, pull_timeout: float, deployment: str = "") -> None:
+    def _init_image_sessions(self, *, bundle_image: str, pull: str, pull_timeout: float, deployment: str = "",
+                             bundle_image_musl: str = "") -> None:
         self._bundle_image = bundle_image
+        self._bundle_image_musl = bundle_image_musl
+        #: Images (by id) the main bundle could not start in: they get the musl bundle from then on.
+        self._musl_images: set[str] = set()
         self._deployment = deployment
         self._image_pull = pull
         self._image_pull_timeout = pull_timeout
@@ -278,7 +292,7 @@ class ImageSessions:
                 "A session's own image needs the executor bundle (sandbox.executor_bundle_image is not set)",
                 classification="config",
             )
-        for ref in (image, self._bundle_image):
+        for ref in (image, self._bundle_image, *([self._bundle_image_musl] if self._bundle_image_musl else [])):
             if not valid_reference(ref):
                 # session_image_of checked the session's; this is the last door before docker's argument list.
                 raise SandboxUnavailableError(f"Not an image reference: {ref}", classification="config")
@@ -315,9 +329,6 @@ class ImageSessions:
             "--name", "",  # filled per provision: container_name()
             "--label", "surogates.sandbox_image=1",
             "--label", f"surogates.session_image={image}",
-            "--label", f"surogates.executor_bundle={self._bundle_image}",
-            "--mount", f"type=image,source={self._bundle_image},target={BUNDLE_MOUNT},"
-                       f"image-subpath={BUNDLE_MOUNT.lstrip('/')}",
             # The image's own user runs the tools; nothing in it gains privileges (setuid files), sends raw packets
             # on the sandbox network, makes devices, or runs the image's own health check.
             "--security-opt", "no-new-privileges",
@@ -405,8 +416,6 @@ class ImageSessions:
             return None
 
     async def _provision_image(self, spec: SandboxSpec, sandbox_id: str, token: str, limits: list[str]) -> str:
-        from surogates.sandbox.docker import _IN_CONTAINER_PORT, _PUBLISH_HOST
-
         if spec.ssh_key_material:
             raise SandboxUnavailableError("SSH access is not offered in a session's own image", classification="config")
         if not spec.session_id:
@@ -435,9 +444,54 @@ class ImageSessions:
                            err.decode(errors="replace").strip()[:300])
             await self._set_aside(cid, spec.session_id)
 
+        bundles = [self._bundle_for(run)]
+        arch = self._versions[2] if self._versions else ""
+        if self._bundle_image_musl and bundles[0] != self._bundle_image_musl and arch in ("amd64", "x86_64"):
+            bundles.append(self._bundle_image_musl)  # the musl bundle is amd64 only
+        why = ""
+        for i, bundle in enumerate(bundles):
+            musl = bool(self._bundle_image_musl) and bundle == self._bundle_image_musl
+            if musl:
+                # Asked before every use (as the main bundle is in _image_run): a run never pulls an image mount.
+                try:
+                    await self._ensure_image(bundle, "executor bundle (musl)")
+                except SandboxUnavailableError as exc:
+                    raise SandboxUnavailableError(
+                        f"{exc.reason}{f' (wanted for {run.image}: {why})' if why else ''}",
+                        classification=exc.classification,
+                    ) from exc
+            try:
+                taken = await self._run_new(spec, sandbox_id, name, token, limits, run, deployment, bundle,
+                                            main_tried=i > 0)
+            except _NeedsMusl as exc:
+                if i + 1 == len(bundles):
+                    raise SandboxUnavailableError(exc.reason, classification="readiness") from exc
+                logger.info("The image %s looks like a musl image: the musl executor bundle is tried", run.image)
+                why = "the main executor bundle did not start in it"
+                continue
+            if musl:
+                # Its executor answered: a musl image (Alpine), the musl bundle for it from now on.
+                self._musl_images.add(run.image_id or run.image)
+            return taken
+        raise SandboxUnavailableError("no executor bundle", classification="config")  # unreachable
+
+    def _bundle_for(self, run: ImageRun) -> str:
+        if self._bundle_image_musl and (run.image_id or run.image) in self._musl_images:
+            return self._bundle_image_musl
+        return self._bundle_image
+
+    async def _run_new(self, spec: SandboxSpec, sandbox_id: str, name: str, token: str, limits: list[str],
+                       run: ImageRun, deployment: str, bundle: str, *, main_tried: bool = False) -> str:
+        """A new container of the session from *run*, with *bundle* mounted; its sandbox id once its executor
+        answers.  ``_NeedsMusl`` when the main bundle cannot start in it (a musl image)."""
+        from surogates.sandbox.docker import _IN_CONTAINER_PORT, _PUBLISH_HOST
+
         env = image_env(self._build_env(spec, sandbox_id, token, "ephemeral", None), run.env, run.workdir)
         run_args = list(run.run_args)
         run_args[run_args.index("--name") + 1] = name
+        run_args += ["--label", f"surogates.executor_bundle={bundle}",
+                     "--mount", f"type=image,source={bundle},target={BUNDLE_MOUNT},"
+                                f"image-subpath={BUNDLE_MOUNT.lstrip('/')}"]
         # Docker picks the host port, at every start: a fixed one could be taken while the container is stopped.
         args = ["run", "-d", "-p", f"{_PUBLISH_HOST}::{_IN_CONTAINER_PORT}"]
         if self._network:
@@ -500,11 +554,26 @@ class ImageSessions:
             # kept for the reaper.
             await asyncio.shield(self._discard_new(container_id, spec.session_id))
             if said:
-                hint = (" (the image has no glibc 2.28 or later, such as Alpine, or is of another architecture)"
-                        if _CANNOT_RUN_RE.search(said) else "")
-                raise SandboxUnavailableError(
-                    f"{exc}. The executor in {run.image} said: {said}{hint}", classification="readiness",
-                ) from exc
+                on_musl_bundle = bool(self._bundle_image_musl) and bundle == self._bundle_image_musl
+                musl = not on_musl_bundle and bool(_MUSL_RE.search(said))
+                hint = ""
+                if _CANNOT_RUN_RE.search(said):
+                    arch = self._versions[2] if self._versions else ""
+                    if on_musl_bundle and main_tried:
+                        hint = (" (neither executor bundle starts in it: it has no glibc 2.28 or later and no musl"
+                                " 1.2.2 or later (Alpine 3.13), or is of another architecture)")
+                    elif on_musl_bundle:
+                        hint = " (the musl executor bundle does not start in it)"
+                    elif musl and arch not in ("x86_64", "amd64"):
+                        hint = f" (a musl image, such as Alpine: no musl executor bundle for {arch})"
+                    elif musl and not self._bundle_image_musl:
+                        hint = " (a musl image, such as Alpine: set sandbox.executor_bundle_image_musl)"
+                    else:
+                        hint = " (the image has no glibc 2.28 or later, or is of another architecture)"
+                reason = f"{exc}. The executor in {run.image} said: {said}{hint}"
+                if musl:
+                    raise _NeedsMusl(reason) from exc
+                raise SandboxUnavailableError(reason, classification="readiness") from exc
             raise
 
         self._register(spec, sandbox_id, container_id, host_port, token, created=True)
@@ -630,9 +699,10 @@ class ImageSessions:
             code, out, _ = await self._docker.run(
                 ["inspect", "--format", '{{index .Config.Labels "surogates.executor_bundle"}}', cid])
             made_with = out.decode(errors="replace").strip()
-            if code == 0 and made_with and made_with != self._bundle_image:
+            mine = {self._bundle_image, *([self._bundle_image_musl] if self._bundle_image_musl else [])}
+            if code == 0 and made_with and made_with not in mine:
                 logger.warning("The container %s runs the executor of %s, not this worker's %s: a new bundle "
-                               "applies to new containers only", cid, made_with, self._bundle_image)
+                               "applies to new containers only", cid, made_with, " / ".join(sorted(mine)))
         task = asyncio.ensure_future(check())
         self._checks_running = getattr(self, "_checks_running", set())
         self._checks_running.add(task)
