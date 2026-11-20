@@ -533,3 +533,24 @@ async def test_one_stop_a_pod_when_a_pause_asks_twice(k8s, monkeypatch):
     await k8s.stop_image_of_session(SESSION)
     await k8s.stop_image_of_session(SESSION)
     assert asked == ["/stop"]
+
+
+async def test_a_later_stop_is_asked_again(k8s, monkeypatch):
+    import httpx
+
+    from surogates.sandbox import kubernetes_image
+
+    asked = []
+    real = httpx.AsyncClient
+
+    def client(*a, **kw):
+        def answer(request):
+            asked.append(request.url.path)
+            return httpx.Response(200, json={"killed": 0})
+        return real(transport=httpx.MockTransport(answer), timeout=5.0)
+    monkeypatch.setattr(httpx, "AsyncClient", client)
+    monkeypatch.setattr(kubernetes_image, "_STOP_DEDUP_S", -1.0)
+    k8s._api = _api(_pod(), _pod())
+    await k8s.stop_image_of_session(SESSION)
+    await k8s.stop_image_of_session(SESSION)
+    assert asked == ["/stop", "/stop"]

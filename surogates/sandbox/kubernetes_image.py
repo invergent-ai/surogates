@@ -70,6 +70,8 @@ _NEVER_STARTS = ("InvalidImageName", "ErrImageNeverPull", "CreateContainerConfig
 _PULL_REFUSED = re.compile(r'manifest unknown|failed to resolve reference "[^"]*": [^\n]*: not found\s*$|'
                            r"unauthorized|access denied|pull access denied", re.IGNORECASE)
 _LABEL_VALUE_RE = re.compile(r"[A-Za-z0-9]([A-Za-z0-9_.-]{0,61}[A-Za-z0-9])?")
+#: A Stop that ended this long ago or less is not asked again (a pause asks twice in a row).
+_STOP_DEDUP_S = 5.0
 #: How long a provision waits for the reaper to delete a pod whose executor it retired, before taking it back.
 _RETIRED_WAIT_S = 20.0
 #: How long a ready pod's executor may not answer before the provision gives up on it.
@@ -470,19 +472,25 @@ class ImagePods:
         """A Stop of the session in pod *name*: its commands end (the executor's ``/stop``), its files stay.  Only a
         pod whose executor cannot be reached at all, twice, or that refuses this deployment's token, is deleted; a
         slow or odd answer keeps it (logged)."""
-        import httpx
-
         pod = await self._read_pod(api, name)
         if pod is None or self._terminating(pod):
             return
-        # One Stop a pod: a pause asks twice in a row (this worker's sandbox, then the session's pod anywhere).
+        # One Stop for a pause's two asks in a row (this worker's sandbox, then the session's pod anywhere): one that
+        # ended a moment ago is not asked again; any later Stop is.
         stops = self.__dict__.setdefault("_recent_stops", {})
         now = time.monotonic()
-        for uid in [u for u, t in stops.items() if now - t > 60]:
+        for uid in [u for u, t in stops.items() if now - t > _STOP_DEDUP_S]:
             stops.pop(uid, None)
         if self._uid(pod) in stops:
             return
-        stops[self._uid(pod)] = now
+        try:
+            await self._stop_or_delete(api, name, pod)
+        finally:
+            stops[self._uid(pod)] = time.monotonic()
+
+    async def _stop_or_delete(self, api: Any, name: str, pod: Any) -> None:
+        import httpx
+
         session = ((pod.metadata.annotations or {}) if pod.metadata else {}).get("surogates.ai/session") or ""
         ip = pod.status.pod_ip if pod.status else ""
         refused = False
