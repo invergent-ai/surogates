@@ -74,7 +74,8 @@ RUN (/opt/surogates/bin/python3 -m compileall -qq -j 4 --invalidation-mode unche
     && /opt/surogates/bin/python3 -I -c "import json, platform; json.dump({'python': platform.python_version(), 'libc': 'musl', 'arch': platform.machine()}, open('/opt/surogates/bundle.json', 'w'))"
 
 # ── The bundle ──────────────────────────────────────────────────────
-# On a Debian base (the Kubernetes init container's cp), as the main bundle.
+# On a Debian base, as the main bundle (whose Kubernetes init container copies the tree with cp; the Kubernetes backend
+# does not use a musl bundle yet).
 FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS bundle
 LABEL org.opencontainers.image.title="surogates-executor-bundle-musl" \
       org.opencontainers.image.description="The Surogates tool executor, self-contained, for a session's own sandbox image built on musl" \

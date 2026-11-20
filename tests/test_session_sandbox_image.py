@@ -1732,3 +1732,14 @@ async def test_a_musl_bundle_missing_is_asked_for_again_at_the_next_provision():
     docker.logs = b""
     sid = await backend.provision(SandboxSpec(session_id="r2", session_image=TASK_IMAGE))
     assert backend.created(sid) and backend._musl_images
+
+
+async def test_on_an_arm64_host_a_musl_image_is_told_there_is_no_musl_bundle_for_it():
+    docker = ImageDocker(images={TASK_IMAGE: _image(arch="arm64"), BUNDLE: _image(arch="arm64"),
+                                 MUSL_BUNDLE: _image()}, arch="aarch64")
+    docker.exited = True
+    docker.logs = b"[FATAL tini (7)] exec /opt/surogates/bin/python3 failed: No such file or directory\n"
+    backend = _docker_backend(docker, _never_ready(), executor_bundle_image_musl=MUSL_BUNDLE)
+    with pytest.raises(SandboxUnavailableError, match="no musl executor bundle for arm64"):
+        await backend.provision(SandboxSpec(session_id="r", session_image=TASK_IMAGE))
+    assert sum(1 for c in docker.calls if c[:2] == ["run", "-d"]) == 1
