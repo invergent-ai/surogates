@@ -295,6 +295,28 @@ class PoolEntry:
         )
 
 
+def call_result_text(result: Any) -> str:
+    """What an MCP ``tools/call`` result says, as the text the model reads: its text blocks, a placeholder for each
+    binary one, and, where no block has text, its structured content as JSON.
+
+    A tool may answer in structured content only (MCP 2025-06-18 ``structuredContent``, e.g. a FastMCP tool that
+    returns a dict): read from its text blocks alone, the answer was empty.  Where a text block mirrors it (as the
+    spec asks), the text is the answer, as before, not sent twice.  An error result is read the same way.
+    """
+    parts: list[str] = []
+    texts = 0
+    for block in (getattr(result, "content", None) or []):
+        if hasattr(block, "text"):
+            parts.append(block.text)
+            texts += bool(block.text)
+        elif hasattr(block, "data") and not getattr(result, "isError", False):
+            parts.append(f"[binary: {getattr(block, 'mimeType', 'unknown')}]")
+    structured = getattr(result, "structuredContent", None)
+    if not texts and structured is not None:
+        parts.insert(0, json.dumps(structured, ensure_ascii=False, default=str))
+    return ("" if getattr(result, "isError", False) else "\n").join(parts) if parts else ""
+
+
 class ConnectionPool:
     """Manages tenant-scoped MCP server connections.
 
@@ -1387,26 +1409,14 @@ class ConnectionPool:
                     future.cancel()
                     raise
 
+            text = call_result_text(result)
             if result.isError:
-                error_text = ""
-                for block in (result.content or []):
-                    if hasattr(block, "text"):
-                        error_text += block.text
                 return json.dumps({
                     "error": _sanitize_error(
-                        error_text or "MCP tool returned an error",
+                        text or "MCP tool returned an error",
                     ),
                 })
-
-            parts: list[str] = []
-            for block in (result.content or []):
-                if hasattr(block, "text"):
-                    parts.append(block.text)
-                elif hasattr(block, "data"):
-                    parts.append(f"[binary: {getattr(block, 'mimeType', 'unknown')}]")
-
-            output = "\n".join(parts)
-            return _sanitize_error(output)
+            return _sanitize_error(text)
 
         except asyncio.TimeoutError:
             return json.dumps({
