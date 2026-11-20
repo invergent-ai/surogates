@@ -76,6 +76,12 @@ STATE_TOOLS_WHY: dict[str, str] = {
     "draft_process_save": "saves a process draft",
     "draft_process_edit": "edits a process draft",
     "draft_dry_run": "runs a Keel draft (effect unclear); included",
+    "post_to_channel": "posts a message into a connected Slack channel or DM",
+    "request_folder_access": "grants the chat read access to a folder on the user's computer",
+    "copy_files": "copies files to or between folders on the user's computer, outside the chat's folder",
+    "move_files": "moves files on the user's computer, outside the chat's folder",
+    "move_to_trash": "moves files on the user's computer to the Recycle Bin",
+    "put_back": "replaces a file on the user's computer with the chat's edited copy",
 }
 STATE_TOOLS = frozenset(STATE_TOOLS_WHY)
 # Every other builtin, reviewed as a read or as acting only inside the chat, and left real.
