@@ -764,7 +764,7 @@ def create_app(
             name = payload.get("name") or ""
             args = payload.get("args") or {}
             timeout = float(payload.get("timeout") or default_timeout)
-        except Exception:
+        except BaseException:
             uncount()
             raise
 
@@ -781,7 +781,11 @@ def create_app(
                     handed = json.loads(result)
                 except ValueError:
                     handed = {}
-                uncount(used=bool(handed.get("events") or handed.get("lines")))
+                uncount(used=bool(isinstance(handed, dict) and (handed.get("events") or handed.get("lines"))))
+                from surogates.tools.utils.process_registry import process_registry
+
+                if process_registry.completion_queue.qsize() == 0:
+                    activity["queued_since"] = None  # the next end left undrained counts from when it is seen
             return Response(content=result, media_type="application/json")
 
         if not name:

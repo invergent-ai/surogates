@@ -248,11 +248,10 @@ IMAGE_REMADE = (
 )
 
 
-async def _worked_in_a_sandbox_before(store: Any, session: Any, root: str, before: int | None) -> bool:
-    """Whether *session*, or the root it shares its sandbox with, had a sandbox tool's result before the call
-    *before*: a call of the same step, run beside it, has none yet, and is no earlier work."""
-    from uuid import UUID
-
+async def _worked_in_a_sandbox_before(store: Any, session: Any, before: int | None) -> bool:
+    """Whether *session* had a sandbox tool's result before the call *before*: a call of the same step, run beside
+    it, has none yet, and is no earlier work.  Each session sharing a sandbox (the root, its sub-agents) is asked
+    for itself."""
     from surogates.tools.router import TOOL_LOCATIONS, ToolLocation
 
     def in_sandbox(event: Any) -> bool:
@@ -260,12 +259,10 @@ async def _worked_in_a_sandbox_before(store: Any, session: Any, root: str, befor
         return not name.startswith("mcp__") and TOOL_LOCATIONS.get(name, ToolLocation.SANDBOX) == ToolLocation.SANDBOX
 
     try:
-        ids = {session.id} | ({UUID(root)} if root != str(session.id) else set())
-        for sid in ids:
-            until = before - 1 if sid == session.id and before is not None else None
-            events = await store.get_events(sid, types=[EventType.TOOL_RESULT], until=until)
-            if any(in_sandbox(e) for e in events):
-                return True
+        until = before - 1 if before is not None else None
+        events = await store.get_events(session.id, types=[EventType.TOOL_RESULT], until=until)
+        if any(in_sandbox(e) for e in events):
+            return True
     except Exception:
         logger.debug("Could not tell whether session %s worked in a sandbox before", session.id, exc_info=True)
     return False
@@ -1846,8 +1843,8 @@ async def _run_single_tool(
 
     if isinstance(sandbox_pool, SandboxPool) and (session.config or {}).get(IMAGE_KEY):
         from surogates.sandbox.pool import sandbox_session_key
-        if sandbox_pool.image_new(sandbox_session_key(session)) and await _worked_in_a_sandbox_before(
-            store, session, sandbox_session_key(session), _call_event_id,
+        if sandbox_pool.image_new(sandbox_session_key(session), str(session.id)) and await _worked_in_a_sandbox_before(
+            store, session, _call_event_id,
         ):
             result_content = _noted(result_content, IMAGE_REMADE)
     if replay_of is not None and device_call is not None and await device_call.diverged():

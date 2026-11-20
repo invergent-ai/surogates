@@ -682,7 +682,7 @@ class DockerSandbox(ImageSessions):
                         return
                     if response.status_code == 410:
                         # Retired for its reaper (a session's own image): never ready again as it is.
-                        raise SandboxUnavailableError("The sandbox's executor is retired", classification="readiness")
+                        raise SandboxUnavailableError("The sandbox's executor is retired", classification="retired")
                     last_detail = f"last status {response.status_code}"
                 except SandboxUnavailableError:
                     raise

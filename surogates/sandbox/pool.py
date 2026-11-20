@@ -74,7 +74,10 @@ class SandboxPool:
         self._fresh: set[str] = set()
         # Sessions in their own image whose container the backend has just made new from the image, not yet asked
         # about (``image_new``): work the session did in a container before is not in it.
-        self._image_new: set[str] = set()
+        # Session-image keys: how many times this pool made the key's container new from its image, and, per
+        # session sharing it (the root, its sub-agents), the last of those it was told about.
+        self._image_made: dict[str, int] = {}
+        self._image_told: dict[str, dict[str, int]] = {}
         # session_id -> when its sandbox was last asked for or a call in it ended (monotonic), and the calls in it now.
         self._used: dict[str, float] = {}
         self._busy: dict[str, int] = {}
@@ -141,9 +144,7 @@ class SandboxPool:
                     self._fresh.add(session_id)
                 created = getattr(self._backend, "created", None)
                 if spec.session_image and created is not None and created(sandbox_id):
-                    self._image_new.add(session_id)
-                else:
-                    self._image_new.discard(session_id)
+                    self._image_made[session_id] = self._image_made.get(session_id, 0) + 1
             logger.info(
                 "Session %s mapped to sandbox %s", session_id, sandbox_id
             )
@@ -207,13 +208,21 @@ class SandboxPool:
         spec = self._specs.get(session_id)
         return spec is not None and "PROJECT_DIR" in spec.env
 
-    def image_new(self, session_id: str) -> bool:
-        """Whether *session_id*'s own-image container was just made new from its image (not taken over, not started
-        again): whatever the session did in a container before is not in it.  Asked once."""
-        if session_id in self._image_new:
-            self._image_new.discard(session_id)
-            return True
-        return False
+    def image_new(self, session_id: str, asking: str | None = None) -> bool:
+        """Whether the own-image container of the sandbox key *session_id* was made new from its image (not taken
+        over, not started again) since the session *asking* (default: the key's own) last asked: whatever that
+        session did in a container before is not in it.  Each session sharing the key asks for itself."""
+        made = self._image_made.get(session_id, 0)
+        told = self._image_told.setdefault(session_id, {}) if made else {}
+        who = asking or session_id
+        if not made or told.get(who, 0) >= made:
+            return False
+        told[who] = made
+        return True
+
+    def _drop_image_marks(self, key: str) -> None:
+        self._image_made.pop(key, None)
+        self._image_told.pop(key, None)
 
     async def release_for_session(self, session_id: str, *, only: str | None = None) -> str | None:
         """Detach the sandbox from *session_id*, returning its id.
@@ -234,7 +243,7 @@ class SandboxPool:
             self._specs.pop(session_id, None)
             self._fresh.discard(session_id)
             self._used.pop(session_id, None)
-            self._image_new.discard(session_id)
+            self._drop_image_marks(session_id)
             return self._mapping.pop(session_id, None)
 
     async def reap_at_rest(
@@ -333,7 +342,7 @@ class SandboxPool:
             self._mapping.pop(key, None)
             self._specs.pop(key, None)
             self._used.pop(key, None)
-            self._image_new.discard(key)
+            self._drop_image_marks(key)
 
     def _in_its_image(self, key: str) -> bool:
         spec = self._specs.get(key)

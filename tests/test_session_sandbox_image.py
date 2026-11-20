@@ -272,6 +272,8 @@ class ImageDocker:
             name, c = self._by_id(args[-1])
             if c is None and args[-1] in self.named:
                 name = args[-1]
+            if "-f" not in args and c is not None and c[1] == "running":
+                return 1, b"", b"cannot remove container: container is running"
             if name is not None:
                 self.named.pop(name, None)
             return 0, b"", b""
@@ -288,7 +290,12 @@ class ImageDocker:
                 return 1, b"", b"No such object"
             port = self.ports.get(c[0], 33000 + list(self.named).index(name))
             ports = {"8071/tcp": [{"HostIp": "127.0.0.1", "HostPort": str(port)}]} if c[1] == "running" else {}
-            return 0, f"{'true' if c[1] == 'running' else 'false'}\n{json.dumps(ports)}\n".encode(), b""
+            return 0, f"/{name}\n{'true' if c[1] == 'running' else 'false'}\n{json.dumps(ports)}\n".encode(), b""
+        if args[:1] == ["inspect"] and "{{.Name}} {{.State.Running}}" in args:
+            name, c = self._by_id(args[-1])
+            if c is None:
+                return 1, b"", b"No such object"
+            return 0, f"/{name} {'true' if c[1] == 'running' else 'false'}\n".encode(), b""
         if args[:1] == ["rename"]:
             name, c = self._by_id(args[1])
             if c is not None:
@@ -934,7 +941,8 @@ def _listing(docker: ImageDocker, rows: dict[str, tuple[str, str]]):
         if args[:1] == ["inspect"] and "NetworkSettings.Ports" in joined:
             docker.calls.append(args)
             running = rows[args[-1]][0] == "running"
-            return 0, (b"true\n" if running else b"false\n") + b'{"8071/tcp":[{"HostIp":"127.0.0.1","HostPort":"33999"}]}\n', b""
+            return 0, (f"/surogates-sbx-{args[-1]}\n".encode() + (b"true\n" if running else b"false\n")
+                       + b'{"8071/tcp":[{"HostIp":"127.0.0.1","HostPort":"33999"}]}\n'), b""
         return await real(args)
     docker.run = run
 
@@ -951,9 +959,10 @@ async def test_the_reaper_removes_only_containers_at_rest_and_idle_by_their_own_
     async def at_rest(session):
         return True
     assert await backend.reap_images(at_rest, idle_seconds=300) == [("s", "idle"), ("s", "stopped-long")]
-    rms = [c for c in docker.calls if c[:1] == ["rm"]]
-    # A retired running one with -f; a stopped one without, so one started again meanwhile is not taken.
-    assert rms == [["rm", "-f", "-v", "idle"], ["rm", "-v", "stopped-long"]]
+    ends = [c for c in docker.calls if c[:1] in (["rm"], ["stop"])]
+    # A retired running one is stopped, then removed without -f like a stopped one: one started again meanwhile
+    # (a worker that met its 410 and found it kept) is not taken.
+    assert ends == [["stop", "-t", "2", "idle"], ["rm", "-v", "idle"], ["rm", "-v", "stopped-long"]]
     assert retire.asked == [300]
     # Only this deployment's, whatever network they are on.
     ps = next(c for c in docker.calls if c[:2] == ["ps", "-a"])
@@ -1052,6 +1061,12 @@ async def test_a_new_container_is_reported_once():
     pool = SandboxPool(Backend())
     await pool.ensure("img", SandboxSpec(session_id="r", session_image=TASK_IMAGE))
     assert pool.image_new("img") and not pool.image_new("img")
+    # Each session sharing the key is asked for itself: a sub-agent's call never uses up the root's.
+    assert pool.image_new("img", "sub-1") and not pool.image_new("img", "sub-1") and not pool.image_new("img", "img")
+    pool._mapping.pop("img")
+    pool._used.pop("img", None)
+    await pool.ensure("img", SandboxSpec(session_id="r", session_image=TASK_IMAGE))
+    assert pool.image_new("img", "sub-1") and pool.image_new("img")
 
 
 async def test_the_session_is_told_only_when_it_had_worked_in_a_container_before():
@@ -1063,10 +1078,10 @@ async def test_the_session_is_told_only_when_it_had_worked_in_a_container_before
         return [e for e in calls if until is None or e.id <= until]
     store = SimpleNamespace(get_events=get_events)
     session = SimpleNamespace(id=uuid4())
-    assert await tool_exec._worked_in_a_sandbox_before(store, session, str(session.id), 9)
-    assert not await tool_exec._worked_in_a_sandbox_before(store, session, str(session.id), 6)
+    assert await tool_exec._worked_in_a_sandbox_before(store, session, 9)
+    assert not await tool_exec._worked_in_a_sandbox_before(store, session, 6)
     calls[:] = [SimpleNamespace(id=3, data={"name": "mcp__crm__search"})]
-    assert not await tool_exec._worked_in_a_sandbox_before(store, session, str(session.id), 9)
+    assert not await tool_exec._worked_in_a_sandbox_before(store, session, 9)
 
 
 def test_the_entry_clears_the_images_control_names_before_the_executor_reads_them():
@@ -1201,11 +1216,15 @@ async def test_a_call_finds_the_container_where_it_is_now():
     assert backend._entries[sid].host_port == 33777 and await backend.status(sid) == SandboxStatus.RUNNING
 
 
-async def test_a_retired_executor_that_was_not_removed_is_started_fresh_and_the_call_runs():
+async def test_a_retired_executor_that_was_not_removed_is_started_fresh_and_the_call_runs(monkeypatch):
+    from surogates.sandbox import docker_image
+
+    monkeypatch.setattr(docker_image, "_RETIRED_WAIT_S", 0.05)
     docker = ImageDocker(images={TASK_IMAGE: _image(), BUNDLE: _image()})
     backend = _docker_backend(docker)
     sid = await backend.provision(SandboxSpec(session_id="root-1", session_image=TASK_IMAGE))
-    answers = [SandboxUnavailableError("The sandbox at 127.0.0.1:33000 was retired at rest"), '{"ok": true}']
+    answers = [SandboxUnavailableError("The sandbox at 127.0.0.1:33000 was retired at rest", classification="retired"),
+               '{"ok": true}']
 
     async def fake_execute(**kw):
         answer = answers.pop(0)
@@ -1244,3 +1263,63 @@ def test_a_drain_that_hands_out_an_end_counts_as_use(tmp_path):
                       return_value='{"events": [{"session_id": "proc_1"}], "known": [], "lines": {}}'):
         client.post("/execute", json={"name": "_background", "args": {}}, headers=auth)
     assert idle_after_empty >= 1 and client.get("/activity", headers=auth).json()["idle_seconds"] < 1
+
+
+async def test_a_call_that_meets_a_retired_executor_whose_container_the_reaper_removes_fails_once(monkeypatch):
+    from surogates.sandbox import docker_image
+
+    monkeypatch.setattr(docker_image, "_RETIRED_WAIT_S", 2.0)
+    docker = ImageDocker(images={TASK_IMAGE: _image(), BUNDLE: _image()})
+    backend = _docker_backend(docker)
+    sid = await backend.provision(SandboxSpec(session_id="root-1", session_image=TASK_IMAGE))
+
+    async def fake_execute(**kw):
+        docker.named.pop("surogates-sbx-root-1")  # the reaper's stop and rm
+        raise SandboxUnavailableError("The sandbox at 127.0.0.1:33000 was retired at rest", classification="retired")
+    backend._client.execute = fake_execute
+    with pytest.raises(SandboxUnavailableError, match="removed at rest"):
+        await backend.execute(sid, "read_file", "{}")
+    from surogates.sandbox.base import SandboxStatus
+
+    assert not any(c[:1] == ["start"] for c in docker.calls)
+    assert await backend.status(sid) != SandboxStatus.RUNNING
+
+
+async def test_a_kill_into_a_stopped_container_never_starts_it():
+    docker = ImageDocker(images={TASK_IMAGE: _image(), BUNDLE: _image()})
+    backend = _docker_backend(docker)
+    sid = await backend.provision(SandboxSpec(session_id="root-1", session_image=TASK_IMAGE))
+    docker.named["surogates-sbx-root-1"][1] = "exited"
+    answer = json.loads(await backend.execute(sid, "process", json.dumps({"action": "kill", "session_id": "proc_1"})))
+    assert answer["status"] == "already_exited"
+    assert not any(c[:1] == ["start"] for c in docker.calls)
+
+
+async def test_a_container_set_aside_is_never_worked_in_again():
+    """Another worker set it aside (renamed): this worker's entry for it reads as gone, and the next ensure makes or
+    takes the session's container by its name."""
+    docker = ImageDocker(images={TASK_IMAGE: _image(), BUNDLE: _image()})
+    backend = _docker_backend(docker)
+    sid = await backend.provision(SandboxSpec(session_id="root-1", session_image=TASK_IMAGE))
+    docker.named["surogates-sbx-root-1-aside-1-abc"] = docker.named.pop("surogates-sbx-root-1")
+    assert await backend.gone(sid)
+    with pytest.raises(SandboxUnavailableError, match="gone"):
+        await backend.execute(sid, "read_file", "{}")
+    assert not any(c[:1] == ["start"] for c in docker.calls)
+
+
+async def test_a_container_this_provision_started_again_whose_executor_never_comes_is_set_aside():
+    docker = ImageDocker(images={TASK_IMAGE: _image(), BUNDLE: _image()})
+    docker.named["surogates-sbx-r"] = ["cid-old", "exited", "r", "sbx-old"]
+    calls = {"n": 0}
+
+    def never_then_ready(request):
+        # The old container's executor never answers; the new one's does.
+        calls["n"] += 1
+        return httpx.Response(200 if "33001" in str(request.url) else 503)
+    backend = _docker_backend(docker, httpx.MockTransport(never_then_ready))
+    backend._ready_timeout = 1
+    sid = await backend.provision(SandboxSpec(session_id="r", session_image=TASK_IMAGE))
+    assert ["start", "cid-old"] in docker.calls
+    assert any(c[:2] == ["rename", "cid-old"] for c in docker.calls)
+    assert backend.created(sid)
