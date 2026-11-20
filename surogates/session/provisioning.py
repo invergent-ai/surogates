@@ -62,6 +62,13 @@ _WORKSPACE_SHARING_FIELDS = (
     "workspace_path",
 )
 
+# How the session's model is asked (``llm_call.sampling_kwargs``): a child on
+# the same model is asked the same way, unless the code making it sets its
+# own.  Thinking switched off for a session stays off in its sub-agents.
+# Not for a child on another model: a chat-template switch or an OpenAI
+# field one endpoint takes, another refuses.
+_SAMPLING_FIELDS = ("enable_thinking", "reasoning_effort", "temperature", "max_tokens")
+
 # Boundary fields a child session inherits verbatim from its parent so it
 # lands in the same partitioned workspace/memory as the rest of the thread,
 # and inside the same simulation run.
@@ -245,6 +252,18 @@ async def create_child_session(
 
     *context* is what a schedule captured when it was made; without it the
     child takes the parent's (see :mod:`surogates.session.execution_context`).
+
+    A child on its parent's model and tier is asked as the parent is: the
+    parent's ``enable_thinking``, ``reasoning_effort``, ``temperature`` and
+    ``max_tokens``, unless *config* sets them (a ``None`` there does not opt
+    out).  A child on another model or tier (an agent type's model, a
+    scheduled run, which keeps no package) takes none of them: a
+    chat-template switch or an OpenAI field one endpoint takes, another
+    refuses.  A project's threads (:func:`create_thread_session`) run on the
+    project's tier and take none either, nor do the helpers of a project's
+    master or of a thread (no child inherits ``workstream_tier``).  Its tools are the caller's to
+    narrow: ``delegate.child_tool_policy`` adds the parent's exclusions, but
+    not under an agent type's own tool list; a scheduled run gets none.
     """
     merged_config = dict(config or {})
     # A child runs where its root runs: on the same computer, when it names one.
@@ -322,6 +341,15 @@ async def create_child_session(
     else:
         merged_config["sandbox_root_session_id"] = sandbox_session_key(parent)
 
+    child_model = model if model is not None else parent.model
+    # The same model row is the same endpoint only on the same tier: the worker picks the model by the session's
+    # package and its project's tier at wake (``session_llm``), and a scheduled run keeps no package.
+    same_tier = all(merged_config.get(field) == parent_config.get(field) for field in ("entitlements", "workstream_tier"))
+    if child_model == parent.model and same_tier:
+        for field in _SAMPLING_FIELDS:
+            if parent_config.get(field) is not None and merged_config.get(field) is None:
+                merged_config[field] = parent_config[field]
+
     effective_service_account_id = (
         service_account_id
         if service_account_id is not None
@@ -341,7 +369,7 @@ async def create_child_session(
         org_id=parent.org_id,
         agent_id=parent.agent_id,
         channel=channel,
-        model=model if model is not None else parent.model,
+        model=child_model,
         config=merged_config,
         parent_id=parent.id,
         service_account_id=effective_service_account_id,
