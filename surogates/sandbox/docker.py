@@ -29,6 +29,7 @@ from surogates.sandbox.base import (
     SandboxStatus,
     SandboxUnavailableError,
 )
+from surogates.sandbox.docker_image import ImageSessions
 
 logger = logging.getLogger(__name__)
 
@@ -160,7 +161,14 @@ class _RealDocker:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await proc.communicate()
+        try:
+            stdout, stderr = await proc.communicate()
+        except BaseException:
+            # A call given up on (a pull past its time, a provision cancelled) leaves no docker client running on.
+            if proc.returncode is None:
+                proc.kill()
+                await asyncio.shield(proc.wait())
+            raise
         return proc.returncode or 0, stdout, stderr
 
 
@@ -172,10 +180,14 @@ class _Entry:
     token: str
     spec: SandboxSpec
     status: SandboxStatus = SandboxStatus.RUNNING
+    #: In a session's own image (``docker_image``): stopped, never removed, by a destroy; and whether this provision
+    #: made it new (not taken over or started again).
+    image: bool = False
+    created: bool = False
 
 
-class DockerSandbox:
-    """Sandbox backend that runs one Docker container per root session."""
+class DockerSandbox(ImageSessions):
+    """Sandbox backend that runs one Docker container per root session (``docker_image``: in a session's own image)."""
 
     def __init__(
         self,
@@ -188,10 +200,14 @@ class DockerSandbox:
         storage_settings: Any = None,
         pids_limit: int = DEFAULT_PIDS_LIMIT,
         token_env: str = "plain",
+        executor_bundle_image: str = "",
+        image_pull: str = "missing",
+        image_pull_timeout: float = 900,
         docker: _DockerDriver | None = None,
         httpx_transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self._image = image
+        self._init_image_sessions(bundle_image=executor_bundle_image, pull=image_pull, pull_timeout=image_pull_timeout)
         self._port_base = executor_port_base
         self._ready_timeout = ready_timeout
         self._network = network
@@ -224,6 +240,9 @@ class DockerSandbox:
             storage_settings=storage_settings,
             pids_limit=sandbox.docker_pids_limit,
             token_env=sandbox.executor_token_env,
+            executor_bundle_image=sandbox.executor_bundle_image,
+            image_pull=sandbox.docker_image_pull,
+            image_pull_timeout=sandbox.docker_image_pull_timeout,
         )
 
     # ------------------------------------------------------------------
@@ -253,6 +272,9 @@ class DockerSandbox:
         if host.answered:
             self._host = host
         limits = limit_args(spec, pids_limit=self._pids_limit, host=host)
+        if spec.session_image:
+            # A session's own image: one container per session, the executor bundle mounted in it (docker_image).
+            return await self._provision_image(spec, sandbox_id, token, limits)
 
         # Reap stale containers left by a previous worker for this root
         # session before claiming a new one: a live worker's are its own.
@@ -406,6 +428,10 @@ class DockerSandbox:
     async def destroy(self, sandbox_id: str) -> None:
         entry = self._entries.pop(sandbox_id, None)
         if entry is None:
+            return
+        if entry.image:
+            # The container is the session's workspace: stopped, kept for its next call; the reaper removes it.
+            await self.stop_image_sandbox(entry)
             return
         await self._docker.run(["stop", entry.container_id])
         await self._docker.run(["rm", entry.container_id])
@@ -624,8 +650,11 @@ class DockerSandbox:
             return None
         return workspace
 
-    async def _wait_ready(self, host_port: int) -> None:
+    async def _wait_ready(self, host_port: int, container_id: str | None = None) -> None:
+        """Until the executor on *host_port* answers; with *container_id* (a session's own image), told at once when
+        its container ends instead of at the timeout."""
         deadline = asyncio.get_running_loop().time() + self._ready_timeout
+        looked = 0
         # Track the last observed reason across BOTH paths: a transport
         # exception (daemon not bound yet) and a non-200 response (daemon up
         # but unhealthy, e.g. an image whose /healthz still requires a FUSE
@@ -645,6 +674,11 @@ class DockerSandbox:
                     last_detail = f"last status {response.status_code}"
                 except Exception as exc:  # noqa: BLE001
                     last_detail = type(exc).__name__
+                looked += 1
+                if container_id is not None and looked % 4 == 0 and not await self._running(container_id):
+                    raise SandboxUnavailableError(
+                        "The sandbox's container stopped before its executor became ready", classification="readiness",
+                    )
                 await asyncio.sleep(0.5)
         raise SandboxUnavailableError(
             f"Sandbox did not become ready within {self._ready_timeout}s "

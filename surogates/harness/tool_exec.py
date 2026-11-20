@@ -206,6 +206,19 @@ async def _build_session_sandbox_spec(
     from surogates.simulation.side_effects import is_simulated
 
     sandbox_spec.simulated = is_simulated(session.config)
+    # A session's own image: held to the operator's list again here, where the sandbox is made, whatever path its
+    # config came by.  A sub-agent carries its root's (create_child_session), so a reprovision under it runs the same.
+    from surogates.sandbox.session_image import SessionImageRefused, names_image, session_image_of
+
+    if names_image(session.config):
+        from surogates.config import load_settings
+
+        try:
+            image = session_image_of(session.config, load_settings().sandbox)
+        except SessionImageRefused as exc:
+            raise SandboxUnavailableError(str(exc), classification="config") from None
+        if image is not None:
+            sandbox_spec.session_image, sandbox_spec.image_workdir = image.image, image.workdir
     await _apply_ssh_access(session, tenant, sandbox_spec, credential_vault)
     return sandbox_spec
 
@@ -225,6 +238,35 @@ COPY_REMADE_HANDED_ON = (
     "Changes it made after that are not in it. "
     "Check the files before making any of those changes again.]"
 )
+
+
+#: The first tool result after a session's own-image container was made again from its image (its container was
+#: reaped at rest, or died): what the session did in the container before is not in the new one.
+IMAGE_REMADE = (
+    "[This session's container was started again from its image. Changes made in the container before are not "
+    "in it. Check the files before relying on earlier work.]"
+)
+
+
+async def _worked_in_a_sandbox_before(store: Any, session: Any, root: str, before: int | None) -> bool:
+    """Whether *session*, or the root it shares its sandbox with, called a sandbox tool before the call *before*."""
+    from uuid import UUID
+
+    from surogates.tools.router import TOOL_LOCATIONS, ToolLocation
+
+    def in_sandbox(event: Any) -> bool:
+        name = str((event.data or {}).get("name") or "")
+        return not name.startswith("mcp__") and TOOL_LOCATIONS.get(name, ToolLocation.SANDBOX) == ToolLocation.SANDBOX
+
+    try:
+        ids = {session.id} | ({UUID(root)} if root != str(session.id) else set())
+        for sid in ids:
+            events = await store.get_events(sid, types=[EventType.TOOL_CALL])
+            if any(in_sandbox(e) and (sid != session.id or before is None or e.id < before) for e in events):
+                return True
+    except Exception:
+        logger.debug("Could not tell whether session %s worked in a sandbox before", session.id, exc_info=True)
+    return False
 
 
 def _noted(content: str, note: str) -> str:
@@ -1780,6 +1822,18 @@ async def _run_single_tool(
 
             line = COPY_REMADE_HANDED_ON if await took_its_own(sandbox_pool, sandbox_session_key(session)) else COPY_REMADE
             result_content = f"{line}\n\n{result_content}"
+
+    # A session in its own image whose container was just made new from the image, when it had worked in one before
+    # (its container was reaped at rest, or could not start again): that work is not there.
+    from surogates.sandbox.pool import SandboxPool
+    from surogates.sandbox.session_image import IMAGE_KEY
+
+    if isinstance(sandbox_pool, SandboxPool) and (session.config or {}).get(IMAGE_KEY):
+        from surogates.sandbox.pool import sandbox_session_key
+        if sandbox_pool.image_new(sandbox_session_key(session)) and await _worked_in_a_sandbox_before(
+            store, session, sandbox_session_key(session), _call_event_id,
+        ):
+            result_content = _noted(result_content, IMAGE_REMADE)
 
     spill_pool = device_call if device_call is not None else sandbox_pool
     if spill_pool is not None:

@@ -72,6 +72,9 @@ class SandboxPool:
         # Threads whose copy this pool has just made from the real files,
         # not yet asked about: whether that loses work is the session's log's to say.
         self._fresh: set[str] = set()
+        # Sessions in their own image whose container the backend has just made new from the image, not yet asked
+        # about (``image_new``): work the session did in a container before is not in it.
+        self._image_new: set[str] = set()
         # session_id -> when its sandbox was last asked for or a call in it ended (monotonic), and the calls in it now.
         self._used: dict[str, float] = {}
         self._busy: dict[str, int] = {}
@@ -130,6 +133,9 @@ class SandboxPool:
                 self._used[session_id] = time.monotonic()
                 if "PROJECT_DIR" in spec.env:
                     self._fresh.add(session_id)
+                created = getattr(self._backend, "created", None)
+                if spec.session_image and created is not None and created(sandbox_id):
+                    self._image_new.add(session_id)
             logger.info(
                 "Session %s mapped to sandbox %s", session_id, sandbox_id
             )
@@ -193,6 +199,14 @@ class SandboxPool:
         spec = self._specs.get(session_id)
         return spec is not None and "PROJECT_DIR" in spec.env
 
+    def image_new(self, session_id: str) -> bool:
+        """Whether *session_id*'s own-image container was just made new from its image (not taken over, not started
+        again): whatever the session did in a container before is not in it.  Asked once."""
+        if session_id in self._image_new:
+            self._image_new.discard(session_id)
+            return True
+        return False
+
     async def release_for_session(self, session_id: str, *, only: str | None = None) -> str | None:
         """Detach the sandbox from *session_id*, returning its id.
 
@@ -233,7 +247,9 @@ class SandboxPool:
         reaped: list[str] = []
         unsure = 0
         for key, sandbox_id in list(self._mapping.items()):
-            if not self._idle(key, idle_seconds) or self.holds_copy(key):
+            if not self._idle(key, idle_seconds) or self.holds_copy(key) or self._in_its_image(key):
+                # A session's own image is the backend's to reap, by the container's own clock (below): another
+                # worker may work in it, which this pool's clock never sees.
                 continue
             try:
                 if not await at_rest(key):
@@ -272,7 +288,22 @@ class SandboxPool:
             reaped.append(key)
         if unsure:
             logger.warning("Could not tell whether %d sessions are at rest; their sandboxes stay", unsure)
+        reap_images = getattr(self._backend, "reap_images", None)
+        if reap_images is not None:
+            for key in await reap_images(at_rest, idle_seconds=idle_seconds):
+                reaped.append(key)
+                lock = await self._session_lock(key)
+                async with lock:
+                    # Its container is gone: a next call makes a new one.
+                    if self._in_its_image(key):
+                        self._mapping.pop(key, None)
+                        self._specs.pop(key, None)
+                        self._used.pop(key, None)
         return reaped
+
+    def _in_its_image(self, key: str) -> bool:
+        spec = self._specs.get(key)
+        return spec is not None and bool(spec.session_image)
 
     def _idle(self, key: str, idle_seconds: float) -> bool:
         """Whether *key*'s sandbox has no call in flight and went unused for *idle_seconds*."""
@@ -386,6 +417,10 @@ class SandboxPool:
             session_ids = list(self._mapping.keys())
 
         for session_id in session_ids:
+            if self._in_its_image(session_id):
+                # Another worker may be working in it: a worker's shutdown never ends a session's own image.
+                await self.release_for_session(session_id)
+                continue
             try:
                 await self.destroy_for_session(session_id)
             except Exception:

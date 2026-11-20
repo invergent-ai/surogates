@@ -78,6 +78,7 @@ REQUIRED_KEYS: tuple[str, ...] = (
     "guidance/working_principles",
     "identity/default_personality",
     "identity/workspace_rules",
+    "identity/workspace_rules_image",
 )
 
 

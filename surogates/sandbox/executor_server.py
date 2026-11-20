@@ -46,6 +46,7 @@ import multiprocessing
 import os
 import subprocess
 import sys
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -642,6 +643,9 @@ def create_app(
     # No /docs or /openapi.json: nothing for a command to find the daemon's calls by.
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     sem = asyncio.Semaphore(max_concurrency)
+    # When a call last ended, and the calls running now: the sandbox's own clock of its use (``/activity``), which a
+    # worker other than the one that made the sandbox can ask (a session's own image is shared by its workers).
+    activity = {"last": time.monotonic(), "running": 0}
     mount = str(history.project) if history is not None else workspace
     # A master's pod has nothing to open: its workspace is the real files.
     opened = history is None or history.copy is None
@@ -675,6 +679,19 @@ def create_app(
         if failed is not None:
             return Response(content=f"copy not made: {failed}", status_code=503)
         return Response(content="ok", status_code=200)
+
+    @app.get("/activity")
+    async def activity_of(request: Request) -> Response:
+        """Seconds since a call last ended (0 while one runs), the calls running, and the background commands that
+        still run.  The worker's own drains of finished commands are no use of the sandbox and are not counted."""
+        if not _token_ok(request.headers.get("authorization", ""), token):
+            return Response(content="unauthorized", status_code=401)
+        from surogates.tools.utils.process_registry import process_registry
+
+        background = sum(1 for p in process_registry.list_sessions() if p.get("status") == "running")
+        idle = 0.0 if activity["running"] else time.monotonic() - activity["last"]
+        return Response(content=json.dumps({"idle_seconds": round(idle, 1), "running": activity["running"],
+                                            "background_running": background}), media_type="application/json")
 
     @app.post("/execute")
     async def execute(request: Request) -> Response:
@@ -737,7 +754,16 @@ def create_app(
 
         # A caller that hangs up (a stopped agent's call, cancelled) wants no result: the call stops, its child
         # killed, and frees its slot, instead of running on to its own timeout.
-        work = asyncio.ensure_future(run())
+        activity["running"] += 1
+
+        async def counted() -> str:
+            try:
+                return await run()
+            finally:
+                activity["running"] -= 1
+                activity["last"] = time.monotonic()
+
+        work = asyncio.ensure_future(counted())
         while not work.done():
             await asyncio.wait({work}, timeout=_DISCONNECT_POLL_S)
             if not work.done() and await request.is_disconnected():

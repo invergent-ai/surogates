@@ -328,4 +328,11 @@ async def test_a_reaper_stopped_mid_destroy_waits_for_the_destroy():
     gate.set()
     await stopping
     assert backend.destroyed == [sid]
-
+async def test_a_sandbox_in_the_sessions_own_image_is_not_this_pools_to_reap():
+    """In its own image the container is the session's workspace, which another worker may be using: the backend's
+    reaper removes it, by the container's own clock."""
+    backend = FakeBackend()
+    pool = SandboxPool(backend)
+    image = await pool.ensure(ROOT, SandboxSpec(session_image="registry.example/tasks/x:1"))
+    assert await pool.reap_at_rest(rest(ROOT), idle_seconds=0) == []
+    assert backend.destroyed == [] and pool.sandbox_of(ROOT) == image
