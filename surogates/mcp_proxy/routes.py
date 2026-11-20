@@ -23,7 +23,7 @@ from surogates.mcp_proxy.loader import (
     debrand_composio_text,
     load_mcp_configs,
 )
-from surogates.mcp_proxy.pool import AgentChangedDuringConnect, ConnectionPool
+from surogates.mcp_proxy.pool import AgentChangedDuringConnect, ConnectionPool, call_result_text
 from surogates.mcp_proxy.sandbox import MCPCallSandbox
 from surogates.runtime import (
     AgentRuntimeContext,
@@ -539,28 +539,19 @@ async def _execute_call(
             _OUTCOME_TRANSPORT_ERROR,
         )
 
+    # The pool's reading of a result (text, binary placeholders, structured content where no text is): one for
+    # both transports.
+    text = call_result_text(call_result)
     if call_result.isError:
-        error_text = "".join(
-            getattr(b, "text", "") for b in (call_result.content or [])
-        )
         return (
             json.dumps({
                 "error": _sanitize_error(
-                    error_text or "MCP tool returned an error",
+                    text or "MCP tool returned an error",
                 ),
             }),
             _OUTCOME_TOOL_ERROR,
         )
-
-    parts: list[str] = []
-    for block in (call_result.content or []):
-        if hasattr(block, "text"):
-            parts.append(block.text)
-        elif hasattr(block, "data"):
-            parts.append(
-                f"[binary: {getattr(block, 'mimeType', 'unknown')}]",
-            )
-    return "\n".join(parts), _OUTCOME_SUCCESS
+    return text, _OUTCOME_SUCCESS
 
 
 def _error_envelope_message(text: str) -> str | None:
