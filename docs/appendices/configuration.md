@@ -65,6 +65,8 @@ Surogates is configured via a YAML file merged with environment variables. Envir
 | `sandbox.default_cpu_limit` | `SUROGATES_SANDBOX_DEFAULT_CPU_LIMIT` | `4` | CPU limit (burst ceiling) for sandbox pods; the Docker backend's `--cpus` (at most the Docker daemon's CPUs). Docker backend only: `""` or `0` sets none |
 | `sandbox.default_memory_limit` | `SUROGATES_SANDBOX_DEFAULT_MEMORY_LIMIT` | `8Gi` | Memory limit for sandbox pods; the Docker backend's `--memory` and `--memory-swap` (no swap past it; at least `6Mi`). Docker backend only: `""` or `0` sets none |
 | `sandbox.docker_pids_limit` | `SUROGATES_SANDBOX_DOCKER_PIDS_LIMIT` | `4096` | Docker backend: `--pids-limit`, the most processes and threads a sandbox container holds at once. `0`: none |
+| `sandbox.reap_idle_seconds` | `SUROGATES_SANDBOX_REAP_IDLE_SECONDS` | `300` | A worker destroys the sandboxes it holds for sessions at rest (and the agents below them) that went unused this long: what a turn end left up while a background agent ran. At least 30. `0`: off |
+| `sandbox.reap_every_seconds` | `SUROGATES_SANDBOX_REAP_EVERY_SECONDS` | `60` | How often a worker looks for such sandboxes |
 | `sandbox.k8s_namespace` | `SUROGATES_SANDBOX_K8S_NAMESPACE` | `surogates` | K8s namespace for sandbox pods |
 | `sandbox.k8s_image` | `SUROGATES_SANDBOX_K8S_IMAGE` | `ghcr.io/invergent-ai/surogates-agent-sandbox:latest` | Sandbox container image |
 | `sandbox.k8s_service_account` | `SUROGATES_SANDBOX_K8S_SERVICE_ACCOUNT` | `surogates-sandbox` | ServiceAccount for sandbox pods |
