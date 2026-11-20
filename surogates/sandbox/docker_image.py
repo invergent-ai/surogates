@@ -448,15 +448,21 @@ class ImageSessions:
         if self._bundle_image_musl and bundles[0] != self._bundle_image_musl:
             bundles.append(self._bundle_image_musl)
         for i, bundle in enumerate(bundles):
+            musl = bool(self._bundle_image_musl) and bundle == self._bundle_image_musl
+            if musl:
+                # Asked before every use (as the main bundle is in _image_run): a run never pulls an image mount.
+                await self._ensure_image(bundle, "executor bundle (musl)")
             try:
-                return await self._run_new(spec, sandbox_id, name, token, limits, run, deployment, bundle)
+                taken = await self._run_new(spec, sandbox_id, name, token, limits, run, deployment, bundle)
             except _NeedsMusl as exc:
                 if i + 1 == len(bundles):
                     raise SandboxUnavailableError(exc.reason, classification="readiness") from exc
-                # A musl image (Alpine): the musl bundle, for this image from now on.
-                logger.info("The image %s is a musl image: the musl executor bundle runs in it", run.image)
+                logger.info("The image %s looks like a musl image: the musl executor bundle is tried", run.image)
+                continue
+            if musl:
+                # Its executor answered: a musl image (Alpine), the musl bundle for it from now on.
                 self._musl_images.add(run.image_id or run.image)
-                await self._ensure_image(self._bundle_image_musl, "executor bundle (musl)")
+            return taken
         raise SandboxUnavailableError("no executor bundle", classification="config")  # unreachable
 
     def _bundle_for(self, run: ImageRun) -> str:
@@ -538,12 +544,20 @@ class ImageSessions:
             # kept for the reaper.
             await asyncio.shield(self._discard_new(container_id, spec.session_id))
             if said:
-                musl = bundle != self._bundle_image_musl and bool(_MUSL_RE.search(said))
+                on_musl_bundle = bool(self._bundle_image_musl) and bundle == self._bundle_image_musl
+                musl = not on_musl_bundle and bool(_MUSL_RE.search(said))
                 hint = ""
                 if _CANNOT_RUN_RE.search(said):
-                    hint = (" (a musl image, such as Alpine: set sandbox.executor_bundle_image_musl)"
-                            if musl and not self._bundle_image_musl else
-                            " (the image has no glibc 2.28 or later, such as Alpine, or is of another architecture)")
+                    arch = self._versions[2] if self._versions else ""
+                    if on_musl_bundle:
+                        hint = (" (neither executor bundle starts in it: it has no glibc 2.28 or later and no musl"
+                                " 1.2.2 or later (Alpine 3.13), or is of another architecture)")
+                    elif musl and arch not in ("x86_64", "amd64"):
+                        hint = f" (a musl image, such as Alpine: no musl executor bundle for {arch})"
+                    elif musl and not self._bundle_image_musl:
+                        hint = " (a musl image, such as Alpine: set sandbox.executor_bundle_image_musl)"
+                    else:
+                        hint = " (the image has no glibc 2.28 or later, or is of another architecture)"
                 reason = f"{exc}. The executor in {run.image} said: {said}{hint}"
                 if musl:
                     raise _NeedsMusl(reason) from exc
@@ -673,9 +687,10 @@ class ImageSessions:
             code, out, _ = await self._docker.run(
                 ["inspect", "--format", '{{index .Config.Labels "surogates.executor_bundle"}}', cid])
             made_with = out.decode(errors="replace").strip()
-            if code == 0 and made_with and made_with not in (self._bundle_image, self._bundle_image_musl):
+            mine = {self._bundle_image, *([self._bundle_image_musl] if self._bundle_image_musl else [])}
+            if code == 0 and made_with and made_with not in mine:
                 logger.warning("The container %s runs the executor of %s, not this worker's %s: a new bundle "
-                               "applies to new containers only", cid, made_with, self._bundle_image)
+                               "applies to new containers only", cid, made_with, " / ".join(sorted(mine)))
         task = asyncio.ensure_future(check())
         self._checks_running = getattr(self, "_checks_running", set())
         self._checks_running.add(task)

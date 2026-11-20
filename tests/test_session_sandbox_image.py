@@ -1683,3 +1683,52 @@ async def test_a_musl_image_without_the_musl_bundle_is_refused_with_the_setting_
     backend = _docker_backend(docker, _never_ready())
     with pytest.raises(SandboxUnavailableError, match="executor_bundle_image_musl"):
         await backend.provision(SandboxSpec(session_id="r", session_image=TASK_IMAGE))
+
+
+async def test_a_glibc_image_that_fails_otherwise_is_run_once_even_with_the_musl_bundle_set():
+    """#698's behaviour for glibc images: one run, the same error."""
+    docker = ImageDocker(images={TASK_IMAGE: _image(), BUNDLE: _image(), MUSL_BUNDLE: _image()})
+    docker.exited = True
+    docker.logs = b"Traceback (most recent call last): ModuleNotFoundError: No module named 'x'\n"
+    backend = _docker_backend(docker, _never_ready(), executor_bundle_image_musl=MUSL_BUNDLE)
+    with pytest.raises(SandboxUnavailableError, match="ModuleNotFoundError"):
+        await backend.provision(SandboxSpec(session_id="r", session_image=TASK_IMAGE))
+    assert sum(1 for c in docker.calls if c[:2] == ["run", "-d"]) == 1
+    assert not any(c[:1] == ["pull"] or (c[:2] == ["image", "inspect"] and c[2] == MUSL_BUNDLE)
+                   for c in docker.calls)
+
+
+async def test_an_image_neither_bundle_starts_in_is_never_kept_as_musl():
+    docker = ImageDocker(images={TASK_IMAGE: {**_image(), "Id": "sha256:" + "bb" * 32}, BUNDLE: _image(),
+                                 MUSL_BUNDLE: _image()})
+    docker.exited = True
+    docker.logs = b"[FATAL tini (7)] exec /opt/surogates/bin/python3 failed: No such file or directory\n"
+    backend = _docker_backend(docker, _never_ready(), executor_bundle_image_musl=MUSL_BUNDLE)
+    with pytest.raises(SandboxUnavailableError, match="neither executor bundle"):
+        await backend.provision(SandboxSpec(session_id="r", session_image=TASK_IMAGE))
+    assert not backend._musl_images
+    assert sum(1 for c in docker.calls if c[:2] == ["run", "-d"]) == 2
+
+
+async def test_a_musl_bundle_missing_is_asked_for_again_at_the_next_provision():
+    docker = ImageDocker(images={TASK_IMAGE: {**_image(), "Id": "sha256:" + "cc" * 32}, BUNDLE: _image()},
+                         pull_ok=False)
+    real = docker.run
+
+    async def run(args):
+        out = await real(args)
+        if args[:2] == ["run", "-d"] and any(a.startswith(f"type=image,source={BUNDLE},") for a in args):
+            docker.named[args[args.index("--name") + 1]][1] = "exited"
+            docker.logs = b"[FATAL tini (7)] exec /opt/surogates/bin/python3 failed: No such file or directory\n"
+        return out
+    docker.run = run
+    backend = _docker_backend(docker, executor_bundle_image_musl=MUSL_BUNDLE, image_pull="missing")
+    with pytest.raises(SandboxUnavailableError):
+        await backend.provision(SandboxSpec(session_id="r", session_image=TASK_IMAGE))
+    assert not backend._musl_images
+    # The bundle is there now (a pull that worked, an operator's load): the next provision gets it.
+    docker.images[MUSL_BUNDLE] = _image()
+    backend._failed_pulls.clear()
+    docker.logs = b""
+    sid = await backend.provision(SandboxSpec(session_id="r2", session_image=TASK_IMAGE))
+    assert backend.created(sid) and backend._musl_images
