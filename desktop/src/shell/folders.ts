@@ -1,7 +1,8 @@
 // Settings → Folders and permissions (spec, Section 4): each folder of this computer its chats
 // work on, in the order a chat first worked on it, and each chat on it, by its title, in its mode,
 // with the hosts its user let it reach past the package hosts, whether it may use the browser on this
-// computer, the ports of its own servers that browser may open, and its background processes alive in the VM.
+// computer, the ports of its own servers that browser may open, the folders outside its own it may read, and its
+// background processes alive in the VM.
 
 import { randomUUID } from "node:crypto";
 
@@ -18,6 +19,8 @@ export interface ChatRow {
   hosts: string[]; // in the order allowed, each on every port
   browser: boolean; // its user let its agent use the browser on this computer
   ports: number[]; // the ports of its own servers that browser may open, lowest first
+  reads: string[]; // the folders outside its own its user let it read, in the order granted, each as shownPath shows it
+  forTask: string[]; // those of them it may read for its current task alone, as shown in reads
   processes: Array<{ id: string; command: string }>; // the agent's words, shown as text
 }
 
@@ -55,7 +58,7 @@ export function stopOperation(root: string, id: string): Operation {
 
 /** The folders and their chats, from *bindings*; *title* names each chat, and *processes* tells what each runs. */
 export async function listFolders(
-  bindings: Pick<Bindings, "all" | "domains" | "browsing" | "ports">,
+  bindings: Pick<Bindings, "all" | "domains" | "browsing" | "ports" | "reads" | "turnFolders">,
   title: (root: string) => Promise<string>,
   processes: Pick<LiveProcesses, "of">,
 ): Promise<FolderRow[]> {
@@ -68,6 +71,8 @@ export async function listFolders(
     chats.push({
       root: binding.root, title: titles[at]!, mode: binding.mode === "free" ? "free" : "ask",
       hosts: bindings.domains(binding.root), browser: bindings.browsing(binding.root), ports: bindings.ports(binding.root),
+      reads: bindings.reads(binding.root).map(shownPath),
+      forTask: bindings.turnFolders(binding.root).map(shownPath),
       processes: processes.of(binding.root),
     });
     folders.set(binding.folder, chats);

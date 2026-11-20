@@ -1,12 +1,12 @@
 import { getEventListeners } from "node:events";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
-  type ApprovalAnswer, type ApprovalPrompts, type ApprovalRequest, Approvals, type ChatLabel, PREVIEW_BYTES,
+  type ApprovalAnswer, type ApprovalPrompts, type ApprovalRequest, Approvals, type ChatLabel, PREVIEW_BYTES, sizesOf,
 } from "../src/binding/approvals.js";
 import { Binder, type FolderPrompts } from "../src/binding/binder.js";
 import { BOOT_ID } from "../src/binding/folder.js";
@@ -17,6 +17,7 @@ import { OperationJournal } from "../src/journal/journal.js";
 import type { DeviceLink } from "../src/link/client.js";
 import type { Operation, Outcome } from "../src/link/protocol.js";
 import { APP_CLOSED, type Executor, type OperationRunner } from "../src/operations/runner.js";
+import { BIN } from "../src/platform.js";
 import { FakeLinkServer } from "./fake-server.js";
 
 const ROOT = "44444444-4444-4444-8444-444444444444";
@@ -26,18 +27,22 @@ const FOLDER = "/home/me/notes";
 
 // The user at the desktop's prompts. With *auto*, each prompt is answered at once;
 // without, it stays open until the test answers it or its signal aborts it.
-// Confirmations get the next of *confirms*; past the end, they decline.
+// Confirmations get the next of *confirms*; past the end, they decline. *ticks*: what
+// each answer leaves ticked of a window's list; *choice*: the option each answer had chosen.
+type Answer = ApprovalAnswer | "trash" | "keep";
 class User implements ApprovalPrompts {
   readonly asked: ApprovalRequest[] = [];
-  readonly open: Array<{ request: ApprovalRequest; resolve: (answer: ApprovalAnswer) => void }> = [];
+  readonly open: Array<{ request: ApprovalRequest; resolve: (answer: { answer: Answer; checked: string[] }) => void }> = [];
   readonly confirmations: ChatLabel[] = [];
   dismissed = 0;
+  ticks: string[] = [];
+  choice: string | null = null;
 
-  constructor(public auto: ApprovalAnswer | null = null, readonly confirms: boolean[] = []) {}
+  constructor(public auto: Answer | null = null, readonly confirms: boolean[] = []) {}
 
-  approve(request: ApprovalRequest, signal: AbortSignal): Promise<ApprovalAnswer> {
+  approve(request: ApprovalRequest, signal: AbortSignal): Promise<{ answer: Answer; checked: string[]; choice?: string | null }> {
     this.asked.push(request);
-    if (this.auto) return Promise.resolve(this.auto);
+    if (this.auto) return Promise.resolve({ answer: this.auto, checked: this.ticks, choice: this.choice });
     return new Promise((resolve) => {
       const prompt = { request, resolve };
       this.open.push(prompt);
@@ -48,14 +53,14 @@ class User implements ApprovalPrompts {
         if (at < 0) return;
         this.open.splice(at, 1);
         this.dismissed += 1;
-        resolve("stop_asking");
+        resolve({ answer: "stop_asking", checked: this.ticks });
       }, { once: true });
     });
   }
 
   // Answer the prompt that opened first.
-  answer(answer: ApprovalAnswer): void {
-    this.open.shift()?.resolve(answer);
+  answer(answer: Answer): void {
+    this.open.shift()?.resolve({ answer, checked: this.ticks });
   }
 
   confirmFreeMode(chat: ChatLabel, signal: AbortSignal): Promise<boolean> {
@@ -395,7 +400,7 @@ describe("a chat that asks every time", () => {
     const ignoring: ApprovalPrompts = {
       approve: (request) => {
         user.asked.push(request);
-        return user.asked.length === 1 ? new Promise(() => {}) : Promise.resolve("allow");
+        return user.asked.length === 1 ? new Promise(() => {}) : Promise.resolve({ answer: "allow", checked: [] });
       },
       confirmFreeMode: () => Promise.resolve(false),
     };
@@ -716,7 +721,7 @@ describe("a chat's mode", () => {
     const confirming = new Approvals({
       bindings: journal.bindings,
       prompts: {
-        approve: () => Promise.resolve("deny"),
+        approve: () => Promise.resolve({ answer: "deny", checked: [] }),
         confirmFreeMode: (chat) => {
           asked.push(chat);
           return new Promise((resolve) => {
@@ -740,7 +745,7 @@ describe("a chat's mode", () => {
     const ignoring = new Approvals({
       bindings: journal.bindings,
       prompts: {
-        approve: () => Promise.resolve("deny"),
+        approve: () => Promise.resolve({ answer: "deny", checked: [] }),
         confirmFreeMode: (chat) => {
           asked.push(chat);
           return asked.length === 1 ? new Promise(() => {}) : Promise.resolve(false);
@@ -763,7 +768,7 @@ describe("a chat's mode", () => {
     const freeing = new Approvals({
       bindings: journal.bindings,
       prompts: {
-        approve: () => Promise.resolve("deny"),
+        approve: () => Promise.resolve({ answer: "deny", checked: [] }),
         // "Allow and stop asking" on the prompt it waited behind, then "Keep asking".
         confirmFreeMode: () => {
           journal.bindings.setMode(ROOT, "free");
@@ -798,7 +803,7 @@ describe("a page that asks for Work freely again", () => {
     const leaving = new Approvals({
       bindings: journal.bindings,
       prompts: {
-        approve: () => Promise.resolve("deny"),
+        approve: () => Promise.resolve({ answer: "deny", checked: [] }),
         confirmFreeMode: (chat) => {
           asked.push(chat);
           return asked.length === 1 ? new Promise(() => {}) : Promise.resolve(false);
@@ -821,7 +826,7 @@ describe("a page that asks for Work freely again", () => {
     const dropping = new Approvals({
       bindings: journal.bindings,
       prompts: {
-        approve: () => Promise.resolve("deny"),
+        approve: () => Promise.resolve({ answer: "deny", checked: [] }),
         confirmFreeMode: (chat) => {
           asked.push(chat);
           return asked.length === 1 ? new Promise(() => {}) : Promise.resolve(false);
@@ -1671,7 +1676,7 @@ describe("the browser on this computer", () => {
     approvals = new Approvals({
       bindings: journal.bindings, agent: "Research assistant",
       // A prompt that takes no notice of its signal, and never answers.
-      prompts: { approve: (request) => (asked.push(request), new Promise<ApprovalAnswer>(() => {})), confirmFreeMode: () => Promise.resolve(false) },
+      prompts: { approve: (request) => (asked.push(request), new Promise<never>(() => {})), confirmFreeMode: () => Promise.resolve(false) },
       refusal: (operation) => (taken && operation.kind.startsWith("browser.") ? PAUSED : null),
     });
     const open = approvals.admit(navigate(), never());
@@ -1710,5 +1715,267 @@ describe("the browser on this computer", () => {
   it("refuses a browser operation for a chat this computer did not bind, asking no one", async () => {
     expect(await approvals.admit(navigate(), never())).toEqual(FOLDER_UNAVAILABLE);
     expect(user.asked).toEqual([]);
+  });
+});
+
+describe("files outside the chat's folder", () => {
+  const SAID_NO = { error: { type: "denied", message: "The user said no." } };
+  const KEPT = { error: { type: "denied", message: `The user kept the originals; nothing went to the ${BIN}. Any copies already made stay.` } };
+  // A trash said no to is said as its originals kept.
+  const no = (operation: Operation) => (operation.kind === "outside.trash" ? KEPT : SAID_NO);
+  const THREAD = { error: { type: "denied", message: "Files outside the chat's folder can be used from the main chat, not from a project's thread." } };
+  const READS = [
+    op("outside.resolve", { path: "/home/me/Desktop" }), op("outside.stat", { key: "/home/me/Desktop/a.txt" }),
+    op("outside.read", { key: "/home/me/Desktop/a.txt", max_bytes: 10 }),
+    op("outside.read_lines", { key: "/home/me/Desktop/a.txt", encoding: "utf-8", offset: 0, limit: 10, max_bytes: 10 }),
+    op("outside.list_dir", { key: "/home/me/Desktop" }),
+    op("outside.walk", { key: "/home/me/Desktop", skip: [], skip_top: [], skip_hidden: true, since: null }),
+  ];
+  const asked = () => [
+    op("outside.grant", { folder: "/home/me/Desktop" }), op("outside.copy", { files: ["/home/me/Desktop/a.txt"], to: FOLDER }),
+    op("outside.trash", { files: ["/home/me/Desktop/a.txt"] }),
+    op("outside.put_back", { copy: `${FOLDER}/a.txt`, original: "/home/me/Desktop/a.txt" }),
+    op("outside.move", { files: ["/home/me/Desktop/a.txt"], to: FOLDER }),
+  ];
+
+  it("asks for outside kinds even when the chat works freely", async () => {
+    bind(ROOT, "free");
+    user.auto = "deny";
+    for (const operation of asked()) expect(await approvals.admit(operation, never())).toEqual(no(operation));
+    expect(user.asked.map((request) => request.kind)).toEqual(["read_folder", "copy", "trash", "put_back", "move"]);
+    // Read kinds pass unasked: the layer checks the grant.
+    for (const operation of READS) expect(await approvals.admit(operation, never())).toBeNull();
+    expect(user.asked).toHaveLength(5);
+  });
+
+  it("refuses every outside kind in a project's thread without asking", async () => {
+    journal.bindings.add({ root: ROOT, nonce: "n", folder: FOLDER, dev: 1, ino: 1, boot: BOOT_ID, mode: "free", boundAt: 1, history: "h" });
+    user.auto = "allow";
+    for (const operation of [...READS, ...asked()]) expect(await approvals.admit(operation, never())).toEqual(THREAD);
+    expect(user.asked).toEqual([]);
+    expect(journal.bindings.reads(ROOT)).toEqual([]);
+  });
+
+  it("refuses an outside kind for a chat this computer did not bind, asking no one", async () => {
+    expect(await approvals.admit(op("outside.grant", { folder: "/home/me/Desktop" }), never())).toEqual(FOLDER_UNAVAILABLE);
+    expect(await approvals.admit(op("outside.read", { key: "/x", max_bytes: 1 }), never())).toEqual(FOLDER_UNAVAILABLE);
+    expect(user.asked).toEqual([]);
+  });
+
+  it("records a read grant only when allowed", async () => {
+    bind(ROOT, "ask");
+    user.auto = "deny";
+    expect(await approvals.admit(op("outside.grant", { folder: "/home/me/Desktop" }), never())).toEqual(SAID_NO);
+    expect(journal.bindings.reads(ROOT)).toEqual([]);
+    user.auto = "allow";
+    expect(await approvals.admit(op("outside.grant", { folder: "/home/me/Desktop" }), never())).toBeNull();
+    expect(journal.bindings.reads(ROOT)).toEqual(["/home/me/Desktop"]);
+    expect(user.asked[1]).toEqual({ kind: "read_folder", chat: chat(), folder: "/home/me/Desktop" });
+    // Granted already, itself or by a folder that holds it: nobody is asked again.
+    for (const folder of ["/home/me/Desktop", "/home/me/Desktop/Scan"]) expect(await approvals.admit(op("outside.grant", { folder }), never())).toBeNull();
+    expect(user.asked).toHaveLength(2);
+    expect(journal.bindings.reads(ROOT)).toEqual(["/home/me/Desktop"]);
+    // A sibling that only begins like it is another folder.
+    user.auto = "deny";
+    expect(await approvals.admit(op("outside.grant", { folder: "/home/me/Desktop2" }), never())).toEqual(SAID_NO);
+    expect(user.asked).toHaveLength(3);
+  });
+
+  it("grants a folder for this turn alone unless its user chose the rest of the chat", async () => {
+    bind(ROOT, "ask");
+    user.auto = "allow";
+    expect(await approvals.admit(op("outside.grant", { folder: "/home/me/Desktop" }), never())).toBeNull();
+    expect(journal.bindings.forTurn(ROOT, "/home/me/Desktop")).toBe(true);
+    user.choice = "chat";
+    expect(await approvals.admit(op("outside.grant", { folder: "/home/me/Documents" }), never())).toBeNull();
+    expect(journal.bindings.forTurn(ROOT, "/home/me/Documents")).toBe(false);
+    expect(journal.bindings.reads(ROOT)).toEqual(["/home/me/Documents", "/home/me/Desktop"]);
+  });
+
+  it("asks a move in one window, with each file's size, and admits only the ticked files", async () => {
+    bind(ROOT, "ask");
+    const a = join(base, "a.txt");
+    writeFileSync(a, "12345");
+    const move = op("outside.move", { files: [a, "/home/me/b.txt"], to: "/home/me/PONTAJE" });
+    user.auto = "allow";
+    user.ticks = [a];
+    expect(await approvals.admit(move, never())).toBeNull();
+    expect(user.asked).toEqual([{ kind: "move", chat: chat(), to: "/home/me/PONTAJE", files: [{ from: a, size: 5 }, { from: "/home/me/b.txt", size: 0 }] }]);
+    expect(approvals.chosenFor(move.id)).toEqual([a]);
+    user.auto = "deny";
+    expect(await approvals.admit(op("outside.move", { files: [a], to: "/home/me/PONTAJE" }), never())).toEqual(SAID_NO);
+    expect(await approvals.admit(op("outside.move", { files: [a], to: "." }), never())).toMatchObject({ error: { type: "denied" } });
+    expect(user.asked).toHaveLength(2);
+  });
+
+  it("admits only the ticked files of a copy", async () => {
+    bind(ROOT, "ask");
+    const a = join(base, "a.txt");
+    writeFileSync(a, "12345");
+    const gone = join(base, "gone.txt");
+    const copy = op("outside.copy", { files: [a, gone], to: FOLDER });
+    // A file the window never listed is not admitted, whatever comes back ticked.
+    user.auto = "allow";
+    user.ticks = [gone, "/etc/passwd"];
+    expect(await approvals.admit(copy, never())).toBeNull();
+    expect(user.asked[0]).toEqual({ kind: "copy", chat: chat(), to: FOLDER, files: [{ from: a, size: 5 }, { from: gone, size: 0 }] });
+    expect(approvals.chosenFor(copy.id)).toEqual([gone]);
+    // Read once.
+    expect(approvals.chosenFor(copy.id)).toBeUndefined();
+    user.auto = "deny";
+    const denied = op("outside.copy", { files: [a], to: FOLDER });
+    expect(await approvals.admit(denied, never())).toEqual(SAID_NO);
+    expect(approvals.chosenFor(denied.id)).toBeUndefined();
+  });
+
+  it("admits a trash only on its own button", async () => {
+    bind(ROOT, "ask");
+    const files = ["/home/me/Desktop/a.txt", "/home/me/Desktop/b.txt"];
+    user.ticks = [files[1]!];
+    for (const answer of ["allow", "keep", "stop_asking", "allow_session"] as const) {
+      user.auto = answer;
+      const trash = op("outside.trash", { files });
+      expect(await approvals.admit(trash, never())).toEqual(KEPT);
+      expect(approvals.chosenFor(trash.id)).toBeUndefined();
+    }
+    user.auto = "trash";
+    const trash = op("outside.trash", { files });
+    expect(await approvals.admit(trash, never())).toBeNull();
+    expect(approvals.chosenFor(trash.id)).toEqual([files[1]]);
+    expect(user.asked.at(-1)).toEqual({ kind: "trash", chat: chat(), files });
+  });
+
+  it("never offers stop asking for an outside window", async () => {
+    bind(ROOT, "ask");
+    user.auto = "stop_asking";
+    user.ticks = ["/home/me/Desktop/a.txt"];
+    for (const operation of asked()) expect(await approvals.admit(operation, never())).toEqual(no(operation));
+    expect(journal.bindings.get(ROOT)?.mode).toBe("ask");
+    expect(journal.bindings.reads(ROOT)).toEqual([]);
+  });
+
+  it("asks one window per chat at a time, behind the chat's other prompts", async () => {
+    bind(ROOT, "ask");
+    const run = approvals.admit(op("run", RUN), never());
+    const grant = approvals.admit(op("outside.grant", { folder: "/home/me/Desktop" }), never());
+    await vi.waitFor(() => expect(user.open).toHaveLength(1));
+    user.answer("deny");
+    await run;
+    await vi.waitFor(() => expect(user.open).toHaveLength(1));
+    expect(user.open[0]!.request.kind).toBe("read_folder");
+    user.answer("allow");
+    expect(await grant).toBeNull();
+  });
+
+  it("denies an outside window that is dismissed, and one nobody answered", async () => {
+    bind(ROOT, "ask");
+    const stop = new AbortController();
+    const grant = approvals.admit(op("outside.grant", { folder: "/home/me/Desktop" }), stop.signal);
+    await vi.waitFor(() => expect(user.open).toHaveLength(1));
+    stop.abort();
+    expect(await grant).toEqual(SAID_NO);
+    user.auto = "timeout";
+    expect((await approvals.admit(op("outside.put_back", { copy: `${FOLDER}/a.txt`, original: "/home/me/Desktop/a.txt" }), never()))).toMatchObject({ error: { type: "denied" } });
+    expect(journal.bindings.reads(ROOT)).toEqual([]);
+  });
+
+  it("refuses an outside kind it does not know, asking no one", async () => {
+    bind(ROOT, "free");
+    user.auto = "allow";
+    expect(await approvals.admit(op("outside.delete", { key: "/home/me/Desktop/a.txt" }), never()))
+      .toEqual({ error: { type: "denied", message: "This computer does not know 'outside.delete'." } });
+    expect(user.asked).toEqual([]);
+  });
+
+  it.each([
+    ["a grant's relative folder", op("outside.grant", { folder: "Desktop" }), "folder"],
+    ["a grant's empty folder", op("outside.grant", { folder: "" }), "folder"],
+    ["a grant's folder with ..", op("outside.grant", { folder: "/home/me/Desktop/../.." }), "folder"],
+    ["a grant's folder with a slash at its end", op("outside.grant", { folder: "/home/me/Desktop/" }), "folder"],
+    ["a grant's folder that is no text", op("outside.grant", { folder: { a: 1 } }), "folder"],
+    ["a copy's relative file", op("outside.copy", { files: ["/home/me/a.txt", "b.txt"], to: FOLDER }), "files"],
+    ["a copy's files that are no list", op("outside.copy", { files: "/home/me/a.txt", to: FOLDER }), "files"],
+    ["a copy's relative place", op("outside.copy", { files: ["/home/me/a.txt"], to: "." }), "to"],
+    ["a trash's file with .", op("outside.trash", { files: ["/home/me/./a.txt"] }), "files"],
+    ["a put back's copy with no path", op("outside.put_back", { original: "/home/me/a.txt" }), "copy"],
+    ["a put back's relative original", op("outside.put_back", { copy: `${FOLDER}/a.txt`, original: "a.txt" }), "original"],
+  ])("refuses %s before any window, not as the user's no", async (_, operation, name) => {
+    bind(ROOT, "ask");
+    user.auto = "allow";
+    expect(await approvals.admit(operation, never())).toEqual({
+      error: { type: "denied", message: `'${name}' must be an absolute path, with no '.' or '..' parts and no slash at its end.` },
+    });
+    expect(user.asked).toEqual([]);
+    expect(journal.bindings.reads(ROOT)).toEqual([]);
+  });
+
+  it("refuses a copy or a trash of no files before any window", async () => {
+    bind(ROOT, "ask");
+    for (const operation of [op("outside.copy", { files: [], to: FOLDER }), op("outside.trash", { files: [] })]) {
+      expect(await approvals.admit(operation, never())).toEqual({ error: { type: "denied", message: "'files' must list at least one file." } });
+    }
+    expect(user.asked).toEqual([]);
+  });
+
+  it("lists each file once, however often it was named", async () => {
+    bind(ROOT, "ask");
+    user.auto = "trash";
+    user.ticks = ["/home/me/a.txt"];
+    const trash = op("outside.trash", { files: ["/home/me/a.txt", "/home/me/a.txt"] });
+    expect(await approvals.admit(trash, never())).toBeNull();
+    expect(user.asked[0]).toMatchObject({ kind: "trash", files: ["/home/me/a.txt"] });
+    expect(approvals.chosenFor(trash.id)).toEqual(["/home/me/a.txt"]);
+  });
+
+  it("grants the folder its resolver names, and asks nobody about one it refuses", async () => {
+    bind(ROOT, "ask");
+    const seen: Array<[string, string]> = [];
+    const resolving = new Approvals({
+      bindings: journal.bindings, prompts: user, agent: "Research assistant",
+      resolveFolder: async (folder, root) => (seen.push([folder, root]), folder === "Desktop" ? { folder: "/home/me/Desktop" } : { refused: "No such folder here." }),
+    });
+    user.auto = "allow";
+    const grant = op("outside.grant", { folder: "Desktop" });
+    expect(await resolving.admit(grant, never())).toBeNull();
+    expect(user.asked).toEqual([{ kind: "read_folder", chat: chat(), folder: "/home/me/Desktop" }]);
+    expect(journal.bindings.reads(ROOT)).toEqual(["/home/me/Desktop"]);
+    // The folder its user allowed, for the layer to answer with, read once.
+    expect(resolving.chosenFor(grant.id)).toEqual(["/home/me/Desktop"]);
+    expect(resolving.chosenFor(grant.id)).toBeUndefined();
+    expect(await resolving.admit(op("outside.grant", { folder: "Music" }), never())).toEqual({ error: { type: "denied", message: "No such folder here." } });
+    expect(user.asked).toHaveLength(1);
+    expect(seen).toEqual([["Desktop", ROOT], ["Music", ROOT]]);
+  });
+
+  it("gives a size to the first 50 files of a copy alone", async () => {
+    bind(ROOT, "ask");
+    const files = Array.from({ length: 51 }, (_, at) => join(base, `f${at}.txt`));
+    for (const file of files) writeFileSync(file, "abc");
+    user.auto = "deny";
+    await approvals.admit(op("outside.copy", { files, to: FOLDER }), never());
+    const sizes = (user.asked[0] as Extract<ApprovalRequest, { kind: "copy" }>).files.map((file) => file.size);
+    expect(sizes).toEqual([...Array.from({ length: 50 }, () => 3), 0]);
+  });
+
+  it("looks at a copy's sizes four at a time, and starts none once its budget is spent", async () => {
+    const files = Array.from({ length: 50 }, (_, at) => `/home/me/f${at}.txt`);
+    let flying = 0;
+    let most = 0;
+    const quick = await sizesOf(files, async () => {
+      most = Math.max(most, ++flying);
+      await new Promise((resolve) => setTimeout(resolve, 2));
+      flying -= 1;
+      return { size: 7 };
+    });
+    expect(quick).toEqual(files.map(() => 7));
+    expect(most).toBe(4);
+    // Looks that never answer: four started, no more, and every size 0 by the budget's end.
+    let started = 0;
+    const began = performance.now();
+    const stuck = await sizesOf(files, () => (started += 1, new Promise(() => {})));
+    expect(performance.now() - began).toBeLessThan(1_500);
+    expect(stuck).toEqual(files.map(() => 0));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(started).toBe(4);
   });
 });

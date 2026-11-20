@@ -15,6 +15,8 @@ must say it keeps that copy, or the thread has nowhere to work.
 
 from __future__ import annotations
 
+import posixpath
+import re
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -57,6 +59,51 @@ def device_of(config: dict[str, Any] | None) -> UUID | None:
     if not isinstance(execution, dict) or execution.get("kind") != "device":
         return None
     return UUID(execution["device_id"])
+
+
+# A Windows drive's path as the tools name it (``/mnt/c/a``), and as its user does (``C:\\a``).
+_GUEST_DRIVE = re.compile(r"/mnt/([a-zA-Z])(/.*)?", re.DOTALL)
+# A drive named alone ("D:") is its root, as shown_folder shows it ("D:\\").
+_WINDOWS_DRIVE = re.compile(r"([A-Za-z]):(?:[\\/](.*))?", re.DOTALL)
+
+
+def shown_folder(path: str) -> str:
+    """A chat's folder as the user knows it: ``/mnt/c/a/b`` is ``C:\\a\\b``.
+
+    Mirrors ``windowsHostPath`` in desktop/src/session-path.ts; any other path
+    is shown as it is.  ``tools_path`` is its inverse.
+    """
+    m = _GUEST_DRIVE.fullmatch(path)
+    if not m:
+        return path
+    return f"{m.group(1).upper()}:" + (m.group(2) or "/").replace("/", "\\")
+
+
+def tools_path(path: str, root: str) -> str:
+    """*path* as the tools take it in a chat whose folder is *root*: ``C:\\a\\b`` is ``/mnt/c/a/b``.
+
+    Only on a Windows computer (*root* on a drive, ``/mnt/<letter>``), where the
+    user and the prompt name a folder the way ``shown_folder`` shows it; any
+    other path, and any path elsewhere, is as it is.
+    """
+    m = _WINDOWS_DRIVE.fullmatch(path) if _GUEST_DRIVE.fullmatch(root) else None
+    if not m:
+        return path
+    rest = (m.group(2) or "").replace("\\", "/").rstrip("/")
+    return f"/mnt/{m.group(1).lower()}" + (f"/{rest}" if rest else "")
+
+
+def normal_path(path: str) -> str:
+    """An absolute *path* as the computer takes it: normalised, one leading slash, no trailing one.
+
+    normpath keeps a leading "//": "//home/a" is "/home/a" here, as on the computer.
+    """
+    return posixpath.normpath("/" + path.lstrip("/"))
+
+
+def inside_folder(path: str, root: str) -> bool:
+    """Whether the normal *path* is the normal folder *root* or in it."""
+    return path == root or path.startswith(root.rstrip("/") + "/")
 
 
 def copy_of(config: dict[str, Any] | None) -> UUID | None:

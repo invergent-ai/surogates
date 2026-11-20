@@ -15,11 +15,13 @@ import asyncio
 import concurrent.futures
 import difflib
 import errno
+import functools
 import io
 import json
 import logging
 import multiprocessing
 import os
+import posixpath
 import re
 import shlex
 import threading
@@ -28,6 +30,7 @@ from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import Any
 
+from surogates.devices.workspace import DeviceWorkspaceIO
 from surogates.tools.registry import ToolRegistry, ToolSchema
 from surogates.tools.workspace_io import RevisionConflict, WorkspaceIO, workspace_io_from
 
@@ -545,6 +548,9 @@ from surogates.tools.utils.binary_extensions import has_binary_extension
 from surogates.tools.utils.tool_output_limits import get_max_bytes, get_max_lines
 from surogates.tools.utils.workspace_sandbox import NUL_REFUSED, WorkspaceSandboxError
 from surogates.tools.utils.workspace_sandbox import holds_nul as _holds_nul
+
+# What search_files answers for content outside a desktop chat's folder: the computer searches there by name only.
+SEARCH_OUTSIDE = "Search outside the chat's folder is by name: use list_files with a pattern."
 
 
 # ---------------------------------------------------------------------------
@@ -2296,15 +2302,107 @@ async def _files_target_rg(
     for p in files:
         st = await wio.stat(p)
         mtimes[p] = st.mtime if st else 0
-    files.sort(key=lambda p: mtimes[p], reverse=True)
-    total_count = len(files)
-    paginated = files[offset : offset + limit]
-    return {
-        "matches": paginated,
-        "count": len(paginated),
-        "total_count": total_count,
-        "truncated": total_count > offset + limit,
-    }
+    return _listed(files, mtimes, offset, limit)
+
+
+def _listed(files: list[str], mtimes: dict[str, float] | None, offset: int, limit: int) -> dict[str, Any]:
+    """A page of *files*, newest first by *mtimes* (as they are, for None), and how many there are in all."""
+    if mtimes is not None:
+        files.sort(key=lambda p: mtimes[p], reverse=True)
+    page = files[offset : offset + limit]
+    return {"matches": page, "count": len(page), "total_count": len(files), "truncated": len(files) > offset + limit}
+
+
+def _glob_matches(path: str, pattern: str) -> bool:
+    """Whether *path*, under a folder outside the chat's, matches *pattern* as ripgrep's ``-g`` would, ignoring case.
+
+    A pattern without a slash matches a file's name at any depth, one with a
+    slash its path under the folder; a folder's row, with its trailing ``/``,
+    by its name or path without it.  Case is ignored as Windows and macOS
+    ignore it in a name: a user's "Facturi" is found by ``*facturi*``.
+    """
+    path = path.rstrip("/")
+    if "/" not in pattern:
+        path = posixpath.basename(path)
+    return _glob_regex(pattern).fullmatch(path) is not None
+
+
+_POSIX_CLASSES = {"alpha": "a-zA-Z", "digit": "0-9", "alnum": "a-zA-Z0-9", "upper": "A-Z", "lower": "a-z", "space": "\\s", "xdigit": "0-9a-fA-F"}
+
+
+@functools.lru_cache(maxsize=64)
+def _glob_regex(pattern: str) -> re.Pattern[str]:
+    """*pattern* as ripgrep's globs read it: ``*`` and ``?`` within one name, ``**`` across folders (a ``**/``
+    matching none), ``[...]`` a character class and ``{a,b}`` either."""
+    # [[:digit:]] as [0-9] before the brackets are read: their body is copied into the regex as it is.
+    pattern = re.sub(r"\[:(alpha|digit|alnum|upper|lower|space|xdigit):\]", lambda m: _POSIX_CLASSES[m[1]], pattern)
+    out: list[str] = []
+    braces = 0
+    i, n = 0, len(pattern)
+    while i < n:
+        c = pattern[i]
+        if pattern.startswith("**", i) and (i == 0 or pattern[i - 1] == "/"):
+            if i + 2 == n:
+                out.append(".*")
+                i += 2
+                continue
+            if pattern[i + 2] == "/":
+                out.append("(?:.*/)?")
+                i += 3
+                continue
+        if c == "*":
+            out.append("[^/]*")
+        elif c == "?":
+            out.append("[^/]")
+        elif c == "[" and "]" in pattern[i + 2 :]:
+            end = pattern.index("]", i + 2)
+            body = pattern[i + 1 : end]
+            if body.startswith("!"):
+                body = "^" + body[1:]
+            out.append("[" + body.replace("\\", "\\\\") + "]")
+            i = end
+        elif c == "{":
+            braces += 1
+            out.append("(?:")
+        elif c == "}" and braces:
+            braces -= 1
+            out.append(")")
+        elif c == "," and braces:
+            out.append("|")
+        else:
+            out.append(re.escape(c))
+        i += 1
+    if braces:
+        # An unclosed brace is no alternation: matched as it is written.
+        return re.compile(re.escape(pattern), re.IGNORECASE)
+    return re.compile("".join(out), re.DOTALL | re.IGNORECASE)
+
+
+async def _files_outside(
+    wio: DeviceWorkspaceIO,
+    pattern: str,
+    key: str,
+    offset: int,
+    limit: int,
+) -> dict[str, Any]:
+    """Find files and folders matching glob *pattern* under *key*, a folder outside the chat's, from the computer's walk.
+
+    Matched as ripgrep's ``-g`` does, but ignoring case: a pattern without a
+    slash by the name at any depth, one with a slash by its path under *key*,
+    where a ``**/`` matches no folder too.  A folder is listed with a trailing
+    ``/``, an empty one too, so the model sees where a file could go.  Newest
+    first, as in the folder, by the times the walk carries.
+    """
+    walk = await wio.walk(key, skip=(), skip_hidden=True)
+    pattern = pattern.strip("/")
+    mtimes = walk.mtimes or {}
+    matched = [path for path, _size in walk.files if _glob_matches(path, pattern)]
+    files = [posixpath.join(key, path) for path in matched]
+    result = _listed(files, {f: mtimes.get(path, 0) for f, path in zip(files, matched)}, offset, limit)
+    if walk.truncated:
+        # A note, not the _warning a repeated search says: both reach the model.
+        result["note"] = "The computer stopped listing this folder before its end: name a folder further down."
+    return result
 
 
 async def _content_target_rg(
@@ -2519,7 +2617,12 @@ async def _search_files_handler(
         if await wio.stat(key) is None:
             return _tool_error(f"Path not found: {path}")
 
-        if target == "files":
+        outside = isinstance(wio, DeviceWorkspaceIO) and wio.is_outside(key)
+        if outside and target != "files":
+            return _tool_error(SEARCH_OUTSIDE)
+        if outside:
+            result_dict = await _files_outside(wio, pattern, key, offset, limit)
+        elif target == "files":
             result_dict = await _files_target_rg(wio, pattern, key, offset, limit)
         else:
             result_dict = await _content_target_rg(

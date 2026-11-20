@@ -7,6 +7,7 @@ import { posix } from "node:path";
 import { type ApprovalRequest, type BrowserAction, type ChatLabel, PREVIEW_BYTES } from "../binding/approvals.js";
 import type { FolderSheet } from "../binding/binder.js";
 import type { LinkSummary } from "../binding/links.js";
+import { BIN } from "../platform.js";
 import { shownName, shownPath, shownWithin } from "../session-path.js";
 
 export interface PromptButton {
@@ -33,12 +34,21 @@ export interface PromptChoice {
   value: string;
 }
 
+// A list the user ticks from, every item ticked as the prompt opens: the answer carries the ones still ticked.
+export interface PromptChecks {
+  legend: string;
+  items: Array<{ value: string; label: string; detail: string }>;
+}
+
 export interface PromptContent {
   title: string;
   lead: string;
   details: PromptDetail[];
   notes: string[]; // what the user should know before answering
   choice: PromptChoice | null;
+  checks?: PromptChecks | null; // none: no list to tick
+  danger?: boolean; // drawn in the warning style, as the Recycle Bin's prompts are
+  detailsBelow?: boolean; // the details drawn under the list, together in one box: a move's From and To
   buttons: PromptButton[]; // left to right; the last is drawn as the main one
   focus: string; // the button focused as it opens
   cancel: string; // Escape's, and a window closed some other way
@@ -226,6 +236,7 @@ export function approval(request: ApprovalRequest): PromptContent {
     };
   }
   if (request.kind === "browser") return browserPrompt(request);
+  if (request.kind !== "network") return outsidePrompt(request);
   const address = `${request.host}:${request.port}`;
   const title = `Connect to ${ending(request.host)}:${request.port}?`;
   return {
@@ -240,6 +251,90 @@ export function approval(request: ApprovalRequest): PromptContent {
     // Tall enough to show the title, the lead, the warning and the whole address as it opens: a title past
     // 30 characters wraps to three lines of 25 px, and a line of 19 px in the address's block holds about 40.
     height: 245 + (title.length > 30 ? 75 : 25) + (request.privateNetwork ? 70 : 0) + Math.ceil(address.length / 40) * 19,
+  };
+}
+
+// How long a folder's read lasts: the agent's answer to this message, or the rest of the chat (bindings.ts, grantRead).
+const HOW_LONG: Omit<PromptChoice, "value"> = {
+  legend: "How long it can read this folder",
+  options: [
+    { value: "chat", label: "For the rest of this chat", description: "You can remove access in Settings." },
+    { value: "turn", label: "Just this request", description: "Ends when it finishes this task." },
+  ],
+};
+
+// A copy's or a move's files, each ticked by its path with its size: one From for files all in one folder, shown
+// under the list; each file's own folder by it otherwise, and no From.
+// A size of null shows none, as the bin's list has none.
+function listed(list: Array<{ from: string; size: number | null }>): { items: PromptChecks["items"]; from: string | null } {
+  const folders = new Set(list.map((f) => posix.dirname(f.from)));
+  const from = folders.size === 1 ? [...folders][0]! : null;
+  const items = list.map((f) => {
+    const parts = [...(from === null ? [shownPath(posix.dirname(f.from))] : []), ...(f.size === null ? [] : [sizeOf(f.size)])];
+    return { value: f.from, label: named(f.from), detail: parts.join(" · ") };
+  });
+  return { items, from };
+}
+
+const files = (n: number) => `${n} ${n === 1 ? "file" : "files"}`;
+// The prompts of the files outside the chat's folder: Deny is focused and what Escape answers, and none offers to stop asking.
+function outsidePrompt(request: Exclude<ApprovalRequest, { kind: "command" | "change" | "input" | "network" | "browser" }>): PromptContent {
+  const { chat } = request;
+  const base = { notes: [], choice: null, details: [], focus: "deny", cancel: "deny" };
+  if (request.kind === "read_folder") {
+    return {
+      ...base, title: `Let ${chat.agent} read ${named(request.folder)}?`,
+      lead: `${chat.agent} will be able to look at the files and folders in it. It asks you before copying, changing or deleting anything there. It works in the cloud, so what it reads is sent to it.`,
+      details: [code("Folder", shownPath(request.folder))],
+      choice: { ...HOW_LONG, value: "chat" },
+      buttons: [button("deny", "Don't allow"), button("allow", "Allow", true)], height: 470,
+    };
+  }
+  if (request.kind === "copy") {
+    const one = request.files.length === 1;
+    const { items, from } = listed(request.files);
+    return {
+      ...base, detailsBelow: true, title: `Copy ${files(request.files.length)}?`,
+      lead: `${one ? "The file" : "Each file"} will be copied to the new folder. A name already taken there gets a number added, so nothing is overwritten.`,
+      checks: { legend: "Files", items },
+      details: [...(from === null ? [] : [code("From", shownPath(from))]), code("To", shownPath(request.to))],
+      buttons: [button("deny", "Cancel"), button("allow", "Copy", true)], height: 470,
+    };
+  }
+  if (request.kind === "move") {
+    const one = request.files.length === 1;
+    // The chat's own files are removed from its folder, not sent to the bin.
+    const own = request.files.filter((f) => f.from.startsWith(`${chat.folder}/`)).length;
+    const then = own === 0
+      ? `Then ${one ? "the" : "its"} original goes to the ${BIN}, where you can restore it if you need it.`
+      : own === request.files.length
+        ? `Then ${one ? "it is" : "each is"} removed from this chat's folder.`
+        : `Then the originals in this chat's folder are removed from it, and the others go to the ${BIN}, where you can restore them.`;
+    const { items, from } = listed(request.files);
+    return {
+      ...base, danger: true, detailsBelow: true, title: `Move ${files(request.files.length)}?`,
+      lead: `${one ? "The file" : "Each file"} will be copied to the new folder. ${then}`,
+      checks: { legend: "Files", items },
+      details: [...(from === null ? [] : [code("From", shownPath(from))]), code("To", shownPath(request.to))],
+      buttons: [button("deny", "Cancel"), button("allow", "Move", true)], height: 470,
+    };
+  }
+  if (request.kind === "trash") {
+    const one = request.files.length === 1;
+    const { items, from } = listed(request.files.map((f) => ({ from: f, size: null })));
+    return {
+      ...base, danger: true, detailsBelow: true, focus: "keep", cancel: "keep", title: `Move ${files(request.files.length)} to the ${BIN}?`,
+      lead: `You can restore ${one ? "it" : "them"} from the ${BIN}.`,
+      checks: { legend: "Files", items },
+      details: from === null ? [] : [code("From", shownPath(from))],
+      buttons: [button("keep", one ? "Keep it" : "Keep them"), button("trash", `Move to the ${BIN}`, true)], height: 420,
+    };
+  }
+  return {
+    ...base, danger: true, detailsBelow: true, title: "Put the changes back?",
+    lead: `The original goes to the ${BIN}, where you can restore it, and the edited copy is deleted from this chat's folder.`,
+    details: [code("Edited copy", shownPath(request.copy)), code("Replaces", shownPath(request.original))],
+    buttons: [button("deny", "Keep only the copy"), button("allow", "Put back", true)], height: 320,
   };
 }
 
@@ -423,4 +518,22 @@ export function freeMode(chat: ChatLabel): PromptContent {
     cancel: "keep",
     height: 300,
   };
+}
+
+/**
+ * What the page's answer comes to: the button, the option chosen, and the ticked values that the prompt
+ * showed (any other the page sends is dropped). An allowing button with nothing ticked of a list gives the
+ * agent nothing, so it answers as a closed window does: null. Throws for a button or option not the prompt's.
+ */
+export function checkAnswer(
+  content: PromptContent, pressed: unknown, chosen: unknown, ticked: unknown,
+): { button: string; choice: string | null; checked: string[] } | null {
+  const offered = content.buttons.find((candidate) => candidate.id === pressed);
+  if (!offered) throw new Error("Not a button of this prompt");
+  const choice = content.choice === null ? null : content.choice.options.find((option) => option.value === chosen)?.value;
+  if (choice === undefined) throw new Error("Not an option of this prompt");
+  const shown = new Set(content.checks?.items.map((item) => item.value));
+  const checked = [...new Set(Array.isArray(ticked) ? ticked.filter((value): value is string => typeof value === "string" && shown.has(value)) : [])];
+  if (content.checks && offered.allows && checked.length === 0) return null;
+  return { button: offered.id, choice, checked };
 }

@@ -3,26 +3,27 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 from types import SimpleNamespace
 
 import pytest
 
-from surogates.devices.link import CLOSE_PROTOCOL, _Close, _Link
+from surogates.devices.link import CLOSE_PROTOCOL, NO_OUTSIDE_OUTCOME, _Close, _Link
 from surogates.devices.operations import OpenOperation
 
 ROOT = uuid.UUID("00000000-0000-4000-8000-000000000001")
 
 
-def open_operation(ordinal: int) -> OpenOperation:
+def open_operation(ordinal: int, kind: str = "which", args: dict | None = None) -> OpenOperation:
     return OpenOperation(
         id=uuid.uuid4(),
         root_session_id=ROOT,
         calling_session_id=ROOT,
         invocation_id=f"call-{ordinal}",
         ordinal=ordinal,
-        kind="which",
-        args={"name": "sh"},
+        kind=kind,
+        args={"name": "sh"} if args is None else args,
         digest=f"{ordinal:064d}",
     )
 
@@ -36,6 +37,7 @@ class FakeOperations:
         self.open = list(operations)
         self.delay = delay
         self.statuses: list[str] = []
+        self.outcomes: dict[uuid.UUID, dict] = {}
         self.closed: set[uuid.UUID] = set()  # by a cancellation or a revocation
         self.waits: list[tuple[uuid.UUID, str | None]] = []
         self.forgotten: set[uuid.UUID] = set()
@@ -65,6 +67,7 @@ class FakeOperations:
 
     async def complete(self, device_id, generation, operation_id, digest, outcome):
         status = "completed" if any(op.id == operation_id for op in self.open) else "duplicate"
+        self.outcomes[operation_id] = outcome
         self.open = [op for op in self.open if op.id != operation_id]
         self.statuses.append(status)
         return status
@@ -130,6 +133,33 @@ async def test_an_answered_operation_leaves_the_delivered_set(repeat):
     assert [f for f in socket.sent if f["type"] == "op_ack"] == [
         {"type": "op_ack", "id": str(first.id)}
     ] * (2 if repeat else 1)
+
+
+async def test_completes_an_outside_kind_for_an_app_that_cannot_do_it_without_sending_it():
+    outside = open_operation(1, "outside.resolve", {"path": "/home/ana/Desktop/a.txt"})
+    inside = open_operation(2)
+    operations = FakeOperations(outside, inside)
+    link, socket = make_link(operations)
+
+    await link.deliver()
+
+    # An app that did not say it works outside a chat's folder hears only of the other.
+    assert socket.operation_ids() == [str(inside.id)]
+    assert operations.outcomes == {outside.id: NO_OUTSIDE_OUTCOME}
+    assert NO_OUTSIDE_OUTCOME["error"]["type"] == "unsupported"
+    assert "Update it" in NO_OUTSIDE_OUTCOME["error"]["message"]
+
+
+async def test_an_app_that_works_outside_the_folder_is_sent_an_outside_kind():
+    outside = open_operation(1, "outside.copy", {"files": ["/home/ana/Desktop/a.txt"], "to": "/home/ana/proj"})
+    operations = FakeOperations(outside)
+    link, socket = make_link(operations)
+    link.outside = True
+
+    await link.deliver()
+
+    assert socket.operation_ids() == [str(outside.id)]
+    assert operations.outcomes == {}
 
 
 async def test_a_cancelled_operation_is_told_to_the_app_once_and_leaves_the_delivered_set():
@@ -259,3 +289,22 @@ async def test_a_malformed_wait_closes_the_link_as_a_protocol_error(frame_id, re
     with pytest.raises(_Close) as closed:
         await link.waiting({"type": "op_waiting", "id": str(op.id) if frame_id == "delivered" else frame_id, "reason": reason})
     assert closed.value.code == CLOSE_PROTOCOL
+
+
+class HelloSocket:
+    """A connection whose app says *hello* first."""
+
+    def __init__(self, hello: dict) -> None:
+        self.hello = hello
+
+    async def receive(self) -> dict:
+        return {"type": "websocket.receive", "text": json.dumps(self.hello)}
+
+
+@pytest.mark.parametrize(("said", "outside"), [({}, False), ({"outside": True}, True), ({"outside": "yes"}, False)])
+async def test_the_hello_says_whether_the_app_works_outside_a_chats_folder(said, outside):
+    from surogates.devices.link import _hello
+
+    hello = await _hello(HelloSocket({"type": "hello", "protocols": [1], "open": [], "copies": True, **said}))
+
+    assert hello == ([], True, outside)

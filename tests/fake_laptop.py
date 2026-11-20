@@ -407,6 +407,12 @@ class InProcessRunner:
             if self.browser is None:
                 return {"error": {"type": "unsupported", "message": f"This computer does not handle {kind} yet"}}
             return json.loads(json.dumps(self.browser(kind, sent)))
+        if kind.startswith("outside."):
+            # As the app answers a chat its user granted no folder outside its own (desktop/src/outside/executor.ts).
+            path = sent.get("path", sent.get("key"))
+            return {"error": {
+                "type": "sandbox", "message": f"No permission to read {path}: ask for it first with request_folder_access.",
+            }}
         if payload is not None:
             # A write's data that crossed as a transfer: whole, as its args name it, then written as one that carried it.
             named = sent.pop("transfer")

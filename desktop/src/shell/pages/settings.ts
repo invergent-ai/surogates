@@ -29,7 +29,7 @@ interface State {
 interface Folder {
   folder: string;
   chats: Array<{
-    root: string; title: string; mode: "free" | "ask"; hosts: string[]; browser: boolean; ports: number[];
+    root: string; title: string; mode: "free" | "ask"; hosts: string[]; browser: boolean; ports: number[]; reads: string[]; forTask: string[];
     processes: Array<{ id: string; command: string }>;
   }>;
 }
@@ -41,6 +41,7 @@ interface Settings {
   takeBrowserBack(root: string): Promise<void>;
   handBrowserBack(): Promise<boolean>;
   takePortBack(root: string, port: number): Promise<void>;
+  takeReadBack(root: string, folder: string): Promise<void>;
   stop(root: string, id: string): Promise<void>;
   set(key: string, value: string): Promise<void>;
   link(which: "usage"): Promise<void>;
@@ -102,11 +103,17 @@ let failure: string | null = null;
 let failedShown = "";
 
 // A line under a chat: what it holds, as text, and the button that ends it, named by what it ends, as it is shown.
-function line(text: string, action: string, name: string, act: () => Promise<void>): HTMLElement {
+function line(text: string, action: string, name: string, act: () => Promise<void>, detail?: string): HTMLElement {
   const held = document.createElement("span");
   held.className = "line";
   const what = document.createElement("span");
   showText(what, text);
+  // A folder's whole path, after its name, smaller.
+  if (detail !== undefined) {
+    const small = document.createElement("small");
+    showText(small, detail);
+    what.append(" ", small);
+  }
   const button = document.createElement("button");
   button.type = "button";
   button.textContent = action;
@@ -127,28 +134,30 @@ function line(text: string, action: string, name: string, act: () => Promise<voi
   return held;
 }
 
-// A chat's row: its title, as text, its mode, each host its user let it reach, the browser if it may use it, each
-// port of its own servers that browser may open, and each background process it runs.
-// Its title is what a search finds it by.
-function chatRow(chat: Folder["chats"][number]): HTMLElement {
+// A chat's card: its title, as text, and its mode; its folder under them; then each host its user let it reach, the
+// browser if it may use it, each port of its own servers that browser may open, each folder outside its own it may
+// read, and each background process it runs, each with the button that ends it. Its title is what a search finds it by.
+function chatRow(chat: Folder["chats"][number], folder: string): HTMLElement {
   // Each line's button, named by its chat and what it ends: a redraw gives the keyboard back to it.
   const keyed = (made: HTMLElement, what: string) => {
     made.querySelector("button")!.dataset.focus = `${chat.root} ${what}`;
     return made;
   };
-  const row = document.createElement("div");
-  row.className = "row";
-  row.dataset.label = chat.title;
-  const label = document.createElement("div");
-  label.className = "label";
-  const title = document.createElement("span");
+  const card = document.createElement("div");
+  card.className = "row chat";
+  card.dataset.label = chat.title;
+  const head = document.createElement("div");
+  head.className = "chat-head";
+  const title = document.createElement("strong");
   showText(title, chat.title);
   const mode = document.createElement("span");
-  mode.className = "desc";
+  mode.className = "chip";
   mode.textContent = chat.mode === "free" ? "Works freely" : "Asks every time";
-  label.append(
-    title,
-    mode,
+  head.append(title, mode);
+  const path = document.createElement("span");
+  path.className = "folder-path";
+  showText(path, folder);
+  const lines = [
     ...chat.hosts.map((host) => keyed(line(`Reaches ${host}, on every port`, "Take back", host, () => settings.takeBack(chat.root, host)), `host ${host}`)),
     ...(chat.browser
       ? [keyed(line("Uses the browser on this computer", "Take back", "the browser on this computer", () => settings.takeBrowserBack(chat.root)), "browser")]
@@ -157,11 +166,27 @@ function chatRow(chat: Folder["chats"][number]): HTMLElement {
       line(`Its browser opens port ${port} of this chat's servers`, "Take back", `port ${port} of this chat's servers`, () => settings.takePortBack(chat.root, port)),
       `port ${port}`,
     )),
+    ...chat.reads.map((read) => keyed(
+      line(`Reads ${lastName(read)}${chat.forTask.includes(read) ? ", for this task" : ""}`, "Remove access", read, () => settings.takeReadBack(chat.root, read), read),
+      `read ${read}`,
+    )),
     ...chat.processes.map(({ id, command }) => keyed(line(`Runs ${command}`, "Stop", command, () => settings.stop(chat.root, id)), `process ${id}`)),
-  );
-  row.append(label);
-  return row;
+  ];
+  const held = document.createElement("div");
+  held.className = "chat-lines";
+  if (lines.length > 0) held.append(...lines);
+  else {
+    const none = document.createElement("span");
+    none.className = "desc";
+    none.textContent = "Nothing beyond its own folder.";
+    held.append(none);
+  }
+  card.append(head, path, held);
+  return card;
 }
+
+// A path's last name, as the person reads it: / or \ ends each name.
+const lastName = (path: string): string => path.split(/[\\/]/).filter(Boolean).pop() ?? path;
 
 async function renderFolders(): Promise<void> {
   // A list that cannot be read, as on a computer the agent revoked, says why in its place.
@@ -180,15 +205,8 @@ async function renderFolders(): Promise<void> {
   // A Take back or Stop that had the keyboard keeps it, or gives it to the line that took its place.
   keepFocus(() => {
     byId("folders-none").hidden = folders.length > 0 || unread !== null;
-    byId("folders").replaceChildren(...folders.map((folder) => {
-      const group = document.createElement("div");
-      group.className = "folder";
-      const path = document.createElement("h3");
-      path.className = "folder-path";
-      showText(path, folder.folder);
-      group.append(path, ...folder.chats.map(chatRow));
-      return group;
-    }));
+    // One card for each chat, its name first and its folder under it.
+    byId("folders").replaceChildren(...folders.flatMap((folder) => folder.chats.map((chat) => chatRow(chat, folder.folder))));
     // Rows drawn since the search was typed are searched too, before the keyboard is placed among what shows.
     search();
   });

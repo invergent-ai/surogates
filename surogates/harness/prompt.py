@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Any
 from surogates.channels.constants import ADAPTER_CHANNELS
 from surogates.channels.memory_boundary import is_case_agent_session, is_case_session
 from surogates.keel.case_agents import is_process_agent_config
-from surogates.devices.binding import device_of
+from surogates.devices.binding import device_of, shown_folder
 from surogates.harness.loop_context_replay import sanitize_sender_name
 from surogates.harness.model_metadata import get_model_info
 from surogates.harness.prompt_library import PromptLibrary, default_library
@@ -955,8 +955,16 @@ class PromptBuilder:
         # `$HOME` and call `terminal`, a tool it does not have.
         workspace = self._get_workspace_path()
         if workspace and self._offers_workspace_tools():
-            parts.append("- **Workspace**: `$HOME` (your working directory)")
-            parts.append("\n" + self._prompts.get("identity/workspace_rules"))
+            if device_of(self._session.config) is not None:
+                # A desktop chat works in the user's own folder, not `$HOME`.
+                parts.append(
+                    "- **Workspace**: the chat's folder on the user's computer, "
+                    f"`{shown_folder(workspace)}` (your working directory)"
+                )
+                parts.append("\n" + self._prompts.get("identity/workspace_rules_device"))
+            else:
+                parts.append("- **Workspace**: `$HOME` (your working directory)")
+                parts.append("\n" + self._prompts.get("identity/workspace_rules"))
 
         # Platform hint based on session channel.
         channel = platform_hint_channel(self._get_channel(), getattr(self._session, "config", None))

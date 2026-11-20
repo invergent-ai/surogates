@@ -8,12 +8,14 @@ import type { ApprovalRequest } from "../src/binding/approvals.js";
 import { BOOT_ID, type FolderGuards } from "../src/binding/folder.js";
 import type { StagedDownload } from "../src/browser/downloads.js";
 import { Browsing } from "../src/browser/executor.js";
+import { fdPaths } from "../src/files/fd-paths.js";
 import type { NetworkApprovals } from "../src/hosts/tool-hosts.js";
 import type { Bindings } from "../src/journal/bindings.js";
 import { OperationJournal } from "../src/journal/journal.js";
 import type { LinkStatus } from "../src/link/client.js";
 import type { Operation, Outcome } from "../src/link/protocol.js";
 import { ACCESS_ENDED, APP_CLOSED } from "../src/operations/runner.js";
+import { Outside } from "../src/outside/executor.js";
 import { type DeviceStack, type DeviceStackOptions, startDevice, stopDevice, type ToolLayer } from "../src/shell/device-stack.js";
 import { FakeLinkServer } from "./fake-server.js";
 
@@ -156,7 +158,7 @@ async function start(overrides: Partial<DeviceStackOptions> = {}) {
       return tools;
     },
     prompts: { pickFolder: () => Promise.resolve(folder), confirmFolder: (sheet) => Promise.resolve({ mode: sheet.mode }) },
-    approvalPrompts: { approve: () => Promise.resolve("deny"), confirmFreeMode: () => Promise.resolve(false) },
+    approvalPrompts: { approve: () => Promise.resolve({ answer: "deny", checked: [] }), confirmFreeMode: () => Promise.resolve(false) },
     onStatus: (status) => {
       statuses.push(status);
       if (status === "stopped") order.push("link");
@@ -296,6 +298,53 @@ describe("one agent's device", () => {
       { host: "example.com", port: 443, privateNetwork: false }, new AbortController().signal)).toBe("deny");
   });
 
+  it("runs an outside kind through the Outside layer and others below it", async () => {
+    const desktop = join(base, "home", "Desktop");
+    mkdirSync(desktop);
+    writeFileSync(join(desktop, "old.txt"), "old");
+    const asked: ApprovalRequest[] = [];
+    const trashed: string[] = [];
+    const device = await start({
+      tools: (bindings, approvals, changed, waiting) => {
+        tools.bindings = bindings;
+        tools.network = approvals;
+        return new Outside({
+          tools, bindings, approvals, fd: fdPaths, getPath: (name) => join(base, "home", name === "desktop" ? "Desktop" : name),
+          trash: async (path) => void trashed.push(path),
+        });
+      },
+      approvalPrompts: {
+        approve: (request) => {
+          asked.push(request);
+          return Promise.resolve(request.kind === "trash" ? { answer: "trash", checked: request.files } : { answer: "allow", checked: [] });
+        },
+        confirmFreeMode: () => Promise.resolve(false),
+      },
+    });
+    await server.until(() => statuses.includes("connected"));
+    // Its hello said it works outside a chat's folder: the server offers the outside tools to no app that does not.
+    expect(server.hellos.map((hello) => hello.outside)).toEqual([true]);
+    const prepared = await device.binder.prepareFolder("pick", "window-1", new AbortController().signal);
+    server.send(op("bind-1", "bind", { folder: prepared?.folder, nonce: prepared?.nonce }, true));
+    await server.until(() => results("bind-1").length === 1);
+    // A grant by the folder's name: the approvals ask about it, and keep it, where the layer resolves it.
+    server.send(op("grant-1", "outside.grant", { folder: "Desktop" }));
+    await server.until(() => results("grant-1").length === 1);
+    // Allowed with no choice made: for this turn alone.
+    expect(results("grant-1")[0]?.outcome).toEqual({ ok: { folder: desktop, lasts: "this request" } });
+    expect(asked[0]).toMatchObject({ kind: "read_folder", folder: desktop });
+    // The files its user ticked reach the layer from the same approvals.
+    server.send(op("trash-1", "outside.trash", { files: [join(desktop, "old.txt")] }));
+    await server.until(() => results("trash-1").length === 1);
+    expect(results("trash-1")[0]?.outcome).toEqual({ ok: { trashed: [join(desktop, "old.txt")], kept: [] } });
+    expect(trashed).toEqual([join(desktop, "old.txt")]);
+    // Any other kind goes below, untouched.
+    server.send(op("run-1", "run", { command: "echo hi", workdir: null, timeout: 10 }));
+    await server.until(() => results("run-1").length === 1);
+    expect(results("run-1")[0]?.outcome).toEqual({ ok: "ran run" });
+    expect(tools.ran.map((ran) => ran.id)).toEqual(["run-1"]);
+  });
+
   it("asks the look it is given whether a new chat's folder answers, before its binder checks the folder", async () => {
     const asked: string[] = [];
     const sheets: Array<string | null> = [];
@@ -312,7 +361,7 @@ describe("one agent's device", () => {
     tools.address = (session) => Promise.resolve(`https://bank.example/${session}`);
     const device = await start({
       prompts: { pickFolder: () => Promise.resolve(folder), confirmFolder: () => Promise.resolve({ mode: "ask" }) },
-      approvalPrompts: { approve: (request) => (asked.push(request), Promise.resolve("allow")), confirmFreeMode: () => Promise.resolve(false) },
+      approvalPrompts: { approve: (request) => (asked.push(request), Promise.resolve({ answer: "allow", checked: [] })), confirmFreeMode: () => Promise.resolve(false) },
     });
     await server.until(() => statuses.includes("connected"));
     const prepared = await device.binder.prepareFolder("pick", "window-1", new AbortController().signal);
@@ -328,7 +377,7 @@ describe("one agent's device", () => {
     const asked: ApprovalRequest[] = [];
     let answer: "deny" | "allow_session" = "deny";
     const device = await start({
-      approvalPrompts: { approve: (request) => (asked.push(request), Promise.resolve(answer)), confirmFreeMode: () => Promise.resolve(false) },
+      approvalPrompts: { approve: (request) => (asked.push(request), Promise.resolve({ answer: answer, checked: [] })), confirmFreeMode: () => Promise.resolve(false) },
     });
     await server.until(() => statuses.includes("connected"));
     const prepared = await device.binder.prepareFolder("pick", "window-1", new AbortController().signal);
@@ -373,7 +422,7 @@ describe("one agent's device", () => {
     before.bindings.allowPort(OTHER, 5173);
     before.close();
     const device = await start({
-      approvalPrompts: { approve: () => Promise.resolve("allow_session"), confirmFreeMode: () => Promise.resolve(false) },
+      approvalPrompts: { approve: () => Promise.resolve({ answer: "allow_session", checked: [] }), confirmFreeMode: () => Promise.resolve(false) },
     });
     await server.until(() => statuses.includes("connected"));
     expect(tools.forwards).toEqual([[{ port: 5173, root: OTHER }]]);
@@ -407,7 +456,7 @@ describe("one agent's device", () => {
     const device = await start({
       approvalPrompts: {
         // Open until dismissed, when it settles with the answer that would let it through.
-        approve: (request, signal) => (asked.push(request), new Promise((resolve) => signal.addEventListener("abort", () => resolve("allow_session")))),
+        approve: (request, signal) => (asked.push(request), new Promise((resolve) => signal.addEventListener("abort", () => resolve({ answer: "allow_session", checked: [] })))),
         confirmFreeMode: () => Promise.resolve(false),
       },
     });
@@ -565,7 +614,7 @@ describe("one agent's device", () => {
     const asked: ApprovalRequest[] = [];
     const device = await start({
       prompts: { pickFolder: () => Promise.resolve(folder), confirmFolder: () => Promise.resolve({ mode: "ask" }) },
-      approvalPrompts: { approve: (request) => (asked.push(request), Promise.resolve("allow")), confirmFreeMode: () => Promise.resolve(false) },
+      approvalPrompts: { approve: (request) => (asked.push(request), Promise.resolve({ answer: "allow", checked: [] })), confirmFreeMode: () => Promise.resolve(false) },
     });
     await server.until(() => statuses.includes("connected"));
     const prepared = await device.binder.prepareFolder("pick", "window-1", new AbortController().signal);

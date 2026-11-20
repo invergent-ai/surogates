@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { ApprovalRequest, ChatLabel } from "../src/binding/approvals.js";
 import type { FolderSheet } from "../src/binding/binder.js";
 import { segments } from "../src/shell/text.js";
-import { approval, folderSheet, freeMode, handBack, sizeOf } from "../src/shell/prompt-content.js";
+import { approval, checkAnswer, folderSheet, freeMode, handBack, sizeOf } from "../src/shell/prompt-content.js";
 
 const SHEET: FolderSheet = {
   agent: "acme.surogate.ai", folder: "/home/me/notes", mode: "free", links: null, refusal: null, project: null, busy: false,
@@ -371,5 +371,117 @@ describe("the browser's prompts", () => {
     expect(long.title.endsWith(".attacker.net?")).toBe(true);
     const short = approval({ kind: "browser", chat: CHAT, action: "open", detail: "https://a.example/" });
     expect(long.height).toBeGreaterThan(short.height + 5 * 19);
+  });
+});
+
+describe("a prompt with a list to tick", () => {
+  const base = { ...folderSheet(SHEET), checks: { legend: "Files", items: [
+    { value: "a", label: "A", detail: "/x/a" }, { value: "b", label: "B", detail: "/x/b" },
+  ] } };
+  const content = { ...base, buttons: [{ id: "deny", label: "Deny", allows: false }, { id: "allow", label: "Allow", allows: true }], choice: null };
+
+  it("keeps existing content with no list and no warning style", () => {
+    expect([folderSheet(SHEET), approval({ kind: "command", chat: CHAT, command: "ls", workdir: "/home/me/notes", background: false })].map((c) => [c.checks ?? null, c.danger ?? false])).toEqual([[null, false], [null, false]]);
+  });
+
+  it("returns the ticked items with the answer, and nothing it did not show", () => {
+    expect(checkAnswer(content, "allow", null, ["b", "zzz", "b"])).toEqual({ button: "allow", choice: null, checked: ["b"] });
+    expect(checkAnswer({ ...content, checks: null }, "allow", null, ["a"])).toEqual({ button: "allow", choice: null, checked: [] });
+  });
+
+  it("answers an allow with nothing ticked as a denial", () => {
+    expect(checkAnswer(content, "allow", null, [])).toBeNull();
+    expect(checkAnswer(content, "allow", null, ["zzz"])).toBeNull();
+    expect(checkAnswer(content, "deny", null, [])).toEqual({ button: "deny", choice: null, checked: [] });
+  });
+});
+
+describe("the windows for files outside the chat's folder", () => {
+  const bin = process.platform === "darwin" ? "Trash" : "Recycle Bin";
+
+  it("asks to read a folder, by its name and whole path, for the rest of the chat unless this request alone is chosen", () => {
+    const c = approval({ kind: "read_folder", chat: CHAT, folder: "/home/me/docs" });
+    expect([c.title, c.lead]).toEqual([
+      "Let acme.surogate.ai read docs?",
+      "acme.surogate.ai will be able to look at the files and folders in it. It asks you before copying, changing or deleting anything there. It works in the cloud, so what it reads is sent to it.",
+    ]);
+    expect(c.details.map((d) => [d.label, d.value])).toEqual([["Folder", "/home/me/docs"]]);
+    expect(c.choice).toEqual({
+      legend: "How long it can read this folder",
+      options: [
+        { value: "chat", label: "For the rest of this chat", description: "You can remove access in Settings." },
+        { value: "turn", label: "Just this request", description: "Ends when it finishes this task." },
+      ],
+      value: "chat",
+    });
+    expect(c.buttons.map((b) => [b.id, b.label])).toEqual([["deny", "Don't allow"], ["allow", "Allow"]]);
+    expect([c.focus, c.danger ?? false, c.checks ?? null]).toEqual(["deny", false, null]);
+    // The choice the user made is the answer's; one the window did not offer is refused.
+    expect(checkAnswer(c, "allow", "chat", [])).toEqual({ button: "allow", choice: "chat", checked: [] });
+    expect(() => checkAnswer(c, "allow", "forever", [])).toThrow();
+  });
+
+  it("moves files in one window: the files ticked, then From and To in one box under them", () => {
+    const c = approval({ kind: "move", chat: CHAT, to: "/home/me/PONTAJE", files: [{ from: "/home/me/Scan/a.pdf", size: 10 }, { from: "/home/me/Scan/b.pdf", size: 2048 }] });
+    expect([c.title, c.danger, c.focus, c.cancel, c.detailsBelow]).toEqual(["Move 2 files?", true, "deny", "deny", true]);
+    expect(c.lead).toBe(`Each file will be copied to the new folder. Then its original goes to the ${bin}, where you can restore it if you need it.`);
+    expect(c.checks?.items).toEqual([
+      { value: "/home/me/Scan/a.pdf", label: "a.pdf", detail: "10 bytes" },
+      { value: "/home/me/Scan/b.pdf", label: "b.pdf", detail: "2 KB" },
+    ]);
+    expect(c.details.map((d) => [d.label, d.value])).toEqual([["From", "/home/me/Scan"], ["To", "/home/me/PONTAJE"]]);
+    expect(c.buttons.map((b) => [b.id, b.label])).toEqual([["deny", "Cancel"], ["allow", "Move"]]);
+    // From two folders: each file's own by it, and no From.
+    const two = approval({ kind: "move", chat: CHAT, to: "/o", files: [{ from: "/a/x.pdf", size: 1 }, { from: "/b/y.pdf", size: 1 }] });
+    expect(two.details.map((d) => d.label)).toEqual(["To"]);
+    expect(two.checks?.items.map((i) => i.detail)).toEqual(["/a · 1 byte", "/b · 1 byte"]);
+    // The chat's own files are removed from its folder, not binned.
+    const out = approval({ kind: "move", chat: CHAT, to: "/o", files: [{ from: `${CHAT.folder}/t.txt`, size: 1 }] });
+    expect(out.lead).toBe("The file will be copied to the new folder. Then it is removed from this chat's folder.");
+    const mixed = approval({ kind: "move", chat: CHAT, to: "/o", files: [{ from: `${CHAT.folder}/t.txt`, size: 1 }, { from: "/a/x.pdf", size: 1 }] });
+    expect(mixed.lead).toBe(`Each file will be copied to the new folder. Then the originals in this chat's folder are removed from it, and the others go to the ${bin}, where you can restore them.`);
+    const one = approval({ kind: "move", chat: CHAT, to: "/o", files: [{ from: "/a/x.pdf", size: 1 }] });
+    expect([one.title, one.lead]).toEqual(["Move 1 file?", `The file will be copied to the new folder. Then the original goes to the ${bin}, where you can restore it if you need it.`]);
+  });
+
+  it("copies files in the move's layout: the files ticked, then From and To in one box under them", () => {
+    const c = approval({ kind: "copy", chat: CHAT, to: "/home/me/out", files: [{ from: "/home/me/docs/a.txt", size: 10 }, { from: "/home/me/x/b.txt", size: 2048 }] });
+    expect([c.title, c.danger ?? false, c.focus, c.detailsBelow]).toEqual(["Copy 2 files?", false, "deny", true]);
+    expect(c.lead).toBe("Each file will be copied to the new folder. A name already taken there gets a number added, so nothing is overwritten.");
+    expect(c.checks?.items).toEqual([
+      { value: "/home/me/docs/a.txt", label: "a.txt", detail: "/home/me/docs · 10 bytes" },
+      { value: "/home/me/x/b.txt", label: "b.txt", detail: "/home/me/x · 2 KB" },
+    ]);
+    expect(c.details.map((d) => [d.label, d.value])).toEqual([["To", "/home/me/out"]]);
+    expect(c.buttons.map((b) => [b.id, b.label])).toEqual([["deny", "Cancel"], ["allow", "Copy"]]);
+    const one = approval({ kind: "copy", chat: CHAT, to: "/o", files: [{ from: "/a/b", size: 1 }] });
+    expect([one.title, one.checks?.items[0]?.detail, one.details.map((d) => [d.label, d.value])]).toEqual(["Copy 1 file?", "1 byte", [["From", "/a"], ["To", "/o"]]]);
+  });
+
+  it("warns, and focuses Keep them, for files going to the bin, with their folder under them", () => {
+    const c = approval({ kind: "trash", chat: CHAT, files: ["/home/me/docs/a.txt", "/home/me/docs/b.txt"] });
+    expect([c.title, c.danger, c.focus, c.cancel, c.detailsBelow]).toEqual([`Move 2 files to the ${bin}?`, true, "keep", "keep", true]);
+    expect(c.lead).toBe(`You can restore them from the ${bin}.`);
+    expect(c.checks?.items).toEqual([{ value: "/home/me/docs/a.txt", label: "a.txt", detail: "" }, { value: "/home/me/docs/b.txt", label: "b.txt", detail: "" }]);
+    expect(c.details.map((d) => [d.label, d.value])).toEqual([["From", "/home/me/docs"]]);
+    expect(c.buttons.map((b) => [b.id, b.label])).toEqual([["keep", "Keep them"], ["trash", `Move to the ${bin}`]]);
+    const one = approval({ kind: "trash", chat: CHAT, files: ["/a/x.txt"] });
+    expect([one.title, one.lead, one.buttons[0]!.label]).toEqual([`Move 1 file to the ${bin}?`, `You can restore it from the ${bin}.`, "Keep it"]);
+    const two = approval({ kind: "trash", chat: CHAT, files: ["/a/x.txt", "/b/y.txt"] });
+    expect([two.details, two.checks?.items.map((i) => i.detail)]).toEqual([[], ["/a", "/b"]]);
+  });
+
+  it("warns before changes go back over the original, naming both under the text", () => {
+    const c = approval({ kind: "put_back", chat: CHAT, copy: "/home/me/notes/a.txt", original: "/home/me/docs/a.txt" });
+    expect([c.title, c.danger, c.focus, c.detailsBelow]).toEqual(["Put the changes back?", true, "deny", true]);
+    expect(c.lead).toBe(`The original goes to the ${bin}, where you can restore it, and the edited copy is deleted from this chat's folder.`);
+    expect(c.details.map((d) => [d.label, d.value])).toEqual([["Edited copy", "/home/me/notes/a.txt"], ["Replaces", "/home/me/docs/a.txt"]]);
+    expect(c.buttons.map((b) => [b.id, b.label])).toEqual([["deny", "Keep only the copy"], ["allow", "Put back"]]);
+  });
+
+  it("never offers to stop asking", () => {
+    for (const r of [{ kind: "read_folder", folder: "/a" }, { kind: "copy", to: "/a", files: [] }, { kind: "move", to: "/a", files: [] }, { kind: "trash", files: [] }, { kind: "put_back", copy: "/a", original: "/b" }] as const) {
+      expect(ids(approval({ ...r, chat: CHAT } as ApprovalRequest))).not.toContain("stop_asking");
+    }
   });
 });

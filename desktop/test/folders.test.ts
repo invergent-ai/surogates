@@ -45,13 +45,13 @@ describe("Settings → Folders and permissions", () => {
       {
         folder: "/home/me/notes",
         chats: [
-          { root: FIRST, title: "Quarterly report", mode: "free", hosts: [], browser: false, ports: [], processes: [] },
+          { root: FIRST, title: "Quarterly report", mode: "free", hosts: [], browser: false, ports: [], reads: [], forTask: [], processes: [] },
           // The hosts its user let it reach, in the order allowed.
-          { root: THIRD, title: "A chat", mode: "ask", hosts: ["example.com", "[::1]"], browser: false, ports: [], processes: [] },
+          { root: THIRD, title: "A chat", mode: "ask", hosts: ["example.com", "[::1]"], browser: false, ports: [], reads: [], forTask: [], processes: [] },
         ],
       },
       // Its user let its agent use the browser on this computer, and open two ports of the chat's own servers there, lowest first.
-      { folder: "/home/me/taxes", chats: [{ root: SECOND, title: "Receipts", mode: "ask", hosts: [], browser: true, ports: [3000, 8000], processes: [] }] },
+      { folder: "/home/me/taxes", chats: [{ root: SECOND, title: "Receipts", mode: "ask", hosts: [], browser: true, ports: [3000, 8000], reads: [], forTask: [], processes: [] }] },
     ]);
   });
 
@@ -65,6 +65,23 @@ describe("Settings → Folders and permissions", () => {
     // A chat that does not use it changes nothing.
     journal.bindings.disallowBrowser(FIRST);
     expect(journal.bindings.browsing(FIRST)).toBe(false);
+  });
+
+  it("lists a chat's read grants with a way to take each back", async () => {
+    bind(FIRST, "/home/me/notes", "free", 1);
+    bind(SECOND, "/home/me/taxes", "free", 2);
+    journal.bindings.grantRead(FIRST, "/home/me/Desktop");
+    journal.bindings.grantRead(FIRST, "/home/me/Downloads");
+    journal.bindings.grantRead(SECOND, "/home/me/Desktop");
+    const reads = async () => (await listFolders(journal.bindings, async () => "", new LiveProcesses())).map((row) => row.chats[0]!.reads);
+    // In the order granted, each chat its own.
+    expect(await reads()).toEqual([["/home/me/Desktop", "/home/me/Downloads"], ["/home/me/Desktop"]]);
+    journal.bindings.takeBackRead(FIRST, "/home/me/Desktop");
+    expect(await reads()).toEqual([["/home/me/Downloads"], ["/home/me/Desktop"]]);
+    // A grant for the current task alone is said so.
+    journal.bindings.grantRead(FIRST, "/home/me/Pictures", true);
+    const first = (await listFolders(journal.bindings, async () => "", new LiveProcesses()))[0]!.chats[0]!;
+    expect([first.reads, first.forTask]).toEqual([["/home/me/Downloads", "/home/me/Pictures"], ["/home/me/Pictures"]]);
   });
 
   it("is empty while no chat works on a folder of this computer", async () => {

@@ -21,7 +21,11 @@ from PIL import Image
 from surogates.channels.memory_boundary import is_case_session
 from surogates.config import load_settings
 from surogates.devices.workspace import DeviceOperationError, said
-from surogates.office.agent import AGENT_KINDS, AgentDocument, AgentDocumentError, open_for_agent, relative_path, within_folder
+from surogates.devices.binding import device_of
+from surogates.office.agent import (
+    AGENT_KINDS, OUTSIDE_DOCUMENT, OUTSIDE_DOCUMENT_READ, AgentDocument, AgentDocumentError, open_for_agent, relative_path,
+    within_folder,
+)
 from surogates.office.guide import GUIDES_KEY, guide_for
 from surogates.office.kinds import office_kind
 from surogates.office.mentions import ACKNOWLEDGEMENT
@@ -234,6 +238,8 @@ async def _run(arguments: dict[str, Any], kwargs: dict[str, Any], *, create: boo
     session = await kwargs["session_store"].get_session(UUID(str(kwargs["session_id"])))
     path = relative_path(raw_path, session)
     if not within_folder(path):
+        if path.startswith("/") and device_of(session.config) is not None:
+            return _error(OUTSIDE_DOCUMENT if create else OUTSIDE_DOCUMENT_READ)
         return _error("Name the document by its path in the chat's folder, like docs/report.docx.")
     kind = office_kind(path)
     # The document types the agent works on; any other kind is refused by opening.

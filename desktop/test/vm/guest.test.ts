@@ -6,7 +6,7 @@
 
 import { spawnSync } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import { dirname, join } from "node:path";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -14,6 +14,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { GUEST_SYSTEM } from "../../src/binding/folder.js";
 import { CANCELLED, SANDBOX_STOPPED } from "../../src/guest/command.js";
 import type { ProcessHandle } from "../../src/guest/processes.js";
+import { GUEST_HOME } from "../../src/host-user.js";
 import { ControlLink } from "../../src/vm/control.js";
 import { bootLinux } from "../../src/vm/linux.js";
 import { Guest, type VmOptions } from "../../src/vm/manager.js";
@@ -72,7 +73,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
     expect(await run("echo hi")).toEqual({ ok: { output: "hi\n", returncode: 0, timed_out: false } });
     console.log(`M1: hello after ${guest.helloMs.toFixed(0)} ms, the first command answered after ${(performance.now() - guest.launched).toFixed(0)} ms`);
     expect(await run("pwd; echo $HOME; id -un")).toEqual({
-      ok: { output: `${folder}\n${USER.home}\n${USER.name}\n`, returncode: 0, timed_out: false },
+      ok: { output: `${folder}\n${GUEST_HOME}\n${USER.name}\n`, returncode: 0, timed_out: false },
     });
     expect(await guest.request({ type: "setup", root: ROOT, folder, share: R1, ended: [] })).toMatchObject({
       type: "failed", message: "This chat's sandbox is already set up",
@@ -89,6 +90,15 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
         type: "failed", message,
       }));
     }
+  });
+
+  it("the user's profile path above the chat's folder takes no new folder", async () => {
+    expect(await run([
+      'm=$(mkdir "$(dirname "$PWD")/Desktop" 2>&1); rc=$?; echo "${m##*: }"; echo rc=$rc',
+      'm=$(ls -d ~/Desktop 2>&1); rc=$?; echo "${m##*: }"; echo rc=$rc',
+    ].join("; "))).toEqual({
+      ok: { output: "Permission denied\nrc=1\nNo such file or directory\nrc=2\n", returncode: 0, timed_out: false },
+    });
   });
 
   it("activates the bpf LSM and attaches all sixteen rule hooks before sessions run", () => {
@@ -137,7 +147,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
   it("reaches nothing of this computer past its root's folder: what lies beside it, the user's ~/.ssh, or a write beside it", async () => {
     expect(await run([
       `ls -A "${dir}"`,
-      "ls ~/.ssh 2>&1 | sed 's/.*: //'",
+      `ls ${userInfo().homedir}/.ssh 2>&1 | sed 's/.*: //'`,
       `(echo x > "${dir}/outside.txt") 2>&1 | sed 's/.*: //'`,
     ].join("; "))).toEqual({ ok: { output: "my folder's\nNo such file or directory\nPermission denied\n", returncode: 0, timed_out: false } });
     expect(existsSync(join(dir, "outside.txt"))).toBe(false);
@@ -612,7 +622,7 @@ describe.skipIf(process.env.SUROGATE_VM_TESTS !== "1")("the guest", { timeout: 6
     // Each folder of the image's, at its top and in its /opt and /var, that holds what the root's user can see.
     const listed = await run('for d in /* /opt/* /var/*; do [ -d "$d" ] && [ ! -L "$d" ] && [ -n "$(ls -A "$d" 2>/dev/null)" ] && echo "$d"; done') as { ok: { output: string } };
     // The root's own: its namespace's mounts, its home, and the folders of the two below.
-    const own = new Set(["/dev", "/home", "/opt", "/proc", "/run", "/sys", "/tmp", "/var", "/var/tmp"]);
+    const own = new Set(["/dev", "/home", "/opt", "/proc", "/run", "/surogate", "/sys", "/tmp", "/var", "/var/tmp"]);
     expect(listed.ok.output.trim().split("\n").filter((folder) => !own.has(folder)).sort()).toEqual([...GUEST_SYSTEM].sort());
   });
 

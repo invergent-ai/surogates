@@ -194,8 +194,9 @@ export function parseServerFrame(raw: string): ServerFrame {
 
 // *copies*: this app keeps a copy of a folder for a project's thread to work in. The server binds a thread to one
 // only where it is said: an app older than copies would bind the thread to the folder itself.
-export function hello(open: string[], copies = false): Record<string, unknown> {
-  return { type: "hello", protocols: [PROTOCOL_VERSION], open, ...(copies ? { copies: true } : {}) };
+// *outside*: this app works on files outside a chat's folder (outside/executor.ts): an older one knows no outside.* kind.
+export function hello(open: string[], copies = false, outside = false): Record<string, unknown> {
+  return { type: "hello", protocols: [PROTOCOL_VERSION], open, ...(copies ? { copies: true } : {}), ...(outside ? { outside: true } : {}) };
 }
 
 export function opResult(

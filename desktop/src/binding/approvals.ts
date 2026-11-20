@@ -1,6 +1,7 @@
 // Approvals (spec, Section 4). A chat that asks every time has its user allow
 // each command, file change and process input before it happens, in the
-// desktop's own window; a chat that works freely is asked nothing here. Each is
+// desktop's own window; a chat that works freely is asked nothing here but a use of
+// the agent's browser (below) and anything outside the chat's folder. Each is
 // asked in the runner's admit phase, before the journal marks the operation
 // started: a prompt still open when the app stops is asked again once the server
 // sends the operation again, nothing ran, and the command's timeout starts only
@@ -10,14 +11,19 @@
 // a destination off the package hosts asks too, while the command runs; "Allow for
 // this session" lets that host through, on every port, for the rest of the chat.
 
+import { stat } from "node:fs/promises";
 import { posix } from "node:path";
 
 import { chatPortOf, SANDBOX_PORTS } from "../browser/ports.js";
 import { THREAD_KINDS } from "../history/kinds.js";
+import { whole } from "../files/edge.js";
+import { inside } from "../files/paths.js";
 import { FOLDER_UNAVAILABLE, type NetworkAnswer, type NetworkAsk } from "../hosts/messages.js";
 import type { Binding, Bindings } from "../journal/bindings.js";
 import type { Operation, Outcome } from "../link/protocol.js";
+import { BIN } from "../platform.js";
 import { report } from "../report.js";
+import { hostPathOf } from "../session-path.js";
 
 // What Ask every time never asks about: these only read, or make things safer (kill).
 // Every other kind asks (run, start, write, delete, write_stdin), and so does a new one.
@@ -51,6 +57,64 @@ const BROWSER_READS: ReadonlySet<string> = new Set(["browser.observe", "browser.
 const LOOKING: ReadonlySet<unknown> = new Set(["move", "wheel"]);
 const acts = ({ kind, args }: Operation): boolean => !BROWSER_READS.has(kind) && !(kind === "browser.mouse" && LOOKING.has(args.action));
 
+// Files outside the chat's folder (outside_folder.ts). Each is asked in either mode: a chat that works freely
+// was let loose in its own folder, not in the rest of the computer, and none of these windows offers to stop
+// asking. The reads ask nothing here: the layer lets them only within a folder its user granted. A project's
+// thread has none of them: it works in a copy of the chat's folder, and the rest of the computer is the main chat's.
+export const OUTSIDE = "outside.";
+export const OUTSIDE_READS: ReadonlySet<string> = new Set([
+  "outside.resolve", "outside.stat", "outside.read", "outside.read_lines", "outside.list_dir", "outside.walk",
+]);
+export const outsideDenied = (message: string): Outcome => ({ error: { type: "denied", message } });
+const SAID_NO = outsideDenied("The user said no.");
+const KEPT = outsideDenied(`The user kept the originals; nothing went to the ${BIN}. Any copies already made stay.`);
+const IN_A_THREAD = outsideDenied("Files outside the chat's folder can be used from the main chat, not from a project's thread.");
+const NOT_ANSWERED = outsideDenied("Nobody answered on this computer in time, so nothing was done.");
+// Not "unsupported", which the server reads as an app too old for files outside the folder: this app knows them, not this one.
+export const UNKNOWN = (kind: string): Outcome => outsideDenied(`This computer does not know '${kind}'.`);
+// A path the agent gave that is not one whole guest path: refused before any window, which would show it as it came.
+const NOT_A_PATH = (name: string): Outcome => outsideDenied(
+  `'${name}' must be an absolute path, with no '.' or '..' parts and no slash at its end.`,
+);
+const NO_FILES = outsideDenied("'files' must list at least one file.");
+const isPath = (value: unknown): value is string => typeof value === "string" && whole(value);
+
+// The copy window's sizes, display only: the copy itself checks every file again. The first SIZED are looked at off
+// the main thread, LOOKS at a time, within one budget for them all; one not in by then, past the first SIZED, or that
+// cannot be read, shows 0. A look that does not answer (a mount gone stale, a network drive) holds one of libuv's
+// threads, not the app, and no new look starts once the budget is spent: a window holds LOOKS of them at most.
+// ponytail: stalled looks per window can stay stuck in the thread pool; a worker of their own if that ever bites.
+const SIZED = 50;
+const SIZES_MS = 500;
+const LOOKS = 4;
+/** The sizes a copy window shows for *files*, each by *look*. Exported for its tests. */
+export async function sizesOf(files: string[], look: (path: string) => Promise<{ size: number }> = stat): Promise<number[]> {
+  const sizes = files.map(() => 0);
+  const count = Math.min(files.length, SIZED);
+  let next = 0;
+  let over = false;
+  const looker = async () => {
+    while (!over && next < count) {
+      const at = next++;
+      try {
+        const { size } = await look(hostPathOf(files[at]!));
+        if (!over) sizes[at] = size;
+      } catch {
+        // Unreadable: shown as 0.
+      }
+    }
+  };
+  let timer: NodeJS.Timeout | undefined;
+  const late = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, SIZES_MS);
+  });
+  await Promise.race([Promise.all(Array.from({ length: LOOKS }, looker)), late]);
+  over = true;
+  clearTimeout(timer);
+  // Those in by the budget's end, and no later: a late one would change what the window was given.
+  return [...sizes];
+}
+
 // Whose download a write saves (browser/downloads.ts): one a page of the agent's browser started, or
 // one that began while its user held the browser, or just after they handed it back, which asks in
 // either mode.
@@ -83,6 +147,13 @@ export type ApprovalRequest =
   // command: what the process runs, as its start named it; null for a process this run of the app did not start.
   | { kind: "input"; chat: ChatLabel; process: string; command: string | null; data: string }
   | { kind: "network"; chat: ChatLabel; host: string; port: number; privateNetwork: boolean }
+  // Outside the chat's folder, each file by its guest path: a folder to read, files to copy to a place (with each one's size),
+  // files to move to the Recycle Bin, and a copy's changes to put back over the original.
+  | { kind: "read_folder"; chat: ChatLabel; folder: string }
+  | { kind: "copy"; chat: ChatLabel; to: string; files: Array<{ from: string; size: number }> }
+  | { kind: "trash"; chat: ChatLabel; files: string[] }
+  | { kind: "move"; chat: ChatLabel; to: string; files: Array<{ from: string; size: number }> }
+  | { kind: "put_back"; chat: ChatLabel; copy: string; original: string }
   // The chat's first use of the browser here ("use", with no detail), or what an operation would do
   // in its page: the address it opens, the script it runs, where it clicks, what it types or presses, its drag's path.
   // page: an act's, the address of the page it acts in, as the browser said it just before; null when it did not say in time.
@@ -104,13 +175,20 @@ export type BrowserAction = "use" | "port" | "open" | "script" | "click" | "down
 // host, on every port, for the rest of the chat. "timeout": nobody answered in time.
 // Any answer a prompt does not offer denies.
 export type ApprovalAnswer = "allow" | "deny" | "stop_asking" | "allow_session" | "timeout";
+// A window's answer, with what its list still had ticked, and the option it had chosen: the trash window's buttons are its own.
+export interface PromptReply {
+  answer: ApprovalAnswer | "trash" | "keep";
+  checked: string[];
+  choice?: string | null; // a folder's read window: "chat" for the rest of the chat, else this turn alone
+}
 
 // The desktop shell's own windows; fakes in tests. Each settles once its signal aborts.
 export interface ApprovalPrompts {
   // One operation or network destination, focus on Deny. Each settles once its signal aborts.
   // An operation allows on "allow" or "stop_asking"; a network prompt allows on "allow" or
   // "allow_session", and "allow_session" keeps the host for the chat, on every port. Any other answer denies.
-  approve(request: ApprovalRequest, signal: AbortSignal): Promise<ApprovalAnswer>;
+  // A window outside the chat's folder allows on its allowing button alone, with *checked* the files still ticked.
+  approve(request: ApprovalRequest, signal: AbortSignal): Promise<PromptReply>;
   // The desktop's own confirmation before a chat works freely. Only true lets it.
   confirmFreeMode(chat: ChatLabel, signal: AbortSignal): Promise<boolean>;
 }
@@ -132,6 +210,10 @@ export interface ApprovalsOptions {
   // nobody. "busy": the sandbox holds every connection it takes from the browser, and could not be asked.
   listening?: (root: string, port: number) => Promise<boolean | "busy">;
   onError?: (error: unknown) => void; // a choice that could not be recorded, or a network prompt that failed, and why
+  // The folder an outside.grant names, as its window shows it and its grant keeps it: a known name ("Desktop") or an
+  // absolute path, resolved and checked for the chat *root*; or why it cannot be granted, and nobody is asked.
+  // Without it, only an absolute, normal path is taken.
+  resolveFolder?: (folder: string, root: string) => Promise<{ folder: string } | { refused: string }> | { folder: string } | { refused: string };
 }
 
 // How long an act's prompt waits for its page's address before it says the page is not known.
@@ -280,6 +362,9 @@ export class Approvals {
   private readonly browsing = new Map<string, Set<AbortController>>();
   // The documents whose editor saves its user allowed: a chat's root and the file's key.
   private readonly editorSaves = new Set<string>();
+  // The files its user left ticked on an admitted copy or trash, by its operation's id, until the layer reads them.
+  // ponytail: one kept per such operation the layer never reads (it failed before), for the app's life.
+  private readonly chosen = new Map<string, string[]>();
 
   constructor(private readonly options: ApprovalsOptions) {}
 
@@ -292,6 +377,8 @@ export class Approvals {
    */
   async admit(operation: Operation, signal: AbortSignal, download?: DownloadBy): Promise<Outcome | null> {
     if (operation.kind.startsWith(BROWSER)) return this.browse(operation, signal);
+    // Before anything that reads a chat's mode: free or not, these ask.
+    if (operation.kind.startsWith(OUTSIDE)) return this.outside(operation, signal);
     if (UNASKED.has(operation.kind)) return null;
     // A thread's snapshots, its history's steps and its landing (spec, Section 13, "Approvals") are none of its user's to
     // allow: each change a landing applies was asked about when the thread made it in its copy, and a prompt for each
@@ -309,10 +396,10 @@ export class Approvals {
       const request = requestFor(
         operation, again.binding, this.options.agent, (process) => this.commands.get(`${root}\0${process}`) ?? null, download,
       );
-      let answer: ApprovalAnswer | undefined;
+      let answer: PromptReply["answer"] | undefined;
       try {
         // Raced against its signal: a prompt that ignores it cannot hold a cancel or a suspend.
-        answer = await settled(this.options.prompts.approve(request, signal), signal);
+        answer = (await settled(this.options.prompts.approve(request, signal), signal))?.answer;
       } catch (error) {
         return denied(operation.kind, couldNotAsk(error));
       }
@@ -384,10 +471,10 @@ export class Approvals {
         const now = needed();
         if ("answer" in now) return now.answer;
         const chat = { agent: this.options.agent, root, calling: operation.callingSessionId, folder: now.binding.folder };
-        const ask = async (request: ApprovalRequest): Promise<ApprovalAnswer | Outcome> => {
+        const ask = async (request: ApprovalRequest): Promise<PromptReply["answer"] | Outcome> => {
           try {
             // Raced against its signal: a prompt that ignores it cannot hold a cancel or a suspend.
-            const answer = await settled(this.options.prompts.approve(request, asking), asking);
+            const answer = (await settled(this.options.prompts.approve(request, asking), asking))?.answer;
             // A dismissed prompt's answer is not its user's.
             if (asking.aborted) return browserDenied(BROWSER_DENIED.act);
             return answer === "timeout" ? browserDenied(BROWSER_DENIED.unanswered) : (answer ?? "deny");
@@ -445,12 +532,121 @@ export class Approvals {
     return answer;
   }
 
+  // A file outside the chat's folder: refused in a project's thread, read within a grant unasked, and every other
+  // asked in its own window, in the chat's line, in either mode. Only its allowing button admits it; fails closed.
+  private async outside(operation: Operation, signal: AbortSignal): Promise<Outcome | null> {
+    const root = operation.sessionId;
+    const { kind, args } = operation;
+    const bound = (): Binding | Outcome => {
+      let binding: Binding | undefined;
+      try {
+        binding = this.options.bindings.get(root);
+      } catch (error) {
+        return outsideDenied(couldNotAsk(error));
+      }
+      if (!binding) return FOLDER_UNAVAILABLE;
+      return binding.history !== undefined ? IN_A_THREAD : binding;
+    };
+    const first = bound();
+    if (!("root" in first)) return first;
+    if (OUTSIDE_READS.has(kind)) return null;
+    const checked = await this.outsideArgs(kind, args, root);
+    if ("refused" in checked) return checked.refused;
+    // A folder a grant of this chat's holds already is not asked about again: the layer answers it as granted.
+    if (kind === "outside.grant" && this.options.bindings.reads(root).some((grant) => inside(checked.folder, grant))) return null;
+    const no = kind === "outside.trash" ? KEPT : SAID_NO;
+    return this.inLine(root, signal, no, async () => {
+      // Unbound while it waited its turn: asked nothing.
+      const binding = bound();
+      if (!("root" in binding)) return binding;
+      const chat = { agent: this.options.agent, root, calling: operation.callingSessionId, folder: binding.folder };
+      const { files, folder } = checked;
+      let request: ApprovalRequest;
+      if (kind === "outside.grant") request = { kind: "read_folder", chat, folder };
+      else if (kind === "outside.trash") request = { kind: "trash", chat, files };
+      else if (kind === "outside.put_back") request = { kind: "put_back", chat, copy: String(args.copy), original: String(args.original) };
+      else {
+        const sizes = await settled(sizesOf(files), signal);
+        if (signal.aborted || !sizes) return no;
+        const sized = files.map((from, at) => ({ from, size: sizes[at]! }));
+        request = { kind: kind === "outside.move" ? "move" : "copy", chat, to: String(args.to), files: sized };
+      }
+      let reply: PromptReply | undefined;
+      try {
+        // Raced against its signal: a prompt that ignores it cannot hold a cancel or a suspend.
+        reply = await settled(this.options.prompts.approve(request, signal), signal);
+      } catch (error) {
+        return outsideDenied(couldNotAsk(error));
+      }
+      // A dismissed window's answer is not its user's.
+      if (signal.aborted || !reply) return no;
+      if (reply.answer === "timeout") return NOT_ANSWERED;
+      // Every other answer, "stop_asking" among them, is one these windows do not offer.
+      if (reply.answer !== (kind === "outside.trash" ? "trash" : "allow")) return no;
+      if (kind === "outside.grant") {
+        try {
+          // For this turn alone unless its user chose the rest of the chat: a window that offered no choice grants the least.
+          this.options.bindings.grantRead(root, folder, reply.choice !== "chat");
+        } catch (error) {
+          // Not kept, the layer would refuse every read of it anyway.
+          report(this.options.onError, error);
+          return outsideDenied(couldNotAsk(error));
+        }
+        // The folder its user allowed, for the layer to answer with: its name may resolve elsewhere by the time it runs.
+        this.chosen.set(operation.id, [folder]);
+      }
+      if (kind === "outside.copy" || kind === "outside.trash" || kind === "outside.move") {
+        // Only what the window listed: a ticked file it did not show is not the user's choice.
+        const ticked = files.filter((file) => reply.checked.includes(file));
+        if (ticked.length === 0) return no;
+        this.chosen.set(operation.id, ticked);
+      }
+      return null;
+    });
+  }
+
+  // An outside kind's paths, checked before anyone is asked: each whole and absolute, *files* without a repeat, and a
+  // grant's folder resolved. Or why not.
+  private async outsideArgs(kind: string, args: Record<string, unknown>, root: string): Promise<{ files: string[]; folder: string } | { refused: Outcome }> {
+    const refused = (outcome: Outcome) => ({ refused: outcome });
+    let files: string[] = [];
+    let folder = "";
+    if (kind === "outside.copy" || kind === "outside.trash" || kind === "outside.move") {
+      if (!Array.isArray(args.files)) return refused(NOT_A_PATH("files"));
+      if (args.files.length === 0) return refused(NO_FILES);
+      if (!args.files.every(isPath)) return refused(NOT_A_PATH("files"));
+      files = [...new Set(args.files as string[])];
+      if ((kind === "outside.copy" || kind === "outside.move") && !isPath(args.to)) return refused(NOT_A_PATH("to"));
+    } else if (kind === "outside.put_back") {
+      for (const name of ["copy", "original"]) if (!isPath(args[name])) return refused(NOT_A_PATH(name));
+    } else if (kind === "outside.grant") {
+      if (typeof args.folder !== "string") return refused(NOT_A_PATH("folder"));
+      // Looked at apart before it is resolved (outside/executor.ts): a drive that has stopped answering never holds the app.
+      const resolved = (await this.options.resolveFolder?.(args.folder, root)) ?? (isPath(args.folder) ? { folder: args.folder } : null);
+      if (resolved === null) return refused(NOT_A_PATH("folder"));
+      if ("refused" in resolved) return refused(outsideDenied(resolved.refused));
+      // What the window shows and the grant keeps is checked like the rest, whoever resolved it.
+      if (!isPath(resolved.folder)) return refused(NOT_A_PATH("folder"));
+      folder = resolved.folder;
+    } else {
+      return refused(UNKNOWN(kind));
+    }
+    return { files, folder };
+  }
+
+  /** The files its user left ticked on an admitted copy or trash, read once: the layer copies or trashes these alone. */
+  chosenFor(operationId: string): string[] | undefined {
+    const ticked = this.chosen.get(operationId);
+    this.chosen.delete(operationId);
+    return ticked;
+  }
+
   // A port of the chat's own servers its agent's browser would open: asked in either mode, once something
   // listens there, and kept with the binding on "Allow for this chat" alone. Null once it is kept;
   // otherwise why the browser does not open it. A port that could not be kept is refused: the proxy lets
   // through only what the journal holds.
   private async openPort(
-    root: string, port: number, chat: ChatLabel, ask: (request: ApprovalRequest) => Promise<ApprovalAnswer | Outcome>, asking: AbortSignal,
+    root: string, port: number, chat: ChatLabel, ask: (request: ApprovalRequest) => Promise<PromptReply["answer"] | Outcome>, asking: AbortSignal,
   ): Promise<Outcome | null> {
     if (SANDBOX_PORTS.has(port)) return SANDBOX_PROXY(port);
     const listening = await settled(Promise.resolve().then(() => this.options.listening?.(root, port) ?? false).catch(() => false), asking);
@@ -547,9 +743,9 @@ export class Approvals {
         report(this.options.onError, error);
         return "deny";
       }
-      let answer: ApprovalAnswer | undefined;
+      let answer: PromptReply["answer"] | undefined;
       try {
-        answer = await settled(this.options.prompts.approve({ kind: "network", chat, ...asked }, signal), signal);
+        answer = (await settled(this.options.prompts.approve({ kind: "network", chat, ...asked }, signal), signal))?.answer;
       } catch (error) {
         report(this.options.onError, error);
         return "deny";

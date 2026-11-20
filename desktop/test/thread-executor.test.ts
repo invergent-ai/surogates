@@ -648,7 +648,7 @@ describe("a thread's own kinds, through the app's executor", { timeout: 10_000 }
         approvalPrompts: {
           approve: async (request) => {
             prompts.push(request);
-            return "deny";
+            return { answer: "deny", checked: [] };
           },
           confirmFreeMode: async () => false,
         },

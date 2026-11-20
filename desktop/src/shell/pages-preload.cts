@@ -80,6 +80,7 @@ if (location.protocol === "file:") {
     takeBrowserBack: (root: string) => ipcRenderer.invoke("settings:take-back-browser", root),
     handBrowserBack: () => ipcRenderer.invoke("settings:hand-back-browser"),
     takePortBack: (root: string, port: number) => ipcRenderer.invoke("settings:take-back-port", root, port),
+    takeReadBack: (root: string, folder: string) => ipcRenderer.invoke("settings:take-back-read", root, folder),
     stop: (root: string, id: string) => ipcRenderer.invoke("settings:stop", root, id),
     set: (key: string, value: string) => ipcRenderer.invoke("settings:set", key, value),
     link: (which: string) => ipcRenderer.invoke("settings:link", which),
@@ -105,7 +106,8 @@ if (location.protocol === "file:") {
   });
   contextBridge.exposeInMainWorld("surogatePrompt", {
     state: () => ipcRenderer.invoke("prompt:state"),
-    answer: (button: string, choice: string | null) => ipcRenderer.invoke("prompt:answer", button, choice),
+    answer: (button: string, choice: string | null, checked: string[]) => ipcRenderer.invoke("prompt:answer", button, choice, checked),
+    fit: (height: number) => ipcRenderer.invoke("prompt:fit", height),
     onChanged: listen("prompt:changed"),
     onArmed: (listener: (armed: boolean) => void) => {
       const relay = (_event: unknown, armed: unknown) => listener(armed === true);

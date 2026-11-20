@@ -126,6 +126,11 @@ describe("app frames", () => {
     expect(hello(["a"], false)).toEqual({ type: "hello", protocols: [1], open: ["a"] });
   });
 
+  it("says it can work outside a chat's folder in its hello", () => {
+    expect(hello(["a"], false, true)).toEqual({ type: "hello", protocols: [1], open: ["a"], outside: true });
+    expect(hello(["a"], true, true)).toEqual({ type: "hello", protocols: [1], open: ["a"], copies: true, outside: true });
+  });
+
   it("answers an operation by id and digest", () => {
     expect(opResult({ id: "x", digest: "d" }, { ok: null })).toEqual({
       type: "op_result", id: "x", digest: "d", outcome: { ok: null },

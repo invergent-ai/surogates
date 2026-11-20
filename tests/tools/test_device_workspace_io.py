@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import dataclasses
 import errno
 import hashlib
 import json
@@ -24,6 +25,7 @@ from surogates.devices.workspace import (
     MAX_READ_BYTES,
     MAX_WRITE_BYTES,
     OUTPUT_CAP_CHARS,
+    OUTSIDE_READ_ONLY,
     READ_TOO_LARGE,
     WRITE_TOO_LARGE,
     DeviceOperationError,
@@ -825,3 +827,281 @@ async def test_the_reference_laptop_refuses_a_walk_it_cannot_take(root):
         "error": {"type": "value", "message": "'key' must be a string"},
     }
     assert (await perform(LocalWorkspaceIO(str(root)), "walk", {**taken, "since": "9" * 20}))["ok"]["files"] == []
+
+
+class OutsideToo:
+    """A computer whose chat's folder is *chat*, and that also answers outside.* kinds in *elsewhere*,
+    as the app does in a folder its user granted: the same outcomes, through the JSON a link carries."""
+
+    def __init__(self, chat: Path, elsewhere: Path) -> None:
+        self.chat = InProcessRunner(LocalWorkspaceIO(workspace_path=str(chat)))
+        self.elsewhere = InProcessRunner(LocalWorkspaceIO(workspace_path=str(elsewhere)))
+        self.sent: list[tuple[str, dict]] = []
+
+    async def run(self, kind, args, payload=None):
+        self.sent.append((kind, json.loads(json.dumps(args))))
+        if kind.startswith("outside."):
+            outcome = await self.elsewhere.run(kind.removeprefix("outside."), args, payload)
+            if kind == "outside.walk" and "ok" in outcome:
+                # The app's outside walk carries each file's mtime too, and each folder as a row of its own, by a
+                # trailing "/" (an empty one too), as the app's walkFrom with folders does.
+                root = Path(args["key"])
+                folders = [
+                    f"{Path(at, name).relative_to(root).as_posix()}/"
+                    for at, names, _ in os.walk(root)
+                    for name in names
+                    if not (args["skip_hidden"] and name.startswith("."))
+                ]
+                outcome["ok"]["files"] = [
+                    [p, size, (root / p).lstat().st_mtime]
+                    for p, size in [*outcome["ok"]["files"], *((f, 0) for f in folders)]
+                ]
+            return outcome
+        return await self.chat.run(kind, args, payload)
+
+
+@pytest.fixture
+def two_folders(tmp_path):
+    chat, elsewhere = tmp_path / "chat", tmp_path / "chat-old"
+    chat.mkdir()
+    (elsewhere / "sub").mkdir(parents=True)
+    (elsewhere / "a.txt").write_text("one\ntwo\n")
+    (elsewhere / "sub" / "b.txt").write_text("b")
+    laptop = OutsideToo(chat, elsewhere)
+    return laptop, DeviceWorkspaceIO(laptop, root=str(chat)), chat, elsewhere
+
+
+async def test_routes_reads_of_a_path_outside_the_folder_to_outside_kinds(two_folders):
+    laptop, wio, chat, elsewhere = two_folders
+
+    # Named as the model may write it: normalised before it is sent, as the app takes only that.
+    key = await wio.resolve(f"{elsewhere}/sub/../a.txt/")
+    folder = await wio.resolve(str(elsewhere))
+    assert key == str(elsewhere / "a.txt")
+    assert (await wio.stat(key)).size == 8
+    assert await wio.read(key) == b"one\ntwo\n"
+    assert (await wio.read_lines(key, encoding="utf-8", offset=2, limit=1, max_bytes=100)).data == b"two\n"
+    assert sorted(await wio.list_dir(folder)) == ["a.txt", "sub"]
+    # Each folder a row too, by a trailing "/".
+    assert sorted((await wio.walk(folder, skip=())).files) == [("a.txt", 8), ("sub/", 0), ("sub/b.txt", 1)]
+    assert wio.is_outside(key) and wio.is_outside(folder)
+
+    assert [kind for kind, _ in laptop.sent] == [
+        "outside.resolve", "outside.resolve", "outside.stat", "outside.read", "outside.read_lines",
+        "outside.list_dir", "outside.walk",
+    ]
+    assert laptop.sent[0][1] == {"path": str(elsewhere / "a.txt")}
+
+    # A path in the chat's folder, absolute or not, is the folder's as before; so is a key no outside.resolve gave.
+    laptop.sent.clear()
+    inside = await wio.resolve(str(chat / "x.txt"))
+    await wio.resolve("y.txt")
+    await wio.stat(inside)
+    await wio.stat(str(elsewhere / "sub" / "b.txt"))
+    assert [kind for kind, _ in laptop.sent] == ["resolve", "resolve", "stat", "stat"]
+    assert not wio.is_outside(inside)
+
+    # A leading "//" is one slash: the chat's own folder still, and outside by its one-slash path.
+    laptop.sent.clear()
+    await wio.resolve("/" + str(chat / "x.txt"))
+    await wio.resolve("/" + str(elsewhere / "a.txt"))
+    assert laptop.sent[0][0] == "resolve"
+    assert laptop.sent[1] == ("outside.resolve", {"path": str(elsewhere / "a.txt")})
+
+
+async def test_a_windows_path_is_the_tools_path_on_a_windows_computer():
+    sent: list[tuple[str, dict]] = []
+
+    class Windows:
+        async def run(self, kind, args, payload=None):
+            sent.append((kind, args))
+            return {"ok": args["path"] if kind.endswith("resolve") else None}
+
+    wio = DeviceWorkspaceIO(Windows(), root="/mnt/c/Users/Diana/work")
+    # The chat's own folder as the prompt shows it, and a folder outside it, as its user names them.
+    assert await wio.resolve("C:\\Users\\Diana\\work\\a.txt") == "/mnt/c/Users/Diana/work/a.txt"
+    assert await wio.resolve("C:\\Users\\Diana\\Desktop\\Scan\\b.pdf") == "/mnt/c/Users/Diana/Desktop/Scan/b.pdf"
+    assert await wio.check_write("D:/Scans/c.txt") == OUTSIDE_READ_ONLY
+    assert sent == [
+        ("resolve", {"path": "/mnt/c/Users/Diana/work/a.txt"}),
+        ("outside.resolve", {"path": "/mnt/c/Users/Diana/Desktop/Scan/b.pdf"}),
+        ("check_write", {"path": "/mnt/d/Scans/c.txt"}),
+    ]
+    # Elsewhere such a name is only a file's.
+    sent.clear()
+    await DeviceWorkspaceIO(Windows(), root="/home/ana/proj").resolve("C:\\a.txt")
+    assert sent == [("resolve", {"path": "C:\\a.txt"})]
+
+
+async def test_refuses_writes_deletes_and_searches_by_content_outside_the_folder(two_folders):
+    laptop, wio, _chat, elsewhere = two_folders
+    key = await wio.resolve(str(elsewhere / "a.txt"))
+    laptop.sent.clear()
+
+    for call in (
+        lambda: wio.write(key, b"changed"),
+        lambda: wio.delete(key),
+        lambda: wio.ripgrep(key, mode="content", pattern="one"),
+    ):
+        with pytest.raises(WorkspaceSandboxError) as refused:
+            await call()
+        assert str(refused.value) == (
+            "Files outside the chat's folder are read-only: use copy_files, move_files, move_to_trash or put_back."
+        )
+    # Nothing reached the computer, and the file is as it was.
+    assert laptop.sent == []
+    assert (elsewhere / "a.txt").read_text() == "one\ntwo\n"
+    # write_file's check answers so too, after the computer's own refusals.
+    assert await wio.check_write(str(elsewhere / "a.txt")) == (
+        "Files outside the chat's folder are read-only: use copy_files, move_files, move_to_trash or put_back."
+    )
+    assert await wio.check_write("/etc/passwd") == "Write denied: '/etc/passwd' is a protected system/credential file."
+    assert (elsewhere / "a.txt").read_text() == "one\ntwo\n"
+
+
+async def test_list_files_outside_the_folder_lists_by_name_and_search_by_content_is_refused(two_folders):
+    _laptop, wio, _chat, elsewhere = two_folders
+
+    listed = json.loads(await file_ops._list_files_handler({"path": str(elsewhere), "pattern": "*.txt"}, workspace_io=wio))
+    assert sorted(listed["matches"]) == [str(elsewhere / "a.txt"), str(elsewhere / "sub" / "b.txt")]
+    assert listed["total_count"] == 2
+
+    # "**/" matches no folder too, as ripgrep's -g does; newest first, as in the chat's folder.
+    os.utime(elsewhere / "a.txt", (1_000, 1_000))
+    os.utime(elsewhere / "sub" / "b.txt", (2_000, 2_000))
+    deep = json.loads(await file_ops._list_files_handler({"path": str(elsewhere), "pattern": "**/*.txt"}, workspace_io=wio))
+    assert deep["matches"] == [str(elsewhere / "sub" / "b.txt"), str(elsewhere / "a.txt")]
+    os.utime(elsewhere / "a.txt", (3_000, 3_000))
+    newest = json.loads(await file_ops._list_files_handler({"path": str(elsewhere), "pattern": "*.txt"}, workspace_io=wio))
+    assert newest["matches"] == [str(elsewhere / "a.txt"), str(elsewhere / "sub" / "b.txt")]
+
+    only_sub = json.loads(await file_ops._list_files_handler({"path": str(elsewhere), "pattern": "sub/*"}, workspace_io=wio))
+    assert only_sub["matches"] == [str(elsewhere / "sub" / "b.txt")]
+
+    searched = json.loads(await file_ops._search_files_handler(
+        {"path": str(elsewhere), "pattern": "one", "target": "content"}, workspace_io=wio,
+    ))
+    assert searched["error"] == "Search outside the chat's folder is by name: use list_files with a pattern."
+
+    read = await file_ops._read_file_handler({"path": str(elsewhere / "a.txt")}, workspace_io=wio)
+    assert "one" in read and "two" in read
+
+
+async def test_an_outside_list_is_sorted_by_the_walks_times_with_no_look_a_file(two_folders):
+    laptop, wio, _chat, elsewhere = two_folders
+    for n in range(600):
+        (elsewhere / f"f{n}.txt").write_text("x")
+        os.utime(elsewhere / f"f{n}.txt", (n, n))
+    os.utime(elsewhere / "a.txt", (5_000, 5_000))
+    os.utime(elsewhere / "sub" / "b.txt", (4_000, 4_000))
+    laptop.sent.clear()
+    listed = json.loads((await file_ops._list_files_handler(
+        {"path": str(elsewhere), "pattern": "*.txt", "limit": 3}, workspace_io=wio,
+    )).split("\n\n[Hint")[0])
+    assert listed["total_count"] == 602
+    assert listed["matches"] == [str(elsewhere / "a.txt"), str(elsewhere / "sub" / "b.txt"), str(elsewhere / "f599.txt")]
+    assert "note" not in listed
+    # The walk and nothing a file: no outside.stat.
+    assert [k for k, _ in laptop.sent if k.startswith("outside.")] == ["outside.resolve", "outside.stat", "outside.walk"]
+
+
+async def test_a_walk_cut_short_is_said_in_a_note_a_repeated_search_does_not_replace(two_folders, monkeypatch):
+    _laptop, wio, _chat, elsewhere = two_folders
+    real = wio.walk
+
+    async def cut(key, **options):
+        return dataclasses.replace(await real(key, **options), truncated=True)
+
+    monkeypatch.setattr(wio, "walk", cut)
+    for _ in range(3):
+        listed = json.loads((await file_ops._search_files_handler(
+            {"path": str(elsewhere), "pattern": "*.txt", "target": "files"}, workspace_io=wio,
+        )).split("\n\n[Hint")[0])
+    assert "stopped listing this folder" in listed["note"]
+    assert "run this exact search 3 times" in listed["_warning"]
+
+
+async def test_an_outside_listing_shows_its_folders_and_matches_names_ignoring_case(tmp_path):
+    # As a user's Desktop was: empty folders to file things in, and names in capitals.
+    chat, desktop = tmp_path / "chat", tmp_path / "Desktop"
+    (chat / "Notes").mkdir(parents=True)
+    (chat / "Notes" / "a.txt").write_text("a")
+    (desktop / "PONTAJE PENTRU STATE" / "Pontaje octombrie").mkdir(parents=True)
+    (desktop / "Scan").mkdir()
+    (desktop / "Scan" / "cerere de avans.pdf").write_text("pdf")
+    (desktop / "Facturi test").mkdir()
+    (desktop / "Facturi test" / "Factura 12.pdf").write_text("pdf")
+    (desktop / "Registru test.xlsx").write_text("x")
+    wio = DeviceWorkspaceIO(OutsideToo(chat, desktop), root=str(chat))
+
+    async def listed(path, **more):
+        found = await file_ops._list_files_handler({"path": str(path), **more}, workspace_io=wio)
+        return sorted(json.loads(found.split("\n\n[Hint")[0])["matches"])
+
+    assert await listed(desktop) == sorted([
+        f"{desktop}/Facturi test/", f"{desktop}/Facturi test/Factura 12.pdf",
+        f"{desktop}/PONTAJE PENTRU STATE/", f"{desktop}/PONTAJE PENTRU STATE/Pontaje octombrie/",
+        f"{desktop}/Registru test.xlsx", f"{desktop}/Scan/", f"{desktop}/Scan/cerere de avans.pdf",
+    ])
+    assert await listed(desktop, pattern="*pontaje*") == [
+        f"{desktop}/PONTAJE PENTRU STATE/", f"{desktop}/PONTAJE PENTRU STATE/Pontaje octombrie/",
+    ]
+    assert await listed(desktop, pattern="*facturi*") == [f"{desktop}/Facturi test/"]
+    assert await listed(desktop, pattern="*FACTUR*") == [f"{desktop}/Facturi test/", f"{desktop}/Facturi test/Factura 12.pdf"]
+    found = json.loads((await file_ops._search_files_handler(
+        {"path": str(desktop), "pattern": "*PONTAJE*", "target": "files"}, workspace_io=wio,
+    )).split("\n\n[Hint")[0])
+    assert len(found["matches"]) == 2
+    # The chat's own folder is listed as before: its files only, matched as ripgrep matches them.
+    assert await listed(chat) == [f"{chat}/Notes/a.txt"]
+    assert await listed(chat, pattern="*notes*") == []
+
+
+def test_an_outside_listing_matches_files_as_ripgreps_globs_do():
+    files = ["top.xlsx", "a/b.txt", "a/x/b.txt", "a/x/y/b.txt", "b/c.xlsx", "p.jpg", "a/q.png", "a/r.gif"]
+
+    def matched(pattern):
+        return [f for f in files if file_ops._glob_matches(f, pattern)]
+
+    assert matched("*.{jpg,png}") == ["p.jpg", "a/q.png"]
+    assert matched("a/**/b.txt") == ["a/b.txt", "a/x/b.txt", "a/x/y/b.txt"]
+    assert matched("**/*.xlsx") == ["top.xlsx", "b/c.xlsx"]
+    assert matched("top.xlsx") == ["top.xlsx"]
+    # "*" stays in one folder; "**" at the end takes everything under it.
+    assert matched("a/*") == ["a/b.txt", "a/q.png", "a/r.gif"]
+    assert matched("a/**") == ["a/b.txt", "a/x/b.txt", "a/x/y/b.txt", "a/q.png", "a/r.gif"]
+    assert matched("[!a]/*") == ["b/c.xlsx"]
+
+
+def test_an_outside_listing_reads_a_posix_class_in_brackets_as_ripgrep_does():
+    names = ["2026 raport.pdf", "raport.pdf", "A1.pdf"]
+    assert [n for n in names if file_ops._glob_matches(n, "[[:digit:]]*.pdf")] == ["2026 raport.pdf"]
+    assert [n for n in names if file_ops._glob_matches(n, "[[:upper:]][[:digit:]].pdf")] == ["A1.pdf"]
+
+
+async def test_a_path_in_the_folder_spelled_with_other_capitals_is_the_folders_where_the_computer_says_so():
+    sent: list[tuple[str, dict]] = []
+
+    class Computer:
+        def __init__(self, ignores_case):
+            self.ignores_case = ignores_case
+
+        async def run(self, kind, args, payload=None):
+            sent.append((kind, args))
+            if kind == "resolve" and not self.ignores_case:
+                return {"error": {"type": "sandbox", "message": "outside the workspace"}}
+            if kind == "check_write":
+                return {"ok": None}
+            return {"ok": args["path"]}
+
+    # Windows (and a Mac): the drive ignores case, so it is the chat's own file, written and read as such.
+    root = "/mnt/c/Users/Monica/Proj"
+    wio = DeviceWorkspaceIO(Computer(True), root=root)
+    assert await wio.resolve("/mnt/c/users/monica/proj/a.txt") == "/mnt/c/users/monica/proj/a.txt"
+    assert await wio.check_write("/mnt/c/users/monica/proj/a.txt") is None
+    assert [kind for kind, _ in sent] == ["resolve", "check_write"]
+    # Linux: another folder, which the computer says is outside: a grant's to read, and read-only.
+    sent.clear()
+    wio = DeviceWorkspaceIO(Computer(False), root="/home/ana/Proj")
+    key = await wio.resolve("/home/ana/proj/a.txt")
+    assert [kind for kind, _ in sent] == ["resolve", "outside.resolve"] and wio.is_outside(key)

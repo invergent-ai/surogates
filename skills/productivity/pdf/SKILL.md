@@ -222,10 +222,12 @@ For canvas-drawn text (not Paragraph objects), manually adjust font the size and
 
 ```bash
 pdftotext output.pdf - | grep -c "■"          # must print 0
-pdftoppm -png -r 80 output.pdf page && ls -1 "$PWD"/page-*.png
+pdftoppm -png -r 80 output.pdf output-preview && ls -1 "$PWD"/output-preview-*.png
 ```
 
-Each `■` is a character the font couldn't draw: switch to the TrueType font above. Then ask `vision_analyze` about each page image once, for the look: layout, tables, the watermark. Render with `pdftoppm`, not `pypdfium2`.
+Each `■` is a character the font couldn't draw: switch to the TrueType font above. Then ask `vision_analyze` about each page image once, for the look: layout, tables, the watermark. Render with `pdftoppm`, not `pypdfium2`. **Name what you make after the document**: previews as `output-preview` after `output.pdf` here, and the build script after it too, never a plain `page-1.png` or `make.py`. Before you make one, check no file of that name is in the workspace already: a file of the user's would be overwritten, then deleted in the clean up.
+
+**Clean up when the file is done.** Delete what you made only to build or check it, the build script, the PDF and the page images, unless the user asked for them: `rm -f output-preview-*.png` and the generating script, each by the name you gave it. Only the file the user asked for stays in the workspace; in a desktop chat the workspace is a folder the user sees on their computer.
 
 ## Command-Line Tools
 

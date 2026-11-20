@@ -9,14 +9,18 @@
 // same keys and presses.
 // Over a hidden window, a prompt waits to be shown until the window is, and the user is told.
 
-import { BrowserWindow } from "electron";
+import { BrowserWindow, screen } from "electron";
 
 import { dropMenu, lockPage } from "./main-window.js";
-import type { PromptContent } from "./prompt-content.js";
+import { checkAnswer, type PromptContent } from "./prompt-content.js";
 import type { PromptQueue } from "./prompt-queue.js";
 import { ownPage } from "./window-policy.js";
 
 export const WIDTH = 460;
+// The tallest a prompt grows to fit what it shows; past it, its middle scrolls. And how long a prompt waits to be
+// shown for its page to measure itself, before it is shown at the height it was given.
+const MAX_FIT = 720;
+const FIT_MS = 300;
 // The input protection: how long a prompt is shown, or focused again, before an answer counts.
 export const INPUT_PROTECTION_MS = 500;
 // The keys that only change what another key means.
@@ -37,6 +41,7 @@ export interface PromptWindowOptions {
 export interface PromptAnswer {
   button: string;
   choice: string | null; // the option chosen, when the prompt offers a choice
+  checked: string[]; // the items of its list still ticked, when it shows one
 }
 
 /**
@@ -142,16 +147,30 @@ export function openPrompt(options: PromptWindowOptions, signal: AbortSignal): P
   // True once taken; false for one that the input protection holds back: before it has passed since the prompt
   // was shown, or too soon after a key or a press that may not answer. Which button, and which choice, is the
   // page's word: this process sees keys and presses, not what they land on. Whether, is this process's own count.
-  handle("prompt:answer", (pressed, chosen) => {
-    const offered = content.buttons.find((candidate) => candidate.id === pressed);
-    if (!offered) throw new Error("Not a button of this prompt");
-    const choice = content.choice === null ? null : content.choice.options.find((option) => option.value === chosen)?.value;
-    if (choice === undefined) throw new Error("Not an option of this prompt");
+  handle("prompt:answer", (pressed, chosen, ticked) => {
+    const checked = checkAnswer(content, pressed, chosen, ticked);
     const now = performance.now();
     if (now < armedAt || !(answers || now - lastInput >= INPUT_PROTECTION_MS)) return false;
-    answer ??= { button: offered.id, choice };
+    answer ??= checked;
     close();
     return true;
+  });
+  // The page's own height, as it measured what it shows: the window takes it, within MAX_FIT. Once measured, it is shown.
+  const fitted = Promise.withResolvers<void>();
+  handle("prompt:fit", (height) => {
+    try {
+      if (typeof height === "number" && Number.isFinite(height) && height > 0 && !window.isDestroyed() && !parent.isDestroyed()) {
+        // A window its user cannot resize is resized by this process alone, which some window managers allow only while it may be.
+        window.setResizable(true);
+        // Within the screen the app's window is on, its buttons on it: what does not fit scrolls in its middle.
+        const room = screen.getDisplayMatching(parent.getBounds()).workArea.height - 40;
+        window.setContentSize(WIDTH, Math.max(160, Math.min(Math.ceil(height), MAX_FIT, room)));
+        window.setResizable(false);
+      }
+    } finally {
+      // Shown however the measure went: a window that cannot be sized is shown at the height it was given.
+      fitted.resolve();
+    }
   });
   const unheard = options.queue.onChange(() => send("prompt:changed"));
   const reveal = () => {
@@ -170,10 +189,13 @@ export function openPrompt(options: PromptWindowOptions, signal: AbortSignal): P
   };
   parent.on("focus", pass);
   window.once("ready-to-show", () => {
-    if (parent.isVisible() && !parent.isMinimized()) return reveal();
-    options.unseen();
-    parent.on("show", reveal);
-    parent.on("restore", reveal);
+    void Promise.race([fitted.promise, new Promise((done) => setTimeout(done, FIT_MS))]).then(() => {
+      if (closing || window.isDestroyed()) return;
+      if (parent.isVisible() && !parent.isMinimized()) return reveal();
+      options.unseen();
+      parent.on("show", reveal);
+      parent.on("restore", reveal);
+    });
   });
   signal.addEventListener("abort", close, { once: true });
   window.once("closed", () => {

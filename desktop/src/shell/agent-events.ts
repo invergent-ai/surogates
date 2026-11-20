@@ -184,14 +184,15 @@ const GONE: ReadonlySet<unknown> = new Set(["archived", "session_not_found"]);
 
 /**
  * Follow chat *sessionId* across its turns (watch=1): *onTurnEnd* is called each time one of its turns
- * ends, done or not: a turn that failed or was stopped has ended too; *onTurnStart* each time one starts.
+ * ends, done or not: a turn that failed or was stopped has ended too; *onTurnStart* each time one starts, with the
+ * event that started it.
  * It starts at the chat's newest event, and takes up after the last event it heard, stream.start's
  * included, whenever its stream closes. Only a chat archived or gone ends it, short of stop. Until *started*, it has heard nothing of the chat: a turn
  * that ends meanwhile it never tells.
  */
 export function followTurns(
   options: Omit<FollowOptions, "agentId"> & {
-    sessionId: string; onTurnEnd(done: boolean): void; onTurnStart?(): void; onAsking?(): void; live?(): boolean;
+    sessionId: string; onTurnEnd(done: boolean): void; onTurnStart?(type: string): void; onAsking?(): void; live?(): boolean;
   },
 ): { stop(): void; started(): boolean } {
   let after = -1;
@@ -213,7 +214,7 @@ export function followTurns(
     if (ended()) return;
     if (event.id !== null && /^\d+$/.test(event.id)) after = Number(event.id);
     if (endsTheTurn(event)) options.onTurnEnd(event.type === "session.complete");
-    else if (TURN_STARTS.has(event.type)) options.onTurnStart?.();
+    else if (TURN_STARTS.has(event.type)) options.onTurnStart?.(event.type);
     else if (event.type === ASKS) options.onAsking?.();
     else if (event.type === "session.done" && GONE.has(parsed(event.data)?.reason)) stop();
   });

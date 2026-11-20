@@ -1941,6 +1941,8 @@ class AgentHarness(
             # built without it keeps the tools, as before).
             has_image_model="generate_image" not in _unwired_media,
             has_video_model="generate_video" not in _unwired_media,
+            # A project's thread works in a copy of the chat's folder: the rest of the computer is the main chat's.
+            on_device=device_of(session.config) is not None and not under_a_thread(session.config),
         )
 
     def _withhold_from_experts(self, usable: dict[str, bool], offered: Iterable[str] | None) -> None:

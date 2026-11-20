@@ -34,6 +34,7 @@ from surogates.harness.tool_guardrails import (
     canonical_tool_args,
     toolguard_synthetic_result,
 )
+from surogates.tools.builtin.outside_folder import IN_A_THREAD, OUTSIDE_FOLDER_TOOLS
 from surogates.tools.coerce import coerce_tool_args
 from surogates.runtime.governance import CASE_ITEM_TOOLS, CASE_STEP_TOOLS, floor_gate
 from surogates.runtime.turn_slots import turn_activity
@@ -479,7 +480,13 @@ def _sanitize_paths(data: Any, workspace_path: str | None) -> Any:
         # insert the token between every character.
         return data
     if isinstance(data, str):
-        return data.replace(ws, _WORKSPACE_TOKEN)
+        if ws not in data:
+            return data
+        # Only where the folder's path ends: a sibling that only begins like it ("/a/proj-old", a folder outside a
+        # desktop chat's) is another folder, not the workspace.
+        # Only a name's own characters continue it: a JSON-escaped newline, a sentence's ".", "&" or "|" end it.
+        # ponytail: a space ends the path too, so "/a/proj 2" still reads as the workspace's "proj" then " 2".
+        return re.sub(re.escape(ws) + r"(?![\w-]|\.\w)", _WORKSPACE_TOKEN, data)
     if isinstance(data, dict):
         return {k: _sanitize_paths(v, workspace_path) for k, v in data.items()}
     if isinstance(data, list):
@@ -668,13 +675,14 @@ HELD_UNTIL_SAVED_TOOLS: frozenset[str] = (
 def thread_refuses(tool_name: str, arguments: Any, config: dict[str, Any] | None) -> str | None:
     """What a session under a project's thread is refused in the call of *tool_name*, as its refusal names it; None when it may run.
 
-    A tool the thread's rule refuses, or a research's own sub-agent asked
+    A tool the thread's rule refuses, one on files outside a desktop chat's
+    folder (the main chat's alone), or a research's own sub-agent asked
     for by its type, in any goal of the call: deep research started so runs
     as from its command, and cannot finish in a thread.
     """
     if not under_a_thread(config):
         return None
-    if tool_name in THREAD_REFUSED_TOOLS:
+    if tool_name in THREAD_REFUSED_TOOLS or tool_name in OUTSIDE_FOLDER_TOOLS:
         return tool_name
     if tool_name in HELPER_STARTING_TOOLS and isinstance(arguments, dict):
         goals = arguments.get("goals")
@@ -1511,7 +1519,9 @@ async def _run_single_tool(
         if image_dispatched:
             pass  # result_content already set by the image branch.
         elif (refused := thread_refuses(tool_name, tool_args, session.config)) is not None:
-            result_content = json.dumps({"error": thread_refusal(refused)})
+            result_content = json.dumps({
+                "error": IN_A_THREAD if refused in OUTSIDE_FOLDER_TOOLS else thread_refusal(refused),
+            })
         elif (open_refused := await _refused_open_document(tool_name, tool_args, session, session_factory)) is not None:
             result_content = json.dumps({"error": open_refused})
         elif device_call is not None and tool_name in UNAVAILABLE_TOOLS:

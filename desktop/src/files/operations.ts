@@ -10,10 +10,11 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
-  accessSync, type BigIntStats, closeSync, constants, type Dirent, fchmodSync, fstatSync, readSync, type Stats, statSync, writeSync,
+  accessSync, type BigIntStats, closeSync, constants, type Dirent, fchmodSync, fstatSync, read as readCallback, readSync, type Stats, statSync, writeSync,
 } from "node:fs";
 import { constants as osConstants } from "node:os";
 import { posix } from "node:path";
+import { promisify } from "node:util";
 
 import { isBase64, type Outcome } from "../link/protocol.js";
 import {
@@ -22,7 +23,7 @@ import {
   sandboxError, SHOWN_DOT_FOLDERS, valueError, WALK_BUDGET_MS, WALK_MARGIN_NS, WRITE_TOO_LARGE,
 } from "./answers.js";
 import { retold, saidInFailing, searched, spared } from "./edge.js";
-import { fdPaths, type Listing, type Where } from "./fd-paths.js";
+import { type FdPaths, fdPaths, type Listing, type Where } from "./fd-paths.js";
 import { FLAGS } from "./flags.js";
 import { identityOf } from "./identity.js";
 import { land } from "./land.js";
@@ -76,6 +77,7 @@ const WRITE_EFBIG = new Failure({ type: "os", code: "EFBIG", message: WRITE_TOO_
 const READ_EFBIG = new Failure({ type: "os", code: "EFBIG", message: READ_TOO_LARGE });
 // What one read call takes from the file at a time.
 const READ_PIECE_BYTES = 1024 * 1024;
+const readAsync = promisify(readCallback);
 // The codecs read_file decodes text in, which read_lines pages, as surogates/tools/workspace_io/local.py's
 // CODE_UNITS: each one's code unit, as its width in bytes and where in it a line feed's or carriage return's value is.
 const CODE_UNITS: Record<string, readonly [width: number, low: number]> = {
@@ -164,22 +166,26 @@ function revisionAt(key: string): string | null {
 
 function stat(args: Record<string, unknown>, { folder, at }: Context): unknown {
   try {
-    const st = fdPaths.stat(keyInFolder(folder, text(args, "key"), at), { bigint: true });
-    // st_mtime as CPython computes it from tv_sec and tv_nsec: seconds plus
-    // nanoseconds * 1e-9, with tv_nsec never negative.
-    let seconds = st.mtimeNs / 1_000_000_000n;
-    let nanoseconds = st.mtimeNs % 1_000_000_000n;
-    if (nanoseconds < 0n) {
-      seconds -= 1n;
-      nanoseconds += 1_000_000_000n;
-    }
-    return {
-      is_dir: st.isDirectory(), size: Number(st.size), mtime: Number(seconds) + Number(nanoseconds) * 1e-9,
-      revision: revisionOf(st),
-    };
+    return statOf(fdPaths.stat(keyInFolder(folder, text(args, "key"), at), { bigint: true }));
   } catch {
     return null;
   }
+}
+
+/** A stat's answer for *st*: whether it is a folder, its size, its mtime as Python reads it, and its revision. */
+export function statOf(st: BigIntStats): unknown {
+  return { is_dir: st.isDirectory(), size: Number(st.size), mtime: mtimeOf(st), revision: revisionOf(st) };
+}
+
+// st_mtime as CPython computes it from tv_sec and tv_nsec: seconds plus nanoseconds * 1e-9, with tv_nsec never negative.
+function mtimeOf(st: BigIntStats): number {
+  let seconds = st.mtimeNs / 1_000_000_000n;
+  let nanoseconds = st.mtimeNs % 1_000_000_000n;
+  if (nanoseconds < 0n) {
+    seconds -= 1n;
+    nanoseconds += 1_000_000_000n;
+  }
+  return Number(seconds) + Number(nanoseconds) * 1e-9;
 }
 
 // An open file that is a regular file; refused otherwise, before any byte moves.
@@ -192,9 +198,18 @@ function regular(fd: number, key: string): Stats {
 
 function read(args: Record<string, unknown>, { folder, at }: Context): string {
   const key = keyInFolder(folder, text(args, "key"), at);
+  return readFrom(args, key, (flags) => fdPaths.open(key, flags));
+}
+
+// An opening of a key already checked, with these flags: by its path in the folder's helper, or one name at a time
+// from a grant outside the chat's folder (outside/executor.ts), which no sandbox binds.
+export type Opener = (flags: number) => number;
+
+/** read's answer for *key*, opened by *open*. */
+export function readFrom(args: Record<string, unknown>, key: string, open: Opener): string {
   const wanted = wholeOrNull(args, "max_bytes");
   const limit = wanted === null ? MAX_READ_BYTES + 1 : Math.min(wanted, MAX_READ_BYTES + 1);
-  const fd = io(key, () => fdPaths.open(key, constants.O_RDONLY | FLAGS.NOFOLLOW | constants.O_NONBLOCK));
+  const fd = io(key, () => open(constants.O_RDONLY | FLAGS.NOFOLLOW | constants.O_NONBLOCK));
   try {
     // Asked for whole, a file over the cap is refused from its size, before a byte of it is read.
     if (regular(fd, key).size > MAX_READ_BYTES && limit > MAX_READ_BYTES) throw READ_EFBIG;
@@ -216,6 +231,38 @@ function read(args: Record<string, unknown>, { folder, at }: Context): string {
   }
 }
 
+/**
+ * readFrom's answer, its pieces read off the main thread: for a read in the app's own process (outside/executor.ts),
+ * whose thread a large file's read would hold. *open* is called before the first await, so a caller holding the
+ * file's folder for the open may let it go once this returns its promise.
+ */
+export async function readFromAsync(args: Record<string, unknown>, key: string, open: Opener): Promise<string> {
+  const wanted = wholeOrNull(args, "max_bytes");
+  const limit = wanted === null ? MAX_READ_BYTES + 1 : Math.min(wanted, MAX_READ_BYTES + 1);
+  const fd = io(key, () => open(constants.O_RDONLY | FLAGS.NOFOLLOW | constants.O_NONBLOCK));
+  try {
+    if (regular(fd, key).size > MAX_READ_BYTES && limit > MAX_READ_BYTES) throw READ_EFBIG;
+    const pieces: Buffer[] = [];
+    let size = 0;
+    while (size < limit) {
+      const piece = Buffer.allocUnsafe(Math.min(READ_PIECE_BYTES, limit - size));
+      let count: number;
+      try {
+        ({ bytesRead: count } = await readAsync(fd, piece, 0, piece.length, null));
+      } catch (error) {
+        throw fromNode(error, key);
+      }
+      if (count === 0) break;
+      pieces.push(count === piece.length ? piece : Buffer.from(piece.subarray(0, count)));
+      size += count;
+    }
+    if (size > MAX_READ_BYTES) throw READ_EFBIG;
+    return Buffer.concat(pieces, size).toString("base64");
+  } finally {
+    io(key, () => closeSync(fd));
+  }
+}
+
 const isInteger = (value: unknown): value is number => Number.isInteger(value);
 
 // A page of a text file, as WorkspaceIO.read_lines defines it (surogates/tools/workspace_io/base.py): the bytes of the
@@ -224,6 +271,11 @@ const isInteger = (value: unknown): value is number => Number.isInteger(value);
 // decodes the page and applies every rule.
 function readLines(args: Record<string, unknown>, { folder, at }: Context): { data: string; total_lines: number } {
   const key = keyInFolder(folder, text(args, "key"), at);
+  return linesFrom(args, key, (flags) => fdPaths.open(key, flags));
+}
+
+/** read_lines's answer for *key*, opened by *open*. */
+export function linesFrom(args: Record<string, unknown>, key: string, open: Opener): { data: string; total_lines: number } {
   const { encoding, offset, limit, max_bytes: maxBytes } = args;
   const unit = typeof encoding === "string" && Object.hasOwn(CODE_UNITS, encoding) ? CODE_UNITS[encoding] : undefined;
   if (
@@ -232,7 +284,7 @@ function readLines(args: Record<string, unknown>, { folder, at }: Context): { da
   ) {
     throw valueError(BAD_PAGE);
   }
-  const fd = io(key, () => fdPaths.open(key, constants.O_RDONLY | FLAGS.NOFOLLOW | constants.O_NONBLOCK));
+  const fd = io(key, () => open(constants.O_RDONLY | FLAGS.NOFOLLOW | constants.O_NONBLOCK));
   try {
     // From the file's size, before a byte of it is read.
     if (regular(fd, key).size > MAX_READ_BYTES) throw READ_EFBIG;
@@ -486,8 +538,11 @@ function makeDirs(dir: string): void {
 
 function listDir(args: Record<string, unknown>, { folder, at }: Context): string[] {
   const key = keyInFolder(folder, text(args, "key"), at);
-  return io(key, () => fdPaths.readdir(key)).filter((name) => !OWN_FILE.test(name)).slice(0, MAX_NAMES);
+  return listed(io(key, () => fdPaths.readdir(key)));
 }
+
+/** list_dir's answer from a folder's names. */
+export const listed = (names: string[]): string[] => names.filter((name) => !OWN_FILE.test(name)).slice(0, MAX_NAMES);
 
 // walk (surogates/devices/workspace.py): the regular files under the folder at the key, each as its path from it and
 // its size, depth first. No link is followed, and no folder the tree hides is entered: one named in skip, one directly
@@ -503,8 +558,28 @@ function listDir(args: Record<string, unknown>, { folder, at }: Context): string
 // most. Each folder is read an entry at a time, so one of a million entries costs no more than the walk looks at. A
 // folder it may not read, or one a link took the place of, is left out, and the walk goes on. Out of handles, it
 // stops, said truncated: what the rest holds is unknown, and the walk must not be taken for whole.
-function walk(args: Record<string, unknown>, { folder, at }: Context): { files: Array<[string, number]>; truncated: boolean; cursor: string } {
+function walk(args: Record<string, unknown>, { folder, at }: Context): ReturnType<typeof walkFrom> {
   const key = keyInFolder(folder, text(args, "key"), at);
+  return walkFrom(args, key, (flags) => fdPaths.open(key, flags));
+}
+
+/**
+ * How a walk is bounded, whether each file comes with its mtime: [path, size, mtime], and whether each folder it sees
+ * is a row too: its path with a trailing "/" (no name holds one) and size 0, counted as a file toward the bounds, so
+ * an empty folder is seen as well.
+ */
+export interface WalkLimits {
+  budgetMs?: number;
+  maxFiles?: number;
+  times?: boolean;
+  folders?: boolean;
+}
+
+/** walk's answer for *key*, opened by *open*, every folder below it entered through *fd*. */
+export function walkFrom(
+  args: Record<string, unknown>, key: string, open: Opener, fd: FdPaths = fdPaths,
+  { budgetMs = WALK_BUDGET_MS, maxFiles = MAX_WALK_FILES, times = false, folders = false }: WalkLimits = {},
+): { files: Array<[string, number] | [string, number, number]>; truncated: boolean; cursor: string } {
   const { skip, skip_top: top, skip_hidden: hidden, since } = args;
   if (
     !names(skip) || !names(top) || typeof hidden !== "boolean"
@@ -514,19 +589,32 @@ function walk(args: Record<string, unknown>, { folder, at }: Context): { files: 
     throw valueError(BAD_WALK);
   }
   const cursor = String(BigInt(Date.now()) * 1_000_000n - WALK_MARGIN_NS);
-  const deadline = performance.now() + WALK_BUDGET_MS;
+  const deadline = performance.now() + budgetMs;
   const after = since === null ? null : BigInt(since);
   const skipped = new Set<string>(skip);
   const skippedTop = new Set<string>(top);
-  const files: Array<[string, number]> = [];
+  const files: Array<[string, number] | [string, number, number]> = [];
   let cost = 2; // "[]"
   let looks = 0;
   let truncated = false;
+  // *path*'s row, unless the bounds are reached: then the walk is said truncated, and false.
+  const add = (path: string, size: number, st: BigIntStats): boolean => {
+    // A time as JSON writes a double: at most 24 characters, and its ", ".
+    const more = pyJsonLength(path) + 24 + (times ? 26 : 0);
+    if (files.length === maxFiles || cost + more > MAX_PAYLOAD_BYTES) {
+      truncated = true;
+      return false;
+    }
+    files.push(times ? [path, size, mtimeOf(st)] : [path, size]);
+    cost += more;
+    return true;
+  };
+  const changed = (st: BigIntStats) => after === null || st.mtimeNs >= after || st.ctimeNs >= after;
   // The key's own failure is the answer.
-  const keyFd = io(key, () => fdPaths.open(key, constants.O_RDONLY | FLAGS.DIRECTORY | FLAGS.NOFOLLOW));
+  const keyFd = io(key, () => open(constants.O_RDONLY | FLAGS.DIRECTORY | FLAGS.NOFOLLOW));
   let keyDir: Listing;
   try {
-    keyDir = io(key, () => fdPaths.listing(keyFd));
+    keyDir = io(key, () => fd.listing(keyFd));
   } catch (error) {
     closeSync(keyFd);
     throw error;
@@ -559,14 +647,23 @@ function walk(args: Record<string, unknown>, { folder, at }: Context): { files: 
       if (entry.isDirectory()) {
         const hides = hidden && name.startsWith(".") && !SHOWN_DOT_FOLDERS.has(name);
         if (skipped.has(name) || (!level.rel && skippedTop.has(name)) || hides) continue;
+        if (folders) {
+          let st: BigIntStats | null = null;
+          try {
+            st = fd.lstat(at);
+          } catch {
+            // Its time unknown, it is no row; the walk still goes in, as it would without folders.
+          }
+          if (st !== null && changed(st) && !add(`${path}/`, 0, st)) break;
+        }
         // The key is the first level: this folder would be levels.length below it.
         if (levels.length > MAX_WALK_DEPTH) {
           truncated = true;
           break;
         }
-        let fd: number;
+        let entered: number;
         try {
-          fd = fdPaths.open(at, constants.O_RDONLY | FLAGS.DIRECTORY | FLAGS.NOFOLLOW);
+          entered = fd.open(at, constants.O_RDONLY | FLAGS.DIRECTORY | FLAGS.NOFOLLOW);
         } catch (error) {
           if (outOfHandles(error)) {
             truncated = true;
@@ -575,9 +672,9 @@ function walk(args: Record<string, unknown>, { folder, at }: Context): { files: 
           continue;
         }
         try {
-          levels.push({ fd, rel: path, dir: fdPaths.listing(fd) });
+          levels.push({ fd: entered, rel: path, dir: fd.listing(entered) });
         } catch (error) {
-          closeSync(fd);
+          closeSync(entered);
           if (outOfHandles(error)) {
             truncated = true;
             break;
@@ -588,18 +685,12 @@ function walk(args: Record<string, unknown>, { folder, at }: Context): { files: 
       if (!entry.isFile() || OWN_FILE.test(name)) continue;
       let st: BigIntStats;
       try {
-        st = fdPaths.lstat(at);
+        st = fd.lstat(at);
       } catch {
         continue;
       }
-      if (after !== null && st.mtimeNs < after && st.ctimeNs < after) continue;
-      const more = pyJsonLength(path) + 24;
-      if (files.length === MAX_WALK_FILES || cost + more > MAX_PAYLOAD_BYTES) {
-        truncated = true;
-        break;
-      }
-      files.push([path, Number(st.size)]);
-      cost += more;
+      if (!changed(st)) continue;
+      if (!add(path, Number(st.size), st)) break;
     }
   } finally {
     for (const level of levels) close(level);

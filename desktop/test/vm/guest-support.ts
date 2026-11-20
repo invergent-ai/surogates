@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 
 import { expect } from "vitest";
 
+import { GUEST_HOME } from "../../src/host-user.js";
 import type { HostUser, Share } from "../../src/guest/protocol.js";
 import { imageArchOf } from "../../src/vm/image.js";
 import { emulation } from "../../src/vm/linux.js";
@@ -153,4 +154,4 @@ export function withHistory(image: string, main: string): string {
 }
 
 const host = userInfo();
-export const USER: HostUser = { uid: host.uid, gid: host.gid, name: host.username, home: host.homedir };
+export const USER: HostUser = { uid: host.uid, gid: host.gid, name: host.username, home: GUEST_HOME };

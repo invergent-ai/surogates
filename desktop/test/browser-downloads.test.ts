@@ -47,7 +47,7 @@ beforeEach(() => {
       approve: async (request) => {
         asked.push(request);
         await meanwhile(request);
-        return answer;
+        return { answer, checked: [] };
       },
       confirmFreeMode: () => Promise.resolve(false),
     },

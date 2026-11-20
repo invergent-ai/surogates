@@ -16,6 +16,9 @@ interface Content {
   details: Array<{ label: string; value: string; code: boolean; keep: string }>;
   notes: string[];
   choice: { legend: string; options: Array<{ value: string; label: string; description: string }>; value: string } | null;
+  checks?: { legend: string; items: Array<{ value: string; label: string; detail: string }> } | null;
+  danger?: boolean;
+  detailsBelow?: boolean;
   buttons: Array<{ id: string; label: string; allows: boolean }>;
   focus: string;
   cancel: string;
@@ -30,7 +33,8 @@ interface State {
 
 interface Prompt {
   state(): Promise<State>;
-  answer(button: string, choice: string | null): Promise<boolean>;
+  answer(button: string, choice: string | null, checked: string[]): Promise<boolean>;
+  fit(height: number): Promise<void>;
   onChanged(listener: () => void): () => void;
   onArmed(listener: (armed: boolean) => void): () => void;
 }
@@ -66,13 +70,15 @@ const element = <K extends keyof HTMLElementTagNameMap>(tag: K, className: strin
 
 const chosen = (): string | null => document.querySelector<HTMLInputElement>("#prompt-choice input:checked")?.value ?? null;
 
+const ticked = (): string[] => [...document.querySelectorAll<HTMLInputElement>("#prompt-checks input:checked")].map((box) => box.value);
+
 // A button was pressed, by a key, a press, or with neither as assistive technology presses one: the main
 // process says whether it is taken. One it refuses came too soon, and the prompt says so in a line beside the
 // buttons, which a screen reader reads by itself: a person who pressed sees, or hears, why nothing happened.
 function answer(id: string): void {
   const offered = content?.buttons.find((button) => button.id === id);
   if (!offered) return;
-  void prompt.answer(id, content?.choice ? chosen() : null).then((taken) => {
+  void prompt.answer(id, content?.choice ? chosen() : null, ticked()).then((taken) => {
     if (!taken) byId("prompt-refused").textContent = TOO_SOON;
   }, () => {});
 }
@@ -135,6 +141,16 @@ document.addEventListener("keydown", down, true);
 document.addEventListener("pointerdown", down, true);
 for (const after of ["keyup", "pointerup", "pointercancel"]) document.addEventListener(after, up, true);
 
+// The window as tall as what it shows: measured with the prompt at its own height, not the window's.
+function fit(): void {
+  const box = document.querySelector<HTMLElement>(".prompt");
+  if (!box) return;
+  box.style.height = "auto";
+  const height = Math.ceil(box.getBoundingClientRect().height);
+  box.style.height = "";
+  void prompt.fit(height).catch(() => {});
+}
+
 // More may wait than the line here holds: each chat keeps its own later prompts back until this one is answered.
 function waiting(count: number): void {
   byId("prompt-waiting").textContent = count === 0 ? "" : "More prompts wait after this one.";
@@ -172,10 +188,40 @@ function draw(state: State): void {
       const description = element("span", "desc", option.description);
       description.id = `choice-${option.value}`;
       radio.setAttribute("aria-describedby", description.id);
-      const label = element("label", "");
-      label.append(radio, element("span", "name", option.label));
-      const row = element("div", "option");
-      row.append(label, description);
+      // The whole box is the option's label: a click anywhere in it chooses it.
+      const head = element("span", "option-head");
+      const name = element("span", "name", option.label);
+      name.id = `choice-name-${option.value}`;
+      radio.setAttribute("aria-labelledby", name.id);
+      head.append(radio, name);
+      const row = element("label", "option");
+      row.append(head, description);
+      return row;
+    }));
+  }
+  document.querySelector(".prompt")?.classList.toggle("danger", content.danger === true);
+  // A move's From and To, under its list of files, in one box.
+  const details = byId("prompt-details");
+  details.classList.toggle("below", content.detailsBelow === true);
+  if (content.detailsBelow) byId("prompt-checks").after(details);
+  const checks = byId("prompt-checks");
+  checks.hidden = !content.checks;
+  if (content.checks) {
+    showText(byId("prompt-checks-legend"), content.checks.legend);
+    checks.append(...content.checks.items.map((item, index) => {
+      const box = document.createElement("input");
+      Object.assign(box, { type: "checkbox", value: item.value, checked: true });
+      const detail = element("span", "desc", item.detail);
+      detail.id = `check-${index}`;
+      box.setAttribute("aria-describedby", detail.id);
+      // The whole box is the item's label: a click anywhere in it ticks or unticks it.
+      const head = element("span", "option-head");
+      const name = element("span", "name", item.label);
+      name.id = `check-name-${index}`;
+      box.setAttribute("aria-labelledby", name.id);
+      head.append(box, name);
+      const row = element("label", "option");
+      row.append(head, detail);
       return row;
     }));
   }
@@ -187,6 +233,7 @@ function draw(state: State): void {
     return button;
   }));
   waiting(state.waiting);
+  fit();
   hold();
   document.querySelector<HTMLElement>(`#prompt-buttons button[data-id="${content.focus}"]`)?.focus();
 }
@@ -203,5 +250,6 @@ prompt.onArmed((now) => {
   armed = now;
   hold();
 });
+// Not fitted again: a prompt shown keeps its size and its buttons where they are, its middle scrolling if it must.
 prompt.onChanged(() => void prompt.state().then((state) => waiting(state.waiting)));
 void prompt.state().then(draw);

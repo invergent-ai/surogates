@@ -127,8 +127,13 @@ export function onNetworkVolume(path: string): boolean {
 
 // The folder, named by its session's path *folder*, as it resolves, and its identity; or why no chat may work on it.
 // Each guard is compared by the session's paths too, as the folder's own. Its words name a folder as *shown* does:
-// by the session's path, as the agent reads it, unless the person is the one told (session-path.ts, shownPath).
-export function checkFolder(folder: string, guards: FolderGuards, shown: (path: string) => string = (path) => path): FolderCheck {
+// by the session's path, as the agent reads it, unless the person is the one told (session-path.ts, shownPath). For
+// *purpose* "read", a folder a chat asks to read (outside/places.ts, grantable), each refusal says so of *folder*.
+export function checkFolder(
+  folder: string, guards: FolderGuards, shown: (path: string) => string = (path) => path, purpose: "chat" | "read" = "chat",
+): FolderCheck {
+  const said = (message: string) => (purpose === "chat" ? message : `Surogate cannot read ${folder}: ${message}`);
+  const cannot = purpose === "chat" ? "cannot be a chat's" : "cannot be read";
   const paths = FOLDERS ?? notBuilt("A chat's folder");
   let at: string;
   let stats: Stats;
@@ -137,10 +142,10 @@ export function checkFolder(folder: string, guards: FolderGuards, shown: (path: 
     at = paths.real(folder);
     stats = hostStat(at);
   } catch {
-    return { ok: false, missing: true, message: `the folder ${shown(folder)} is not there` };
+    return { ok: false, missing: true, message: said(`the folder ${shown(folder)} is not there`) };
   }
-  if (!stats.isDirectory()) return { ok: false, missing: true, message: `the folder ${shown(folder)} is not a folder` };
-  const refused = (message: string): FolderCheck => ({ ok: false, missing: false, message });
+  if (!stats.isDirectory()) return { ok: false, missing: true, message: said(`the folder ${shown(folder)} is not a folder`) };
+  const refused = (message: string): FolderCheck => ({ ok: false, missing: false, message: said(message) });
   if (onNetworkVolume(at)) return refused(`the folder ${at} is on a network volume, which Surogate cannot work in on this computer`);
   let path: string;
   try {
@@ -155,7 +160,7 @@ export function checkFolder(folder: string, guards: FolderGuards, shown: (path: 
   if (isReserved(at)) return refused(`the folder ${shown(path)} is inside one of this computer's system folders`);
   // One that is, holds or lies in a folder of the guest's tools would hide them from its commands.
   const tools = GUEST_SYSTEM.find((dir) => inside(path, dir) || inside(dir, path));
-  if (tools) return refused(`the sandbox keeps its own tools in ${tools}, so the folder ${shown(path)} cannot be a chat's`);
+  if (tools) return refused(`the sandbox keeps its own tools in ${tools}, so the folder ${shown(path)} ${cannot}`);
   // A sandbox whose writable folder held the home folder, the app's own data, cache or
   // files or a credential folder would hand all of it to the agent. Each is
   // compared as spelled and as resolved: a link would otherwise walk around the check.
@@ -182,6 +187,6 @@ export function checkFolder(folder: string, guards: FolderGuards, shown: (path: 
     }
   });
   const browser = browsers.find((dir) => [...new Set([resolve(folder), path])].some((candidate) => inside(dir, candidate) || inside(candidate, dir)));
-  if (browser) return refused(`the app runs a browser at ${shown(browser)} outside the sandbox, so the folder ${shown(path)} cannot be a chat's`);
+  if (browser) return refused(`the app runs a browser at ${shown(browser)} outside the sandbox, so the folder ${shown(path)} ${cannot}`);
   return { ok: true, path, ...identityOf(stats) };
 }

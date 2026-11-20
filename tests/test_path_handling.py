@@ -381,3 +381,26 @@ async def test_a_child_shares_its_roots_task_id() -> None:
         tenant=MagicMock(asset_root="/tmp/test"),
     )
     assert registry.get("terminal").handler.call_args.kwargs["task_id"] == root
+
+
+def test_a_folder_that_only_begins_like_the_workspace_is_left_as_it_is() -> None:
+    # A folder outside a desktop chat's, beside it: it is not the workspace, and an event must not say it is.
+    assert _sanitize_paths(
+        {"path": "/home/ana/proj-old/a.txt", "files": ["/home/ana/proj/b.txt", "/home/ana/proj"]}, "/home/ana/proj",
+    ) == {"path": "/home/ana/proj-old/a.txt", "files": ["__WORKSPACE__/b.txt", "__WORKSPACE__"]}
+    assert _sanitize_paths('cd "/home/ana/proj" && ls /home/ana/proj2', "/home/ana/proj") == (
+        'cd "__WORKSPACE__" && ls /home/ana/proj2'
+    )
+
+
+@pytest.mark.parametrize("text", [
+    '{"output": "/home/ana/proj\\n"}', "/home/ana/proj\t", "cwd is /home/ana/proj.", "cd /home/ana/proj&&ls",
+    "/home/ana/proj|y", "/home/ana/proj\\x", "/home/ana/proj",
+])
+def test_the_workspace_path_is_sanitized_wherever_it_ends(text) -> None:
+    assert "/home/ana/proj" not in _sanitize_paths(text, "/home/ana/proj")
+
+
+@pytest.mark.parametrize("text", ["/home/ana/proj-old/a", "/home/ana/proj2", "/home/ana/proj_x", "/home/ana/proj.bak/a"])
+def test_a_longer_folder_name_is_not_the_workspace(text) -> None:
+    assert _sanitize_paths(text, "/home/ana/proj") == text

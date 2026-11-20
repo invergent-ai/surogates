@@ -417,6 +417,8 @@ describe("a prompt's text", () => {
           details: [{ label: "Command", value, code: true, keep: "\n\t" }],
           notes: [],
           choice: null,
+          checks: null,
+          danger: false,
           buttons: [{ id: "deny", label: "Deny", allows: false }, { id: "allow", label: "Allow once", allows: true }],
           focus: "deny",
           cancel: "deny",
@@ -437,7 +439,7 @@ describe("a prompt's text", () => {
     });
     expect(seen).toBe(true);
     await press(asked, "allow");
-    expect(await answered).toEqual({ button: "allow", choice: null });
+    expect(await answered).toEqual({ button: "allow", choice: null, checked: [] });
   });
 });
 
@@ -590,7 +592,7 @@ describe("an approval prompt", () => {
     expect([warned.title, warned.titleWhole]).toEqual([true, true]);
     for (const { seen, height } of warned.details) expect(seen).toBeCloseTo(height, 0);
     await press(network, "deny");
-    expect(await answered).toEqual({ button: "deny", choice: null });
+    expect(await answered).toEqual({ button: "deny", choice: null, checked: [] });
   });
 
   it("shows the browser's first use, and each act with the page it acts in, whole as it opens", async () => {
@@ -634,7 +636,7 @@ describe("an approval prompt", () => {
       expect([opened.titleWhole, opened.details.length]).toEqual([true, privateNetwork ? 2 : 1]);
       for (const { seen, height } of opened.details) expect(seen).toBeCloseTo(height, 0);
       await press(asked, "deny");
-      expect(await answered).toEqual({ button: "deny", choice: null });
+      expect(await answered).toEqual({ button: "deny", choice: null, checked: [] });
     }
   });
 

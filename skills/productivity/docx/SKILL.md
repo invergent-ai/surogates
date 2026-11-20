@@ -25,9 +25,9 @@ Everything this skill uses is preinstalled in the sandbox. The sandbox runs as a
 Start from `scripts/example_doc.js`. It is a one-page agreement that passes `validate.py`, and it already has everything most documents need: US Letter, the font and size set once for the whole document, numbered clauses with (a)/(b) sub-clauses, bullets, a table, a signature table and a "Page X of Y" footer.
 
 ```bash
-cp scripts/example_doc.js make_doc.js   # into the workspace
-# edit make_doc.js: replace the CONTENT array, nothing else
-node make_doc.js out.docx
+cp scripts/example_doc.js output-build.js   # into the workspace, named after the document
+# edit output-build.js: replace the CONTENT array, nothing else
+node output-build.js output.docx
 ```
 
 `docx` is preinstalled: do not run `npm install`.
@@ -79,13 +79,17 @@ These two are exact. Answer page count, wording, numbering, order and "is everyt
 Then look at the pages once, for what only an image shows: alignment, table borders, spacing, overlapping text.
 
 ```bash
-pdftoppm -jpeg -r 100 output.pdf page
-ls -1 "$PWD"/page-*.jpg
+pdftoppm -jpeg -r 100 output.pdf output-preview
+ls -1 "$PWD"/output-preview-*.jpg
 ```
 
 Ask `vision_analyze` about each image `ls` printed, once per page (it reads workspace files only — render into the workspace, never `/tmp`). It misreads small text and miscounts rows, so don't ask it what `pdftotext` already answered, and don't re-ask the same question at a higher resolution.
 
-`pdftoppm` zero-pads page numbers to the width of the page count (`page-01.jpg`…`page-12.jpg`).
+`pdftoppm` zero-pads page numbers to the width of the page count (`output-preview-01.jpg`…`output-preview-12.jpg`).
+
+**Name what you make after the document.** `output` here stands for the document's own name: `Raport_lunar.docx` is built by `Raport_lunar-build.js`, converted to `Raport_lunar.pdf` and previewed as `Raport_lunar-preview-1.jpg`. Before you make one, check no file of that name is in the workspace already; if one is, add a number. A plain `page-1.jpg`, `make_doc.js` or `output.pdf` of the user's would be overwritten, then deleted in the clean up.
+
+**Clean up when the file is done.** Delete what you made only to build or check it, the build script, the PDF and the page images, unless the user asked for them: `rm -f output-build.js output.pdf output-preview-*.jpg`, each by the name you gave it. Only the file the user asked for stays in the workspace; in a desktop chat the workspace is a folder the user sees on their computer.
 
 **Fitting a page limit.** If `pdfinfo` shows too many pages, make these changes in order, re-checking `pdfinfo` after each:
 

@@ -34,6 +34,31 @@ enforces its rules; the worker never touches the folder.
   kill            session_id                                    process status (object)
   write_stdin     session_id, data                              status (object)
   list_processes  task_id                                       [process summary]
+  outside.resolve path (absolute, normalised)                   key (str)
+  outside.stat    key                                           as stat
+  outside.read    key, max_bytes                                as read
+  outside.read_lines  key, encoding, offset, limit, max_bytes   as read_lines
+  outside.list_dir    key                                       as list_dir
+  outside.walk    key, skip, skip_top, skip_hidden, since       as walk, each file with its mtime, each folder a
+                                                                [path + "/", 0, mtime] row
+  outside.grant   folder ("Desktop", "Downloads", "Documents",  {folder, lasts: "this request" | "this chat"}
+                  "Pictures", or an absolute path)
+  outside.copy    files ([path]), to (path)                     {copied: [{from, to, open?}], skipped: [{from, reason}]}
+  outside.move    files ([path]), to (path)                     {moved: [{from, to}], copied_only: [{from, to, reason}],
+                                                                skipped: [{from, reason}]}
+  outside.trash   files ([path])                                {trashed: [path], kept: [{file, reason}]}
+  outside.put_back  copy, original                              {original, copyDeleted, olderCopiesDeleted?}
+
+The outside.* kinds are files outside the chat's folder, in a folder its user
+granted it (outside.grant).  Their paths are the computer's, absolute,
+normalised and with no trailing slash.  The reads answer as the folder's own
+kinds do; DeviceWorkspaceIO sends one for a path outside its root and for a
+key outside.resolve gave, and refuses anything else there with
+OUTSIDE_READ_ONLY.  outside.copy, outside.move, outside.trash and outside.put_back are
+surogates.tools.builtin.outside_folder's, and each shows the user a window.
+A refusal is {"type": "denied"} (the user said no, or the computer will not),
+{"type": "sandbox"} (no grant reaches the path), or {"type": "unsupported"}:
+an app older than them is never sent one (surogates.devices.link).
 
 bind is a session's first operation, sent when the server creates a chat that
 works on a folder of this computer.  The app answers it only after its user
@@ -154,11 +179,13 @@ import contextlib
 import errno
 import hashlib
 import json
+import math
 import tempfile
 from collections.abc import AsyncIterator, Collection
 from pathlib import Path
 from typing import Any, Protocol
 
+from surogates.devices.binding import inside_folder, normal_path, tools_path
 from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
 from surogates.tools.workspace_io.base import (
     FileStat,
@@ -188,9 +215,14 @@ WALK_BUDGET_S = 5
 TOO_LARGE = "Too large for one operation on a local folder (over 1.5 MiB)"
 # The kinds whose data in a result may be a transfer: a read's, and a screenshot's
 # (surogates.devices.browser).  Every other result fits in its frame.
-RESULT_TRANSFERS = frozenset({"read", "browser.screenshot"})
+RESULT_TRANSFERS = frozenset({"read", "outside.read", "browser.screenshot"})
 READ_TOO_LARGE = "File too large to read from a local folder (over 50 MiB)"
 WRITE_TOO_LARGE = "File too large to write to a local folder (over 50 MiB)"
+OUTSIDE_READ_ONLY = "Files outside the chat's folder are read-only: use copy_files, move_files, move_to_trash or put_back."
+# What an app that knows no outside.* kind is answered for one, and what the tools tell the model of it.
+OUTSIDE_OLD_APP = (
+    "The Surogate app on this computer cannot work outside the chat's folder yet. Update it, then try again."
+)
 
 
 class DeviceOperationError(RuntimeError):
@@ -269,6 +301,9 @@ class DeviceWorkspaceIO:
         self.root = root
         self.identity = identity
         self.caches_documents = caches_documents
+        # The keys outside.resolve gave: only those are files outside the folder.
+        # ponytail: only grows, for the IO's life (one tool call's); a bound if an IO ever lives long.
+        self._outside: set[str] = set()
 
     @property
     def runner(self) -> OperationRunner:
@@ -280,6 +315,30 @@ class DeviceWorkspaceIO:
             raise OSError(errno.EFBIG, TOO_LARGE)
         return answered(kind, await self._runner.run(kind, args, payload))
 
+    def _outside_path(self, path: str) -> str | None:
+        """*path* normalised when it is absolute and not in the folder, as outside.resolve takes it; else None."""
+        if not path.startswith("/"):
+            return None
+        path = normal_path(path)
+        return None if inside_folder(path, normal_path(self.root)) else path
+
+    def _folder_but_for_case(self, path: str) -> bool:
+        """Whether the normal *path* is in the folder spelled with other capitals: on a drive that ignores case
+        (Windows, macOS) it is the folder's own, on Linux another folder.  The computer, which knows, says which."""
+        return inside_folder(path.casefold(), normal_path(self.root).casefold())
+
+    def is_outside(self, key: str) -> bool:
+        """Whether *key* is a file outside the folder: one outside.resolve gave."""
+        return key in self._outside
+
+    def _of(self, kind: str, key: str) -> str:
+        """The kind that reads *key*: the folder's own, or its outside.* twin."""
+        return f"outside.{kind}" if self.is_outside(key) else kind
+
+    def _only_inside(self, key: str) -> None:
+        if self.is_outside(key):
+            raise WorkspaceSandboxError(OUTSIDE_READ_ONLY)
+
     # -- files -----------------------------------------------------------
 
     # A NUL is refused here, before the operation is recorded: the computer
@@ -288,17 +347,37 @@ class DeviceWorkspaceIO:
 
     async def resolve(self, path: str) -> str:
         refuse_nul(path)
-        return await self._call("resolve", path=path)
+        # C:\a, as the prompt shows a Windows chat's folder, is /mnt/c/a here.
+        path = tools_path(path, self.root)
+        outside = self._outside_path(path)
+        if outside is None:
+            return await self._call("resolve", path=path)
+        if self._folder_but_for_case(outside):
+            try:
+                return await self._call("resolve", path=path)
+            except WorkspaceSandboxError:
+                pass  # outside the folder on this computer: a folder of its own, as a grant may hold
+        key = await self._call("outside.resolve", path=outside)
+        if isinstance(key, str):
+            self._outside.add(key)
+        return key
 
     async def check_write(self, path: str) -> str | None:
         refuse_nul(path)
-        return await self._call("check_write", path=path)
+        path = tools_path(path, self.root)
+        # The computer's own refusal first (a credential file, say), then, outside the folder, read-only.
+        refused = await self._call("check_write", path=path)
+        if refused:
+            return refused
+        # Spelled with other capitals, the computer's own check took it as the folder's: it is.
+        outside = self._outside_path(path)
+        return OUTSIDE_READ_ONLY if outside is not None and not self._folder_but_for_case(outside) else None
 
     async def stat(self, key: str) -> FileStat | None:
         if isinstance(key, str) and "\0" in key:
             # Nothing is there, as the computer and the cloud's own workspace answer it.
             return None
-        value = await self._call("stat", key=key)
+        value = await self._call(self._of("stat", key), key=key)
         if value is None:
             return None
         # Writes check it and the document cache keys by it: a stat without one is no stat.
@@ -308,7 +387,7 @@ class DeviceWorkspaceIO:
 
     async def read(self, key: str, max_bytes: int | None = None) -> bytes:
         refuse_nul(key)
-        data = await self._call("read", key=key, max_bytes=max_bytes)
+        data = await self._call(self._of("read", key), key=key, max_bytes=max_bytes)
         if isinstance(data, bytes):
             # A transfer's data, which the journal's runner fetched and checked.
             return data
@@ -326,7 +405,7 @@ class DeviceWorkspaceIO:
         # At most one frame's data, so a page is always the ok value itself.
         asked = min(max_bytes, MAX_PAYLOAD_BYTES)
         value = await self._call(
-            "read_lines", key=key, encoding=encoding,
+            self._of("read_lines", key), key=key, encoding=encoding,
             # Python's slice reads True as 1, as the cloud does; JSON would send true.
             offset=int(offset) if isinstance(offset, bool) else offset,
             limit=int(limit) if isinstance(limit, bool) else limit,
@@ -345,6 +424,7 @@ class DeviceWorkspaceIO:
 
     async def write(self, key: str, data: bytes, *, expected_revision: str | None = None, create: bool = False) -> None:
         refuse_nul(key)
+        self._only_inside(key)
         # Only when there is one: a write that expects nothing asks for what it always did.
         expected = {} if expected_revision is None else {"expected_revision": expected_revision}
         if create:
@@ -378,11 +458,12 @@ class DeviceWorkspaceIO:
 
     async def delete(self, key: str) -> None:
         refuse_nul(key)
+        self._only_inside(key)
         await self._call("delete", key=key)
 
     async def list_dir(self, key: str) -> list[str]:
         refuse_nul(key)
-        return await self._call("list_dir", key=key)
+        return await self._call(self._of("list_dir", key), key=key)
 
     async def walk(
         self, key: str, *, skip: Collection[str], skip_top: Collection[str] = (), skip_hidden: bool = False,
@@ -392,23 +473,28 @@ class DeviceWorkspaceIO:
             # A string is a collection of its characters: sorted, it would skip every one-letter folder.
             raise TypeError("skip and skip_top take folder names, not one string")
         refuse_nul(key)
+        kind = self._of("walk", key)
+        # Outside the folder each file comes with its mtime too: a listing sorts by it, with no look a file.
+        timed = kind == "outside.walk"
         value = await self._call(
-            "walk", key=key, skip=sorted(skip), skip_top=sorted(skip_top), skip_hidden=skip_hidden, since=since,
+            kind, key=key, skip=sorted(skip), skip_top=sorted(skip_top), skip_hidden=skip_hidden, since=since,
         )
         try:
             files, truncated, cursor = value["files"], value["truncated"], value["cursor"]
             if (
                 isinstance(files, list) and len(files) <= MAX_WALK_FILES
                 and all(
-                    isinstance(entry, list) and len(entry) == 2 and isinstance(entry[0], str)
+                    isinstance(entry, list) and len(entry) == 2 + timed and isinstance(entry[0], str)
                     and type(entry[1]) is int and entry[1] >= 0
+                    and (not timed or (type(entry[2]) in (int, float) and math.isfinite(entry[2])))
                     for entry in files
                 )
                 and type(truncated) is bool
                 # Taken here, not at the next walk's since: up to 20 digits, as the computer takes it back.
                 and isinstance(cursor, str) and cursor.isascii() and cursor.isdigit() and len(cursor) <= 20
             ):
-                return Walk([(path, size) for path, size in files], truncated, cursor)
+                mtimes = {entry[0]: float(entry[2]) for entry in files} if timed else None
+                return Walk([(entry[0], entry[1]) for entry in files], truncated, cursor, mtimes)
         except (KeyError, TypeError):
             pass
         raise DeviceOperationError("The computer returned an invalid listing")
@@ -434,6 +520,7 @@ class DeviceWorkspaceIO:
         context: int = 0,
     ) -> str:
         refuse_nul(key, pattern, glob)
+        self._only_inside(key)
         return await self._call(
             "ripgrep", key=key, mode=mode, pattern=pattern, glob=glob, context=context,
         )

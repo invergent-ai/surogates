@@ -331,6 +331,111 @@ describe("the bindings", () => {
     root, nonce: `nonce-${root}`, folder: `/home/me/${root}`, dev: 2049, ino: 7_340_033, boot: "boot-1", mode: "free", boundAt,
   });
 
+  it("keeps a chat's read grants until taken back or the chat retires", () => {
+    const journal = new OperationJournal(path);
+    journal.bindings.add(binding("r1", 1));
+    journal.bindings.grantRead("r1", "/home/me/notes");
+    journal.bindings.grantRead("r1", "/home/me/papers");
+    journal.bindings.grantRead("r1", "/home/me/notes");
+    expect(journal.bindings.reads("r1")).toEqual(["/home/me/notes", "/home/me/papers"]);
+    journal.bindings.takeBackRead("r1", "/home/me/notes");
+    expect(journal.bindings.reads("r1")).toEqual(["/home/me/papers"]);
+    journal.bindings.recordCopy("r1", "/w/a.txt", "/home/me/papers/a.txt", "rev1");
+    journal.bindings.replace(binding("r1", 2));
+    expect([journal.bindings.reads("r1"), journal.bindings.copyOf("r1", "/w/a.txt")?.revision]).toEqual([["/home/me/papers"], "rev1"]);
+    journal.bindings.retire("r1");
+    expect([journal.bindings.reads("r1"), journal.bindings.copyOf("r1", "/w/a.txt")]).toEqual([[], undefined]);
+    journal.close();
+  });
+
+  it("keeps a grant for one turn in memory alone, until its turn ends, a restart, or a grant for the chat", () => {
+    const journal = new OperationJournal(path);
+    journal.bindings.add(binding("r1", 1));
+    const told: string[] = [];
+    journal.bindings.watch((root) => told.push(root));
+    journal.bindings.grantRead("r1", "/home/me/papers");
+    journal.bindings.grantRead("r1", "/home/me/notes", true);
+    journal.bindings.grantRead("r1", "/home/me/papers", true);
+    expect(journal.bindings.reads("r1")).toEqual(["/home/me/papers", "/home/me/notes"]);
+    expect([journal.bindings.forTurn("r1", "/home/me/notes"), journal.bindings.forTurn("r1", "/home/me/papers")]).toEqual([true, false]);
+    journal.bindings.endTurnReads("r1");
+    journal.bindings.endTurnReads("r1");
+    expect(journal.bindings.reads("r1")).toEqual(["/home/me/papers"]);
+    // For the turn, then for the chat: the chat's takes its place.
+    journal.bindings.grantRead("r1", "/home/me/notes", true);
+    journal.bindings.grantRead("r1", "/home/me/notes");
+    expect(journal.bindings.forTurn("r1", "/home/me/notes")).toBe(false);
+    journal.bindings.takeBackRead("r1", "/home/me/notes");
+    journal.bindings.grantRead("r1", "/home/me/notes", true);
+    journal.bindings.takeBackRead("r1", "/home/me/notes");
+    expect(journal.bindings.reads("r1")).toEqual(["/home/me/papers"]);
+    expect(told).toEqual(Array(8).fill("r1"));
+    // None to a root it does not bind; and a restart ends them.
+    journal.bindings.grantRead("r9", "/home/me/notes", true);
+    journal.bindings.grantRead("r1", "/home/me/notes", true);
+    journal.close();
+    const after = new OperationJournal(path);
+    expect([after.bindings.reads("r9"), after.bindings.reads("r1")]).toEqual([[], ["/home/me/papers"]]);
+    after.close();
+  });
+
+  it("lists each folder once: a wider grant takes the place of the narrower ones that last no longer", () => {
+    const journal = new OperationJournal(path);
+    journal.bindings.add(binding("r1", 1));
+    journal.bindings.grantRead("r1", "/home/me/Desktop/PONTAJE");
+    journal.bindings.grantRead("r1", "/home/me/Desktop/Scan", true);
+    journal.bindings.grantRead("r1", "/home/me/Desktop2");
+    // For the turn: the chat's narrower grant outlasts it, and stays.
+    journal.bindings.grantRead("r1", "/home/me/Desktop", true);
+    expect(journal.bindings.reads("r1")).toEqual(["/home/me/Desktop/PONTAJE", "/home/me/Desktop2", "/home/me/Desktop"]);
+    // Inside a grant already: nothing changes.
+    journal.bindings.grantRead("r1", "/home/me/Desktop/Scan/a", true);
+    expect(journal.bindings.reads("r1")).toEqual(["/home/me/Desktop/PONTAJE", "/home/me/Desktop2", "/home/me/Desktop"]);
+    // For the chat: it takes the place of both.
+    journal.bindings.grantRead("r1", "/home/me/Desktop");
+    expect(journal.bindings.reads("r1")).toEqual(["/home/me/Desktop2", "/home/me/Desktop"]);
+    journal.bindings.grantRead("r1", "/home/me/Desktop/Scan");
+    expect(journal.bindings.reads("r1")).toEqual(["/home/me/Desktop2", "/home/me/Desktop"]);
+    journal.close();
+  });
+
+  it("grants nothing to a root it does not bind", () => {
+    const journal = new OperationJournal(path);
+    journal.bindings.grantRead("r9", "/home/me/notes");
+    journal.bindings.recordCopy("r9", "/w/a.txt", "/home/me/notes/a.txt", "rev1");
+    expect([journal.bindings.reads("r9"), journal.bindings.copyOf("r9", "/w/a.txt")]).toEqual([[], undefined]);
+    journal.close();
+  });
+
+  it("records a working copy's original and revision, and forgets it", () => {
+    const journal = new OperationJournal(path);
+    journal.bindings.add(binding("r1", 1));
+    journal.bindings.recordCopy("r1", "/w/a.txt", "/home/me/notes/a.txt", "rev1");
+    expect(journal.bindings.copyOf("r1", "/w/a.txt")).toEqual({ original: "/home/me/notes/a.txt", revision: "rev1" });
+    journal.bindings.recordCopy("r1", "/w/a.txt", "/home/me/notes/a.txt", "rev2");
+    expect(journal.bindings.copyOf("r1", "/w/a.txt")?.revision).toBe("rev2");
+    journal.bindings.recordCopy("r1", "/w/a (1).txt", "/home/me/notes/a.txt", "rev3");
+    journal.bindings.recordCopy("r1", "/w/b.txt", "/home/me/notes/b.txt", "rev1");
+    expect(journal.bindings.copiesFrom("r1", "/home/me/notes/a.txt")).toEqual(["/w/a.txt", "/w/a (1).txt"]);
+    journal.bindings.forgetCopy("r1", "/w/a.txt");
+    expect(journal.bindings.copyOf("r1", "/w/a.txt")).toBeUndefined();
+    expect(journal.bindings.copiesFrom("r1", "/home/me/notes/a.txt")).toEqual(["/w/a (1).txt"]);
+    journal.close();
+  });
+
+  it("tells its watchers when a grant changes", () => {
+    const journal = new OperationJournal(path);
+    journal.bindings.add(binding("r1", 1));
+    const told: string[] = [];
+    journal.bindings.watch((root) => told.push(root));
+    journal.bindings.grantRead("r1", "/home/me/notes");
+    journal.bindings.grantRead("r1", "/home/me/notes");
+    journal.bindings.takeBackRead("r1", "/home/me/notes");
+    journal.bindings.takeBackRead("r1", "/home/me/notes");
+    expect(told).toEqual(["r1", "r1"]);
+    journal.close();
+  });
+
   it("keep each root's folder across a restart, and give the latest", () => {
     const before = new OperationJournal(path);
     expect(before.bindings.last()).toBeUndefined();

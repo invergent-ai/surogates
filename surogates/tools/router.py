@@ -199,6 +199,12 @@ TOOL_LOCATIONS: dict[str, ToolLocation] = {
     "patch": ToolLocation.SANDBOX,
     "search_files": ToolLocation.SANDBOX,
     "list_files": ToolLocation.SANDBOX,
+    # Files outside a desktop chat's folder: each asks the computer through its tool call's runner.
+    "request_folder_access": ToolLocation.HARNESS,
+    "copy_files": ToolLocation.HARNESS,
+    "move_files": ToolLocation.HARNESS,
+    "move_to_trash": ToolLocation.HARNESS,
+    "put_back": ToolLocation.HARNESS,
 }
 
 
