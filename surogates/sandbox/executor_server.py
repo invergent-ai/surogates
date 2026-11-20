@@ -589,10 +589,26 @@ def set_dumpable(on: bool) -> bool:
         return False
 
 
+#: The environment variable that holds the SHA-256 of the daemon's token (hex), in place of the token itself.
+TOKEN_SHA256_ENV = "TOOL_EXECUTOR_TOKEN_SHA256"
+
+
+def token_sha256(token: str) -> str:
+    """The hex SHA-256 the worker puts in the sandbox's environment in place of *token*."""
+    import hashlib
+
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
 def _token_ok(auth_header: str, token: str) -> bool:
+    """Whether *auth_header* carries the daemon's token.  *token* is the token itself, or ``sha256:<hex>``: then
+    the bearer's digest is compared, and a copy of the environment (``/proc/1/environ``) holds no usable secret."""
     if not auth_header.startswith("Bearer "):
         return False
-    return hmac.compare_digest(auth_header[len("Bearer "):], token)
+    bearer = auth_header[len("Bearer "):]
+    if token.startswith("sha256:"):
+        return hmac.compare_digest(token_sha256(bearer), token[len("sha256:"):])
+    return hmac.compare_digest(bearer.encode("utf-8"), token.encode("utf-8"))
 
 
 def create_app(
@@ -749,9 +765,19 @@ def main() -> None:
     port = int(os.environ.get("TOOL_EXECUTOR_PORT", str(DEFAULT_PORT)))
     # Out of the environment once read: the commands the daemon starts, and its
     # forks' tools, inherit it, and none of them is to call the daemon.
+    # The token's SHA-256 (``TOOL_EXECUTOR_TOKEN_SHA256``) where the worker keeps the token itself out of the
+    # sandbox's environment; the token where it does not.
+    digest = os.environ.pop(TOKEN_SHA256_ENV, "").strip().lower()
     token = os.environ.pop("TOOL_EXECUTOR_TOKEN", "")
+    if digest:
+        import re
+
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            logger.error("TOOL_EXECUTOR_TOKEN_SHA256 is not a hex SHA-256")
+            sys.exit(1)
+        token = f"sha256:{digest}"
     if not token:
-        logger.error("TOOL_EXECUTOR_TOKEN is required")
+        logger.error("TOOL_EXECUTOR_TOKEN or TOOL_EXECUTOR_TOKEN_SHA256 is required")
         sys.exit(1)
     # Not dumpable: its /proc files (environ, mem) are root's, and a command of its user cannot ptrace it (where
     # yama lets a process trace its ancestors).  tini, PID 1, keeps the same start environment readable: a token

@@ -187,6 +187,7 @@ class DockerSandbox:
         mcp_proxy_url: str = "",
         storage_settings: Any = None,
         pids_limit: int = DEFAULT_PIDS_LIMIT,
+        token_env: str = "plain",
         docker: _DockerDriver | None = None,
         httpx_transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
@@ -195,6 +196,8 @@ class DockerSandbox:
         self._ready_timeout = ready_timeout
         self._network = network
         self._pids_limit = pids_limit
+        # "sha256": the container's environment holds the token's digest, not the token (the daemon compares).
+        self._token_env = token_env
         self._host: DockerHost | None = None
         self._mcp_proxy_url = mcp_proxy_url
         self._storage = storage_settings
@@ -220,6 +223,7 @@ class DockerSandbox:
             mcp_proxy_url=mcp_proxy_url,
             storage_settings=storage_settings,
             pids_limit=sandbox.docker_pids_limit,
+            token_env=sandbox.executor_token_env,
         )
 
     # ------------------------------------------------------------------
@@ -334,6 +338,18 @@ class DockerSandbox:
 
         try:
             await self._wait_ready(host_port)
+        except SandboxUnavailableError as exc:
+            exited = self._token_env == "sha256" and not await self._running(container_id)
+            await self._docker.run(["stop", container_id])
+            await self._docker.run(["rm", container_id])
+            if exited:
+                # An image from before the digest exits at once without TOOL_EXECUTOR_TOKEN.
+                raise SandboxUnavailableError(
+                    f"{exc.reason}; the container exited: if the image predates TOOL_EXECUTOR_TOKEN_SHA256 (its "
+                    "daemon exits at start), update it or set SUROGATES_SANDBOX_EXECUTOR_TOKEN_ENV=plain",
+                    classification="config",
+                ) from exc
+            raise
         except Exception:
             await self._docker.run(["stop", container_id])
             await self._docker.run(["rm", container_id])
@@ -433,6 +449,10 @@ class DockerSandbox:
                 container_id, session_id,
             )
 
+    async def _running(self, container_id: str) -> bool:
+        code, stdout, _ = await self._docker.run(["inspect", "--format", "{{.State.Running}}", container_id])
+        return code == 0 and stdout.decode().strip() == "true"
+
     async def _sweepable(self, container_id: str) -> bool:
         """Whether a sweep of its session may take *container_id*: this worker's, one of no worker's, or one of
         a worker that is gone.  Unsure, it is spared."""
@@ -474,10 +494,13 @@ class DockerSandbox:
         """
         import os
 
-        env = {
-            "TOOL_EXECUTOR_TOKEN": token,
-            "WORKSPACE_DIR": "/workspace",
-        }
+        env = {"WORKSPACE_DIR": "/workspace"}
+        if self._token_env == "sha256":
+            from surogates.sandbox.executor_server import TOKEN_SHA256_ENV, token_sha256
+
+            env[TOKEN_SHA256_ENV] = token_sha256(token)
+        else:
+            env["TOOL_EXECUTOR_TOKEN"] = token
         if mode == "s3fs":
             # /workspace becomes a real FUSE mount, so leave the daemon's
             # FUSE readiness check at its default (require_fuse=1) -- the
@@ -493,7 +516,7 @@ class DockerSandbox:
             # bind / ephemeral: /workspace is not FUSE, so disable the check.
             env["TOOL_EXECUTOR_REQUIRE_FUSE"] = "0"
         reserved = {
-            "TOOL_EXECUTOR_TOKEN", "WORKSPACE_DIR", "TOOL_EXECUTOR_REQUIRE_FUSE",
+            "TOOL_EXECUTOR_TOKEN", "TOOL_EXECUTOR_TOKEN_SHA256", "WORKSPACE_DIR", "TOOL_EXECUTOR_REQUIRE_FUSE",
             "TOOL_EXECUTOR_PORT", "SANDBOX_S3FS_INLINE", "S3_BUCKET_PATH",
             "S3_ENDPOINT", "S3_REGION", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
             # The daemon's own switches: never from a tenant's spec or a skill's passthrough.

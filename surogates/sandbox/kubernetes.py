@@ -52,7 +52,9 @@ _SANDBOX_UID = 1000
 
 
 #: Environment the sandbox daemon reads as its own switches (``executor_server.main``).
-_DAEMON_SWITCHES = frozenset({"TOOL_EXECUTOR_ALLOW_LOCAL", "FORWARDED_ALLOW_IPS"})
+_DAEMON_SWITCHES = frozenset({
+    "TOOL_EXECUTOR_ALLOW_LOCAL", "FORWARDED_ALLOW_IPS", "TOOL_EXECUTOR_TOKEN", "TOOL_EXECUTOR_TOKEN_SHA256",
+})
 
 
 @dataclass
@@ -128,8 +130,11 @@ class K8sSandbox:
         ssh_agent_image: str = "ghcr.io/invergent-ai/surogates-ssh-agent:latest",
         ssh_egress_enforced: bool = False,
         ssh_egress_baseline_cidrs: list[str] | None = None,
+        token_env: str = "plain",
     ) -> None:
         self._namespace = namespace
+        # "sha256": the pod's environment (and its spec) holds the token's digest, not the token.
+        self._token_env = token_env
         self._service_account = service_account
         self._pod_ready_timeout = pod_ready_timeout
         self._executor_port = executor_port
@@ -282,8 +287,12 @@ class K8sSandbox:
             logger.error("Sandbox pod %s failed to become ready", pod_name, exc_info=True)
             await self._destroy_entry(api, entry)
             self._pods.pop(sandbox_id, None)
+            hint = (
+                "; if the image predates TOOL_EXECUTOR_TOKEN_SHA256 (its daemon exits at start), update it or set "
+                "SUROGATES_SANDBOX_EXECUTOR_TOKEN_ENV=plain"
+            ) if self._token_env == "sha256" else ""
             raise SandboxUnavailableError(
-                f"Sandbox pod {pod_name} failed to become ready: {exc}",
+                f"Sandbox pod {pod_name} failed to become ready: {exc}{hint}",
             ) from exc
 
         logger.info("Provisioned K8s sandbox %s (pod %s)", sandbox_id, pod_name)
@@ -441,10 +450,13 @@ class K8sSandbox:
             client.V1EnvVar(
                 name="TOOL_EXECUTOR_PORT", value=str(self._executor_port),
             ),
-            client.V1EnvVar(
-                name="TOOL_EXECUTOR_TOKEN", value=executor_token,
-            ),
         ]
+        if self._token_env == "sha256":
+            from surogates.sandbox.executor_server import TOKEN_SHA256_ENV, token_sha256
+
+            env_vars.append(client.V1EnvVar(name=TOKEN_SHA256_ENV, value=token_sha256(executor_token)))
+        else:
+            env_vars.append(client.V1EnvVar(name="TOOL_EXECUTOR_TOKEN", value=executor_token))
         if self._mcp_proxy_url:
             env_vars.append(client.V1EnvVar(
                 name="MCP_PROXY_URL", value=self._mcp_proxy_url,
