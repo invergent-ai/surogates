@@ -11,7 +11,9 @@ Output: the daemon's JSON result on stdout (same shapes as before).
 
 The daemon refuses calls from inside its sandbox (a command that read its
 token could otherwise run tools past the harness), so this client works only
-in a pod whose daemon was started with ``TOOL_EXECUTOR_ALLOW_LOCAL=1``.
+in a pod whose daemon was started with ``TOOL_EXECUTOR_ALLOW_LOCAL=1``.  Where the
+worker keeps only the token's digest in the sandbox (``TOOL_EXECUTOR_TOKEN_SHA256``,
+``sandbox.executor_token_env=sha256``), pass the token itself in ``TOOL_EXECUTOR_TOKEN``.
 """
 
 import json

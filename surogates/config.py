@@ -494,6 +494,10 @@ class SandboxSettings(BaseSettings):
     # (swap included) and CPUs are the spec's ``memory_limit`` / ``cpu_limit`` (``default_memory_limit`` /
     # ``default_cpu_limit``, or the tenant's), "" or "0" for none.
     docker_pids_limit: int = 4096
+    # What a sandbox's environment holds of its daemon's token: "sha256", only the token's digest, so that a
+    # command reading /proc/1/environ finds nothing it can call the daemon with; "plain", the token, as images from
+    # before the digest need.  Set "sha256" once the sandbox image in use has it (both backends).
+    executor_token_env: Literal["plain", "sha256"] = "plain"
 
     # K8s sandbox backend settings (only used when backend == "kubernetes")
     k8s_namespace: str = "surogates"
