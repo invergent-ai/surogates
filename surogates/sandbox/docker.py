@@ -201,6 +201,7 @@ class DockerSandbox(ImageSessions):
         pids_limit: int = DEFAULT_PIDS_LIMIT,
         token_env: str = "plain",
         executor_bundle_image: str = "",
+        executor_bundle_image_musl: str = "",
         image_pull: str = "missing",
         image_pull_timeout: float = 900,
         image_deployment: str = "",
@@ -209,7 +210,7 @@ class DockerSandbox(ImageSessions):
     ) -> None:
         self._image = image
         self._init_image_sessions(bundle_image=executor_bundle_image, pull=image_pull, pull_timeout=image_pull_timeout,
-                                  deployment=image_deployment)
+                                  deployment=image_deployment, bundle_image_musl=executor_bundle_image_musl)
         self._port_base = executor_port_base
         self._ready_timeout = ready_timeout
         self._network = network
@@ -243,6 +244,7 @@ class DockerSandbox(ImageSessions):
             pids_limit=sandbox.docker_pids_limit,
             token_env=sandbox.executor_token_env,
             executor_bundle_image=sandbox.executor_bundle_image,
+            executor_bundle_image_musl=sandbox.executor_bundle_image_musl,
             image_pull=sandbox.docker_image_pull,
             image_pull_timeout=sandbox.docker_image_pull_timeout,
             image_deployment=sandbox.image_deployment,

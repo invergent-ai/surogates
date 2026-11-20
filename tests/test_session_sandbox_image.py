@@ -1640,3 +1640,46 @@ async def test_a_conflict_then_another_failure_reports_the_second(monkeypatch):
     docker.run_answers = [(125, b"", conflict), (125, b"", b"docker: no space left on device")]
     with pytest.raises(SandboxUnavailableError, match="no space left on device"):
         await _docker_backend(docker).provision(SandboxSpec(session_id="root-1", session_image=TASK_IMAGE))
+
+
+MUSL_BUNDLE = "registry.example/surogates-executor-bundle-musl:test"
+
+
+async def test_a_musl_image_gets_the_musl_bundle_and_keeps_it():
+    """The main bundle cannot start in an Alpine image: the musl bundle runs there, for that image from then on."""
+    docker = ImageDocker(images={TASK_IMAGE: {**_image(), "Id": "sha256:" + "aa" * 32}, BUNDLE: _image(),
+                                 MUSL_BUNDLE: _image()})
+    real = docker.run
+    musl_log = b"[FATAL tini (7)] exec /opt/surogates/bin/python3 failed: No such file or directory\n"
+
+    async def run(args):
+        out = await real(args)
+        if args[:2] == ["run", "-d"] and any(a.startswith(f"type=image,source={BUNDLE},") for a in args):
+            # The glibc bundle's executor dies at once in this image.
+            name = args[args.index("--name") + 1]
+            docker.named[name][1] = "exited"
+            docker.logs = musl_log
+        elif args[:2] == ["run", "-d"]:
+            docker.logs = b""
+        return out
+    docker.run = run
+    backend = _docker_backend(docker, executor_bundle_image_musl=MUSL_BUNDLE)
+    sid = await backend.provision(SandboxSpec(session_id="r", session_image=TASK_IMAGE))
+    runs = [c for c in docker.calls if c[:2] == ["run", "-d"]]
+    assert len(runs) == 2
+    assert f"type=image,source={MUSL_BUNDLE},target=/opt/surogates,image-subpath=opt/surogates" in runs[1]
+    assert f"surogates.executor_bundle={MUSL_BUNDLE}" in runs[1] and backend.created(sid)
+    # The same image again (another session): the musl bundle at once.
+    await backend.provision(SandboxSpec(session_id="r2", session_image=TASK_IMAGE))
+    runs = [c for c in docker.calls if c[:2] == ["run", "-d"]]
+    assert len(runs) == 3 and any(a.startswith(f"type=image,source={MUSL_BUNDLE},") for a in runs[2])
+
+
+async def test_a_musl_image_without_the_musl_bundle_is_refused_with_the_setting_named():
+    docker = ImageDocker(images={TASK_IMAGE: _image(), BUNDLE: _image()})
+    docker.exited = True
+    docker.logs = (b"Error relocating /opt/surogates/python/cpython-3.12.12-linux-x86_64-gnu/bin/python3.12: "
+                   b"posix_fallocate64: symbol not found\n")
+    backend = _docker_backend(docker, _never_ready())
+    with pytest.raises(SandboxUnavailableError, match="executor_bundle_image_musl"):
+        await backend.provision(SandboxSpec(session_id="r", session_image=TASK_IMAGE))
