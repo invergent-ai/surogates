@@ -479,6 +479,9 @@ class SandboxSettings(BaseSettings):
     # this long: the safety net behind the turn ends' teardown.  0 turns it off.
     reap_idle_seconds: int = Field(300, ge=0)
     reap_every_seconds: int = Field(60, gt=0)
+    # A session's own image (sandbox_image) keeps its workspace in its container: removed once the session has been
+    # at rest this long by the container's own clock (its executor's last call, or its stop).  0: never removed.
+    image_idle_seconds: int = Field(1800, ge=0)
 
     # A session's own image (session config ``sandbox_image``, ``surogates.sandbox.session_image``): the images a
     # session may name, as fnmatch patterns ("ghcr.io/acme/tasks:*").  Empty: no session may name one.

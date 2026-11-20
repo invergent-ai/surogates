@@ -645,7 +645,7 @@ def create_app(
     sem = asyncio.Semaphore(max_concurrency)
     # When a call last ended, and the calls running now: the sandbox's own clock of its use (``/activity``), which a
     # worker other than the one that made the sandbox can ask (a session's own image is shared by its workers).
-    activity = {"last": time.monotonic(), "running": 0}
+    activity = {"last": time.monotonic(), "running": 0, "retired": False}
     mount = str(history.project) if history is not None else workspace
     # A master's pod has nothing to open: its workspace is the real files.
     opened = history is None or history.copy is None
@@ -680,18 +680,44 @@ def create_app(
             return Response(content=f"copy not made: {failed}", status_code=503)
         return Response(content="ok", status_code=200)
 
-    @app.get("/activity")
-    async def activity_of(request: Request) -> Response:
-        """Seconds since a call last ended (0 while one runs), the calls running, and the background commands that
-        still run.  The worker's own drains of finished commands are no use of the sandbox and are not counted."""
-        if not _token_ok(request.headers.get("authorization", ""), token):
-            return Response(content="unauthorized", status_code=401)
+    def waited_on() -> int:
+        """The background commands still running that a session waits to hear the end of (or a monitor watches):
+        a forgotten server or ``tail -f`` nobody waits on does not keep a sandbox in use."""
         from surogates.tools.utils.process_registry import process_registry
 
-        background = sum(1 for p in process_registry.list_sessions() if p.get("status") == "running")
+        with process_registry._lock:
+            running = list(process_registry._running.values())
+        return sum(1 for p in running if not p.exited and (p.notify_on_complete or p.watch_lines))
+
+    def activity_now() -> dict:
         idle = 0.0 if activity["running"] else time.monotonic() - activity["last"]
-        return Response(content=json.dumps({"idle_seconds": round(idle, 1), "running": activity["running"],
-                                            "background_running": background}), media_type="application/json")
+        return {"idle_seconds": round(idle, 1), "running": activity["running"], "background_running": waited_on()}
+
+    @app.get("/activity")
+    async def activity_of(request: Request) -> Response:
+        """Seconds since a call last ended (0 while one runs), the calls running, and the background commands a
+        session waits on.  The worker's own drains of finished commands are no use of the sandbox and are not
+        counted."""
+        if not _token_ok(request.headers.get("authorization", ""), token):
+            return Response(content="unauthorized", status_code=401)
+        return Response(content=json.dumps(activity_now()), media_type="application/json")
+
+    @app.post("/retire")
+    async def retire(request: Request) -> Response:
+        """Retire this sandbox if nothing runs or is waited on in it and it went unused ``min_idle_seconds``: from
+        then on every call is refused (410), so a reaper that removes it next takes no call with it.  Atomic with
+        the calls: no await between the look and the mark."""
+        if not _token_ok(request.headers.get("authorization", ""), token):
+            return Response(content="unauthorized", status_code=401)
+        try:
+            body = await request.json()
+            min_idle = float((body or {}).get("min_idle_seconds") or 0)
+        except (ValueError, TypeError, AttributeError):
+            return Response(content="bad request", status_code=400)
+        now = activity_now()
+        if not activity["retired"]:
+            activity["retired"] = not now["running"] and not now["background_running"] and now["idle_seconds"] >= min_idle
+        return Response(content=json.dumps({**now, "retired": activity["retired"]}), media_type="application/json")
 
     @app.post("/execute")
     async def execute(request: Request) -> Response:
@@ -704,6 +730,9 @@ def create_app(
         auth = request.headers.get("authorization", "")
         if not _token_ok(auth, token):
             return Response(content="unauthorized", status_code=401)
+        if activity["retired"]:
+            # Retired for its reaper (``/retire``): a call now would be lost with it.
+            return Response(content="this sandbox is retired", status_code=410)
 
         payload = await request.json()
         name = payload.get("name") or ""

@@ -13,7 +13,7 @@
 #
 # The Docker sandbox backend mounts /opt/surogates of this image read-only into the
 # session's image (`--mount type=image`, Docker 28 or later) and starts
-# `/opt/surogates/bin/tini -- /opt/surogates/bin/python3 -I -m surogates.sandbox.executor_server`
+# `/opt/surogates/bin/tini -- /opt/surogates/bin/python3 -I -m surogates.image_entry`
 # there, as the image's own user. Nothing of it is on the commands' PATH.
 #
 # Build (from repo root), the tag sandbox.executor_bundle_image names:
@@ -71,7 +71,7 @@ COPY --from=static /static/ /opt/surogates/bin/
 # _py2.py), so compileall's status is not the test: the executor and every tool it registers must import,
 # from the bundle alone.
 RUN (/opt/surogates/bin/python3 -m compileall -qq -j 4 --invalidation-mode unchecked-hash /opt/surogates/python || true) \
-    && /opt/surogates/bin/python3 -I -c "from surogates.sandbox.executor_server import init_registry; init_registry()" \
+    && /opt/surogates/bin/python3 -I -c "import surogates.image_entry; from surogates.sandbox.executor_server import init_registry; init_registry()" \
     && /opt/surogates/bin/python3 -I -c "import json, platform, sys; json.dump({'python': platform.python_version(), 'glibc_floor': '2.28', 'arch': platform.machine()}, open('/opt/surogates/bundle.json', 'w'))"
 
 # ── The bundle ──────────────────────────────────────────────────────

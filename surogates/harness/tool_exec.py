@@ -261,8 +261,9 @@ async def _worked_in_a_sandbox_before(store: Any, session: Any, root: str, befor
     try:
         ids = {session.id} | ({UUID(root)} if root != str(session.id) else set())
         for sid in ids:
-            events = await store.get_events(sid, types=[EventType.TOOL_CALL])
-            if any(in_sandbox(e) and (sid != session.id or before is None or e.id < before) for e in events):
+            until = before - 1 if sid == session.id and before is not None else None
+            events = await store.get_events(sid, types=[EventType.TOOL_CALL], until=until)
+            if any(in_sandbox(e) for e in events):
                 return True
     except Exception:
         logger.debug("Could not tell whether session %s worked in a sandbox before", session.id, exc_info=True)

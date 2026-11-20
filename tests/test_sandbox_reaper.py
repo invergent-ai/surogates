@@ -328,6 +328,8 @@ async def test_a_reaper_stopped_mid_destroy_waits_for_the_destroy():
     gate.set()
     await stopping
     assert backend.destroyed == [sid]
+
+
 async def test_a_sandbox_in_the_sessions_own_image_is_not_this_pools_to_reap():
     """In its own image the container is the session's workspace, which another worker may be using: the backend's
     reaper removes it, by the container's own clock."""

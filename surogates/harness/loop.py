@@ -1528,6 +1528,9 @@ class AgentHarness(
 
                 await background_watch.stop_session_elsewhere(session.id)
                 await self._sandbox_pool.destroy_for_session(str(session.id))
+                if (session.config or {}).get("sandbox_image"):
+                    # Its own image's container stops even where this worker held none for it; its files stay.
+                    await self._sandbox_pool.stop_image_session(str(session.id))
             except Exception:
                 logger.debug(
                     "Sandbox cleanup on interrupt failed", exc_info=True,
@@ -6640,6 +6643,8 @@ class AgentHarness(
 
                 await background_watch.stop_session_elsewhere(session.id)
                 await self._sandbox_pool.destroy_for_session(str(session.id))
+                if (session.config or {}).get("sandbox_image"):
+                    await self._sandbox_pool.stop_image_session(str(session.id))
             except Exception:
                 logger.debug("Sandbox cleanup on /clear failed", exc_info=True)
 

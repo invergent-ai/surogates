@@ -11,16 +11,16 @@ There the container IS the session's workspace, with nothing in storage
 behind it, so:
 
 - it is one container per session, whichever worker asks for it: named after
-  the session, a worker that finds it takes it over (its port and token from
-  ``docker inspect``) instead of starting its own; one that stopped (its
-  executor killed, the daemon restarted, a Stop) is started again, its files as
-  they were;
+  the session, a worker that finds it takes it over (its port from ``docker
+  inspect``, its token derived from the deployment's signing secret and the
+  session) instead of starting its own; one that stopped (its executor killed,
+  the daemon restarted, a Stop) is started again, its files as they were;
 - nothing of a worker's own ends it: not a turn's end, a Stop or pause (they
   stop it), a worker's shutdown or another worker's view of it.  It is removed
   only by :meth:`ImageSessions.reap_images`, on any worker: once its session
   and the agents below it are at rest and the container itself says it went
-  unused for ``reap_idle_seconds`` (the executor's own clock, ``/activity``, or
-  since it stopped), or when it can no longer start;
+  unused for ``image_idle_seconds`` (its executor retires it, ``/retire``,
+  atomically with its calls; or since it stopped), or when it can never start;
 - its label is ``app=surogates-image-sandbox``, not the agent-sandbox's: no
   sweep of a session's sandbox containers ever takes it.
 """
@@ -71,6 +71,9 @@ _DROPPED_CAPS = ("NET_RAW", "MKNOD", "SETFCAP")
 #: How long a failed pull answers the sessions that waited on it, without a pull of their own.
 _FAILED_PULL_HOLD_S = 60.0
 #: A log that says the bundle's programs could not run in the image (no glibc, another architecture).
+#: A start that can never succeed (the image or the bundle gone, the binary unrunnable): the container is removed.
+_NEVER_STARTS_RE = re.compile(r"(no such image|exec format error|executable file not found|no such file or directory)",
+                              re.IGNORECASE)
 #: Docker's refusal of a second container under a name in use.
 _NAME_TAKEN_RE = re.compile(r"Conflict\. The container name .* is already in use", re.IGNORECASE)
 #: How long a worker waits for the session's container another worker is starting.
@@ -106,6 +109,35 @@ class ImageRun:
     env: tuple[tuple[str, str], ...]
     run_args: tuple[str, ...]
     command: tuple[str, ...]
+
+
+def _secret() -> bytes:
+    from surogates.tenant.auth.jwt import signing_secret
+
+    try:
+        return signing_secret().encode()
+    except RuntimeError:
+        raise SandboxUnavailableError(
+            "A session's own image needs the runtime's signing secret (SUROGATES_JWT_SECRET)", classification="config",
+        ) from None
+
+
+def session_token(session_id: str) -> str:
+    """The executor token of a session's own-image container: derived from the deployment's signing secret and the
+    session, so every worker of the deployment can call it without reading it back from the container."""
+    import hashlib
+    import hmac
+
+    digest = hmac.new(_secret(), f"surogates-image-sandbox\0{session_id}".encode(), hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(digest).decode().rstrip("=")
+
+
+def deployment_id() -> str:
+    """This deployment's mark on its session-image containers (from its signing secret, which its workers share):
+    a reaper takes only its own deployment's, whatever network they are on."""
+    import hashlib
+
+    return hashlib.sha256(b"surogates-deployment\0" + _secret()).hexdigest()[:16]
 
 
 def container_name(spec: SandboxSpec, sandbox_id: str) -> str:
@@ -305,32 +337,36 @@ class ImageSessions:
         return out
 
     async def _adopt(self, container_id: str) -> tuple[int, str] | None:
-        """The published port and the executor token of a container of the session, or ``None``."""
+        """The host port of a RUNNING container of the session (Docker picks it at each start) and its executor's
+        token (derived from the session, ``session_token``), or ``None``."""
         code, stdout, _ = await self._docker.run(
-            ["inspect", "--format", "{{json .HostConfig.PortBindings}}\n{{json .Config.Env}}", container_id],
+            ["inspect", "--format",
+             '{{json .NetworkSettings.Ports}}\n{{index .Config.Labels "surogates.session_id"}}', container_id],
         )
         if code != 0:
             return None
         try:
             # One JSON document a line: JSON never holds a raw newline.
-            ports_json, env_json = stdout.decode(errors="replace").strip().split("\n", 1)
+            ports_json, session = stdout.decode(errors="replace").strip().split("\n", 1)
             bindings = (json.loads(ports_json) or {}).get(f"{_IN_PORT}/tcp") or []
-            port = int(bindings[0]["HostPort"])
-            token = next(item.split("=", 1)[1] for item in json.loads(env_json) if item.startswith("TOOL_EXECUTOR_TOKEN="))
-        except (ValueError, KeyError, IndexError, TypeError, StopIteration):
+            port = int(next(b["HostPort"] for b in bindings if b.get("HostIp") in ("127.0.0.1", "", None)))
+        except (ValueError, KeyError, TypeError, StopIteration):
             return None
-        return port, token
+        return port, session_token(session.strip())
 
     async def _remove(self, container_id: str) -> None:
         # -v: the anonymous volumes of the image's VOLUME lines go with it.
         await self._docker.run(["rm", "-f", "-v", container_id])
 
     async def _provision_image(self, spec: SandboxSpec, sandbox_id: str, token: str, limits: list[str]) -> str:
-        from surogates.sandbox.docker import _IN_CONTAINER_PORT, _MAX_PORT_ATTEMPTS, _PORT_CONFLICT_RE
+        from surogates.sandbox.docker import _IN_CONTAINER_PORT, _PUBLISH_HOST
 
         if spec.ssh_key_material:
             raise SandboxUnavailableError("SSH access is not offered in a session's own image", classification="config")
+        if not spec.session_id:
+            raise SandboxUnavailableError("A session's own image needs its session", classification="config")
         run = await self._image_run(spec)
+        deployment = deployment_id()
         name = container_name(spec, sandbox_id)
         for cid, state in await self._session_containers(name):
             if state in ("running", "created", "restarting"):
@@ -341,53 +377,54 @@ class ImageSessions:
             if code == 0:
                 logger.info("Started the stopped container %s of session %s again", cid, spec.session_id)
                 return await self._take_over(spec, sandbox_id, name)
-            logger.warning("The container %s of session %s cannot start again (%s): removed, a new one starts",
-                           cid, spec.session_id, err.decode(errors="replace").strip()[:200])
+            said = err.decode(errors="replace").strip()
+            if not _NEVER_STARTS_RE.search(said):
+                # Its files are the session's work: kept, and the call fails; the reaper removes it once at rest.
+                raise SandboxUnavailableError(
+                    f"The session's stopped container {cid} did not start again: {said[:300]}", classification="docker",
+                )
+            logger.warning("The container %s of session %s can never start again (%s): removed, a new one starts",
+                           cid, spec.session_id, said[:200])
             await self._remove(cid)
 
+        # The executor's token is derived from the session, so any worker of the deployment can call it (take-over)
+        # without reading it back from the container.
+        token = session_token(spec.session_id)
         env = image_env(self._build_env(spec, sandbox_id, token, "ephemeral", None), run.env, run.workdir)
         run_args = list(run.run_args)
         run_args[run_args.index("--name") + 1] = name
-        container_id = ""
-        for _attempt in range(_MAX_PORT_ATTEMPTS):
-            async with self._lock:
-                offset = self._next_offset
-                self._next_offset += 1
-            host_port = self._port_base + offset
-            args = ["run", "-d", "-p", f"{host_port}:{_IN_CONTAINER_PORT}"]
-            if self._network:
-                args += ["--network", self._network]
-            args += ["--add-host", "host.docker.internal:host-gateway", "--label", f"app={IMAGE_APP}"]
-            if spec.session_id:
-                args += ["--label", f"surogates.session_id={spec.session_id}"]
-            if self._worker:
-                args += ["--label", f"surogates.worker={self._worker}"]
-            args += limits + run_args
-            for key, value in env.items():
-                args += ["-e", f"{key}={value}"]
-            args += [run.image, *run.command]
-            code, stdout, stderr = await self._docker.run(args)
-            if code != 0:
-                said = stderr.decode(errors="replace")
-                if _NAME_TAKEN_RE.search(said):
-                    # Another worker started the session's container just now: it is the session's, taken over.
-                    return await self._take_over(spec, sandbox_id, name)
-                # A run that failed at its start leaves its container created under the name, which was free: ours.
-                await self._remove(name)
-                if _PORT_CONFLICT_RE.search(said):
-                    logger.warning("Sandbox port %d unavailable; trying next offset", host_port)
-                    continue
-                raise SandboxUnavailableError(f"docker run failed (exit {code}): {said}", classification="docker")
-            container_id = stdout.decode().strip().splitlines()[0]
-            if stderr.strip():
-                said = stderr.decode(errors="replace").strip()
-                logger.log(logging.WARNING if "WARNING" in said else logging.INFO,
-                           "docker run for sandbox %s: %s", sandbox_id, said)
-            break
-        else:
-            raise SandboxUnavailableError("docker run failed: no free sandbox ports found", classification="docker")
+        # Docker picks the host port, at every start: a fixed one could be taken while the container is stopped.
+        args = ["run", "-d", "-p", f"{_PUBLISH_HOST}::{_IN_CONTAINER_PORT}"]
+        if self._network:
+            args += ["--network", self._network]
+        args += ["--add-host", "host.docker.internal:host-gateway", "--label", f"app={IMAGE_APP}",
+                 "--label", f"surogates.deployment={deployment}", "--label", f"surogates.session_id={spec.session_id}"]
+        if self._worker:
+            args += ["--label", f"surogates.worker={self._worker}"]
+        args += limits + run_args
+        for key, value in env.items():
+            args += ["-e", f"{key}={value}"]
+        args += [run.image, *run.command]
+        code, stdout, stderr = await self._docker.run(args)
+        if code != 0:
+            said = stderr.decode(errors="replace")
+            if _NAME_TAKEN_RE.search(said):
+                # Another worker started the session's container just now: it is the session's, taken over.
+                return await self._take_over(spec, sandbox_id, name)
+            # A run that failed at its start leaves its container created under the name, which was free: ours.
+            await self._remove(name)
+            raise SandboxUnavailableError(f"docker run failed (exit {code}): {said}", classification="docker")
+        container_id = stdout.decode().strip().splitlines()[0]
+        if stderr.strip():
+            said = stderr.decode(errors="replace").strip()
+            logger.log(logging.WARNING if "WARNING" in said else logging.INFO,
+                       "docker run for sandbox %s: %s", sandbox_id, said)
 
         try:
+            found = await self._adopt(container_id)
+            if found is None:
+                raise SandboxUnavailableError("Docker gave the new container no port", classification="docker")
+            host_port = found[0]
             # An executor that cannot start ends its container at once: told then, not at the ready timeout.
             await self._wait_ready(host_port, container_id)
         except BaseException as exc:
@@ -416,7 +453,7 @@ class ImageSessions:
 
     async def _take_over(self, spec: SandboxSpec, sandbox_id: str, name: str) -> str:
         """The session's container, running or starting: taken over once its executor answers (``_TAKE_OVER_S`` at
-        most for it to run).  One that runs and never answers is removed: no worker could use it."""
+        most for it to run).  One that runs and never answers is stopped, its files kept, and the call fails."""
         deadline = time.monotonic() + _TAKE_OVER_S
         while time.monotonic() < deadline:
             for cid, state in await self._session_containers(name):
@@ -425,10 +462,10 @@ class ImageSessions:
                     try:
                         await self._wait_ready(host_port, cid)
                     except Exception as exc:
-                        await asyncio.shield(self._remove(cid))
+                        await asyncio.shield(self._docker.run(["stop", cid]))
                         raise SandboxUnavailableError(
-                            f"The session's container {cid} does not answer ({exc}): removed, the next call starts "
-                            "a new one", classification="readiness",
+                            f"The session's container {cid} does not answer ({exc}): stopped, its files kept; the "
+                            "next call starts it again", classification="readiness",
                         ) from exc
                     self._register(spec, sandbox_id, cid, host_port, token, created=False)
                     logger.info("Took over the container %s of session %s as sandbox %s (port %d)",
@@ -438,6 +475,10 @@ class ImageSessions:
         raise SandboxUnavailableError(
             f"The session's container {name} never came to run", classification="docker",
         )
+
+    def forget(self, sandbox_id: str) -> None:
+        """Drop the entry of a sandbox whose container no longer runs, without a Docker call (the pool's cleanup)."""
+        self._entries.pop(sandbox_id, None)
 
     def created(self, sandbox_id: str) -> bool:
         """Whether *sandbox_id* is a container this provision made new from the image (not one taken over or
@@ -451,7 +492,13 @@ class ImageSessions:
         await self._docker.run(["stop", entry.container_id])
         logger.info("Stopped the container %s of session %s (kept)", entry.container_id, entry.spec.session_id)
 
-    async def _activity(self, cid: str) -> dict | None:
+    async def stop_image_of_session(self, session_id: str) -> None:
+        """A Stop or ``/clear`` of a session in its own image on a worker that holds no entry for its container: the
+        container stops all the same (its runaway commands with it), its files kept."""
+        await self._docker.run(["stop", container_name(SandboxSpec(session_id=session_id), session_id)])
+
+    async def _executor(self, cid: str, method: str, path: str, **kw: Any) -> dict | None:
+        """A call to a container's executor (``/activity``, ``/retire``); ``None`` when unsure."""
         found = await self._adopt(cid)
         if found is None:
             return None
@@ -461,52 +508,53 @@ class ImageSessions:
         try:
             async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{host_port}", transport=self._transport,
                                          timeout=5.0) as client:
-                r = await client.get("/activity", headers={"Authorization": f"Bearer {token}"})
-            return r.json() if r.status_code == 200 else None
+                r = await client.request(method, path, headers={"Authorization": f"Bearer {token}"}, **kw)
+            answer = r.json() if r.status_code == 200 else None
         except Exception:  # noqa: BLE001 - unsure: the caller keeps the container
             return None
+        return answer if isinstance(answer, dict) else None
 
-    async def reap_images(self, at_rest: Any, *, idle_seconds: float) -> list[str]:
-        """Remove the session-image containers on this worker's network whose session (and the agents below it)
-        is at rest and that went unused for *idle_seconds* by their own clock: the executor's (``/activity``) for one
-        that runs, its stop time for one that stopped.  Unsure of either: kept.  Their session ids."""
-        args = ["ps", "-a", "--filter", f"label=app={IMAGE_APP}", "--format", "{{.ID}} {{.State}}"]
-        if self._network:
-            # One deployment's containers: each stack has its own sandbox network.
-            args[2:2] = ["--filter", f"network={self._network}"]
-        code, stdout, _ = await self._docker.run(args)
+    async def reap_images(self, at_rest: Any, *, idle_seconds: float) -> list[tuple[str, str]]:
+        """Remove this deployment's session-image containers whose session (and the agents below it) is at rest
+        and that went unused for *idle_seconds* by their own clock: the executor retires a running one only if no
+        call runs and none is waited on and it went unused that long (``/retire``, atomic with its calls), and a
+        stopped one counts from its stop.  Unsure: kept.  (session id, container id) of each one removed."""
+        if not self._bundle_image:
+            return []  # no session image can run here
+        code, stdout, _ = await self._docker.run(
+            ["ps", "-a", "--filter", f"label=app={IMAGE_APP}", "--filter", f"label=surogates.deployment={deployment_id()}",
+             "--format", "{{.ID}} {{.State}}"],
+        )
         if code != 0:
             return []
-        reaped = []
+        reaped: list[tuple[str, str]] = []
         for line in stdout.decode(errors="replace").splitlines():
             cid, _, state = line.partition(" ")
             if not cid:
                 continue
-            code, out, _ = await self._docker.run(
-                ["inspect", "--format", '{{index .Config.Labels "surogates.session_id"}} {{.State.FinishedAt}}', cid],
-            )
-            if code != 0:
-                continue
-            session, _, finished = out.decode(errors="replace").strip().partition(" ")
             try:
+                code, out, _ = await self._docker.run(
+                    ["inspect", "--format", '{{index .Config.Labels "surogates.session_id"}} {{.State.FinishedAt}}', cid],
+                )
+                if code != 0:
+                    continue
+                session, _, finished = out.decode(errors="replace").strip().partition(" ")
                 if not session or not await at_rest(session):
                     continue
-            except Exception:  # noqa: BLE001 - unsure: kept
-                continue
-            if state.strip() == "running":
-                seen = await self._activity(cid)
-                if seen is None or seen.get("running") or seen.get("background_running"):
+                if state.strip() == "running":
+                    retired = await self._executor(cid, "POST", "/retire", json={"min_idle_seconds": idle_seconds})
+                    if not retired or not retired.get("retired"):
+                        continue
+                elif not _stopped_for(finished, idle_seconds):
                     continue
-                if float(seen.get("idle_seconds") or 0) < idle_seconds:
-                    continue
-            elif not _stopped_for(finished, idle_seconds):
-                continue
-            await self._remove(cid)
-            for sid, entry in list(self._entries.items()):
-                if entry.container_id == cid:
-                    self._entries.pop(sid, None)
-            logger.info("Reaped the container %s of session %s at rest", cid, session)
-            reaped.append(session)
+                await self._remove(cid)
+                for sid, entry in list(self._entries.items()):
+                    if entry.container_id == cid:
+                        self._entries.pop(sid, None)
+                logger.info("Reaped the container %s of session %s at rest", cid, session)
+                reaped.append((session, cid))
+            except Exception:  # noqa: BLE001 - one container's trouble never ends the round
+                logger.warning("Could not reap the session-image container %s", cid, exc_info=True)
         return reaped
 
     async def _running(self, container_id: str) -> bool:
