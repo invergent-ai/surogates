@@ -52,16 +52,16 @@ def _env(container) -> dict[str, str]:
 
 
 def _pod(ready: bool = True, *, uid: str = "uid-1", ip: str = "10.0.0.7", phase: str = "Running",
-         deleting: bool = False, waiting: str = "", terminated: int | None = None, name: str = NAME,
-         session: str = SESSION):
+         deleting: bool = False, waiting: str = "", said: str = "", terminated: int | None = None, name: str = NAME,
+         session: str = SESSION, made=None):
     sandbox_state = SimpleNamespace(
-        waiting=SimpleNamespace(reason=waiting, message="") if waiting else None,
+        waiting=SimpleNamespace(reason=waiting, message=said) if waiting else None,
         terminated=(SimpleNamespace(exit_code=terminated, reason="Error", message="")
                     if terminated is not None else None),
     )
     return SimpleNamespace(
         metadata=SimpleNamespace(name=name, uid=uid, deletion_timestamp="now" if deleting else None,
-                                 annotations={"surogates.ai/session": session}),
+                                 annotations={"surogates.ai/session": session}, creation_timestamp=made),
         spec=SimpleNamespace(containers=[]),
         status=SimpleNamespace(pod_ip=ip, phase=phase,
                                conditions=[SimpleNamespace(type="Ready", status="True" if ready else "False")],
@@ -201,9 +201,11 @@ async def test_a_pod_that_never_gets_ready_is_kept_and_the_call_fails(k8s, monke
 
 
 async def test_a_pod_this_provision_made_that_cannot_pull_is_deleted_and_says_why(k8s):
-    k8s._api = _api(GONE, _pod(False, uid="mine", phase="Pending", waiting="ImagePullBackOff"),
+    k8s._api = _api(GONE, _pod(False, uid="mine", phase="Pending", waiting="ImagePullBackOff",
+                               said="manifest unknown"),
                     create={"return_value": _pod(uid="mine")})
-    with pytest.raises(SandboxUnavailableError, match="ImagePullBackOff"):
+    with patch("surogates.sandbox.kubernetes_image.asyncio.sleep", AsyncMock()), \
+            pytest.raises(SandboxUnavailableError, match="ImagePullBackOff"):
         await k8s.provision(_spec())
     assert k8s._api.delete_namespaced_pod.await_args.kwargs["body"].preconditions.uid == "mine"
 
@@ -229,6 +231,7 @@ async def test_an_entry_whose_pod_was_replaced_reads_as_gone(k8s):
     sid = await k8s.provision(_spec())
     k8s._api.read_namespaced_pod = AsyncMock(return_value=_pod(uid="second"))
     assert await k8s.gone(sid)
+    k8s._pods[sid].status_checked_at = 0.0  # past the RUNNING cache
     assert await k8s.status(sid) == SandboxStatus.TERMINATED and sid not in k8s._pods
 
 
@@ -396,3 +399,65 @@ async def test_the_executors_stop_ends_every_command_from_outside_only(tmp_path)
             assert (await post("198.51.100.1")).status_code == 200
         end.assert_called_once_with()
         kill.assert_not_called()
+
+
+async def test_a_transient_pull_error_is_waited_out(k8s):
+    k8s._api = _api(GONE, _pod(False, uid="mine", phase="Pending", waiting="ErrImagePull", said="i/o timeout"),
+                    _pod(uid="mine"), create={"return_value": _pod(uid="mine")})
+    with patch("surogates.sandbox.kubernetes_image.asyncio.sleep", AsyncMock()):
+        sid = await k8s.provision(_spec())
+    k8s._api.delete_namespaced_pod.assert_not_awaited()
+    assert k8s.created(sid)
+
+
+async def test_a_retired_pod_the_reaper_kept_is_taken_back(k8s, monkeypatch):
+    from surogates.sandbox import kubernetes_image
+
+    monkeypatch.setattr(kubernetes_image, "_RETIRED_WAIT_S", -1.0)
+    k8s._executor_answers = AsyncMock(side_effect=[410, 200])
+    k8s._executor_post = AsyncMock()
+    k8s._api = _api(_pod(uid="kept"), _pod(uid="kept"))
+    with patch("surogates.sandbox.kubernetes_image.asyncio.sleep", AsyncMock()):
+        sid = await k8s.provision(_spec())
+    assert k8s._executor_post.await_args.args[2] == "/unretire"
+    assert k8s._pods[sid].uid == "kept"
+    k8s._api.delete_namespaced_pod.assert_not_awaited()
+
+
+async def test_a_stop_answered_oddly_keeps_the_pod(k8s, monkeypatch):
+    import httpx
+
+    real = httpx.AsyncClient
+
+    def client(*a, **kw):
+        return real(transport=httpx.MockTransport(lambda request: httpx.Response(500)), timeout=5.0)
+    monkeypatch.setattr(httpx, "AsyncClient", client)
+    k8s._api = _api(_pod())
+    await k8s.stop_image_of_session(SESSION)
+    k8s._api.delete_namespaced_pod.assert_not_awaited()
+
+
+async def test_the_reaper_deletes_a_pod_that_never_answers_after_rounds_and_one_that_never_ran(k8s):
+    from datetime import datetime, timedelta, timezone
+
+    import httpx
+
+    long_ago = datetime.now(timezone.utc) - timedelta(hours=2)
+    api = MagicMock()
+    api.list_namespaced_pod = AsyncMock(return_value=SimpleNamespace(items=[
+        _pod(name="silent", session="s-silent", ip="10.0.0.5", uid="u-silent"),
+        _pod(False, name="stuck", session="s-stuck", ip="", phase="Pending", uid="u-stuck", made=long_ago),
+        _pod(False, name="young", session="s-young", ip="", phase="Pending", uid="u-young",
+             made=datetime.now(timezone.utc))]))
+    api.delete_namespaced_pod = AsyncMock()
+    k8s._api = api
+    k8s._executor_post = AsyncMock(return_value=httpx.ConnectError("refused"))
+
+    async def at_rest(session):
+        return True
+    from surogates.sandbox import kubernetes_image
+
+    rounds = [await k8s.reap_images(at_rest, idle_seconds=300) for _ in range(kubernetes_image._UNANSWERED_ROUNDS)]
+    assert rounds[0] == [("s-stuck", "stuck")]
+    assert sorted(rounds[-1]) == [("s-silent", "silent"), ("s-stuck", "stuck")]
+    assert all(("s-young", "young") not in r for r in rounds)

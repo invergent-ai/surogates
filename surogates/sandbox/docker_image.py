@@ -137,7 +137,7 @@ def deployment_id(configured: str) -> str:
     """This deployment's mark on its session-image containers (``sandbox.image_deployment``): a reaper takes only
     its own deployment's, whatever network they are on.  Required: two stacks on one Docker host must never take
     each other's."""
-    if not configured or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,62}", configured):
+    if not configured or not re.fullmatch(r"[A-Za-z0-9]([A-Za-z0-9_.-]{0,61}[A-Za-z0-9])?", configured):
         raise SandboxUnavailableError(
             "A session's own image needs this deployment's mark (sandbox.image_deployment: letters, digits, . _ -)",
             classification="config",
@@ -397,7 +397,7 @@ class ImageSessions:
         import httpx
 
         try:
-            async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{host_port}", transport=self._transport,
+            async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{host_port}", transport=self._transport, trust_env=False,
                                          timeout=5.0) as client:
                 r = await client.get("/activity", headers={"Authorization": f"Bearer {token}"})
             return r.status_code
@@ -700,7 +700,7 @@ class ImageSessions:
             import httpx
 
             try:
-                async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}", transport=self._transport,
+                async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}", transport=self._transport, trust_env=False,
                                              timeout=5.0) as client:
                     r = await client.post("/unretire", headers={"Authorization": f"Bearer {session_token(session)}"})
                 if r.status_code != 200:
@@ -718,7 +718,7 @@ class ImageSessions:
         import httpx
 
         try:
-            async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{host_port}", transport=self._transport,
+            async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{host_port}", transport=self._transport, trust_env=False,
                                          timeout=5.0) as client:
                 return (await client.get("/healthz")).status_code
         except Exception:  # noqa: BLE001
@@ -816,7 +816,7 @@ class ImageSessions:
         import httpx
 
         try:
-            async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{seen[1]}", transport=self._transport,
+            async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{seen[1]}", transport=self._transport, trust_env=False,
                                          timeout=5.0) as client:
                 r = await client.post("/retire", headers={"Authorization": f"Bearer {session_token(session)}"},
                                       json={"min_idle_seconds": idle_seconds})

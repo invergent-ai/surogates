@@ -719,7 +719,8 @@ def create_app(
 
     def activity_now() -> dict:
         idle = 0.0 if activity["running"] else time.monotonic() - activity["last"]
-        return {"idle_seconds": round(idle, 1), "running": activity["running"], "background_running": waited_on()}
+        return {"idle_seconds": round(idle, 1), "running": activity["running"], "background_running": waited_on(),
+                "retired": activity["retired"]}
 
     @app.get("/activity")
     async def activity_of(request: Request) -> Response:
@@ -768,7 +769,7 @@ def create_app(
             return Response(content="unauthorized", status_code=401)
         from surogates.tools.utils.process_registry import process_registry
 
-        killed = process_registry.kill_all()
+        killed = await asyncio.to_thread(process_registry.kill_all)
         if os.environ.get("SUROGATES_IMAGE_SESSION") == "1":
             _end_every_process()
         return Response(content=json.dumps({"killed": killed}), media_type="application/json")

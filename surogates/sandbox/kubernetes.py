@@ -347,8 +347,10 @@ class K8sSandbox(ImagePods):
         api = await self._get_api()
         if entry.spec.session_image:
             # The session's work: its commands end, the pod stays (the reaper ends it at rest).
-            await self._stop_image_pod(api, entry.pod_name)
-            self.forget(sandbox_id)
+            try:
+                await self._stop_image_pod(api, entry.pod_name)
+            finally:
+                self.forget(sandbox_id)
             return
         await self._destroy_entry(api, entry)
         self._pods.pop(sandbox_id, None)
@@ -392,11 +394,6 @@ class K8sSandbox(ImagePods):
         entry = self._pods.get(sandbox_id)
         if entry is None:
             return SandboxStatus.TERMINATED
-        if entry.spec.session_image:
-            # A session's pod, by its name: replaced, going or ended since, it is not this entry's any more.
-            if await self.gone(sandbox_id):
-                self._pods.pop(sandbox_id, None)
-                return SandboxStatus.TERMINATED
 
         # A recently-confirmed RUNNING pod is trusted without another read.
         # Only RUNNING is cached: every other status is transitional, and a
@@ -411,6 +408,11 @@ class K8sSandbox(ImagePods):
         api = await self._get_api()
         try:
             pod = await api.read_namespaced_pod(entry.pod_name, self._namespace)
+            if entry.spec.session_image and (self._uid(pod) != entry.uid or self._terminating(pod)
+                                             or self._ended(pod)):
+                # A session's pod, by its name: replaced, going or ended since, it is not this entry's any more.
+                self.forget(sandbox_id)
+                return SandboxStatus.TERMINATED
             new_status = self._map_pod_status(pod)
             entry.status = new_status
             entry.status_checked_at = time.monotonic()

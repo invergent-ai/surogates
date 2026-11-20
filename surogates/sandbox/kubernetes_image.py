@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any
 
 from kubernetes_asyncio import client
@@ -61,8 +62,15 @@ _DROPPED_CAPS = ["NET_RAW", "MKNOD", "SETFCAP"]
 #: How long a provision waits for the session's pod to be ready (a task image of several GB is pulled first).
 _TAKE_OVER_S = 600.0
 #: Waiting reasons of a container that will never start as it is.
-_NEVER_STARTS = ("ErrImagePull", "ImagePullBackOff", "InvalidImageName", "ErrImageNeverPull",
-                 "CreateContainerConfigError", "CreateContainerError")
+_NEVER_STARTS = ("InvalidImageName", "ErrImageNeverPull", "CreateContainerConfigError", "CreateContainerError")
+#: A pull that failed for good (its message), not one the kubelet retries with luck (a registry's 429, a timeout).
+_PULL_REFUSED = ("not found", "manifest unknown", "unauthorized", "denied", "no such host")
+#: How long a provision waits for the reaper to delete a pod whose executor it retired, before taking it back.
+_RETIRED_WAIT_S = 20.0
+#: How long a ready pod's executor may not answer before the provision gives up on it.
+_NO_ANSWER_S = 60.0
+#: Rounds at rest a pod's executor may not answer the reaper before it is deleted (hung, or another signing secret).
+_UNANSWERED_ROUNDS = 5
 _SMALL = client.V1ResourceRequirements(requests={"cpu": "100m", "memory": "64Mi"},
                                        limits={"cpu": "1", "memory": "256Mi"})
 
@@ -106,6 +114,11 @@ class ImagePods:
                 return None
             raise SandboxUnavailableError(f"Could not read the session's pod {name}: {exc}") from exc
 
+    async def _force_delete_if_stuck(self, api: Any, pod: Any) -> None:
+        if self._stuck_going(pod):
+            # Its node is gone: the delete is forced (grace 0), still only for this uid.
+            await self._delete_pod(api, pod.metadata.name, self._uid(pod))
+
     @staticmethod
     def _uid(pod: Any) -> str:
         return str(getattr(getattr(pod, "metadata", None), "uid", "") or "")
@@ -147,9 +160,27 @@ class ImagePods:
         status = getattr(pod, "status", None)
         for c in [*(getattr(status, "init_container_statuses", None) or []),
                   *(getattr(status, "container_statuses", None) or [])]:
-            if c.state is not None and c.state.waiting is not None and c.state.waiting.reason in _NEVER_STARTS:
+            waiting = c.state.waiting if c.state is not None else None
+            if waiting is None:
+                continue
+            if waiting.reason in _NEVER_STARTS:
+                return True
+            if waiting.reason in ("ErrImagePull", "ImagePullBackOff") and any(
+                    word in (waiting.message or "").lower() for word in _PULL_REFUSED):
                 return True
         return False
+
+    @staticmethod
+    def _stuck_going(pod: Any) -> bool:
+        """Going for longer than its grace and a margin (a node lost: the kubelet never confirms)."""
+        from datetime import datetime, timezone
+
+        meta = getattr(pod, "metadata", None)
+        since = getattr(meta, "deletion_timestamp", None)
+        if not isinstance(since, datetime):
+            return False
+        grace = getattr(meta, "deletion_grace_period_seconds", None) or 0
+        return (datetime.now(timezone.utc) - since).total_seconds() > grace + 30
 
     async def _delete_pod(self, api: Any, name: str, uid: str) -> bool:
         """Delete pod *name* only if it is still the one with *uid* (a precondition: never a pod made since).
@@ -166,18 +197,40 @@ class ImagePods:
         return True
 
     async def _executor_answers(self, ip: str, session: str) -> int | None:
-        """The status an authenticated ``/activity`` gets from the pod's executor (``None``: no answer)."""
+        """The status an authenticated ``/activity`` gets from the pod's executor (``None``: no answer; 410: it is
+        retired for the reaper)."""
         import httpx
 
         from surogates.sandbox.docker_image import session_token
 
         try:
-            async with httpx.AsyncClient(timeout=5.0) as http:
+            # trust_env=False: a proxy in the worker's environment never stands between it and a pod.
+            async with httpx.AsyncClient(timeout=5.0, trust_env=False) as http:
                 r = await http.get(f"http://{ip}:{self._executor_port}/activity",
                                    headers={"Authorization": f"Bearer {session_token(session)}"})
+            if r.status_code == 200:
+                try:
+                    if (r.json() or {}).get("retired"):
+                        return 410
+                except ValueError:
+                    pass
             return r.status_code
         except Exception:  # noqa: BLE001
             return None
+
+    async def _executor_post(self, ip: str, session: str, path: str, *, timeout: float = 5.0,
+                             body: dict | None = None) -> Any:
+        """An authenticated POST to the pod's executor: the response, or the exception it raised."""
+        import httpx
+
+        from surogates.sandbox.docker_image import session_token
+
+        try:
+            async with httpx.AsyncClient(timeout=timeout, trust_env=False) as http:
+                return await http.post(f"http://{ip}:{self._executor_port}{path}", json=body,
+                                       headers={"Authorization": f"Bearer {session_token(session)}"})
+        except Exception as exc:  # noqa: BLE001
+            return exc
 
     def _image_pod_manifest(self, sandbox_id: str, pod_name: str, spec: SandboxSpec, *, executor_token: str) -> client.V1Pod:
         if not self._bundle_image or not valid_reference(self._bundle_image):
@@ -270,6 +323,8 @@ class ImagePods:
                 service_account_name=self._service_account,
                 automount_service_account_token=False,
                 enable_service_links=False,
+                # The executor's /stop ends every process it may signal but PID 1: its own namespace only.
+                share_process_namespace=False,
                 # No active deadline: the session's work lives as long as the session needs it; the reaper ends it.
                 restart_policy="Never",
                 security_context=client.V1PodSecurityContext(
@@ -296,10 +351,18 @@ class ImagePods:
         # Derived from the deployment's signing secret and the session: any worker can call it (take-over).
         token = session_token(spec.session_id)
         manifest = self._image_pod_manifest(sandbox_id, name, spec, executor_token=token)
-        deadline = asyncio.get_running_loop().time() + max(float(self._pod_ready_timeout), _TAKE_OVER_S)
+        loop = asyncio.get_running_loop()
+        waits = max(float(self._pod_ready_timeout), _TAKE_OVER_S)
+        deadline = loop.time() + waits
         made_uid = ""
+        silent_since: float | None = None
+        retired_since: float | None = None
+        why = ""
         while True:
-            pod = await self._read_pod(api, name)
+            try:
+                pod = await self._read_pod(api, name)
+            except SandboxUnavailableError as exc:
+                pod, why = False, str(exc)  # the API unsure (throttled, a blip): waited out like a pod starting
             if pod is None:
                 try:
                     made = await api.create_namespaced_pod(self._namespace, manifest)
@@ -307,54 +370,72 @@ class ImagePods:
                 except ApiException as exc:
                     if exc.status != 409:  # 409: another worker made the session's pod just now (waited for)
                         raise SandboxUnavailableError(self._classify_create_pod_failure(exc)) from exc
-                continue
-            uid = self._uid(pod)
-            if self._terminating(pod):
-                pass  # going: waited for, then made again
-            elif self._ended(pod) or self._never_starts(pod):
-                why = self._why_not(pod)
-                ours = bool(made_uid) and uid == made_uid
-                # Ended: what was in it is gone; one this provision made and that never came up is told as is.
-                await self._delete_pod(api, name, uid)
-                if ours:
-                    raise SandboxUnavailableError(
-                        f"The session's pod {name} did not start: {why or 'it ended'}", classification="readiness",
-                    )
-                logger.warning("The pod %s of session %s ended (%s): a new one starts", name, spec.session_id, why)
-            elif self._is_pod_ready(pod) and pod.status.pod_ip:
-                answered = await self._executor_answers(pod.status.pod_ip, spec.session_id)
-                if answered == 401:
-                    # Made under another signing secret (rotated): its executor never takes this deployment's
-                    # token; replaced (its files go with it: a pod cannot be set aside).
-                    logger.warning("The pod %s of session %s refuses this deployment's token: replaced", name,
-                                   spec.session_id)
+            elif pod is not False:
+                uid = self._uid(pod)
+                if self._terminating(pod):
+                    why = "it is being deleted"
+                    await self._force_delete_if_stuck(api, pod)
+                elif self._ended(pod) or self._never_starts(pod):
+                    why = self._why_not(pod) or "it ended"
+                    ours = bool(made_uid) and uid == made_uid
+                    # Ended: what was in it is gone; one this provision made and that never came up is told as is.
                     await self._delete_pod(api, name, uid)
-                elif answered is not None:
-                    entry = _PodEntry(sandbox_id=sandbox_id, pod_name=name, secret_name="", namespace=self._namespace,
-                                      spec=spec, pod_ip=pod.status.pod_ip, token=token, status=SandboxStatus.RUNNING)
-                    entry.uid = uid
-                    self._pods[sandbox_id] = entry
-                    if made_uid and uid == made_uid:
-                        self._created_pods.add(sandbox_id)
-                    logger.info("Sandbox %s in the pod %s of session %s (%s)", sandbox_id, name, spec.session_id,
-                                "made" if uid == made_uid else "taken over")
-                    return sandbox_id
-            if asyncio.get_running_loop().time() > deadline:
+                    if ours:
+                        raise SandboxUnavailableError(f"The session's pod {name} did not start: {why}",
+                                                      classification="readiness")
+                    logger.warning("The pod %s of session %s ended (%s): a new one starts", name, spec.session_id,
+                                   why)
+                elif self._is_pod_ready(pod) and pod.status.pod_ip:
+                    ip = pod.status.pod_ip
+                    answered = await self._executor_answers(ip, spec.session_id)
+                    if answered == 401:
+                        # Made under another signing secret (rotated): its executor never takes this deployment's
+                        # token; replaced (its files go with it: a pod cannot be set aside).
+                        logger.warning("The pod %s of session %s refuses this deployment's token: replaced", name,
+                                       spec.session_id)
+                        await self._delete_pod(api, name, uid)
+                    elif answered == 410:
+                        # Retired for the reaper: deleted in a moment; still there after the wait, the reaper kept
+                        # it, and it is taken back (its files as they are).
+                        retired_since = retired_since if retired_since is not None else loop.time()
+                        why = "its executor is retired for the reaper"
+                        if loop.time() - retired_since > _RETIRED_WAIT_S:
+                            await self._executor_post(ip, spec.session_id, "/unretire")
+                            retired_since = None
+                    elif answered is not None:
+                        entry = _PodEntry(sandbox_id=sandbox_id, pod_name=name, secret_name="",
+                                          namespace=self._namespace, spec=spec, pod_ip=ip, token=token,
+                                          status=SandboxStatus.RUNNING)
+                        entry.uid = uid
+                        entry.status_checked_at = time.monotonic()
+                        self._pods[sandbox_id] = entry
+                        if made_uid and uid == made_uid:
+                            self._created_pods.add(sandbox_id)
+                        logger.info("Sandbox %s in the pod %s of session %s (%s)", sandbox_id, name,
+                                    spec.session_id, "made" if uid == made_uid else "taken over")
+                        return sandbox_id
+                    else:
+                        silent_since = silent_since if silent_since is not None else loop.time()
+                        why = f"its executor at {ip}:{self._executor_port} does not answer"
+                        if loop.time() - silent_since > _NO_ANSWER_S:
+                            raise SandboxUnavailableError(f"The session's pod {name} is ready but {why}",
+                                                          classification="readiness")
+                else:
+                    why = self._why_not(pod) or "starting"
+            if loop.time() > deadline:
                 # Kept: another worker may be bringing it up, or working in it.
                 raise SandboxUnavailableError(
-                    f"The session's pod {name} was not ready within {deadline:.0f}s: {self._why_not(pod)}",
-                    classification="readiness",
+                    f"The session's pod {name} was not ready within {waits:.0f}s: {why}", classification="readiness",
                 )
             await asyncio.sleep(1.0)
 
     # -- its end -----------------------------------------------------------------------------------------------------
 
     async def _stop_image_pod(self, api: Any, name: str) -> None:
-        """A Stop of the session in pod *name*: its commands end (the executor's ``/stop``), its files stay; one
-        whose executor does not answer is deleted."""
+        """A Stop of the session in pod *name*: its commands end (the executor's ``/stop``), its files stay.  Only a
+        pod whose executor cannot be reached at all, twice, or that refuses this deployment's token, is deleted; a
+        slow or odd answer keeps it (logged)."""
         import httpx
-
-        from surogates.sandbox.docker_image import session_token
 
         pod = await self._read_pod(api, name)
         if pod is None or self._terminating(pod):
@@ -362,17 +443,21 @@ class ImagePods:
         session = ((pod.metadata.annotations or {}) if pod.metadata else {}).get("surogates.ai/session") or ""
         ip = pod.status.pod_ip if pod.status else ""
         if ip and session and not self._ended(pod):
-            try:
-                async with httpx.AsyncClient(timeout=10.0) as http:
-                    r = await http.post(f"http://{ip}:{self._executor_port}/stop",
-                                        headers={"Authorization": f"Bearer {session_token(session)}"})
-                if r.status_code == 200:
-                    logger.info("Stopped the commands in the pod %s (kept)", name)
+            for timeout in (10.0, 30.0):
+                answer = await self._executor_post(ip, session, "/stop", timeout=timeout)
+                if isinstance(answer, httpx.Response):
+                    if answer.status_code == 200:
+                        logger.info("Stopped the commands in the pod %s (kept)", name)
+                        return
+                    if answer.status_code != 401:
+                        logger.warning("The pod %s answered its Stop with %s: kept", name, answer.status_code)
+                        return
+                    break  # another signing secret: never this deployment's to stop
+                if not isinstance(answer, (httpx.ConnectError, httpx.ConnectTimeout)):
+                    logger.warning("The pod %s did not take its Stop (%s): kept", name, type(answer).__name__)
                     return
-            except Exception:  # noqa: BLE001 - not answering: deleted below
-                pass
         await self._delete_pod(api, name, self._uid(pod))
-        logger.info("Deleted the pod %s: its executor did not take the Stop", name)
+        logger.info("Deleted the pod %s: its executor could not be reached for the Stop", name)
 
     async def stop_image_of_session(self, session_id: str) -> None:
         """A Stop, a pause or ``/clear`` of a session in its own image, on any worker: its commands end, its files
@@ -397,10 +482,11 @@ class ImagePods:
     async def reap_images(self, at_rest: Any, *, idle_seconds: float) -> list[tuple[str, str]]:
         """Delete this deployment's session-image pods whose session (and the agents below it) is at rest and whose
         executor retires (``/retire``: unused for *idle_seconds* by its own clock, nothing running or waited on;
-        atomic with its calls), or that ended.  Unsure: kept.  (session, pod name) of each one deleted."""
+        atomic with its calls), or that ended, or that never came to run, or whose executor did not answer for a
+        few rounds at rest (hung, or another signing secret).  Unsure: kept.  (session, pod name) of each one."""
         import httpx
 
-        from surogates.sandbox.docker_image import deployment_id, session_token
+        from surogates.sandbox.docker_image import deployment_id
 
         if not self._bundle_image or not self._image_deployment:
             return []  # no session image can run here
@@ -411,26 +497,45 @@ class ImagePods:
             pods = await api.list_namespaced_pod(self._namespace, label_selector=selector)
         except ApiException:
             return []
+        unanswered = self.__dict__.setdefault("_unanswered_pods", {})
+        listed = {self._uid(p) for p in pods.items or []}
+        for uid in [u for u in unanswered if u not in listed]:
+            unanswered.pop(uid, None)
         reaped: list[tuple[str, str]] = []
         for pod in pods.items or []:
-            name = pod.metadata.name
+            name, uid = pod.metadata.name, self._uid(pod)
             session = ((pod.metadata.annotations or {}) if pod.metadata else {}).get("surogates.ai/session") or ""
             try:
-                if not session or self._terminating(pod) or not await at_rest(session):
+                if self._terminating(pod):
+                    await self._force_delete_if_stuck(api, pod)
+                    continue
+                if not session or not await at_rest(session):
+                    unanswered.pop(uid, None)
                     continue
                 if not self._ended(pod):
                     ip = (pod.status.pod_ip if pod.status else "") or ""
                     if not ip or (pod.status.phase if pod.status else "") != "Running":
-                        continue
-                    async with httpx.AsyncClient(timeout=5.0) as http:
-                        r = await http.post(f"http://{ip}:{self._executor_port}/retire",
-                                            headers={"Authorization": f"Bearer {session_token(session)}"},
-                                            json={"min_idle_seconds": idle_seconds})
-                    seen = r.json() if r.status_code == 200 else None
-                    if not isinstance(seen, dict) or not seen.get("retired"):
-                        continue
-                if not await self._delete_pod(api, name, self._uid(pod)):
+                        if not self._old(pod):
+                            continue  # starting: its provision waits for it
+                    else:
+                        answer = await self._executor_post(ip, session, "/retire", body={"min_idle_seconds":
+                                                                                         idle_seconds})
+                        seen = None
+                        if isinstance(answer, httpx.Response) and answer.status_code == 200:
+                            try:
+                                seen = answer.json()
+                            except ValueError:
+                                seen = None
+                        if not isinstance(seen, dict):
+                            unanswered[uid] = unanswered.get(uid, 0) + 1
+                            if unanswered[uid] < _UNANSWERED_ROUNDS:
+                                continue
+                        elif not seen.get("retired"):
+                            unanswered.pop(uid, None)
+                            continue
+                if not await self._delete_pod(api, name, uid):
                     continue
+                unanswered.pop(uid, None)
             except Exception:  # noqa: BLE001 - one pod's trouble never ends the round; unsure: kept
                 logger.debug("Could not reap the session-image pod %s", name, exc_info=True)
                 continue
@@ -440,3 +545,11 @@ class ImagePods:
             logger.info("Reaped the pod %s of session %s at rest", name, session)
             reaped.append((session, name))
         return reaped
+
+    @staticmethod
+    def _old(pod: Any) -> bool:
+        """Made longer ago than a provision waits for it (never came to run: unschedulable, a pull left behind)."""
+        from datetime import datetime, timezone
+
+        made = getattr(getattr(pod, "metadata", None), "creation_timestamp", None)
+        return isinstance(made, datetime) and (datetime.now(timezone.utc) - made).total_seconds() > _TAKE_OVER_S
