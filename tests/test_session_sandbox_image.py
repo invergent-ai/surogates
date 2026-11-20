@@ -639,6 +639,24 @@ async def test_an_executor_that_never_comes_up_says_why_and_leaves_nothing():
     with pytest.raises(SandboxUnavailableError, match="no such file or directory.*glibc") as raised:
         await _docker_backend(docker, _never_ready()).provision(SandboxSpec(session_id="r", session_image=TASK_IMAGE))
     assert raised.value.classification == "readiness"
+    # Still running, it may have been taken over by another worker meanwhile: set aside, never removed here.
+    assert ["stop", "cid-1"] in docker.calls and any(c[:2] == ["rename", "cid-1"] for c in docker.calls)
+    assert not any(c[:1] == ["rm"] for c in docker.calls)
+
+
+async def test_a_new_container_that_ended_at_once_is_removed():
+    """It never served a call: nothing of anyone's is in it."""
+    docker = ImageDocker(images={TASK_IMAGE: _image(), BUNDLE: _image()})
+    real = docker.run
+
+    async def run(args):
+        out = await real(args)
+        if args[:2] == ["run", "-d"]:
+            docker.named["surogates-sbx-r"][1] = "exited"
+        return out
+    docker.run = run
+    with pytest.raises(SandboxUnavailableError, match="stopped before its executor became ready"):
+        await _docker_backend(docker, _never_ready()).provision(SandboxSpec(session_id="r", session_image=TASK_IMAGE))
     assert ["rm", "-f", "-v", "cid-1"] in docker.calls
 
 
@@ -678,7 +696,8 @@ async def test_a_cancelled_provision_leaves_no_container():
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert ["rm", "-f", "-v", "cid-1"] in docker.calls
+    # Never left running: stopped and set aside (another worker may have taken it over meanwhile).
+    assert ["stop", "cid-1"] in docker.calls and any(c[:2] == ["rename", "cid-1"] for c in docker.calls)
 
 
 async def test_a_default_sandbox_never_asks_whether_its_container_runs():
@@ -976,14 +995,14 @@ async def test_the_pool_leaves_image_sandboxes_to_the_backends_reaper_and_a_shut
 
     class Backend:
         def __init__(self):
-            self.n, self.destroyed, self.reaped, self.gone, self.forgotten = 0, [], [], set(), []
+            self.n, self.destroyed, self.reaped, self.missing, self.forgotten = 0, [], [], set(), []
 
         async def provision(self, spec):
             self.n += 1
             return f"sbx-{self.n}"
 
         async def status(self, sid):
-            return SandboxStatus.TERMINATED if sid in self.gone else SandboxStatus.RUNNING
+            return SandboxStatus.TERMINATED if sid in self.missing else SandboxStatus.RUNNING
 
         async def destroy(self, sid):
             self.destroyed.append(sid)
@@ -1007,7 +1026,7 @@ async def test_the_pool_leaves_image_sandboxes_to_the_backends_reaper_and_a_shut
     assert await pool.reap_at_rest(at_rest, idle_seconds=0, image_idle_seconds=60) == ["plain"]
     assert backend.destroyed == ["sbx-2"] and pool.sandbox_of("img") == "sbx-1"
     # Another worker's reaper removed it: this pool lets its entry go, and destroys nothing.
-    backend.gone.add("sbx-1")
+    backend.missing.add("sbx-1")
     backend.reaped = [("img", "cid-1")]
     assert await pool.reap_at_rest(at_rest, idle_seconds=0, image_idle_seconds=60) == ["img"]
     assert pool.sandbox_of("img") is None and backend.destroyed == ["sbx-2"] and backend.forgotten == ["sbx-1"]
@@ -1180,3 +1199,48 @@ async def test_a_call_finds_the_container_where_it_is_now():
     assert await backend.execute(sid, "read_file", "{}") == '{"ok": true}'
     assert ["start", "cid-1"] in docker.calls and seen_ports == [33777]
     assert backend._entries[sid].host_port == 33777 and await backend.status(sid) == SandboxStatus.RUNNING
+
+
+async def test_a_retired_executor_that_was_not_removed_is_started_fresh_and_the_call_runs():
+    docker = ImageDocker(images={TASK_IMAGE: _image(), BUNDLE: _image()})
+    backend = _docker_backend(docker)
+    sid = await backend.provision(SandboxSpec(session_id="root-1", session_image=TASK_IMAGE))
+    answers = [SandboxUnavailableError("The sandbox at 127.0.0.1:33000 was retired at rest"), '{"ok": true}']
+
+    async def fake_execute(**kw):
+        answer = answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+    backend._client.execute = fake_execute
+    assert await backend.execute(sid, "read_file", "{}") == '{"ok": true}'
+    assert ["stop", "cid-1"] in docker.calls and ["start", "cid-1"] in docker.calls
+
+
+async def test_the_workers_own_look_never_starts_a_stopped_container():
+    docker = ImageDocker(images={TASK_IMAGE: _image(), BUNDLE: _image()})
+    backend = _docker_backend(docker)
+    sid = await backend.provision(SandboxSpec(session_id="root-1", session_image=TASK_IMAGE))
+    docker.named["surogates-sbx-root-1"][1] = "exited"
+    with pytest.raises(SandboxUnavailableError, match="stopped"):
+        await backend.execute(sid, "_background", "{}")
+    assert not any(c[:1] == ["start"] for c in docker.calls)
+
+
+def test_a_drain_that_hands_out_an_end_counts_as_use(tmp_path):
+    from fastapi.testclient import TestClient
+
+    from surogates.sandbox import executor_server
+
+    app = executor_server.create_app(token="tok", workspace=str(tmp_path), require_fuse=False)
+    auth = {"Authorization": "Bearer tok"}
+    client = TestClient(app)
+    with patch.object(executor_server, "drain_background", return_value='{"events": [], "known": [], "lines": {}}'):
+        client.post("/execute", json={"name": "_background", "args": {}}, headers=auth)
+    import time as _time
+    _time.sleep(1.1)
+    idle_after_empty = client.get("/activity", headers=auth).json()["idle_seconds"]
+    with patch.object(executor_server, "drain_background",
+                      return_value='{"events": [{"session_id": "proc_1"}], "known": [], "lines": {}}'):
+        client.post("/execute", json={"name": "_background", "args": {}}, headers=auth)
+    assert idle_after_empty >= 1 and client.get("/activity", headers=auth).json()["idle_seconds"] < 1

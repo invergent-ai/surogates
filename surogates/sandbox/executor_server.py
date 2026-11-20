@@ -70,6 +70,8 @@ DEFAULT_TIMEOUT = 300
 MAX_CONCURRENCY = 8
 # How long a background command a session waits on counts as use of its sandbox: as long as the worker watches one.
 _WATCHED_AT_MOST_S = 3600.0
+# How long ends of such commands, not drained by any worker, count as use.
+_UNDRAINED_AT_MOST_S = 600.0
 # How often a running call looks whether its caller has hung up.
 _DISCONNECT_POLL_S = 0.5
 
@@ -695,7 +697,15 @@ def create_app(
         now = time.time()
         watched = sum(1 for p in running if not p.exited and (p.notify_on_complete or p.watch_lines)
                       and now - (p.started_at or now) < _WATCHED_AT_MOST_S)
-        return watched + process_registry.completion_queue.qsize()
+        # Ends not drained yet count while they are fresh: one nobody will ever drain (its watch gone) must not pin
+        # the sandbox for good.
+        queued = process_registry.completion_queue.qsize()
+        if not queued:
+            activity["queued_since"] = None
+        elif activity.get("queued_since") is None:
+            activity["queued_since"] = now
+        fresh = queued if queued and now - activity["queued_since"] < _UNDRAINED_AT_MOST_S else 0
+        return watched + fresh
 
     def activity_now() -> dict:
         idle = 0.0 if activity["running"] else time.monotonic() - activity["last"]
@@ -751,19 +761,27 @@ def create_app(
 
         try:
             payload = await request.json()
+            name = payload.get("name") or ""
+            args = payload.get("args") or {}
+            timeout = float(payload.get("timeout") or default_timeout)
         except Exception:
             uncount()
             raise
-        name = payload.get("name") or ""
-        args = payload.get("args") or {}
-        timeout = float(payload.get("timeout") or default_timeout)
 
         if name == "_background":
             # A drain reads memory and never waits on a tool: no slot, so the
             # worker's watch is answered while long calls fill them.  The
-            # worker's own look, no use of the sandbox: the idle clock stays.
-            uncount(used=False)
-            result = drain_background(args)
+            # worker's own look is no use of the sandbox, unless it hands out
+            # ends or lines a session waits on: their turn is coming.
+            result = "{}"
+            try:
+                result = drain_background(args)
+            finally:
+                try:
+                    handed = json.loads(result)
+                except ValueError:
+                    handed = {}
+                uncount(used=bool(handed.get("events") or handed.get("lines")))
             return Response(content=result, media_type="application/json")
 
         if not name:

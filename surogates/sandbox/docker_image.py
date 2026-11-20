@@ -429,7 +429,13 @@ class ImageSessions:
         for key, value in env.items():
             args += ["-e", f"{key}={value}"]
         args += [run.image, *run.command]
-        code, stdout, stderr = await self._docker.run(args)
+        try:
+            code, stdout, stderr = await self._docker.run(args)
+        except BaseException:
+            # Cut off mid-run (a provision cancelled): a container it may have left under the session's name is this
+            # run's, never started for any work.
+            await asyncio.shield(self._remove_ours(name, sandbox_id))
+            raise
         if code != 0:
             said = stderr.decode(errors="replace")
             if _NAME_TAKEN_RE.search(said):
@@ -461,8 +467,10 @@ class ImageSessions:
             said = ""
             if isinstance(exc, Exception):
                 said = await self._log_tail(container_id)
-            # Never left running, a cancelled provision included: it never held any work.
-            await asyncio.shield(self._remove(container_id))
+            # Never left running, a cancelled provision included.  One that ended never served a call: removed.
+            # One that runs may have been taken over meanwhile by another worker and worked in: set aside, its files
+            # kept for the reaper.
+            await asyncio.shield(self._discard_new(container_id, spec.session_id))
             if said:
                 hint = (" (the image has no glibc 2.28 or later, such as Alpine, or is of another architecture)"
                         if _CANNOT_RUN_RE.search(said) else "")
@@ -475,6 +483,13 @@ class ImageSessions:
         logger.info("Provisioned docker sandbox %s in the image %s (container %s, port %d)",
                     sandbox_id, run.image, container_id, host_port)
         return sandbox_id
+
+    async def _discard_new(self, cid: str, session: str) -> None:
+        seen = await self._port_of(cid)
+        if seen is not None and seen[0]:
+            await self._set_aside(cid, session)
+        else:
+            await self._remove(cid)
 
     async def _remove_ours(self, name: str, sandbox_id: str) -> None:
         code, stdout, _ = await self._docker.run(
@@ -521,6 +536,13 @@ class ImageSessions:
                             cid, spec.session_id, sandbox_id, host_port)
                 return sandbox_id
             await asyncio.sleep(0.5)
+        # Still not running: one that never started (a run cut off between its create and its start) holds no work.
+        for cid, state in await self._session_containers(name):
+            if state == "created":
+                code, out, _ = await self._docker.run(["inspect", "--format", "{{.State.StartedAt}}", cid])
+                if code == 0 and out.decode(errors="replace").strip().startswith("0001-"):
+                    await self._remove(cid)
+                    return None
         raise SandboxUnavailableError(
             f"The session's container {name} never came to run", classification="docker",
         )
@@ -530,6 +552,8 @@ class ImageSessions:
         self._bundle_checks = getattr(self, "_bundle_checks", set())
         if cid in self._bundle_checks:
             return
+        if len(self._bundle_checks) > 1000:
+            self._bundle_checks.clear()
         self._bundle_checks.add(cid)
 
         async def check() -> None:
@@ -539,7 +563,10 @@ class ImageSessions:
             if code == 0 and made_with and made_with != self._bundle_image:
                 logger.warning("The container %s runs the executor of %s, not this worker's %s: a new bundle "
                                "applies to new containers only", cid, made_with, self._bundle_image)
-        asyncio.ensure_future(check())
+        task = asyncio.ensure_future(check())
+        self._checks_running = getattr(self, "_checks_running", set())
+        self._checks_running.add(task)
+        task.add_done_callback(self._checks_running.discard)
 
     async def execute_in_image(self, entry: Any, name: str, input: str, timeout: float | None) -> str:
         """A call into the session's container, wherever it is now: started again if it stopped (a Stop elsewhere,
@@ -549,29 +576,67 @@ class ImageSessions:
             raise SandboxUnavailableError(f"The session's container {entry.container_id} is gone")
         running, port = seen
         if not running:
-            code, _out, err = await self._docker.run(["start", entry.container_id])
-            if code != 0:
-                raise SandboxUnavailableError(
-                    f"The session's container did not start again: {err.decode(errors='replace').strip()[:300]}",
-                )
-            seen = await self._port_of(entry.container_id)
-            port = seen[1] if seen and seen[0] else None
-            if port is None:
-                raise SandboxUnavailableError("The session's container did not come back")
-            await self._wait_ready(port, entry.container_id)
+            if name.startswith("_"):
+                # The worker's own look (a drain, a kill of a watched command): a stopped container stays stopped.
+                raise SandboxUnavailableError("The session's container is stopped")
+            port = await self._start_again(entry)
         if port is None:
             raise SandboxUnavailableError("The session's container has no port")
+        entry.host_port = port
+        try:
+            return await self._client.execute(
+                host="127.0.0.1", port=port, token=entry.token, name=name, args_str=input,
+                timeout=timeout or entry.spec.timeout,
+            )
+        except SandboxUnavailableError as exc:
+            if "retired" not in str(exc) or name.startswith("_"):
+                raise
+        # Retired for the reaper, which then did not remove it (a turn came first): retirement is the executor's
+        # state only, its files stay; a stop and a start give a fresh executor.  The call never ran: once more.
+        await self._docker.run(["stop", entry.container_id])
+        port = await self._start_again(entry)
         entry.host_port = port
         return await self._client.execute(
             host="127.0.0.1", port=port, token=entry.token, name=name, args_str=input,
             timeout=timeout or entry.spec.timeout,
         )
 
+    async def _start_again(self, entry: Any) -> int:
+        """Start the session's stopped container again and wait for its executor; set it aside if it will not
+        come back (its files kept), so the next call makes a new one."""
+        code, _out, err = await self._docker.run(["start", entry.container_id])
+        if code != 0:
+            await self._set_aside(entry.container_id, entry.spec.session_id)
+            raise SandboxUnavailableError(
+                f"The session's container did not start again: {err.decode(errors='replace').strip()[:300]}",
+            )
+        seen = await self._port_of(entry.container_id)
+        port = seen[1] if seen and seen[0] else None
+        try:
+            if port is None:
+                raise SandboxUnavailableError("The session's container did not come back")
+            await self._wait_ready(port, entry.container_id)
+        except Exception:
+            await asyncio.shield(self._set_aside(entry.container_id, entry.spec.session_id))
+            raise
+        return port
+
     def created(self, sandbox_id: str) -> bool:
         """Whether *sandbox_id* is a container this provision made new from the image (not one taken over or
         started again): a session that worked in its container before has none of that work there."""
         entry = self._entries.get(sandbox_id)
         return bool(entry is not None and getattr(entry, "image", False) and getattr(entry, "created", False))
+
+    async def gone(self, sandbox_id: str) -> bool:
+        """Whether *sandbox_id*'s container no longer runs: removed, or stopped (Docker sure of it; a failing
+        ``docker inspect`` is no answer)."""
+        entry = self._entries.get(sandbox_id)
+        if entry is None:
+            return True
+        code, out, err = await self._docker.run(["inspect", "--format", "{{.State.Running}}", entry.container_id])
+        if code != 0:
+            return b"No such" in err
+        return out.decode(errors="replace").strip() == "false"
 
     def forget(self, sandbox_id: str) -> None:
         """Drop the entry of a sandbox whose container no longer runs, without a Docker call (the pool's cleanup)."""
@@ -622,6 +687,9 @@ class ImageSessions:
         if code != 0:
             return []
         unanswered = self.__dict__.setdefault("_unanswered", {})
+        listed = {line.partition(" ")[0] for line in stdout.decode(errors="replace").splitlines()}
+        for gone in [cid for cid in unanswered if cid not in listed]:
+            unanswered.pop(gone, None)
         reaped: list[tuple[str, str]] = []
         for line in stdout.decode(errors="replace").splitlines():
             cid, _, state = line.partition(" ")

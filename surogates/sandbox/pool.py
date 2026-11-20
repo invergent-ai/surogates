@@ -318,8 +318,12 @@ class SandboxPool:
             sandbox_id = self._mapping.get(key)
             if sandbox_id is None or self._busy.get(key):
                 return
+            gone = getattr(self._backend, "gone", None)
             try:
-                if await self._backend.status(sandbox_id) == SandboxStatus.RUNNING:
+                if gone is not None:
+                    if not await gone(sandbox_id):
+                        return
+                elif await self._backend.status(sandbox_id) == SandboxStatus.RUNNING:
                     return
             except Exception:
                 return

@@ -680,7 +680,12 @@ class DockerSandbox(ImageSessions):
                     response = await client.get("/healthz")
                     if response.status_code == 200:
                         return
+                    if response.status_code == 410:
+                        # Retired for its reaper (a session's own image): never ready again as it is.
+                        raise SandboxUnavailableError("The sandbox's executor is retired", classification="readiness")
                     last_detail = f"last status {response.status_code}"
+                except SandboxUnavailableError:
+                    raise
                 except Exception as exc:  # noqa: BLE001
                     last_detail = type(exc).__name__
                 looked += 1
