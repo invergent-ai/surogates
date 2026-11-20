@@ -132,7 +132,7 @@ from surogates.tools.builtin.case_item import item_awaiting_report
 from surogates.tools.builtin.case_step import step_awaiting_report, step_given_back
 from surogates.tools.builtin.send_form import SENT as FORM_SENT
 from surogates.tools.builtin.expert_loop import ExpertScope, expert_scope
-from surogates.tools.skill_visibility import SkillScope, needs_unavailable_tool, skill_scope
+from surogates.tools.skill_visibility import CONSULT_TOOL, SkillScope, expert_unreachable, needs_unavailable_tool, skill_scope
 from surogates.tools.builtin.media_gen import unwired_media_tools
 from surogates.keel.items import ITEM_NUDGE, is_case_item, item_contract_of
 from surogates.tools.builtin.ask_user_question import DISMISSED, TIMED_OUT
@@ -1978,9 +1978,9 @@ class AgentHarness(
         hidden = frozenset(
             getattr(skill, "name", None) or (skill.get("name") if isinstance(skill, dict) else None)
             for skill in skills
-            if needs_unavailable_tool(skill, unavailable)
+            if needs_unavailable_tool(skill, unavailable) or expert_unreachable(skill, unavailable)
         ) - {None}
-        skill_scope.set(SkillScope(hidden=hidden))
+        skill_scope.set(SkillScope(hidden=hidden, experts_reachable=CONSULT_TOOL not in unavailable))
 
     def _scope_experts_before_the_turn(self, session: Session) -> None:
         """``_withhold_from_experts`` for an expert run before the turn's tool

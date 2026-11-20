@@ -251,9 +251,13 @@ async def _skills_list_handler(
     api_client = kwargs.get("api_client")
     if api_client is not None:
         category = arguments.get("category")
-        return await api_client.list_skills(
-            category, leave_out=skills_left_out(kwargs.get("session_config")) | skill_scope.get().hidden,
+        scope = skill_scope.get()
+        listed = await api_client.list_skills(
+            category, leave_out=skills_left_out(kwargs.get("session_config")) | scope.hidden,
         )
+        if scope.experts_reachable:
+            return listed
+        return _without_experts(listed)
 
     tenant = kwargs.get("tenant")
     if tenant is None:
@@ -365,6 +369,22 @@ def _build_skill_response(
     return json.dumps(result, ensure_ascii=False)
 
 
+def _without_experts(listed: str) -> str:
+    """The api's ``skills_list`` answer *listed* with no expert in it: for a session that cannot consult one."""
+    try:
+        payload = json.loads(listed)
+    except ValueError:
+        return listed
+    skills = [s for s in payload.get("skills") or [] if s.get("type") != "expert"]
+    if len(skills) == len(payload.get("skills") or []):
+        return listed
+    payload.update(
+        skills=skills, count=len(skills),
+        categories=sorted({s.get("category") for s in skills if s.get("category")}),
+    )
+    return json.dumps(payload, ensure_ascii=False)
+
+
 def _expert_refusal(name: str) -> str:
     """Refuse to hand an expert's own instructions to the executor.
 
@@ -375,6 +395,9 @@ def _expert_refusal(name: str) -> str:
     successful consult and silently is not. For the built-in advisor it
     would defeat the feature outright.
     """
+    if not skill_scope.get().experts_reachable:
+        # No consult_expert in this session: no hint that sends the model to it.
+        return json.dumps({"success": False, "error": unavailable_tool_refusal(name)}, ensure_ascii=False)
     return json.dumps(
         {
             "success": False,

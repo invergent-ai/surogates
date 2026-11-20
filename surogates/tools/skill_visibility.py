@@ -14,6 +14,9 @@ and from ``skill_view``.  The model read ``read_file`` in a skill's text and cal
 tool".  The worker computes that set once per session and wake (``AgentHarness._narrow_prompt_tools``): the prompt
 hides by it, and :data:`skill_scope`, set from it for the model's tool calls, has the skill tools leave out the same
 skills.  A tool a skill names only where it is there or as not to use is listed in its ``optional_tools``.
+
+An expert is consulted with ``consult_expert``: a session that cannot be sent that tool is shown no expert, in
+``skills_list`` or as ``skill_view``'s hint to consult it (:func:`expert_unreachable`, ``SkillScope.experts_reachable``).
 """
 
 from __future__ import annotations
@@ -49,9 +52,11 @@ def fallback_hidden(fallback_for_tools: Sequence[str], offered: frozenset[str]) 
 
 @dataclass(frozen=True)
 class SkillScope:
-    """The skills a session's skill tools leave out this turn: those that name a tool it cannot be sent."""
+    """The skills a session's skill tools leave out this turn: those that name a tool it cannot be sent, and every
+    expert when it cannot be sent ``consult_expert`` (*experts_reachable* False), by type, whatever catalog lists it."""
 
     hidden: frozenset[str] = frozenset()
+    experts_reachable: bool = True
 
 
 #: Set by the worker for the turn's tool calls (``AgentHarness``); outside a turn it hides nothing.
@@ -86,7 +91,7 @@ def needs_unavailable_tool(skill: Any, unavailable: Collection[str]) -> bool:
     """Whether *skill* (a ``SkillDef`` or its dict) requires or names a tool in *unavailable*: one the session
     cannot be sent.  A tool the skill names only where it is there, or as not to use (its ``optional_tools``), and
     one it stands in for (its ``fallback_for_tools``), do not count.  An expert is a model consulted, its text that
-    model's prompt: never hidden by it."""
+    model's prompt: never hidden by it (it is hidden where it cannot be consulted: :func:`expert_unreachable`)."""
     if not unavailable:
         return False
     get = skill.get if isinstance(skill, dict) else (lambda key, default=None: getattr(skill, key, default))
@@ -97,6 +102,17 @@ def needs_unavailable_tool(skill: Any, unavailable: Collection[str]) -> bool:
         return True
     unavailable -= set(get("optional_tools") or ()) | set(get("fallback_for_tools") or ())
     return bool(tools_named((get("description"), get("trigger"), get("content")), unavailable))
+
+
+#: The tool an expert is reached by: without it an expert is no one the session can consult.
+CONSULT_TOOL = "consult_expert"
+
+
+def expert_unreachable(skill: Any, unavailable: Collection[str]) -> bool:
+    """Whether *skill* is an expert and the session cannot be sent ``consult_expert``: listed, or viewed with its
+    hint to consult it, it sends the model to a tool it does not have ("Unknown tool")."""
+    get = skill.get if isinstance(skill, dict) else (lambda key, default=None: getattr(skill, key, default))
+    return get("type", "skill") == "expert" and CONSULT_TOOL in unavailable
 
 
 def unavailable_tool_refusal(name: str) -> str:
