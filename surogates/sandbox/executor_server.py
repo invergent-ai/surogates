@@ -54,6 +54,13 @@ from fastapi import FastAPI, Request, Response
 
 from surogates.sandbox.base import MAX_FILE_BYTES
 from surogates.sandbox.history import UNKNOWN_STEP, History, HistoryError
+from surogates.tools.utils.process_tree import (
+    become_subreaper,
+    go_first_out_of_memory,
+    own_descendants,
+    start_time,
+    stop_process_tree_async,
+)
 
 logger = logging.getLogger("tool-executor")
 
@@ -434,6 +441,14 @@ def _child_main(
     # loop.  Python 3.12's asyncio also resets this in an at-fork hook —
     # this line is belt-and-braces against that hook changing.
     asyncio._set_running_loop(None)
+    # What the call's commands orphan (a double fork, a shell killed under its
+    # children) is reparented to this child, not to the pod's init: it stays in
+    # the tree a timeout or a cancel stops.
+    become_subreaper()
+    # Every process under this child is this call's: a command's timeout stops them all, adopted ones too.
+    own_descendants()
+    # At the sandbox's memory limit the kernel kills the call's commands, not the daemon or the workspace's mount.
+    go_first_out_of_memory()
     try:
         result = run_tool(name, args, workspace, read_timestamps, history)
     except BaseException as exc:  # never die without reporting
@@ -449,11 +464,14 @@ async def execute_in_child(
 ) -> str:
     """Fork a child, run *name* in it, and return its result JSON.
 
-    On timeout the child is SIGKILLed and the standard ``timed_out``
-    result is returned — unlike the old exec transport, no orphaned
-    process keeps running.  A child that dies without reporting
-    (segfault, ``os._exit``) yields an error result and the daemon
-    keeps serving.
+    On timeout, or when the call is cancelled, the child and everything
+    its tool started (a command's shell and what that shell started) are
+    stopped, ``SIGTERM`` then ``SIGKILL`` after a grace, and on timeout the
+    standard ``timed_out`` result is returned: no orphaned process keeps
+    running.  A call that returns leaves what its command started on
+    purpose in the background (``nohup ... &``) running.  A child that dies
+    without reporting (segfault, ``os._exit``) yields an error result and
+    the daemon keeps serving.
     """
     parent_conn, child_conn = _MP.Pipe(duplex=False)
     proc = _MP.Process(
@@ -463,17 +481,23 @@ async def execute_in_child(
     )
     proc.start()
     child_conn.close()
+    # Read now: what tells the child from a later process with its pid.
+    started = start_time(proc.pid)
+    answered = False
+    stopping: asyncio.Future | None = None
     try:
         ready = await asyncio.to_thread(parent_conn.poll, timeout)
         if not ready:
             logger.warning(
-                "Tool %s timed out after %.0fs; killing child %s",
+                "Tool %s timed out after %.0fs; stopping child %s and what it started",
                 name, timeout, proc.pid,
             )
-            proc.kill()
+            stopping = _stop_child(proc, started)
+            await asyncio.shield(stopping)
             return _timed_out_result()
         try:
             data = await asyncio.to_thread(parent_conn.recv_bytes)
+            answered = True
             result = data.decode("utf-8")
             _record_read(name, args, workspace, result)
             return result
@@ -490,9 +514,24 @@ async def execute_in_child(
             })
     finally:
         parent_conn.close()
-        if proc.is_alive():
-            proc.kill()
+        if stopping is not None:
+            # A cancel during the timeout's stop: that stop finishes, no second one starts.
+            await asyncio.shield(stopping)
+        elif answered:
+            if proc.is_alive():
+                # Only the child, about to exit: what its command started in the background on purpose stays.
+                proc.kill()
+        elif started is not None:
+            # Cancelled (its caller hung up) or failed mid-call: nothing of the call runs on.  Asked by the start
+            # time, not ``is_alive``, which would reap the child and let its pid go before the stop.
+            await asyncio.shield(_stop_child(proc, started))
         await asyncio.to_thread(proc.join, 5)
+
+
+def _stop_child(proc: Any, started: int | None) -> asyncio.Future:
+    """Stop a tool child's whole tree, on a thread of its own; shielded by the callers, so a cancel arriving
+    meanwhile does not cut the stop short."""
+    return asyncio.ensure_future(stop_process_tree_async(proc.pid, root_start=started))
 
 
 def _give_up(reason: str, log: str | Path = "/dev/termination-log") -> None:
@@ -694,6 +733,10 @@ def main() -> None:
             project=Path(workspace), copy=None, thread=None, user=os.environ.get("USER_ID", ""),
         )
 
+    # The background commands the daemon starts go first at the memory limit too.
+    from surogates.tools.utils.process_registry import process_registry
+
+    process_registry.oom_first = True
     logger.info("Loading tool registry...")
     init_registry()
     logger.info("Registry loaded; serving on 0.0.0.0:%d", port)

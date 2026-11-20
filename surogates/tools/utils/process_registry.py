@@ -46,6 +46,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from surogates.tools.utils.ansi_strip import strip_ansi
+from surogates.tools.utils.process_tree import go_first_out_of_memory
 
 _IS_WINDOWS = platform.system() == "Windows"
 
@@ -192,6 +193,8 @@ class ProcessRegistry:
         self._running: Dict[str, ProcessSession] = {}
         self._finished: Dict[str, ProcessSession] = {}
         self._lock = threading.Lock()
+        # Set in a sandbox's daemon: what it starts is the kernel's first pick at the memory limit.
+        self.oom_first = False
 
         # Side-channel for check_interval watchers
         self.pending_watchers: List[Dict[str, Any]] = []
@@ -324,6 +327,8 @@ class ProcessRegistry:
                     dimensions=(30, 120),
                 )
                 session.pid = pty_proc.pid
+                if self.oom_first:
+                    go_first_out_of_memory(pty_proc.pid)
                 # Store the pty handle on the session for read/write
                 session._pty = pty_proc
 
@@ -376,6 +381,8 @@ class ProcessRegistry:
 
         session.process = proc
         session.pid = proc.pid
+        if self.oom_first:
+            go_first_out_of_memory(proc.pid)
 
         # Start output reader thread
         reader = threading.Thread(

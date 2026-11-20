@@ -26,6 +26,12 @@ from typing import Any, BinaryIO
 
 from surogates.tools.utils.env_passthrough import is_env_passthrough
 from surogates.tools.utils.process_registry import process_registry
+from surogates.tools.utils.process_tree import (
+    owns_descendants,
+    start_time,
+    stop_process_tree_async,
+    stop_process_tree_soon,
+)
 from surogates.tools.utils.workspace_sandbox import (
     in_workspace_terms,
     WorkspaceSandboxError,
@@ -311,6 +317,11 @@ def _build_child_env() -> dict[str, str]:
 # Subprocess execution
 # ---------------------------------------------------------------------------
 
+#: Seconds a timed-out command's pipes have to close once its tree is stopped.
+_PIPE_CLOSE_SECONDS = 5.0
+_IS_WINDOWS = os.name == "nt"
+
+
 async def _run_command(
     command: str,
     *,
@@ -318,7 +329,14 @@ async def _run_command(
     timeout: int,
     env: dict[str, str],
 ) -> RunResult:
-    """Run *command* via ``asyncio.create_subprocess_shell``."""
+    """Run *command* via ``asyncio.create_subprocess_shell``.
+
+    The shell leads a session of its own: at the timeout, or when the call is
+    cancelled, the whole tree it started is stopped (``SIGTERM``, then
+    ``SIGKILL``), not only the shell, whose children would run on.  In the
+    sandbox daemon's tool child, which owns every process of its call, what
+    a double fork reparented to that child goes too.
+    """
     try:
         proc = await asyncio.create_subprocess_shell(
             command,
@@ -326,14 +344,34 @@ async def _run_command(
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
             env=env,
+            start_new_session=not _IS_WINDOWS,
         )
+        # Read now: by the time it is stopped the shell may have ended and its pid been taken.
+        started = start_time(proc.pid)
+        stop = {
+            "root_start": started, "session": proc.pid,
+            "also_below": (os.getpid(),) if owns_descendants() else (),
+        }
         try:
             stdout_bytes, stderr_bytes = await asyncio.wait_for(
                 proc.communicate(), timeout=timeout
             )
+        except asyncio.CancelledError:
+            if _IS_WINDOWS:
+                with contextlib.suppress(ProcessLookupError):
+                    proc.kill()
+            else:
+                stop_process_tree_soon(proc.pid, **stop)
+            raise
         except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
+            if _IS_WINDOWS:
+                with contextlib.suppress(ProcessLookupError):
+                    proc.kill()
+            else:
+                await asyncio.shield(stop_process_tree_async(proc.pid, **stop))
+            # Its pipes close once everything holding them is gone; one held past the stop does not hang the call.
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(proc.wait(), _PIPE_CLOSE_SECONDS)
             return RunResult(
                 output=f"Command timed out after {timeout} seconds",
                 returncode=124,
