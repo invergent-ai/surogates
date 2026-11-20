@@ -995,6 +995,10 @@ async def _create_session(
     refused = image_refusal(body.config, settings.sandbox)
     if not refused and body.config.get("sandbox_image") and settings.sandbox.backend not in ("docker", "kubernetes"):
         refused = "A session's own sandbox image needs the Docker or Kubernetes sandbox backend"
+    if (not refused and body.config.get("sandbox_image") and settings.sandbox.backend == "kubernetes"
+            and not body.config.get("sandbox_workdir")):
+        # The worker never pulls the image there, so its working folder must be named.
+        refused = "On Kubernetes a session's own image needs its folder named (sandbox_workdir)"
     if refused:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=refused)
 

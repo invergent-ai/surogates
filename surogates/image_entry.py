@@ -35,7 +35,7 @@ def prepare(environ: dict | os._Environ = os.environ) -> None:
         if name:
             environ.pop(name, None)
     # Kubernetes: the worker never sees the image, so its environment is the init container's file; a control name
-    # whose value is still the image's (the pod did not set it) leaves.
+    # it declares leaves unless the pod set it (``SUROGATES_IMAGE_ENV_SET``: the pod's value, kept).
     path = environ.get("SUROGATES_IMAGE_ENV_FILE")
     if path:
         try:
@@ -43,8 +43,9 @@ def prepare(environ: dict | os._Environ = os.environ) -> None:
                 declared = json.load(fh)
         except (OSError, ValueError):
             declared = {}
-        for name, value in (declared.items() if isinstance(declared, dict) else ()):
-            if is_control(name) and environ.get(name) == value:
+        set_by_pod = {n for n in environ.get("SUROGATES_IMAGE_ENV_SET", "").split(",") if n}
+        for name in (declared if isinstance(declared, dict) else ()):
+            if is_control(name) and name not in set_by_pod:
                 environ.pop(name, None)
     environ["SUROGATES_HOME"] = STATE_DIR
     environ["SUROGATES_CHECKPOINT_DIR"] = f"{STATE_DIR}/checkpoints"

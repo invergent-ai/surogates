@@ -44,6 +44,7 @@ import json
 import logging
 import multiprocessing
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -168,6 +169,15 @@ def start_monitor(args: dict, workspace: str) -> str:
     except WorkspaceSandboxError as exc:
         return json.dumps({"error": str(exc)})
     return json.dumps(started)
+
+
+def _end_every_process() -> None:
+    """``kill(-1, SIGKILL)``: every process this daemon may signal, but PID 1 (tini) and the daemon itself.  Only in a
+    session's own image (``/stop``), where the container is the session's alone."""
+    try:
+        os.kill(-1, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
 
 
 def drain_background(args: dict | None = None) -> str:
@@ -742,6 +752,26 @@ def create_app(
         if not activity["retired"]:
             activity["retired"] = not now["running"] and not now["background_running"] and now["idle_seconds"] >= min_idle
         return Response(content=json.dumps({**now, "retired": activity["retired"]}), media_type="application/json")
+
+    @app.post("/stop")
+    async def stop_commands(request: Request) -> Response:
+        """A Stop of the session whose own image this sandbox is, where its container cannot stop and start again
+        (a Kubernetes pod): every command ends, the files stay.  The registry's commands first, then every other
+        process this daemon may signal (commands that left the registry, their children); ``kill(-1)`` spares PID 1
+        (tini) and the daemon itself."""
+        if not allow_local:
+            peer = request.client.host if request.client else None
+            server = request.scope.get("server")
+            if from_inside(peer, server[0] if server else None):
+                return Response(content="calls from inside the sandbox are refused", status_code=403)
+        if not _token_ok(request.headers.get("authorization", ""), token):
+            return Response(content="unauthorized", status_code=401)
+        from surogates.tools.utils.process_registry import process_registry
+
+        killed = process_registry.kill_all()
+        if os.environ.get("SUROGATES_IMAGE_SESSION") == "1":
+            _end_every_process()
+        return Response(content=json.dumps({"killed": killed}), media_type="application/json")
 
     @app.post("/unretire")
     async def unretire(request: Request) -> Response:
