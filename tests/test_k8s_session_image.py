@@ -28,9 +28,15 @@ SESSION = "3f1c2a8e-0000-4000-8000-000000000001"
 NAME = f"sbx-img-{SESSION}"
 
 
+MINE = "f" * 32  # the sandbox id of the provision under test (its pod's label when it made it)
+
+
 @pytest.fixture(autouse=True)
 def _signing_secret(monkeypatch):
+    import uuid
+
     monkeypatch.setenv("SUROGATES_JWT_SECRET", "test-signing-secret")
+    monkeypatch.setattr("surogates.sandbox.kubernetes.uuid.uuid4", lambda: uuid.UUID(MINE))
 
 
 @pytest.fixture()
@@ -53,7 +59,7 @@ def _env(container) -> dict[str, str]:
 
 def _pod(ready: bool = True, *, uid: str = "uid-1", ip: str = "10.0.0.7", phase: str = "Running",
          deleting: bool = False, waiting: str = "", said: str = "", terminated: int | None = None, name: str = NAME,
-         session: str = SESSION, made=None):
+         session: str = SESSION, made=None, mine: bool = False):
     sandbox_state = SimpleNamespace(
         waiting=SimpleNamespace(reason=waiting, message=said) if waiting else None,
         terminated=(SimpleNamespace(exit_code=terminated, reason="Error", message="")
@@ -61,7 +67,8 @@ def _pod(ready: bool = True, *, uid: str = "uid-1", ip: str = "10.0.0.7", phase:
     )
     return SimpleNamespace(
         metadata=SimpleNamespace(name=name, uid=uid, deletion_timestamp="now" if deleting else None,
-                                 annotations={"surogates.ai/session": session}, creation_timestamp=made),
+                                 annotations={"surogates.ai/session": session}, creation_timestamp=made,
+                                 labels={"surogates.ai/sandbox-id": MINE if mine else "another"}),
         spec=SimpleNamespace(containers=[]),
         status=SimpleNamespace(pod_ip=ip, phase=phase,
                                conditions=[SimpleNamespace(type="Ready", status="True" if ready else "False")],
@@ -160,7 +167,7 @@ async def test_a_ready_pod_of_the_session_is_taken_over_once_its_token_answers(k
 
 async def test_a_pod_of_another_signing_secret_is_replaced(k8s):
     k8s._executor_answers = AsyncMock(side_effect=[401, 200])
-    k8s._api = _api(_pod(uid="old"), GONE, _pod(uid="new"), create={"return_value": _pod(uid="new")})
+    k8s._api = _api(_pod(uid="old"), GONE, _pod(uid="new", mine=True), create={"return_value": _pod(uid="new")})
     with patch("surogates.sandbox.kubernetes_image.asyncio.sleep", AsyncMock()):
         sid = await k8s.provision(_spec())
     delete = k8s._api.delete_namespaced_pod.await_args
@@ -169,7 +176,7 @@ async def test_a_pod_of_another_signing_secret_is_replaced(k8s):
 
 
 async def test_an_ended_pod_is_replaced_by_its_uid_and_no_storage_secret_is_made(k8s):
-    k8s._api = _api(_pod(False, uid="old", phase="Failed"), GONE, _pod(uid="new"),
+    k8s._api = _api(_pod(False, uid="old", phase="Failed"), GONE, _pod(uid="new", mine=True),
                     create={"return_value": _pod(uid="new")})
     with patch("surogates.sandbox.kubernetes_image.asyncio.sleep", AsyncMock()):
         sid = await k8s.provision(_spec())
@@ -201,7 +208,7 @@ async def test_a_pod_that_never_gets_ready_is_kept_and_the_call_fails(k8s, monke
 
 
 async def test_a_pod_this_provision_made_that_cannot_pull_is_deleted_and_says_why(k8s):
-    k8s._api = _api(GONE, _pod(False, uid="mine", phase="Pending", waiting="ErrImagePull",
+    k8s._api = _api(GONE, _pod(False, uid="mine", phase="Pending", waiting="ErrImagePull", mine=True,
                                said='failed to pull and unpack image "registry.example/tasks/repo-fix:1": failed to '
                                     'resolve reference "registry.example/tasks/repo-fix:1": registry.example/tasks/'
                                     'repo-fix:1: not found'),
@@ -222,7 +229,8 @@ async def test_a_pod_another_worker_just_made_is_taken_over(k8s):
 
 
 async def test_a_pod_being_deleted_is_waited_out_then_made_again(k8s):
-    k8s._api = _api(_pod(uid="going", deleting=True), GONE, _pod(uid="new"), create={"return_value": _pod(uid="new")})
+    k8s._api = _api(_pod(uid="going", deleting=True), GONE, _pod(uid="new", mine=True),
+                    create={"return_value": _pod(uid="new")})
     with patch("surogates.sandbox.kubernetes_image.asyncio.sleep", AsyncMock()):
         sid = await k8s.provision(_spec())
     assert k8s._pods[sid].uid == "new"
@@ -425,8 +433,8 @@ async def test_a_transient_pull_error_is_waited_out(k8s):
                                said='failed to pull and unpack image "registry.example/tasks/repo-fix:1": failed to '
                                     'resolve reference "registry.example/tasks/repo-fix:1": failed to do request: '
                                     'Head "https://registry.example/v2/tasks/repo-fix/manifests/1": dial tcp '
-                                    '203.0.113.9:443: i/o timeout'),
-                    _pod(uid="mine"), create={"return_value": _pod(uid="mine")})
+                                    '203.0.113.9:443: i/o timeout', mine=True),
+                    _pod(uid="mine", mine=True), create={"return_value": _pod(uid="mine")})
     with patch("surogates.sandbox.kubernetes_image.asyncio.sleep", AsyncMock()):
         sid = await k8s.provision(_spec())
     k8s._api.delete_namespaced_pod.assert_not_awaited()
@@ -554,3 +562,19 @@ async def test_a_later_stop_is_asked_again(k8s, monkeypatch):
     await k8s.stop_image_of_session(SESSION)
     await k8s.stop_image_of_session(SESSION)
     assert asked == ["/stop", "/stop"]
+
+
+def test_a_pull_error_is_read_without_the_names_in_it(k8s):
+    """An image called "fix-unauthorized-redirect" and a registry's 429: waited out, not refused."""
+    from surogates.sandbox.kubernetes_image import ImagePods
+
+    ref = "registry.example/tasks/fix-unauthorized-redirect:1"
+    busy = _pod(False, phase="Pending", waiting="ErrImagePull",
+                said=f'failed to pull and unpack image "{ref}": failed to copy: httpReadSeeker: failed open: '
+                     f'unexpected status code https://registry.example/v2/tasks/fix-unauthorized-redirect/blobs/x: '
+                     f'429 Too Many Requests - Server message: toomanyrequests')
+    assert not ImagePods._never_starts(busy, (ref, BUNDLE))
+    refused = _pod(False, phase="Pending", waiting="ErrImagePull",
+                   said=f'failed to pull and unpack image "{ref}": failed to resolve reference "{ref}": pull access '
+                        f'denied, repository does not exist or may require authorization')
+    assert ImagePods._never_starts(refused, (ref, BUNDLE))

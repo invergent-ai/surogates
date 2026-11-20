@@ -67,8 +67,9 @@ _TAKE_OVER_S = 600.0
 #: Waiting reasons of a container that will never start as it is.
 _NEVER_STARTS = ("InvalidImageName", "ErrImageNeverPull", "CreateContainerConfigError")
 #: A pull that failed for good (its message), not one the kubelet retries with luck (a registry's 429, a timeout).
-_PULL_REFUSED = re.compile(r'manifest unknown|failed to resolve reference "[^"]*": [^\n]*: not found\s*$|'
-                           r"unauthorized|access denied|pull access denied", re.IGNORECASE)
+_PULL_REFUSED = re.compile(r"manifest unknown|failed to resolve reference\s*: [^\n]*: not found\s*$|unauthorized|"
+                           r"access denied|\b403 Forbidden\b|requested access to the resource is denied",
+                           re.IGNORECASE)
 _LABEL_VALUE_RE = re.compile(r"[A-Za-z0-9]([A-Za-z0-9_.-]{0,61}[A-Za-z0-9])?")
 #: A Stop that ended this long ago or less is not asked again (a pause asks twice in a row).
 _STOP_DEDUP_S = 5.0
@@ -131,6 +132,13 @@ class ImagePods:
         return str(getattr(getattr(pod, "metadata", None), "uid", "") or "")
 
     @staticmethod
+    def _made_by(pod: Any, sandbox_id: str) -> bool:
+        """Whether this provision made *pod* (its label names this provision's sandbox id), even when the create's
+        answer was lost."""
+        labels = getattr(getattr(pod, "metadata", None), "labels", None) or {}
+        return labels.get("surogates.ai/sandbox-id") == sandbox_id
+
+    @staticmethod
     def _terminating(pod: Any) -> bool:
         return bool(getattr(getattr(pod, "metadata", None), "deletion_timestamp", None))
 
@@ -163,7 +171,7 @@ class ImagePods:
         return "; ".join(said)[:1000]
 
     @staticmethod
-    def _never_starts(pod: Any) -> bool:
+    def _never_starts(pod: Any, refs: tuple[str, ...] = ()) -> bool:
         status = getattr(pod, "status", None)
         for c in [*(getattr(status, "init_container_statuses", None) or []),
                   *(getattr(status, "container_statuses", None) or [])]:
@@ -172,8 +180,15 @@ class ImagePods:
                 continue
             if waiting.reason in _NEVER_STARTS:
                 return True
-            if waiting.reason in ("ErrImagePull", "ImagePullBackOff") and _PULL_REFUSED.search(waiting.message or ""):
-                return True
+            if waiting.reason in ("ErrImagePull", "ImagePullBackOff"):
+                # Read without the names in it (an image may be called "fix-unauthorized-redirect"): quoted strings,
+                # URLs and the pod's own image references go first.
+                said = re.sub(r'"[^"]*"|https?://\S+', "", waiting.message or "")
+                for ref in refs:
+                    if ref:
+                        said = said.replace(ref, "")
+                if _PULL_REFUSED.search(said):
+                    return True
         return False
 
     @staticmethod
@@ -198,7 +213,7 @@ class ImagePods:
         except ApiException as exc:
             if exc.status == 404:
                 return True
-            if exc.status == 409:  # another pod by now
+            if exc.status == 409 or exc.status == 429 or (exc.status or 0) >= 500:  # another pod by now, or unsure
                 return False
             raise SandboxUnavailableError(f"Could not delete the session's pod {name}: {exc.status} {exc.reason}") from exc
         return True
@@ -367,7 +382,6 @@ class ImagePods:
         loop = asyncio.get_running_loop()
         waits = max(float(self._pod_ready_timeout), _TAKE_OVER_S)
         deadline = loop.time() + waits
-        made_uid = ""
         silent_since: float | None = None
         retired_since: float | None = None
         why = ""
@@ -390,8 +404,7 @@ class ImagePods:
                 seen_uid, silent_since, retired_since = self._uid(pod), None, None  # another pod: its own clocks
             if pod is None:
                 try:
-                    made = await api.create_namespaced_pod(self._namespace, manifest)
-                    made_uid = self._uid(made)
+                    await api.create_namespaced_pod(self._namespace, manifest)
                 except ApiException as exc:
                     if exc.status == 429 or (exc.status or 0) >= 500:
                         why = f"the API answered {exc.status} {exc.reason}"
@@ -404,9 +417,9 @@ class ImagePods:
                 if self._terminating(pod):
                     why = "it is being deleted"
                     await self._force_delete_if_stuck(api, pod)
-                elif self._ended(pod) or self._never_starts(pod):
+                elif self._ended(pod) or self._never_starts(pod, (spec.session_image, self._bundle_image)):
                     why = self._why_not(pod) or "it ended"
-                    ours = bool(made_uid) and uid == made_uid
+                    ours = self._made_by(pod, sandbox_id)
                     # Ended: what was in it is gone; one this provision made and that never came up is told as is.
                     await self._delete_pod(api, name, uid)
                     if ours:
@@ -446,10 +459,11 @@ class ImagePods:
                         entry.uid = uid
                         entry.status_checked_at = time.monotonic()
                         self._pods[sandbox_id] = entry
-                        if made_uid and uid == made_uid:
+                        made_here = self._made_by(pod, sandbox_id)
+                        if made_here:
                             self._created_pods.add(sandbox_id)
                         logger.info("Sandbox %s in the pod %s of session %s (%s)", sandbox_id, name,
-                                    spec.session_id, "made" if uid == made_uid else "taken over")
+                                    spec.session_id, "made" if made_here else "taken over")
                         return sandbox_id
                     else:
                         silent_since = silent_since if silent_since is not None else loop.time()
@@ -518,7 +532,9 @@ class ImagePods:
                     logger.warning("The pod %s could not be reached for its Stop but is ready: kept", name)
                     return
         if not await self._delete_pod(api, name, self._uid(pod)):
-            return  # another pod by now
+            logger.warning("The pod %s was not deleted after its Stop (another pod by now, or the API unsure): kept",
+                           name)
+            return
         logger.info("Deleted the pod %s: its executor %s", name,
                     "refuses this deployment's token" if refused else "could not be reached for the Stop")
 
