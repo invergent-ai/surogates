@@ -257,7 +257,7 @@ async def test_a_stop_ends_the_commands_and_keeps_the_pod(k8s, monkeypatch):
     assert sid in k8s._pods
 
 
-async def test_a_stop_deletes_a_pod_whose_executor_does_not_answer(k8s, monkeypatch):
+async def test_a_stop_deletes_a_pod_whose_executor_cannot_be_reached_and_is_not_ready(k8s, monkeypatch):
     import httpx
 
     real = httpx.AsyncClient
@@ -267,9 +267,26 @@ async def test_a_stop_deletes_a_pod_whose_executor_does_not_answer(k8s, monkeypa
             raise httpx.ConnectError("refused")
         return real(transport=httpx.MockTransport(answer), timeout=5.0)
     monkeypatch.setattr(httpx, "AsyncClient", client)
-    k8s._api = _api(_pod(uid="stuck"))
-    await k8s.stop_image_of_session(SESSION)
+    k8s._api = _api(_pod(uid="stuck"), _pod(False, uid="stuck"))
+    with patch("surogates.sandbox.kubernetes_image.asyncio.sleep", AsyncMock()):
+        await k8s.stop_image_of_session(SESSION)
     assert k8s._api.delete_namespaced_pod.await_args.kwargs["body"].preconditions.uid == "stuck"
+
+
+async def test_a_stop_that_cannot_reach_a_pod_still_ready_keeps_it(k8s, monkeypatch):
+    import httpx
+
+    real = httpx.AsyncClient
+
+    def client(*a, **kw):
+        def answer(request):
+            raise httpx.ConnectError("refused")
+        return real(transport=httpx.MockTransport(answer), timeout=5.0)
+    monkeypatch.setattr(httpx, "AsyncClient", client)
+    k8s._api = _api(_pod(uid="alive"), _pod(uid="alive"))
+    with patch("surogates.sandbox.kubernetes_image.asyncio.sleep", AsyncMock()):
+        await k8s.stop_image_of_session(SESSION)
+    k8s._api.delete_namespaced_pod.assert_not_awaited()
 
 
 async def test_destroy_of_an_image_sandbox_stops_it_and_keeps_its_pod(k8s):
@@ -461,3 +478,34 @@ async def test_the_reaper_deletes_a_pod_that_never_answers_after_rounds_and_one_
     assert rounds[0] == [("s-stuck", "stuck")]
     assert sorted(rounds[-1]) == [("s-silent", "silent"), ("s-stuck", "stuck")]
     assert all(("s-young", "young") not in r for r in rounds)
+
+
+async def test_a_retired_pod_that_reads_not_ready_is_taken_back_too(k8s, monkeypatch):
+    """A retired executor's /healthz answers 410: its pod reads not ready, and it is still the session's."""
+    from surogates.sandbox import kubernetes_image
+
+    monkeypatch.setattr(kubernetes_image, "_RETIRED_WAIT_S", -1.0)
+    k8s._executor_answers = AsyncMock(side_effect=[410, 200])
+    k8s._executor_post = AsyncMock()
+    k8s._api = _api(_pod(False, uid="kept"), _pod(uid="kept"))
+    with patch("surogates.sandbox.kubernetes_image.asyncio.sleep", AsyncMock()):
+        sid = await k8s.provision(_spec())
+    assert k8s._executor_post.await_args.args[2] == "/unretire" and k8s._pods[sid].uid == "kept"
+
+
+async def test_a_throttled_api_is_waited_out_and_a_refused_one_fails_at_once(k8s):
+    k8s._api = _api(ApiException(status=429, reason="Too Many Requests"), _pod())
+    with patch("surogates.sandbox.kubernetes_image.asyncio.sleep", AsyncMock()):
+        assert await k8s.provision(_spec())
+    k8s._api = _api(ApiException(status=403, reason="Forbidden"))
+    with pytest.raises(SandboxUnavailableError, match="403 Forbidden"):
+        await k8s.provision(_spec())
+
+
+def test_on_kubernetes_the_mark_must_be_a_label_value(k8s):
+    k8s._image_deployment = "stack-a-"
+    with pytest.raises(SandboxUnavailableError, match="label value"):
+        k8s._image_pod_manifest("s", "p", _spec(), executor_token="t")
+    from surogates.sandbox.docker_image import deployment_id
+
+    assert deployment_id("stack-a-") == "stack-a-"  # still a Docker mark, as before

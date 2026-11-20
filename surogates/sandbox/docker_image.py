@@ -137,7 +137,7 @@ def deployment_id(configured: str) -> str:
     """This deployment's mark on its session-image containers (``sandbox.image_deployment``): a reaper takes only
     its own deployment's, whatever network they are on.  Required: two stacks on one Docker host must never take
     each other's."""
-    if not configured or not re.fullmatch(r"[A-Za-z0-9]([A-Za-z0-9_.-]{0,61}[A-Za-z0-9])?", configured):
+    if not configured or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,62}", configured):
         raise SandboxUnavailableError(
             "A session's own image needs this deployment's mark (sandbox.image_deployment: letters, digits, . _ -)",
             classification="config",

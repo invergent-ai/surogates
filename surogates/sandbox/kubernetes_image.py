@@ -38,8 +38,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from typing import Any
+
+import aiohttp
 
 from kubernetes_asyncio import client
 from kubernetes_asyncio.client import ApiException
@@ -62,9 +65,10 @@ _DROPPED_CAPS = ["NET_RAW", "MKNOD", "SETFCAP"]
 #: How long a provision waits for the session's pod to be ready (a task image of several GB is pulled first).
 _TAKE_OVER_S = 600.0
 #: Waiting reasons of a container that will never start as it is.
-_NEVER_STARTS = ("InvalidImageName", "ErrImageNeverPull", "CreateContainerConfigError", "CreateContainerError")
+_NEVER_STARTS = ("InvalidImageName", "ErrImageNeverPull", "CreateContainerConfigError")
 #: A pull that failed for good (its message), not one the kubelet retries with luck (a registry's 429, a timeout).
-_PULL_REFUSED = ("not found", "manifest unknown", "unauthorized", "denied", "no such host")
+_PULL_REFUSED = ("manifest unknown", "failed to resolve reference", "unauthorized", "denied", "no such host")
+_LABEL_VALUE_RE = re.compile(r"[A-Za-z0-9]([A-Za-z0-9_.-]{0,61}[A-Za-z0-9])?")
 #: How long a provision waits for the reaper to delete a pod whose executor it retired, before taking it back.
 _RETIRED_WAIT_S = 20.0
 #: How long a ready pod's executor may not answer before the provision gives up on it.
@@ -176,11 +180,10 @@ class ImagePods:
         from datetime import datetime, timezone
 
         meta = getattr(pod, "metadata", None)
-        since = getattr(meta, "deletion_timestamp", None)
+        since = getattr(meta, "deletion_timestamp", None)  # the request's time plus its grace
         if not isinstance(since, datetime):
             return False
-        grace = getattr(meta, "deletion_grace_period_seconds", None) or 0
-        return (datetime.now(timezone.utc) - since).total_seconds() > grace + 30
+        return (datetime.now(timezone.utc) - since).total_seconds() > 30
 
     async def _delete_pod(self, api: Any, name: str, uid: str) -> bool:
         """Delete pod *name* only if it is still the one with *uid* (a precondition: never a pod made since).
@@ -250,6 +253,12 @@ class ImagePods:
         from surogates.sandbox.executor_server import TOKEN_SHA256_ENV, token_sha256
 
         deployment = deployment_id(self._image_deployment)
+        if not _LABEL_VALUE_RE.fullmatch(deployment):
+            raise SandboxUnavailableError(
+                "On Kubernetes the deployment's mark (sandbox.image_deployment) is a label value: letters, digits, "
+                "'.', '_' and '-', at most 63, starting and ending with a letter or digit",
+                classification="config",
+            )
         # Always the token's digest: the session's token outlives the pod (any worker derives it), and the pod's
         # spec is readable to whoever may get pods.
         token_var = client.V1EnvVar(name=TOKEN_SHA256_ENV, value=token_sha256(executor_token))
@@ -358,11 +367,23 @@ class ImagePods:
         silent_since: float | None = None
         retired_since: float | None = None
         why = ""
+        seen_uid = ""
         while True:
             try:
-                pod = await self._read_pod(api, name)
-            except SandboxUnavailableError as exc:
-                pod, why = False, str(exc)  # the API unsure (throttled, a blip): waited out like a pod starting
+                pod = await api.read_namespaced_pod(name, self._namespace)
+            except ApiException as exc:
+                if exc.status == 404:
+                    pod = None
+                elif exc.status == 429 or (exc.status or 0) >= 500:
+                    pod, why = False, f"the API answered {exc.status} {exc.reason}"  # throttled, a blip: waited out
+                else:
+                    raise SandboxUnavailableError(
+                        f"Could not read the session's pod {name}: {exc.status} {exc.reason}",
+                    ) from exc
+            except (aiohttp.ClientError, OSError, asyncio.TimeoutError) as exc:  # the API not reached this time
+                pod, why = False, f"the API was not reached ({type(exc).__name__})"
+            if pod is not None and pod is not False and self._uid(pod) != seen_uid:
+                seen_uid, silent_since, retired_since = self._uid(pod), None, None  # another pod: its own clocks
             if pod is None:
                 try:
                     made = await api.create_namespaced_pod(self._namespace, manifest)
@@ -385,9 +406,13 @@ class ImagePods:
                                                       classification="readiness")
                     logger.warning("The pod %s of session %s ended (%s): a new one starts", name, spec.session_id,
                                    why)
-                elif self._is_pod_ready(pod) and pod.status.pod_ip:
+                elif pod.status.pod_ip and (self._is_pod_ready(pod) or pod.status.phase == "Running"):
                     ip = pod.status.pod_ip
+                    # Asked whether ready or not: a retired executor's /healthz answers 410, so its pod reads not
+                    # ready, and it is still the session's to take back.
                     answered = await self._executor_answers(ip, spec.session_id)
+                    if answered not in (401, 410) and not self._is_pod_ready(pod):
+                        answered, why = -1, self._why_not(pod) or "starting"
                     if answered == 401:
                         # Made under another signing secret (rotated): its executor never takes this deployment's
                         # token; replaced (its files go with it: a pod cannot be set aside).
@@ -402,6 +427,8 @@ class ImagePods:
                         if loop.time() - retired_since > _RETIRED_WAIT_S:
                             await self._executor_post(ip, spec.session_id, "/unretire")
                             retired_since = None
+                    elif answered == -1:
+                        pass  # running, not ready yet: waited for
                     elif answered is not None:
                         entry = _PodEntry(sandbox_id=sandbox_id, pod_name=name, secret_name="",
                                           namespace=self._namespace, spec=spec, pod_ip=ip, token=token,
@@ -442,8 +469,11 @@ class ImagePods:
             return
         session = ((pod.metadata.annotations or {}) if pod.metadata else {}).get("surogates.ai/session") or ""
         ip = pod.status.pod_ip if pod.status else ""
+        refused = False
         if ip and session and not self._ended(pod):
-            for timeout in (10.0, 30.0):
+            for attempt, timeout in enumerate((10.0, 30.0)):
+                if attempt:
+                    await asyncio.sleep(3.0)
                 answer = await self._executor_post(ip, session, "/stop", timeout=timeout)
                 if isinstance(answer, httpx.Response):
                     if answer.status_code == 200:
@@ -452,12 +482,20 @@ class ImagePods:
                     if answer.status_code != 401:
                         logger.warning("The pod %s answered its Stop with %s: kept", name, answer.status_code)
                         return
+                    refused = True
                     break  # another signing secret: never this deployment's to stop
                 if not isinstance(answer, (httpx.ConnectError, httpx.ConnectTimeout)):
                     logger.warning("The pod %s did not take its Stop (%s): kept", name, type(answer).__name__)
                     return
+            if not refused:
+                again = await self._read_pod(api, name)
+                if again is not None and self._uid(again) == self._uid(pod) and self._is_pod_ready(again):
+                    # The kubelet reaches its executor: alive, the worker's own network blinked. Kept.
+                    logger.warning("The pod %s could not be reached for its Stop but is ready: kept", name)
+                    return
         await self._delete_pod(api, name, self._uid(pod))
-        logger.info("Deleted the pod %s: its executor could not be reached for the Stop", name)
+        logger.info("Deleted the pod %s: its executor %s", name,
+                    "refuses this deployment's token" if refused else "could not be reached for the Stop")
 
     async def stop_image_of_session(self, session_id: str) -> None:
         """A Stop, a pause or ``/clear`` of a session in its own image, on any worker: its commands end, its files

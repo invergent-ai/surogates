@@ -419,7 +419,7 @@ class K8sSandbox(ImagePods):
             return new_status
         except ApiException as exc:
             if exc.status == 404:
-                self._pods.pop(sandbox_id, None)
+                self.forget(sandbox_id)
                 return SandboxStatus.TERMINATED
             logger.warning(
                 "Status check for pod %s failed (HTTP %s); trusting "
