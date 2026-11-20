@@ -8,7 +8,10 @@ underlying sandbox enters an unhealthy state.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
+import time
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 from surogates.sandbox.base import SandboxSpec, SandboxStatus, SandboxUnavailableError
@@ -69,6 +72,10 @@ class SandboxPool:
         # Threads whose copy this pool has just made from the real files,
         # not yet asked about: whether that loses work is the session's log's to say.
         self._fresh: set[str] = set()
+        # session_id -> when its sandbox was last asked for or a call in it ended (monotonic), and the calls in it now.
+        self._used: dict[str, float] = {}
+        self._busy: dict[str, int] = {}
+        self._reaper: asyncio.Task | None = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -104,6 +111,7 @@ class SandboxPool:
                         raise SandboxUnavailableError(
                             "This thread's sandbox holds no copy of the project's files, so its steps cannot run there",
                         )
+                    self._used[session_id] = time.monotonic()
                     return sandbox_id
                 # Stale or failed -- clean up and reprovision.
                 logger.warning(
@@ -119,6 +127,7 @@ class SandboxPool:
             async with self._global_lock:
                 self._mapping[session_id] = sandbox_id
                 self._specs[session_id] = spec
+                self._used[session_id] = time.monotonic()
                 if "PROJECT_DIR" in spec.env:
                     self._fresh.add(session_id)
             logger.info(
@@ -150,11 +159,23 @@ class SandboxPool:
         lock = await self._session_lock(session_id)
         async with lock:
             sandbox_id = self._mapping.get(session_id)
+            if sandbox_id is not None:
+                # Counted under the lock: a reap that takes the lock next sees the call.
+                self._busy[session_id] = self._busy.get(session_id, 0) + 1
         if sandbox_id is None:
             raise ValueError(
                 f"No sandbox provisioned for session {session_id}"
             )
-        return await self._backend.execute(sandbox_id, name, input, timeout=timeout)
+        try:
+            return await self._backend.execute(sandbox_id, name, input, timeout=timeout)
+        finally:
+            left = self._busy.get(session_id, 1) - 1
+            if left > 0:
+                self._busy[session_id] = left
+            else:
+                self._busy.pop(session_id, None)
+            if session_id in self._mapping:
+                self._used[session_id] = time.monotonic()
 
     def copy_fresh(self, session_id: str) -> bool:
         """Whether this pool has just made *session_id*'s copy from the real files; asked once."""
@@ -190,7 +211,109 @@ class SandboxPool:
                 return None
             self._specs.pop(session_id, None)
             self._fresh.discard(session_id)
+            self._used.pop(session_id, None)
             return self._mapping.pop(session_id, None)
+
+    async def reap_at_rest(
+        self, at_rest: Callable[[str], Awaitable[bool]], *, idle_seconds: float,
+    ) -> list[str]:
+        """Destroy the sandboxes this pool holds for sessions at rest, unused for *idle_seconds*; their keys.
+
+        The safety net behind the turn ends' teardown.  A turn end leaves the
+        sandbox up while an agent below the session still runs in it, and the
+        turn end the agent's report brings may run on another worker, whose
+        sweep spares this worker's live container: nothing else ever lets
+        this one go.  *at_rest* says whether a session key's session and the
+        agents below it are all at rest.  Never a sandbox with a call in
+        flight, nor a thread's pod over its copy, whose keep or landing
+        decides what becomes of its work.  The destroy runs under the
+        session's lock: a turn that asks for the sandbox meanwhile waits,
+        then gets a fresh one that no sweep of this reap can take.
+        """
+        reaped: list[str] = []
+        unsure = 0
+        for key, sandbox_id in list(self._mapping.items()):
+            if not self._idle(key, idle_seconds) or self.holds_copy(key):
+                continue
+            try:
+                if not await at_rest(key):
+                    continue
+            except Exception:
+                unsure += 1
+                if unsure == 1:
+                    logger.debug("Could not tell whether session %s is at rest", key, exc_info=True)
+                continue
+            lock = await self._session_lock(key)
+            async with lock:
+                # Asked for, or a call started, since the look: a turn has it again.
+                if self._mapping.get(key) != sandbox_id or not self._idle(key, idle_seconds):
+                    continue
+                spec, used = self._specs.pop(key, None), self._used.pop(key, None)
+                self._fresh.discard(key)
+                self._mapping.pop(key, None)
+                destroy = asyncio.ensure_future(self._destroy_reaped(sandbox_id, key))
+                try:
+                    # Shielded: a reaper cancelled mid-destroy (shutdown) waits for it, nothing is left half done.
+                    await asyncio.shield(destroy)
+                except asyncio.CancelledError:
+                    with contextlib.suppress(Exception):
+                        await destroy
+                    raise
+                except Exception:
+                    logger.warning("Could not destroy sandbox %s of session %s at rest; the next round tries again",
+                                   sandbox_id, key, exc_info=True)
+                    # Kept, so it is asked for again: a pod whose delete failed has no other sweep to go by.
+                    self._mapping[key] = sandbox_id
+                    if spec is not None:
+                        self._specs[key] = spec
+                    if used is not None:
+                        self._used[key] = used
+                    continue
+            reaped.append(key)
+        if unsure:
+            logger.warning("Could not tell whether %d sessions are at rest; their sandboxes stay", unsure)
+        return reaped
+
+    def _idle(self, key: str, idle_seconds: float) -> bool:
+        """Whether *key*'s sandbox has no call in flight and went unused for *idle_seconds*."""
+        used = self._used.get(key)
+        return not self._busy.get(key) and used is not None and time.monotonic() - used >= idle_seconds
+
+    async def _destroy_reaped(self, sandbox_id: str, key: str) -> None:
+        await self._backend.destroy(sandbox_id)
+        logger.info("Reaped sandbox %s of session %s at rest", sandbox_id, key)
+        # The backend's sweep of the session's containers too: those of workers that are gone.
+        sweep = getattr(self._backend, "destroy_for_session", None)
+        if sweep is not None:
+            await sweep(key)
+
+    def start_reaping(
+        self, at_rest: Callable[[str], Awaitable[bool]], *, every: float = 60.0, idle_seconds: float = 300.0,
+    ) -> None:
+        """Run :meth:`reap_at_rest` every *every* seconds; *idle_seconds* 0 or less (or *every*) runs none."""
+        if idle_seconds <= 0 or every <= 0 or (self._reaper is not None and not self._reaper.done()):
+            return
+        self._reaper = asyncio.create_task(self._reap_every(at_rest, every, idle_seconds), name="sandbox-reaper")
+
+    async def _reap_every(self, at_rest: Callable[[str], Awaitable[bool]], every: float, idle_seconds: float) -> None:
+        while True:
+            await asyncio.sleep(every)
+            try:
+                reaped = await self.reap_at_rest(at_rest, idle_seconds=idle_seconds)
+            except Exception:
+                logger.warning("The sandbox reaper's round failed", exc_info=True)
+                continue
+            if reaped:
+                logger.info("Reaped the sandboxes of %d sessions at rest: %s", len(reaped), ", ".join(reaped))
+
+    async def stop_reaping(self) -> None:
+        """Stop the reaper, its round in flight finished or cut where nothing is left half done."""
+        reaper, self._reaper = self._reaper, None
+        if reaper is None:
+            return
+        reaper.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await reaper
 
     async def execute_released(self, sandbox_id: str, name: str, input: str, *, timeout: float | None = None) -> str:
         """Execute a command in a sandbox :meth:`release_for_session` detached, before it is destroyed.
@@ -258,6 +381,7 @@ class SandboxPool:
 
         Intended for graceful shutdown.
         """
+        await self.stop_reaping()
         async with self._global_lock:
             session_ids = list(self._mapping.keys())
 

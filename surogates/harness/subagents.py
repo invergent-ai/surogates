@@ -181,6 +181,56 @@ async def agents_run_in_its_sandbox(session_factory: Any, session: Any) -> bool:
         ))))
 
 
+#: A session's statuses while a turn of it runs or is queued: its sandbox is in use.  Every other status (completed,
+#: failed, paused: a stop or pause destroys the session's own sandbox, archived) is at rest.
+WORKING_STATUSES = frozenset({"active", "processing"})
+
+
+async def sandbox_key_at_rest(session_factory: Any, key: str) -> bool:
+    """Whether the sandbox keyed *key* (``sandbox_session_key``: a root session's id) has no one left to work in it.
+
+    Its session is at rest (not in ``WORKING_STATUSES``), so is every agent
+    below it that works in it (stamped with *key*, or unstamped and the
+    session's own child), and no background command the session waits to
+    hear the end of runs there.  A session that is gone has no one either.
+    The agents are found down the ``parent_id`` tree (indexed): a stamp
+    always names an ancestor.
+    """
+    import uuid
+
+    from sqlalchemy import and_, exists, literal, or_, select
+
+    from surogates.db.models import Session as SessionRow
+    from surogates.harness.background_watch import background_watch
+
+    if background_watch.holds(key):
+        return False
+    try:
+        root = uuid.UUID(key)
+    except ValueError:
+        return False
+    stamped = SessionRow.config["sandbox_root_session_id"].astext
+    tree = (
+        select(SessionRow.id, SessionRow.parent_id, SessionRow.status, stamped.label("stamp"), literal(1).label("depth"))
+        .where(SessionRow.parent_id == root)
+        .cte("below", recursive=True)
+    )
+    tree = tree.union_all(
+        select(SessionRow.id, SessionRow.parent_id, SessionRow.status, stamped, tree.c.depth + 1)
+        # A thread under the session works in a sandbox of its own (its own stamp): none below it holds this one.
+        .where(SessionRow.parent_id == tree.c.id, tree.c.depth < 64, or_(tree.c.stamp == key, tree.c.stamp.is_(None)))
+    )
+    async with session_factory() as db:
+        status = await db.scalar(select(SessionRow.status).where(SessionRow.id == root))
+        if status in WORKING_STATUSES:
+            return False
+        working = await db.scalar(select(exists().where(
+            tree.c.status.in_(WORKING_STATUSES),
+            or_(tree.c.stamp == key, and_(tree.c.stamp.is_(None), tree.c.parent_id == root)),
+        )))
+    return not working
+
+
 def monitor_allowed(config: dict | None) -> bool:
     """Whether a session with *config* may run monitors: not a sub-agent, whose work ends with its report,
     and not a project's thread or one under it, whose sandbox ends with its turn.  Either would be woken by

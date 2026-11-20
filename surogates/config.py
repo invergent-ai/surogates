@@ -475,6 +475,10 @@ class SandboxSettings(BaseSettings):
     default_memory_limit: str = "8Gi"
     srt_enabled: bool = False
     srt_settings_dir: str = "/tmp/surogates/srt"
+    # A worker destroys the sandboxes it holds for sessions at rest (and the agents below them) that went unused
+    # this long: the safety net behind the turn ends' teardown.  0 turns it off.
+    reap_idle_seconds: int = Field(300, ge=0)
+    reap_every_seconds: int = Field(60, gt=0)
 
     # Docker sandbox backend settings (only used when backend == "docker").
     # Local-development backend: one container per root session, talking to

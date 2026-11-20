@@ -1495,6 +1495,18 @@ async def run_worker(settings: Settings) -> None:
         # A session's turns and sub-agents run on any worker, each in that worker's own container for it (the
         # Docker backend): a sweep of the session's containers spares a live worker's (the watch's heartbeat).
         claim_as(background_watch.id, background_watch.worker_alive)
+    # What a turn end left up (an agent below still ran in it, and the turn end its report brought ran on another
+    # worker) goes once its session and the agents below are at rest.
+    from functools import partial
+
+    from surogates.harness.subagents import sandbox_key_at_rest
+
+    # At least 30 s unused: less would race the turn that asked for the sandbox and has not called into it yet.
+    idle = settings.sandbox.reap_idle_seconds
+    sandbox_pool.start_reaping(
+        partial(sandbox_key_at_rest, session_factory),
+        every=settings.sandbox.reap_every_seconds, idle_seconds=max(idle, 30) if idle > 0 else 0,
+    )
 
     # 4b. Browser pool -- one browser per session, lazily provisioned.
     browser_backend = _build_browser_backend(
