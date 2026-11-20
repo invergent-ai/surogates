@@ -36,7 +36,9 @@ def _signing_secret(monkeypatch):
     import uuid
 
     monkeypatch.setenv("SUROGATES_JWT_SECRET", "test-signing-secret")
-    monkeypatch.setattr("surogates.sandbox.kubernetes.uuid.uuid4", lambda: uuid.UUID(MINE))
+    from surogates.sandbox import kubernetes
+
+    monkeypatch.setattr(kubernetes, "uuid", SimpleNamespace(uuid4=lambda: uuid.UUID(MINE), UUID=uuid.UUID))
 
 
 @pytest.fixture()
@@ -578,3 +580,25 @@ def test_a_pull_error_is_read_without_the_names_in_it(k8s):
                    said=f'failed to pull and unpack image "{ref}": failed to resolve reference "{ref}": pull access '
                         f'denied, repository does not exist or may require authorization')
     assert ImagePods._never_starts(refused, (ref, BUNDLE))
+
+
+def test_pull_refusals_and_blips_as_registries_say_them():
+    from surogates.sandbox.kubernetes_image import ImagePods
+
+    ref = "r.example/a/fix-unauthorized-x:1"
+
+    def refused(said):
+        return ImagePods._never_starts(_pod(False, phase="Pending", waiting="ErrImagePull", said=said), (ref, BUNDLE))
+    assert refused(f'failed to pull and unpack image "{ref}": failed to resolve image: {ref}: not found')
+    assert refused(f'failed to pull and unpack image "{ref}": no match for platform in manifest: not found')
+    assert refused("reading manifest 1 in r.example/a/x: name unknown: repository name not known to registry")
+    assert not refused("reading manifest 1 in r.example/a/fix-unauthorized-x: toomanyrequests: too many requests")
+    assert not refused(f'failed to pull and unpack image "{ref}": failed to resolve reference "{ref}": failed to do '
+                       'request: Head "https://r.example/v2/a/fix-unauthorized-x/manifests/1": dial tcp: i/o timeout')
+
+
+async def test_a_pod_this_provision_made_whose_create_answer_was_lost_is_its_own(k8s):
+    k8s._api = _api(GONE, _pod(uid="made", mine=True), create={"side_effect": OSError("connection reset")})
+    with patch("surogates.sandbox.kubernetes_image.asyncio.sleep", AsyncMock()):
+        sid = await k8s.provision(_spec())
+    assert k8s.created(sid)

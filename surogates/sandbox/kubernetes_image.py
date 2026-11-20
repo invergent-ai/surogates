@@ -67,7 +67,8 @@ _TAKE_OVER_S = 600.0
 #: Waiting reasons of a container that will never start as it is.
 _NEVER_STARTS = ("InvalidImageName", "ErrImageNeverPull", "CreateContainerConfigError")
 #: A pull that failed for good (its message), not one the kubelet retries with luck (a registry's 429, a timeout).
-_PULL_REFUSED = re.compile(r"manifest unknown|failed to resolve reference\s*: [^\n]*: not found\s*$|unauthorized|"
+_PULL_REFUSED = re.compile(r"manifest unknown|failed to resolve (?:reference|image)\s*: [^\n]*: not found\s*$|"
+                           r"no match for platform in manifest|name unknown|(?<![\w./-])unauthorized(?![\w./-])|"
                            r"access denied|\b403 Forbidden\b|requested access to the resource is denied",
                            re.IGNORECASE)
 _LABEL_VALUE_RE = re.compile(r"[A-Za-z0-9]([A-Za-z0-9_.-]{0,61}[A-Za-z0-9])?")
@@ -186,7 +187,8 @@ class ImagePods:
                 said = re.sub(r'"[^"]*"|https?://\S+', "", waiting.message or "")
                 for ref in refs:
                     if ref:
-                        said = said.replace(ref, "")
+                        # The reference, and its repository alone (CRI-O names it without the tag).
+                        said = said.replace(ref, "").replace(re.split(r"[@:](?=[^/]*$)", ref)[0], "")
                 if _PULL_REFUSED.search(said):
                     return True
         return False
@@ -526,7 +528,11 @@ class ImagePods:
                     logger.warning("The pod %s did not take its Stop (%s): kept", name, type(answer).__name__)
                     return
             if not refused:
-                again = await self._read_pod(api, name)
+                try:
+                    again = await self._read_pod(api, name)
+                except (SandboxUnavailableError, aiohttp.ClientError, OSError, asyncio.TimeoutError):
+                    logger.warning("The pod %s could not be reached for its Stop and the API is unsure: kept", name)
+                    return
                 if again is not None and self._uid(again) == self._uid(pod) and self._is_pod_ready(again):
                     # The kubelet reaches its executor: alive, the worker's own network blinked. Kept.
                     logger.warning("The pod %s could not be reached for its Stop but is ready: kept", name)
