@@ -223,6 +223,8 @@ class ImageDocker:
         self.start_error = b""
         #: container id -> the host port Docker gave it at its last start
         self.ports: dict[str, int] = {}
+        #: container id -> how many times it started (its StartedAt)
+        self.starts: dict[str, int] = {}
 
     def _by_id(self, cid: str):
         return next(((name, c) for name, c in self.named.items() if c[0] == cid), (None, None))
@@ -256,6 +258,11 @@ class ImageDocker:
             sandbox = next(a.split("=", 1)[1] for a in args if a.startswith("surogates.sandbox_id="))
             self.named[name] = [cid, "running", session, sandbox]
             return 0, cid.encode() + b"\n", b""
+        if args[:1] == ["inspect"] and "{{.State.StartedAt}}" in args:
+            _name, c = self._by_id(args[-1])
+            if c is None:
+                return 1, b"", b"No such object"
+            return 0, f"2026-11-20T10:00:{self.starts.get(c[0], 1):02d}Z\n".encode(), b""
         if args[:1] == ["restart"]:
             _name, c = self._by_id(args[-1])
             if c is not None:
@@ -266,6 +273,8 @@ class ImageDocker:
             if self.start_error:
                 return 1, b"", self.start_error
             if c is not None:
+                if c[1] != "running":
+                    self.starts[c[0]] = self.starts.get(c[0], 1) + 1
                 c[1] = "running"
             return 0, b"", b""
         if args[:1] == ["stop"]:
@@ -978,7 +987,8 @@ async def test_the_reaper_removes_only_containers_at_rest_and_idle_by_their_own_
     # A retired running one is stopped, then removed without -f like a stopped one: one started again meanwhile
     # (a worker that met its 410 and found it kept) is not taken.
     assert ends == [["stop", "-t", "2", "idle"], ["rm", "-v", "idle"], ["rm", "-v", "stopped-long"]]
-    assert retire.asked == [300]
+    # Asked again right before its stop: one a worker took back meanwhile would be kept.
+    assert retire.asked == [300, 300]
     # Only this deployment's, whatever network they are on.
     ps = next(c for c in docker.calls if c[:2] == ["ps", "-a"])
     assert "label=surogates.deployment=stack-a" in ps
@@ -1274,7 +1284,7 @@ def test_the_executor_is_taken_back_only_from_outside_and_with_its_token(tmp_pat
     assert client.get("/healthz").status_code == 200
 
 
-async def test_a_retired_executor_someone_restarted_meanwhile_is_not_restarted_again(monkeypatch):
+async def test_a_retired_executor_another_call_took_back_is_simply_used(monkeypatch):
     from surogates.sandbox import docker_image
 
     monkeypatch.setattr(docker_image, "_RETIRED_WAIT_S", 0.05)
@@ -1453,3 +1463,57 @@ async def test_a_container_that_ends_at_once_after_its_start_again_is_set_aside_
     sid = await _docker_backend(docker).provision(SandboxSpec(session_id="r", session_image=TASK_IMAGE))
     assert any(c[:2] == ["rename", "cid-old"] for c in docker.calls)
     assert docker.named["surogates-sbx-r"][0] != "cid-old" and sid
+
+
+async def test_unretire_is_refused_from_inside():
+    from surogates.sandbox import executor_server
+
+    app = executor_server.create_app(token="tok", workspace="/tmp", require_fuse=False, allow_local=False)
+    inside = httpx.AsyncClient(transport=httpx.ASGITransport(app=app, client=("127.0.0.1", 40000)),
+                               base_url="http://127.0.0.1:8071")
+    async with inside:
+        r = await inside.post("/unretire", headers={"Authorization": "Bearer tok"})
+    assert r.status_code == 403
+
+
+async def test_the_reaper_keeps_a_container_a_worker_took_back_before_its_stop():
+    docker = ImageDocker()
+    _listing(docker, {"idle": ("running", "0001-01-01T00:00:00Z")})
+    answers = [{"idle_seconds": 900, "running": 0, "background_running": 0, "retired": True},
+               {"idle_seconds": 0, "running": 1, "background_running": 0, "retired": False}]
+
+    class TakenBack(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            return httpx.Response(200, json=answers.pop(0))
+    backend = _docker_backend(docker, TakenBack())
+
+    async def at_rest(session):
+        return True
+    assert await backend.reap_images(at_rest, idle_seconds=300) == []
+    assert not any(c[:1] in (["stop"], ["rm"]) for c in docker.calls)
+
+
+async def test_a_start_again_that_someone_else_restarted_meanwhile_waits_at_its_new_port():
+    """This worker starts the stopped container; before its executor answers, another worker's Stop and start move it
+    to a new port: the call follows it there, and nothing is set aside."""
+    docker = ImageDocker(images={TASK_IMAGE: _image(), BUNDLE: _image()})
+    backend = _docker_backend(docker)
+    sid = await backend.provision(SandboxSpec(session_id="root-1", session_image=TASK_IMAGE))
+    docker.named["surogates-sbx-root-1"][1] = "exited"
+    cid = docker.named["surogates-sbx-root-1"][0]
+
+    def executor(request):
+        if request.url.port == 33000 and docker.starts.get(cid, 1) < 3:
+            # The other worker's Stop and start: a new start, a new port.
+            docker.starts[cid] = 3
+            docker.ports[cid] = 33500
+            return httpx.Response(503)
+        return httpx.Response(200 if request.url.port == 33500 else 503)
+    backend._transport = httpx.MockTransport(executor)
+    backend._ready_timeout = 1
+
+    async def fake_execute(**kw):
+        return json.dumps({"port": kw["port"]})
+    backend._client.execute = fake_execute
+    assert json.loads(await backend.execute(sid, "read_file", "{}")) == {"port": 33500}
+    assert not any(c[:1] == ["rename"] for c in docker.calls)

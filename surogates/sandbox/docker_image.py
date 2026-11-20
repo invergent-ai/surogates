@@ -543,9 +543,12 @@ class ImageSessions:
         kept, and the call fails."""
         deadline = time.monotonic() + _TAKE_OVER_S
         token = session_token(spec.session_id)
-        revived = False
+        revived = looked_again = False
         while time.monotonic() < deadline:
-            for cid, state in await self._session_containers(name):
+            listed = await self._session_containers(name)
+            if not listed and revived:
+                return None  # removed after all (a late reaper): a new one starts
+            for cid, state in listed:
                 if state in ("exited", "dead") and cid == started:
                     if await self._crashed(cid):
                         # Ended at once after this provision started it: it will not start (its files kept aside).
@@ -564,11 +567,11 @@ class ImageSessions:
                     continue
                 if state != "running":
                     continue
+                stamp = await self._started_at(cid)  # before the port: a start after it shows as a change
                 seen = await self._port_of(cid)
                 if not seen or not seen[0] or seen[1] is None:
                     continue
                 host_port = seen[1]
-                stamp = await self._started_at(cid)
                 try:
                     await self._wait_ready(host_port, cid)
                 except Exception as exc:
@@ -580,8 +583,12 @@ class ImageSessions:
                             deadline = time.monotonic() + _TAKE_OVER_S
                             break
                         return None
-                    if not retired and await self._started_at(cid) not in ("", stamp):
-                        break  # started again by someone else while this waited: looked at again, at its new port
+                    now = await self._started_at(cid)
+                    if not retired and stamp and now and now != stamp and not looked_again:
+                        # Started again by someone else while this waited: looked at again, at its new port.
+                        looked_again = True
+                        deadline = time.monotonic() + _TAKE_OVER_S
+                        break
                     if retired or (started == cid and await self._crashed(cid)):
                         await asyncio.shield(self._set_aside(cid, spec.session_id))
                         return None
@@ -696,7 +703,9 @@ class ImageSessions:
             try:
                 async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}", transport=self._transport,
                                              timeout=5.0) as client:
-                    await client.post("/unretire", headers={"Authorization": f"Bearer {session_token(session)}"})
+                    r = await client.post("/unretire", headers={"Authorization": f"Bearer {session_token(session)}"})
+                if r.status_code != 200:
+                    logger.warning("The retired container %s was not taken back (%s)", cid, r.status_code)
             except Exception:  # noqa: BLE001 - the caller's wait for its executor tells
                 logger.warning("Could not take the retired container %s back", cid, exc_info=True)
         return True
@@ -752,7 +761,7 @@ class ImageSessions:
                 return port
             except Exception:
                 now = await self._started_at(entry.container_id)
-                if look == 1 and now not in ("", stamp):
+                if look == 1 and stamp and now and now != stamp:
                     stamp = now  # started again by someone else meanwhile: its new port, once more
                     continue
                 # One that crashed at its start is set aside (its files kept), so the next call makes a new one;
@@ -760,7 +769,7 @@ class ImageSessions:
                 if await self._crashed(entry.container_id):
                     await asyncio.shield(self._set_aside(entry.container_id, entry.spec.session_id))
                 raise
-        raise SandboxUnavailableError("The session's container did not come back")
+        raise AssertionError("unreachable")  # look 2 returns or raises
 
     def created(self, sandbox_id: str) -> bool:
         """Whether *sandbox_id* is a container this provision made new from the image (not one taken over or
@@ -866,8 +875,12 @@ class ImageSessions:
                     unanswered.pop(cid, None)
                     if not retired.get("retired"):
                         continue
-                    # Stopped, then removed without -f: a worker that meets the 410 waits for this, and starts it
-                    # again only if it is still there later; one started meanwhile is not taken.
+                    # Asked once more right before the stop: a worker that took it back meanwhile (``/unretire``,
+                    # after waiting for this removal far longer than it takes) has un-retired it: kept.
+                    again = await self._retire(cid, session, idle_seconds)
+                    if not again or not again.get("retired"):
+                        continue
+                    # Stopped, then removed without -f: one started meanwhile is not taken.
                     gone = await asyncio.shield(self._stop_and_remove(cid))
                 elif _stopped_for(finished, idle_seconds):
                     # Without -f: one started again meanwhile by a worker is not taken.
