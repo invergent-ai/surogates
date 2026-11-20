@@ -158,20 +158,152 @@ _SAFE_ENV_KEYS = frozenset({
     "PATH", "HOME", "USER", "LANG", "LC_ALL", "TERM", "SHELL", "TMPDIR",
 })
 
-# Regex for credential patterns to strip from error messages
-_CREDENTIAL_PATTERN = re.compile(
-    r"(?:"
-    r"ghp_[A-Za-z0-9_]{1,255}"           # GitHub PAT
-    r"|sk-[A-Za-z0-9_]{1,255}"           # OpenAI-style key
-    r"|Bearer\s+\S+"                      # Bearer token
-    r"|token=[^\s&,;\"']{1,255}"         # token=...
-    r"|key=[^\s&,;\"']{1,255}"           # key=...
-    r"|API_KEY=[^\s&,;\"']{1,255}"       # API_KEY=...
-    r"|password=[^\s&,;\"']{1,255}"      # password=...
-    r"|secret=[^\s&,;\"']{1,255}"        # secret=...
-    r")",
+# Credential shapes masked in what an MCP tool answers (results and errors) before the model reads it.  Narrow on
+# purpose: the results carry code, and ``key=lambda``, ``risk-free``, ``Bearer {token}``, ``token=None`` or
+# ``OpenAI(api_key=api_key)`` are no secrets (on 11-20, 956 masks in 46 coding attempts' tool results made the
+# model hex-dump its own file).  What is masked:
+# - a known key format standing alone (never inside a word: ``task-...`` is no ``sk-`` key);
+_PREFIX_SECRET_RE = re.compile(
+    r"(?<![A-Za-z0-9_-])(?:"
+    r"ghp_[A-Za-z0-9]{20,}|gh[ousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{20,}"
+    r"|sk-[A-Za-z0-9_-]{16,}|(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{10,}|xox[abprs]-[A-Za-z0-9-]{10,}"
+    r"|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35}|ya29\.[0-9A-Za-z_-]{20,}"
+    r"|eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{2,}\.[A-Za-z0-9_-]{10,}"
+    r"|dop_v1_[a-f0-9]{32,}|shp(?:at|ss|ca|pa)_[a-fA-F0-9]{32,}"
+    r")(?![A-Za-z0-9_-])"
+)
+# - a private key block, also as JSON writes it (``\n`` escapes): a service account's ``private_key``;
+# The body runs to the next dash run, possessively: a header with no END costs one pass, not a scan per header.
+_PEM_RE = re.compile(r"-----BEGIN [A-Z ]{0,30}PRIVATE KEY(?: BLOCK)?-----(?:[^-]|-(?!----))*+-----END [A-Z ]{0,30}PRIVATE KEY(?: BLOCK)?-----")
+# - a password in a connection string: ``postgres://user:<password>@host``;
+_DSN_PASSWORD_RE = re.compile(r"(\b[a-z][a-z0-9+.-]{1,20}://[^\s:/@]{0,200}:)([^\s/@]{1,500})(@)")
+# - a bearer token: the RFC 6750 characters, 8 or more, with a digit or a mark among them, or 20 letters or more
+#   (``Bearer token authentication``, ``Bearer {token}`` and ``Bearer realm=...`` are prose and code);
+_BEARER_RE = re.compile(r"(Bearer\s+)([A-Za-z0-9._~+/=-]{8,})(?![A-Za-z0-9._~+/=-])", re.IGNORECASE)
+_TOKEN_CHARS_RE = re.compile(r"[0-9._~+/=-]")
+# - the value of an assignment to a secret's name, in any case and spelling (``password=``, ``PGPASSWORD=``,
+#   ``OPENAI_API_KEY=``, ``accessToken=``, ``client_secret=``), unless the value is code: an identifier that names
+#   the secret or is a constant (``api_key=api_key``, ``password=DEFAULT_PASSWORD``), an attribute, a call or a
+#   lookup (``self.secret``, ``get_secret()``, ``os.environ[``), a template (``$TOKEN``, ``{token}``, ``<key>``), a
+#   comparison (``password==x``);
+_STRONG = (
+    r"pass(?:word|wd|phrase)|(?:(?<![A-Za-z0-9])|(?<=[_-]))(?:pass|pwd)"  # ``bypass``, ``compass``, ``n_pass`` are no secrets' names
+    r"|secret(?:[_-]?key)?|private[_-]?key|api[_-]?(?:key|secret)|client[_-]?secret"
+    r"|(?:access|refresh|auth|id|session|csrf|bearer|api|private|personal(?:[_-]?access)?)[_-]?token|credentials?"
+)
+# - the value of an assignment to ``key`` or ``token`` (``key=lambda``, ``sort_key=len``, ``monkey=banana``) only
+#   when it looks like one: 16 characters or more, letters and digits, and no snake_case name.
+_WEAK = r"key|token"
+_ASSIGN_RE = re.compile(
+    rf"(?<![A-Za-z0-9_-])([A-Za-z0-9_-]*?(?:(?P<strong>{_STRONG})|{_WEAK}))=(?!=)"
+    # Possessive: a value is never cut short to look like something else (``password=abc(`` is not ``ab``).
+    r"([^\s&,;\"'`]{1,500}+)",
     re.IGNORECASE,
 )
+# - a JSON field of a secret's name with a string value (``"password": "..."``; structured content is JSON).
+_JSON_SECRET_RE = re.compile(rf'("[A-Za-z0-9_-]*?(?:{_STRONG})"\s*:\s*")((?:[^"\\]|\\.)++)(")', re.IGNORECASE)
+
+_IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_CODE_EXPR_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*(?:\(.*\)?|\[.*\]?)?")
+_DOTTED_RE = re.compile(r"[a-z_][A-Za-z_]*(?:\.[A-Za-z_]+)+")
+_CODE_WORDS = frozenset({"none", "true", "false", "null", "nil", "undefined", "self", "this", "nan", "str", "bytes"})
+_SECRET_WORDS = frozenset({
+    "pass", "password", "passwd", "passphrase", "pwd", "secret", "secrets", "key", "keys", "token", "tokens",
+    "auth", "cred", "creds", "credential", "credentials", "api",
+})
+# The words of a name: snake_case, CONSTANT_CASE and camelCase (``accessToken``: access, token).
+_WORD_RE = re.compile(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])")
+_TEMPLATE_RE = re.compile(r"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?|%\(?[A-Za-z_]*\)?s|\*+|\.\.\.")
+# ``{token}``, ``{{ api_key }}``, ``<your password>``: a placeholder names what goes there; ``{hunter2}`` is a value.
+_BRACKETED_RE = re.compile(r"\{\{?\s*([^{}]{1,60}?)\s*\}?\}|<([^<>]{1,60})>")
+_PLACEHOLDER_WORD_RE = re.compile(r"pass|pwd|secret|key|token|auth|cred|your|value|placeholder|here|redacted", re.IGNORECASE)
+_TRAILING = ")]}>:."
+_MASK = "[REDACTED]"
+
+
+def _is_template(value: str) -> bool:
+    if _TEMPLATE_RE.fullmatch(value):
+        return True
+    m = _BRACKETED_RE.fullmatch(value)
+    return bool(m and _PLACEHOLDER_WORD_RE.search(m.group(1) or m.group(2) or ""))
+
+
+_ENV_NAME_RE = re.compile(r"[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*")
+
+
+def _same_name(a: str, b: str) -> bool:
+    return a.replace("_", "").replace("-", "").lower() == b.replace("_", "").replace("-", "").lower()
+
+
+def _names_a_secret(value: str) -> bool:
+    """An identifier that is a variable or constant holding a secret, not a secret written out: no digits, not
+    PascalCase, at least two words, one of them a secret's (``api_key``, ``DEFAULT_PASSWORD``, ``accessToken``,
+    ``secret_bytes``).  ``password123``, ``MyPassword``, ``supersecret``, ``HUNTER_TWO`` are literals."""
+    if any(c.isdigit() for c in value) or (value[0].isupper() and not value.isupper()):
+        return False
+    words = [w.lower() for w in _WORD_RE.findall(value)]
+    return len(words) >= 2 and any(w in _SECRET_WORDS for w in words)
+
+
+def _is_code(value: str, name: str = "") -> bool:
+    """A value that is code or a template, never a secret's literal (see the patterns above)."""
+    if _is_template(value) or value.lower() in _CODE_WORDS:
+        return True
+    if value.startswith(("/", "~/", "./")):
+        return True  # a path (``PWD=/home/u/proj``)
+    if _IDENT_RE.fullmatch(value):
+        # A name: code when it is the assigned name itself (``api_key=api_key``) or names a secret, unless the
+        # assignment is an environment line (``SECRET_KEY=my_secret_key``): there an identifier is a literal.
+        if _ENV_NAME_RE.fullmatch(name):
+            return False
+        return _same_name(value, name.rsplit(".", 1)[-1]) or _names_a_secret(value)
+    if _DOTTED_RE.fullmatch(value):
+        return True  # self.secret, os.environ (no digits: ``ya29.a0Af...`` is a token)
+    if value.endswith(("(", "[")) or (_CODE_EXPR_RE.fullmatch(value) and value.endswith((")", "]"))):
+        # get_secret(), os.environ[ (a quote ended the value), env["PW"]: a call or a lookup.  ``pa[ss]1`` is not.
+        return value[0].isalpha() or value[0] == "_"
+    return False
+
+
+def _looks_like_a_token(value: str) -> bool:
+    """A value a ``key=`` / ``token=`` holds that is one: long, letters and digits, and no snake_case name
+    (``column_name_2024``) unless a part of it is token-like itself (``a1b2c3d4_e5f6a7b8c9d0e1f2``)."""
+    if len(value) < 16 or not any(c.isdigit() for c in value) or not any(c.isalpha() for c in value):
+        return False
+    if re.fullmatch(r"[a-z0-9]+(?:_[a-z0-9]+)+", value):
+        return any(len(part) >= 12 and re.search(r"\d", part) and re.search(r"[a-z]", part) for part in value.split("_"))
+    return True
+
+
+def _mask_assignment(m: re.Match[str]) -> str:
+    name, value = m.group(1), m.group(3)
+    # Closing punctuation after the value (``f(api_key=api_key)``, ``password=PW):``) is the text's, not the value's;
+    # a bracket the value opened is its own (``P@ss(word)1``).
+    core = value.rstrip(_TRAILING)
+    while core and core != value and core.count("(") + core.count("[") + core.count("{") > (
+        core.count(")") + core.count("]") + core.count("}")
+    ):
+        core = value[: len(core) + 1]
+    core = core or value
+    if m.group("strong") is not None:
+        # ``n_pass=2``, ``pwd=3``: a count under a short name, not a password.
+        short = re.search(r"(?:pass|pwd)$", name, re.IGNORECASE) is not None
+        secret = not _is_code(core, name) and not (short and core.isdigit() and len(core) <= 3)
+    else:
+        secret = _looks_like_a_token(core) and not _is_code(core, name)
+    return f"{name}={_MASK}{value[len(core):]}" if secret else m.group(0)
+
+
+def _mask_bearer(m: re.Match[str]) -> str:
+    token = m.group(2)
+    if re.match(r"[A-Za-z]+=", token):  # an auth parameter (``realm=...``), not a token
+        return m.group(0)
+    return m.group(1) + _MASK if _TOKEN_CHARS_RE.search(token) or len(token) >= 20 else m.group(0)
+
+
+def _mask_json_secret(m: re.Match[str]) -> str:
+    value = m.group(2)
+    return m.group(0) if _is_template(value) else m.group(1) + _MASK + m.group(3)
 
 
 # ---------------------------------------------------------------------------
@@ -198,12 +330,18 @@ def _build_safe_env(user_env: Optional[dict]) -> dict:
 
 
 def _sanitize_error(text: str) -> str:
-    """Strip credential-like patterns from error text before returning to LLM.
+    """Mask credential shapes in an MCP tool's answer (its result or its error) before the model reads it.
 
-    Replaces tokens, keys, and other secrets with [REDACTED] to prevent
-    accidental credential exposure in tool error responses.
+    Secrets become ``[REDACTED]``; a secret's name stays (``password=[REDACTED]``).
+    Code and prose that only look like the shapes are kept as written (see the
+    patterns above).
     """
-    return _CREDENTIAL_PATTERN.sub("[REDACTED]", text)
+    text = _PEM_RE.sub("[REDACTED PRIVATE KEY]", text)
+    text = _PREFIX_SECRET_RE.sub(_MASK, text)
+    text = _DSN_PASSWORD_RE.sub(lambda m: m.group(1) + _MASK + m.group(3), text)
+    text = _BEARER_RE.sub(_mask_bearer, text)
+    text = _JSON_SECRET_RE.sub(_mask_json_secret, text)
+    return _ASSIGN_RE.sub(_mask_assignment, text)
 
 
 def _is_auth_error(exc: BaseException) -> bool:
