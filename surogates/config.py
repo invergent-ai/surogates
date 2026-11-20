@@ -486,6 +486,10 @@ class SandboxSettings(BaseSettings):
     # Seconds to wait for /healthz after docker run (matches k8s_pod_ready_timeout).
     docker_ready_timeout: int = 60
     docker_network: str = "bridge"
+    # Each sandbox container's ``--pids-limit`` (processes and threads at once); 0 sets none.  Its memory
+    # (swap included) and CPUs are the spec's ``memory_limit`` / ``cpu_limit`` (``default_memory_limit`` /
+    # ``default_cpu_limit``, or the tenant's), "" or "0" for none.
+    docker_pids_limit: int = 4096
 
     # K8s sandbox backend settings (only used when backend == "kubernetes")
     k8s_namespace: str = "surogates"

@@ -82,6 +82,15 @@ _EXIT_CODE_SEMANTICS: dict[str, dict[int, str]] = {
 }
 
 
+# A command killed by SIGKILL: the shell's 128 + 9, or -9 when the shell itself was.  The terminal's own
+# timeout reports 124; in a sandbox held to a memory limit, a SIGKILL nobody sent is the kernel's at the limit.
+_KILLED_EXIT_CODES = frozenset({137, -9})
+_KILLED_MEANING = (
+    "Killed (SIGKILL). Unless the command sent it itself (kill -9, timeout -s KILL), it most likely ran out of "
+    "memory. Use less memory, e.g. work on the data in parts; check for a loop that grows a list without end."
+)
+
+
 def _interpret_exit_code(command: str, exit_code: int) -> str | None:
     """Return a human-readable note when a non-zero exit code is non-erroneous.
 
@@ -91,6 +100,8 @@ def _interpret_exit_code(command: str, exit_code: int) -> str | None:
     """
     if exit_code == 0:
         return None
+    if exit_code in _KILLED_EXIT_CODES:
+        return _KILLED_MEANING
 
     # Extract the last command in a pipeline/chain.
     segments = re.split(r"\s*(?:\|\||&&|[|;])\s*", command)
