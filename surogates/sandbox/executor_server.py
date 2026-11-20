@@ -448,7 +448,10 @@ def _child_main(
     # Every process under this child is this call's: a command's timeout stops them all, adopted ones too.
     own_descendants()
     # At the sandbox's memory limit the kernel kills the call's commands, not the daemon or the workspace's mount.
+    # A process writes its own score only while dumpable: the daemon is not (``main``), nor this fork of it.
+    set_dumpable(True)
     go_first_out_of_memory()
+    set_dumpable(False)
     try:
         result = run_tool(name, args, workspace, read_timestamps, history)
     except BaseException as exc:  # never die without reporting
@@ -547,6 +550,45 @@ def _give_up(reason: str, log: str | Path = "/dev/termination-log") -> None:
     os._exit(1)
 
 
+def from_inside(peer: str | None, local: str | None) -> bool:
+    """Whether a call came from inside the sandbox: from a loopback address, or from the address it reached
+    (a command connects from the sandbox's own addresses; the worker's calls come from outside: the Docker
+    gateway or its proxy, the worker pod).  No peer known: inside."""
+    import ipaddress
+
+    if not peer:
+        return True
+    try:
+        address = ipaddress.ip_address(peer.split("%", 1)[0])
+    except ValueError:
+        return True
+    mapped = getattr(address, "ipv4_mapped", None)
+    if (mapped or address).is_loopback:
+        return True
+    if local and peer == local:
+        return True
+    # Any address of this sandbox's own (a second network, an alias): bindable here means it is ours.
+    import socket
+
+    family = socket.AF_INET6 if address.version == 6 else socket.AF_INET
+    try:
+        with socket.socket(family, socket.SOCK_STREAM) as probe:
+            probe.bind((str(mapped or address), 0))
+    except OSError:
+        return False
+    return True
+
+
+def set_dumpable(on: bool) -> bool:
+    """``prctl(PR_SET_DUMPABLE)`` on this process; ``False`` where it cannot be set (not Linux)."""
+    try:
+        import ctypes
+
+        return ctypes.CDLL(None, use_errno=True).prctl(4, 1 if on else 0, 0, 0, 0) == 0
+    except (OSError, AttributeError):
+        return False
+
+
 def _token_ok(auth_header: str, token: str) -> bool:
     if not auth_header.startswith("Bearer "):
         return False
@@ -563,18 +605,26 @@ def create_app(
     require_fuse: bool = True,
     history: History | None = None,
     give_up: Callable[[str], None] | None = None,
+    allow_local: bool = True,
 ) -> FastAPI:
     """Build the daemon's FastAPI app.
 
     ``token`` and ``workspace`` are injected (instead of read from env
     inside the handlers) so tests can construct isolated apps.
 
+    Without *allow_local*, ``/execute`` refuses a call from inside the
+    sandbox (:func:`from_inside`): a command that read the token from the
+    daemon's start environment cannot run tools past the harness with it.
+    The daemon runs so (``TOOL_EXECUTOR_ALLOW_LOCAL`` not set): only the
+    ``tool-executor`` debugging client, run in the pod, needs it set.
+
     A thread's pod has a *history*: the project's real files are mounted at
     its ``project``, and ``workspace`` is the thread's copy, made from them
     before the pod reports ready.  When it can never be made in this pod,
     *give_up* is called with the reason.
     """
-    app = FastAPI()
+    # No /docs or /openapi.json: nothing for a command to find the daemon's calls by.
+    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     sem = asyncio.Semaphore(max_concurrency)
     mount = str(history.project) if history is not None else workspace
     # A master's pod has nothing to open: its workspace is the real files.
@@ -612,6 +662,12 @@ def create_app(
 
     @app.post("/execute")
     async def execute(request: Request) -> Response:
+        if not allow_local:
+            peer = request.client.host if request.client else None
+            server = request.scope.get("server")
+            if from_inside(peer, server[0] if server else None):
+                logger.warning("× /execute from inside the sandbox (%s): refused", peer)
+                return Response(content="calls from inside the sandbox are refused", status_code=403)
         auth = request.headers.get("authorization", "")
         if not _token_ok(auth, token):
             return Response(content="unauthorized", status_code=401)
@@ -697,6 +753,11 @@ def main() -> None:
     if not token:
         logger.error("TOOL_EXECUTOR_TOKEN is required")
         sys.exit(1)
+    # Not dumpable: its /proc files (environ, mem) are root's, and a command of its user cannot ptrace it (where
+    # yama lets a process trace its ancestors).  tini, PID 1, keeps the same start environment readable: a token
+    # read there still gets no call through (``allow_local``).
+    if not set_dumpable(False):
+        logger.warning("Could not make the daemon non-dumpable")
 
     # Docker/local backends bind-mount (or skip) the workspace instead of
     # FUSE-mounting it, so they set TOOL_EXECUTOR_REQUIRE_FUSE=0 to make
@@ -744,10 +805,16 @@ def main() -> None:
     import uvicorn
 
     uvicorn.run(
-        create_app(token=token, workspace=workspace, require_fuse=require_fuse, history=history, give_up=_give_up),
+        create_app(
+            token=token, workspace=workspace, require_fuse=require_fuse, history=history, give_up=_give_up,
+            # Only for the in-pod debugging client (``tool-executor``): a command may not call the daemon.
+            allow_local=os.environ.get("TOOL_EXECUTOR_ALLOW_LOCAL") == "1",
+        ),
         host="0.0.0.0",
         port=port,
         log_level="warning",
+        # The peer is the connection's: never rewritten from an X-Forwarded-For a command sends from loopback.
+        proxy_headers=False,
     )
 
 
