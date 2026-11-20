@@ -1723,7 +1723,7 @@ async def test_a_musl_bundle_missing_is_asked_for_again_at_the_next_provision():
         return out
     docker.run = run
     backend = _docker_backend(docker, executor_bundle_image_musl=MUSL_BUNDLE, image_pull="missing")
-    with pytest.raises(SandboxUnavailableError):
+    with pytest.raises(SandboxUnavailableError, match="wanted for .*the main executor bundle did not start"):
         await backend.provision(SandboxSpec(session_id="r", session_image=TASK_IMAGE))
     assert not backend._musl_images
     # The bundle is there now (a pull that worked, an operator's load): the next provision gets it.
@@ -1741,5 +1741,19 @@ async def test_on_an_arm64_host_a_musl_image_is_told_there_is_no_musl_bundle_for
     docker.logs = b"[FATAL tini (7)] exec /opt/surogates/bin/python3 failed: No such file or directory\n"
     backend = _docker_backend(docker, _never_ready(), executor_bundle_image_musl=MUSL_BUNDLE)
     with pytest.raises(SandboxUnavailableError, match="no musl executor bundle for arm64"):
+        await backend.provision(SandboxSpec(session_id="r", session_image=TASK_IMAGE))
+    assert sum(1 for c in docker.calls if c[:2] == ["run", "-d"]) == 1
+    assert not any(c[:1] == ["pull"] or (c[:2] == ["image", "inspect"] and c[2] == MUSL_BUNDLE)
+                   for c in docker.calls)
+
+
+async def test_an_image_known_as_musl_whose_musl_bundle_no_longer_starts_is_told_so():
+    docker = ImageDocker(images={TASK_IMAGE: {**_image(), "Id": "sha256:" + "dd" * 32}, BUNDLE: _image(),
+                                 MUSL_BUNDLE: _image()})
+    backend = _docker_backend(docker, _never_ready(), executor_bundle_image_musl=MUSL_BUNDLE)
+    backend._musl_images.add("sha256:" + "dd" * 32)
+    docker.exited = True
+    docker.logs = b"[FATAL tini (7)] exec /opt/surogates/bin/python3 failed: No such file or directory\n"
+    with pytest.raises(SandboxUnavailableError, match="the musl executor bundle does not start in it"):
         await backend.provision(SandboxSpec(session_id="r", session_image=TASK_IMAGE))
     assert sum(1 for c in docker.calls if c[:2] == ["run", "-d"]) == 1
