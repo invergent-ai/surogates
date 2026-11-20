@@ -369,7 +369,16 @@ async def test_a_session_image_off_the_list_is_refused_at_creation(watched, monk
 async def test_a_session_image_on_a_backend_without_them_is_refused_at_creation(watched, monkeypatch):
     chats, _daemon = watched
     monkeypatch.setattr(chats.api.app.state.settings.sandbox, "allowed_images", ["registry.example/tasks/*"])
+    monkeypatch.setattr(chats.api.app.state.settings.sandbox, "backend", "process")
+    created = await chats.api.client.post(
+        "/v1/sessions", json={"config": {"sandbox_image": "registry.example/tasks/x:1"}}, headers=chats.api.auth())
+    assert created.status_code == 400 and "Docker or Kubernetes sandbox backend" in created.text
+
+
+async def test_a_session_image_on_kubernetes_without_its_folder_is_refused_at_creation(watched, monkeypatch):
+    chats, _daemon = watched
+    monkeypatch.setattr(chats.api.app.state.settings.sandbox, "allowed_images", ["registry.example/tasks/*"])
     monkeypatch.setattr(chats.api.app.state.settings.sandbox, "backend", "kubernetes")
     created = await chats.api.client.post(
         "/v1/sessions", json={"config": {"sandbox_image": "registry.example/tasks/x:1"}}, headers=chats.api.auth())
-    assert created.status_code == 400 and "Docker sandbox backend" in created.text
+    assert created.status_code == 400 and "sandbox_workdir" in created.text

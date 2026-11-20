@@ -30,6 +30,7 @@ from kubernetes_asyncio import client, config, watch
 from kubernetes_asyncio.client import ApiException
 
 from surogates.sandbox._executor_client import ExecutorHTTPClient
+from surogates.sandbox.kubernetes_image import ImagePods
 from surogates.sandbox.history import THREAD_POD_DEADLINE
 from surogates.sandbox.base import (
     SandboxSpec,
@@ -77,6 +78,8 @@ class _PodEntry:
     ssh_netpol_name: str | None = None
     # Seconds the pod is given to stop when it is deleted: its manifest's.
     grace: int = 0
+    # A session image's pod: its uid (the pod by its name may be another one since).
+    uid: str = ""
 
 
 #: A thread's pod is given this long to stop, so its geesefs sidecar can
@@ -95,7 +98,7 @@ _THREAD_POD_READY = 600
 _RUNNING_STATUS_TTL_SECONDS = 10.0
 
 
-class K8sSandbox:
+class K8sSandbox(ImagePods):
     """Kubernetes sandbox backend.
 
     Creates one K8s pod per sandbox instance.  Implements the
@@ -131,7 +134,10 @@ class K8sSandbox:
         ssh_egress_enforced: bool = False,
         ssh_egress_baseline_cidrs: list[str] | None = None,
         token_env: str = "plain",
+        executor_bundle_image: str = "",
+        image_deployment: str = "",
     ) -> None:
+        self._init_image_pods(bundle_image=executor_bundle_image, deployment=image_deployment)
         self._namespace = namespace
         # "sha256": the pod's environment (and its spec) holds the token's digest, not the token.
         self._token_env = token_env
@@ -197,10 +203,8 @@ class K8sSandbox:
     async def provision(self, spec: SandboxSpec) -> str:
         """Create a sandbox pod and wait for it to become ready."""
         if spec.session_image:
-            # Not in a pod yet: refused rather than run in the agent-sandbox image, which has none of the task's files.
-            raise SandboxUnavailableError(
-                "A session's own sandbox image needs the Docker sandbox backend for now", classification="config",
-            )
+            # A session's own image: one pod per session, the executor bundle copied in by an init container.
+            return await self._provision_image_pod(spec, uuid.uuid4().hex)
         api = await self._get_api()
         sandbox_id = uuid.uuid4().hex
         pod_name = f"sandbox-{sandbox_id[:12]}"
@@ -341,6 +345,13 @@ class K8sSandbox:
             return
 
         api = await self._get_api()
+        if entry.spec.session_image:
+            # The session's work: its commands end, the pod stays (the reaper ends it at rest).
+            try:
+                await self._stop_image_pod(api, entry.pod_name)
+            finally:
+                self.forget(sandbox_id)
+            return
         await self._destroy_entry(api, entry)
         self._pods.pop(sandbox_id, None)
         logger.info("Destroyed K8s sandbox %s (pod %s)", sandbox_id, entry.pod_name)
@@ -353,8 +364,8 @@ class K8sSandbox:
         never raised.  The worker's role needs ``patch`` on pods for it.
         """
         entry = self._pods.get(sandbox_id)
-        if entry is None:
-            return
+        if entry is None or entry.spec.session_image:
+            return  # a session's own pod holds its work: no deadline
         api = await self._get_api()
         pod = await api.read_namespaced_pod(entry.pod_name, entry.namespace)
         if pod.status is None or pod.status.start_time is None:
@@ -397,13 +408,18 @@ class K8sSandbox:
         api = await self._get_api()
         try:
             pod = await api.read_namespaced_pod(entry.pod_name, self._namespace)
+            if entry.spec.session_image and (self._uid(pod) != entry.uid or self._terminating(pod)
+                                             or self._ended(pod)):
+                # A session's pod, by its name: replaced, going or ended since, it is not this entry's any more.
+                self.forget(sandbox_id)
+                return SandboxStatus.TERMINATED
             new_status = self._map_pod_status(pod)
             entry.status = new_status
             entry.status_checked_at = time.monotonic()
             return new_status
         except ApiException as exc:
             if exc.status == 404:
-                self._pods.pop(sandbox_id, None)
+                self.forget(sandbox_id)
                 return SandboxStatus.TERMINATED
             logger.warning(
                 "Status check for pod %s failed (HTTP %s); trusting "
@@ -414,6 +430,26 @@ class K8sSandbox:
     # ------------------------------------------------------------------
     # Pod manifest builder
     # ------------------------------------------------------------------
+
+    def _mcp_env(self, spec: SandboxSpec, sandbox_id: str) -> list[client.V1EnvVar]:
+        """The MCP proxy's URL and a sandbox token for it."""
+        # Mint a sandbox token for MCP proxy authentication.
+        from surogates.tenant.auth.jwt import create_sandbox_token
+        sandbox_token = create_sandbox_token(
+            org_id=uuid.UUID(spec.env.get("ORG_ID", "00000000-0000-0000-0000-000000000000")),
+            user_id=uuid.UUID(spec.env.get("USER_ID", "00000000-0000-0000-0000-000000000000")),
+            session_id=uuid.UUID(sandbox_id),
+            # Binds the sandbox token to its agent so the proxy can
+            # reject a spoofed ``?agent_id=``.  Absent → unbound (the
+            # proxy trusts the query param, as before).
+            agent_id=spec.env.get("SUROGATES_AGENT_ID") or None,
+            is_service_account=spec.env.get("SUROGATES_IS_SERVICE_ACCOUNT") == "1",
+            simulated=spec.simulated,
+        )
+        return [
+            client.V1EnvVar(name="MCP_PROXY_URL", value=self._mcp_proxy_url),
+            client.V1EnvVar(name="MCP_PROXY_TOKEN", value=sandbox_token),
+        ]
 
     def _build_pod_manifest(
         self,
@@ -463,25 +499,7 @@ class K8sSandbox:
         else:
             env_vars.append(client.V1EnvVar(name="TOOL_EXECUTOR_TOKEN", value=executor_token))
         if self._mcp_proxy_url:
-            env_vars.append(client.V1EnvVar(
-                name="MCP_PROXY_URL", value=self._mcp_proxy_url,
-            ))
-            # Mint a sandbox token for MCP proxy authentication.
-            from surogates.tenant.auth.jwt import create_sandbox_token
-            sandbox_token = create_sandbox_token(
-                org_id=uuid.UUID(spec.env.get("ORG_ID", "00000000-0000-0000-0000-000000000000")),
-                user_id=uuid.UUID(spec.env.get("USER_ID", "00000000-0000-0000-0000-000000000000")),
-                session_id=uuid.UUID(sandbox_id),
-                # Binds the sandbox token to its agent so the proxy can
-                # reject a spoofed ``?agent_id=``.  Absent → unbound (the
-                # proxy trusts the query param, as before).
-                agent_id=spec.env.get("SUROGATES_AGENT_ID") or None,
-                is_service_account=spec.env.get("SUROGATES_IS_SERVICE_ACCOUNT") == "1",
-                simulated=spec.simulated,
-            )
-            env_vars.append(client.V1EnvVar(
-                name="MCP_PROXY_TOKEN", value=sandbox_token,
-            ))
+            env_vars += self._mcp_env(spec, sandbox_id)
         for k, v in spec.env.items():
             if k in _DAEMON_SWITCHES:
                 continue  # the daemon's own switches: never from a tenant's spec or a skill's passthrough
@@ -992,7 +1010,8 @@ class K8sSandbox:
             if exc.status != 404:
                 logger.warning("Failed to delete pod %s: %s", entry.pod_name, exc)
 
-        await self._delete_secret_safe(api, entry.secret_name)
+        if entry.secret_name:  # a session image's pod has none
+            await self._delete_secret_safe(api, entry.secret_name)
         if entry.ssh_secret_name:
             await self._delete_secret_safe(api, entry.ssh_secret_name)
         if entry.ssh_netpol_name:

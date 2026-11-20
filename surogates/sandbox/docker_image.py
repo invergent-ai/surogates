@@ -64,10 +64,7 @@ IMAGE_APP = "surogates-image-sandbox"
 #: Names the executor and the harness's tools read for their own control (the daemon's port, workspace and history,
 #: the harness's own switches): an image that declares one gets it held for the daemon ("" or the harness's value),
 #: and its own value back in the commands' environment.
-_CONTROL_PREFIXES = ("SUROGATES_", "TOOL_EXECUTOR_", "TERMINAL_", "HISTORY_", "MCP_PROXY_", "SANDBOX_", "S3_",
-                     "GEESEFS_")
-_CONTROL_NAMES = frozenset({"PROJECT_DIR", "WORKSPACE_DIR", "USER_ID", "ORG_ID", "FORWARDED_ALLOW_IPS",
-                            "WEB_CONCURRENCY"})
+from surogates.image_entry import is_control  # noqa: E402  (the one list, also what the entry clears)
 #: Capabilities a task never needs, of Docker's default set: raw packets on a shared bridge, device nodes, file caps.
 _DROPPED_CAPS = ("NET_RAW", "MKNOD", "SETFCAP")
 #: How long a failed pull answers the sessions that waited on it, without a pull of their own.
@@ -159,10 +156,6 @@ def _is_kill(input: str) -> bool:
 def container_name(spec: SandboxSpec, sandbox_id: str) -> str:
     """The one container of a session's own image: named after the session, so no worker starts a second."""
     return f"surogates-sbx-{spec.session_id or sandbox_id}"
-
-
-def is_control(name: str) -> bool:
-    return name in _CONTROL_NAMES or name.startswith(_CONTROL_PREFIXES)
 
 
 def image_env(env: dict[str, str], declared: tuple[tuple[str, str], ...], workdir: str) -> dict[str, str]:
@@ -404,7 +397,7 @@ class ImageSessions:
         import httpx
 
         try:
-            async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{host_port}", transport=self._transport,
+            async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{host_port}", transport=self._transport, trust_env=False,
                                          timeout=5.0) as client:
                 r = await client.get("/activity", headers={"Authorization": f"Bearer {token}"})
             return r.status_code
@@ -707,7 +700,7 @@ class ImageSessions:
             import httpx
 
             try:
-                async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}", transport=self._transport,
+                async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}", transport=self._transport, trust_env=False,
                                              timeout=5.0) as client:
                     r = await client.post("/unretire", headers={"Authorization": f"Bearer {session_token(session)}"})
                 if r.status_code != 200:
@@ -725,7 +718,7 @@ class ImageSessions:
         import httpx
 
         try:
-            async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{host_port}", transport=self._transport,
+            async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{host_port}", transport=self._transport, trust_env=False,
                                          timeout=5.0) as client:
                 return (await client.get("/healthz")).status_code
         except Exception:  # noqa: BLE001
@@ -823,7 +816,7 @@ class ImageSessions:
         import httpx
 
         try:
-            async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{seen[1]}", transport=self._transport,
+            async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{seen[1]}", transport=self._transport, trust_env=False,
                                          timeout=5.0) as client:
                 r = await client.post("/retire", headers={"Authorization": f"Bearer {session_token(session)}"},
                                       json={"min_idle_seconds": idle_seconds})

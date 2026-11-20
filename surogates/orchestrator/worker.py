@@ -1474,6 +1474,8 @@ async def run_worker(settings: Settings) -> None:
             ssh_egress_enforced=settings.sandbox.ssh_egress_enforced,
             ssh_egress_baseline_cidrs=settings.sandbox.ssh_egress_baseline_cidrs,
             token_env=settings.sandbox.executor_token_env,
+            executor_bundle_image=settings.sandbox.executor_bundle_image,
+            image_deployment=settings.sandbox.image_deployment,
         )
     elif settings.sandbox.backend == "docker":
         from surogates.sandbox.docker import DockerSandbox

@@ -328,6 +328,19 @@ def _image_env_shadowed() -> dict[str, str]:
     return {str(k): str(v) for k, v in values.items()} if isinstance(values, dict) else {}
 
 
+def _image_env_file() -> dict[str, str]:
+    """The image's own environment as its pod's init container wrote it (Kubernetes, ``SUROGATES_IMAGE_ENV_FILE``:
+    the worker never sees the image there); none elsewhere."""
+    path = os.environ.get("SUROGATES_IMAGE_ENV_FILE") if in_session_image() else None
+    if not path:
+        return {}
+    try:
+        values = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return {str(k): str(v) for k, v in values.items()} if isinstance(values, dict) else {}
+
+
 def _build_child_env() -> dict[str, str]:
     """Build a restricted environment dict for the child process.
 
@@ -342,6 +355,7 @@ def _build_child_env() -> dict[str, str]:
         if key in _ALWAYS_INHERIT or key in image_keys or is_env_passthrough(key):
             env[key] = value
     env.update(_image_env_shadowed())
+    env.update(_image_env_file())
     return env
 
 
