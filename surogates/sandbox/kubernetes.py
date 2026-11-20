@@ -51,6 +51,10 @@ _DEFAULT_ACTIVE_DEADLINE = 3600  # 1 hour
 _SANDBOX_UID = 1000
 
 
+#: Environment the sandbox daemon reads as its own switches (``executor_server.main``).
+_DAEMON_SWITCHES = frozenset({"TOOL_EXECUTOR_ALLOW_LOCAL", "FORWARDED_ALLOW_IPS"})
+
+
 @dataclass
 class _PodEntry:
     """Internal bookkeeping for a provisioned sandbox pod."""
@@ -462,6 +466,8 @@ class K8sSandbox:
                 name="MCP_PROXY_TOKEN", value=sandbox_token,
             ))
         for k, v in spec.env.items():
+            if k in _DAEMON_SWITCHES:
+                continue  # the daemon's own switches: never from a tenant's spec or a skill's passthrough
             env_vars.append(client.V1EnvVar(name=k, value=v))
 
         # The worker's own environment stays in the worker. The KB tools

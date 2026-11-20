@@ -496,6 +496,8 @@ class DockerSandbox:
             "TOOL_EXECUTOR_TOKEN", "WORKSPACE_DIR", "TOOL_EXECUTOR_REQUIRE_FUSE",
             "TOOL_EXECUTOR_PORT", "SANDBOX_S3FS_INLINE", "S3_BUCKET_PATH",
             "S3_ENDPOINT", "S3_REGION", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
+            # The daemon's own switches: never from a tenant's spec or a skill's passthrough.
+            "TOOL_EXECUTOR_ALLOW_LOCAL", "FORWARDED_ALLOW_IPS",
         }
         for key, value in spec.env.items():
             if key not in reserved:

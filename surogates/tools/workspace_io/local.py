@@ -748,6 +748,16 @@ def _own_proc() -> bool:
 _PROC_FDS = os.path.isdir("/proc/self/fd") and _own_proc()
 
 
+def _dumpable() -> bool:
+    """Whether this process is dumpable: only then may another process open its ``/proc/<pid>/fd``."""
+    try:
+        import ctypes
+
+        return ctypes.CDLL(None).prctl(3, 0, 0, 0, 0) == 1  # PR_GET_DUMPABLE
+    except (OSError, AttributeError):
+        return True
+
+
 def _fd_path(fd: int) -> str:
     """A path that opens the file or folder of this process's descriptor *fd*
     (also from a child process: it names this process, not ``self``)."""
@@ -1063,7 +1073,17 @@ class LocalWorkspaceIO:
             dir=base, ignore_cleanup_errors=True,
         ) as folder:
             local = Path(folder) / Path(key).name
-            os.symlink(_fd_path(fh.fileno()), local)
+            if _dumpable():
+                os.symlink(_fd_path(fh.fileno()), local)
+            else:
+                # Not dumpable (the sandbox daemon's tool child): the kernel lets no other process open this
+                # process's /proc/<pid>/fd, and a parser that converts through LibreOffice is one.  A private copy
+                # (the folder is 0700) of the very file the walk reached, read from its descriptor.
+                with open(local, "xb") as copy:
+                    shutil.copyfileobj(fh, copy)
+                # With the file's own times: what keys a parsed document's cache (``read_file``) stays the file's.
+                st = os.fstat(fh.fileno())
+                os.utime(local, ns=(st.st_atime_ns, st.st_mtime_ns))
             yield local
 
     async def which(self, name: str) -> bool:

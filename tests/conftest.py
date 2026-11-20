@@ -217,3 +217,23 @@ def tmp_asset_root(tmp_path: Path) -> Path:
         (user_root / subdir).mkdir(parents=True, exist_ok=True)
 
     return tmp_path
+
+
+@pytest.fixture(autouse=True)
+def _keep_the_test_process_dumpable():
+    """``executor_server.main()`` makes the daemon not dumpable; a test that runs it in the test's own process
+    would leave the process so for every later test of its worker (a non-dumpable process hands parsers copies,
+    and its /proc files are root's).  Put back what it was."""
+    from surogates.sandbox.executor_server import set_dumpable
+
+    try:
+        import ctypes
+
+        prctl = ctypes.CDLL(None).prctl
+        before = prctl(3, 0, 0, 0, 0)  # PR_GET_DUMPABLE
+    except (OSError, AttributeError):
+        yield
+        return
+    yield
+    if prctl(3, 0, 0, 0, 0) != before:
+        set_dumpable(before == 1)
