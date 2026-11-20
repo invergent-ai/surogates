@@ -1231,18 +1231,20 @@ async def test_a_call_finds_the_container_where_it_is_now():
     assert backend._entries[sid].host_port == 33777 and await backend.status(sid) == SandboxStatus.RUNNING
 
 
-async def test_a_retired_executor_that_was_not_removed_is_started_fresh_and_the_call_runs(monkeypatch):
+async def test_a_retired_executor_that_was_not_removed_is_taken_back_and_the_call_runs(monkeypatch):
     from surogates.sandbox import docker_image
 
     monkeypatch.setattr(docker_image, "_RETIRED_WAIT_S", 0.05)
     docker = ImageDocker(images={TASK_IMAGE: _image(), BUNDLE: _image()})
+    asked: list[str] = []
 
-    def healthz(request):
-        # Retired until its executor restarts.
-        return httpx.Response(200 if any(c[:1] == ["restart"] for c in docker.calls) else 410)
+    def executor(request):
+        asked.append(request.url.path)
+        # Retired until a worker takes it back (no restart: same port, same processes).
+        return httpx.Response(200 if "/unretire" in asked else 410)
     backend = _docker_backend(docker)
     sid = await backend.provision(SandboxSpec(session_id="root-1", session_image=TASK_IMAGE))
-    backend._transport = httpx.MockTransport(healthz)
+    backend._transport = httpx.MockTransport(executor)
     answers = [SandboxUnavailableError("The sandbox at 127.0.0.1:33000 was retired at rest", classification="retired"),
                '{"ok": true}']
 
@@ -1253,8 +1255,23 @@ async def test_a_retired_executor_that_was_not_removed_is_started_fresh_and_the_
         return answer
     backend._client.execute = fake_execute
     assert await backend.execute(sid, "read_file", "{}") == '{"ok": true}'
-    assert ["restart", "-t", "2", "cid-1"] in docker.calls
-    assert not any(c[:1] in (["rm"], ["rename"]) for c in docker.calls)
+    assert "/unretire" in asked
+    assert not any(c[:1] in (["restart"], ["stop"], ["rm"], ["rename"]) for c in docker.calls)
+
+
+def test_the_executor_is_taken_back_only_from_outside_and_with_its_token(tmp_path):
+    from fastapi.testclient import TestClient
+
+    from surogates.sandbox import executor_server
+
+    app = executor_server.create_app(token="tok", workspace=str(tmp_path), require_fuse=False)
+    auth = {"Authorization": "Bearer tok"}
+    client = TestClient(app)
+    assert client.post("/retire", json={"min_idle_seconds": 0}, headers=auth).json()["retired"] is True
+    assert client.get("/healthz").status_code == 410
+    assert client.post("/unretire").status_code == 401
+    assert client.post("/unretire", headers=auth).status_code == 200
+    assert client.get("/healthz").status_code == 200
 
 
 async def test_a_retired_executor_someone_restarted_meanwhile_is_not_restarted_again(monkeypatch):

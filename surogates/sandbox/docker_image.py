@@ -321,6 +321,7 @@ class ImageSessions:
         run_args = (
             "--name", "",  # filled per provision: container_name()
             "--label", "surogates.sandbox_image=1",
+            "--label", f"surogates.session_image={image}",
             "--label", f"surogates.executor_bundle={self._bundle_image}",
             "--mount", f"type=image,source={self._bundle_image},target={BUNDLE_MOUNT},"
                        f"image-subpath={BUNDLE_MOUNT.lstrip('/')}",
@@ -364,7 +365,8 @@ class ImageSessions:
 
     async def _port_of(self, container_id: str, name: str = "") -> tuple[bool, int | None] | None:
         """(running, its host port) of *container_id* (Docker picks the port at each start); ``None``: gone, or, with
-        *name*, no longer under the session's name (set aside: never worked in again)."""
+        *name*, no longer under the session's name (set aside: never worked in again).  Docker unsure (an inspect
+        failing for another reason): :class:`SandboxUnavailableError`."""
         code, stdout, stderr = await self._docker.run(
             ["inspect", "--format", "{{.Name}}\n{{.State.Running}}\n{{json .NetworkSettings.Ports}}", container_id],
         )
@@ -474,7 +476,8 @@ class ImageSessions:
                                               classification="docker")
             # A run that failed at its start may leave its container created: removed, only if it is this run's.
             await self._remove_ours(name, sandbox_id)
-            raise SandboxUnavailableError(f"docker run failed (exit {code}): {said}", classification="docker")
+            raise SandboxUnavailableError(f"docker run of {run.image} failed (exit {code}): {said}",
+                                          classification="docker")
         container_id = stdout.decode().strip().splitlines()[0]
         if stderr.strip():
             said = stderr.decode(errors="replace").strip()
@@ -543,14 +546,21 @@ class ImageSessions:
         revived = False
         while time.monotonic() < deadline:
             for cid, state in await self._session_containers(name):
-                if state in ("exited", "dead") and cid == started and await self._crashed(cid):
-                    # Ended at once after this provision started it: it will not start (its files kept aside).
-                    await asyncio.shield(self._set_aside(cid, spec.session_id))
-                    return None
+                if state in ("exited", "dead") and cid == started:
+                    if await self._crashed(cid):
+                        # Ended at once after this provision started it: it will not start (its files kept aside).
+                        await asyncio.shield(self._set_aside(cid, spec.session_id))
+                        return None
+                    raise SandboxUnavailableError(  # a Stop stopped it meanwhile: it stays the session's
+                        "The session's container was stopped meanwhile (a Stop): its files kept; the next call starts "
+                        "it again", classification="readiness",
+                    )
                 if state == "exited" and revived and not started:
-                    # Brought back from retired but stopped meanwhile: started once more, as this provision's.
-                    if (await self._docker.run(["start", cid]))[0] == 0:
-                        started = cid
+                    # Taken back from retired but stopped meanwhile: started once more, as this provision's.
+                    if (await self._docker.run(["start", cid]))[0] != 0:
+                        await asyncio.shield(self._set_aside(cid, spec.session_id))
+                        return None
+                    started = cid
                     continue
                 if state != "running":
                     continue
@@ -558,26 +568,21 @@ class ImageSessions:
                 if not seen or not seen[0] or seen[1] is None:
                     continue
                 host_port = seen[1]
+                stamp = await self._started_at(cid)
                 try:
                     await self._wait_ready(host_port, cid)
-                except SandboxUnavailableError as exc:
-                    if exc.classification == "retired" and not revived:
-                        # Retired for the reaper: removed in a moment, or kept (it failed); kept, it comes back.
+                except Exception as exc:
+                    retired = isinstance(exc, SandboxUnavailableError) and exc.classification == "retired"
+                    if retired and not revived:
+                        # Retired for the reaper: removed in a moment, or kept (it failed); kept, it is taken back.
                         revived = True
-                        if await self._back_from_retired(cid, name):
+                        if await self._back_from_retired(cid, name, spec.session_id):
                             deadline = time.monotonic() + _TAKE_OVER_S
                             break
                         return None
-                    if (started == cid and await self._crashed(cid)) or exc.classification == "retired":
-                        await asyncio.shield(self._set_aside(cid, spec.session_id))
-                        return None
-                    await asyncio.shield(self._docker.run(["stop", cid]))
-                    raise SandboxUnavailableError(
-                        f"The session's container {cid} does not answer ({exc}): stopped, its files kept; the "
-                        "next call starts it again", classification="readiness",
-                    ) from exc
-                except Exception as exc:
-                    if started == cid and await self._crashed(cid):
+                    if not retired and await self._started_at(cid) not in ("", stamp):
+                        break  # started again by someone else while this waited: looked at again, at its new port
+                    if retired or (started == cid and await self._crashed(cid)):
                         await asyncio.shield(self._set_aside(cid, spec.session_id))
                         return None
                     await asyncio.shield(self._docker.run(["stop", cid]))
@@ -661,7 +666,7 @@ class ImageSessions:
         # Retired for the reaper (the session was at rest): it removes the container in a moment.  The call never
         # ran.  Removed: the next call makes a new one.  Kept (the reaper failed, or a turn came first): its
         # executor comes back, its files as they were, and the call runs.
-        if not await self._back_from_retired(entry.container_id, named):
+        if not await self._back_from_retired(entry.container_id, named, entry.spec.session_id):
             raise SandboxUnavailableError("The session's container was removed at rest: the next call starts a new "
                                           "one from its image")
         port = await self._start_again(entry)
@@ -671,36 +676,35 @@ class ImageSessions:
             timeout=timeout or entry.spec.timeout,
         )
 
-    async def _back_from_retired(self, cid: str, name: str) -> bool:
+    async def _back_from_retired(self, cid: str, name: str, session: str) -> bool:
         """After a 410: wait for the reaper to remove *cid* (False: gone, or no longer under the session's *name*);
-        still there after ``_RETIRED_WAIT_S``, the reaper kept it: its executor restarted once (a fresh one, the files
-        as they were) unless someone did meanwhile (True; a stopped one is left to the caller's start).  One restart
-        however many calls of this worker wait on it."""
+        still there after ``_RETIRED_WAIT_S``, the reaper kept it, and its executor is taken back (``/unretire``:
+        no restart, its port and processes as they are; idempotent, so any number of waiting calls on any worker may
+        ask).  True: there (a stopped one is left to the caller's start)."""
         deadline = time.monotonic() + _RETIRED_WAIT_S
         while time.monotonic() < deadline:
             if await self._port_of(cid, name) is None:
                 return False
             await asyncio.sleep(0.5)
-        locks = self.__dict__.setdefault("_restarts", {})
-        lock = locks.setdefault(cid, asyncio.Lock())
-        try:
-            async with lock:
-                seen = await self._port_of(cid, name)
-                if seen is None:
-                    return False
-                running, port = seen
-                if running and port is not None and await self._health(port) == 200:
-                    return True  # restarted already (another call, another worker)
-                if running:
-                    await self._docker.run(["restart", "-t", "2", cid])
-                    # Ready before the lock goes: the next waiter finds it answering, never restarts it again.
-                    seen = await self._port_of(cid, name)
-                    if seen is not None and seen[0] and seen[1] is not None:
-                        await self._wait_ready(seen[1], cid)
-        finally:
-            if not lock.locked():
-                locks.pop(cid, None)
-        return await self._port_of(cid, name) is not None
+        seen = await self._port_of(cid, name)
+        if seen is None:
+            return False
+        running, port = seen
+        if running and port is not None:
+            import httpx
+
+            try:
+                async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}", transport=self._transport,
+                                             timeout=5.0) as client:
+                    await client.post("/unretire", headers={"Authorization": f"Bearer {session_token(session)}"})
+            except Exception:  # noqa: BLE001 - the caller's wait for its executor tells
+                logger.warning("Could not take the retired container %s back", cid, exc_info=True)
+        return True
+
+    async def _started_at(self, cid: str) -> str:
+        """When *cid* last started (Docker's own stamp; "" unknown): a change tells a start by someone else."""
+        code, out, _ = await self._docker.run(["inspect", "--format", "{{.State.StartedAt}}", cid])
+        return out.decode(errors="replace").strip() if code == 0 else ""
 
     async def _health(self, host_port: int) -> int | None:
         import httpx
@@ -725,7 +729,7 @@ class ImageSessions:
                 seen = await self._port_of(cid)
             except SandboxUnavailableError:
                 return False
-            return not (seen and seen[1] is not None and await self._health(seen[1]) == 200)
+            return not (seen and seen[1] is not None and await self._health(seen[1]) in (200, 410))
         return exit_code.strip() not in ("0", "137", "143")
 
     async def _start_again(self, entry: Any) -> int:
@@ -737,19 +741,26 @@ class ImageSessions:
             raise SandboxUnavailableError(
                 f"The session's container did not start again: {err.decode(errors='replace').strip()[:300]}",
             )
-        seen = await self._port_of(entry.container_id)
-        port = seen[1] if seen and seen[0] else None
-        try:
-            if port is None:
-                raise SandboxUnavailableError("The session's container did not come back")
-            await self._wait_ready(port, entry.container_id)
-        except Exception:
-            # One that crashed at its start is set aside (its files kept), so the next call makes a new one; one
-            # stopped meanwhile (a Stop) stays the session's.
-            if await self._crashed(entry.container_id):
-                await asyncio.shield(self._set_aside(entry.container_id, entry.spec.session_id))
-            raise
-        return port
+        stamp = await self._started_at(entry.container_id)
+        for look in (1, 2):
+            seen = await self._port_of(entry.container_id)
+            port = seen[1] if seen and seen[0] else None
+            try:
+                if port is None:
+                    raise SandboxUnavailableError("The session's container did not come back")
+                await self._wait_ready(port, entry.container_id)
+                return port
+            except Exception:
+                now = await self._started_at(entry.container_id)
+                if look == 1 and now not in ("", stamp):
+                    stamp = now  # started again by someone else meanwhile: its new port, once more
+                    continue
+                # One that crashed at its start is set aside (its files kept), so the next call makes a new one;
+                # one stopped meanwhile (a Stop) stays the session's.
+                if await self._crashed(entry.container_id):
+                    await asyncio.shield(self._set_aside(entry.container_id, entry.spec.session_id))
+                raise
+        raise SandboxUnavailableError("The session's container did not come back")
 
     def created(self, sandbox_id: str) -> bool:
         """Whether *sandbox_id* is a container this provision made new from the image (not one taken over or
@@ -786,8 +797,12 @@ class ImageSessions:
         await self._docker.run(["stop", container_name(SandboxSpec(session_id=session_id), session_id)])
 
     async def _retire(self, cid: str, session: str, idle_seconds: float) -> dict | None:
-        """``POST /retire`` to a running container's executor; ``None`` when it did not answer."""
-        seen = await self._port_of(cid)
+        """``POST /retire`` to a running container's executor; ``None`` when it did not answer, ``{}`` when Docker
+        could not tell where it is (kept, not counted as unanswered)."""
+        try:
+            seen = await self._port_of(cid)
+        except SandboxUnavailableError:
+            return {}
         if not seen or not seen[0] or seen[1] is None:
             return None
         import httpx
@@ -839,6 +854,8 @@ class ImageSessions:
                     continue
                 if state.strip() == "running":
                     retired = await self._retire(cid, session, idle_seconds)
+                    if retired == {}:
+                        continue  # Docker unsure: kept, asked again next round
                     if retired is None:
                         unanswered[cid] = unanswered.get(cid, 0) + 1
                         if unanswered[cid] >= _UNANSWERED_ROUNDS:

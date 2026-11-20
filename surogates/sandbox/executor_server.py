@@ -743,6 +743,21 @@ def create_app(
             activity["retired"] = not now["running"] and not now["background_running"] and now["idle_seconds"] >= min_idle
         return Response(content=json.dumps({**now, "retired": activity["retired"]}), media_type="application/json")
 
+    @app.post("/unretire")
+    async def unretire(request: Request) -> Response:
+        """Take a retired sandbox back: its reaper did not remove it (the worker that met the 410 waited for that),
+        and a session works in it again.  Idempotent."""
+        if not allow_local:
+            peer = request.client.host if request.client else None
+            server = request.scope.get("server")
+            if from_inside(peer, server[0] if server else None):
+                return Response(content="calls from inside the sandbox are refused", status_code=403)
+        if not _token_ok(request.headers.get("authorization", ""), token):
+            return Response(content="unauthorized", status_code=401)
+        activity["retired"] = False
+        activity["last"] = time.monotonic()
+        return Response(content=json.dumps(activity_now()), media_type="application/json")
+
     @app.post("/execute")
     async def execute(request: Request) -> Response:
         if not allow_local:
