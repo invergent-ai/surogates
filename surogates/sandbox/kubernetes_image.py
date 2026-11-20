@@ -67,7 +67,8 @@ _TAKE_OVER_S = 600.0
 #: Waiting reasons of a container that will never start as it is.
 _NEVER_STARTS = ("InvalidImageName", "ErrImageNeverPull", "CreateContainerConfigError")
 #: A pull that failed for good (its message), not one the kubelet retries with luck (a registry's 429, a timeout).
-_PULL_REFUSED = ("manifest unknown", "failed to resolve reference", "unauthorized", "denied", "no such host")
+_PULL_REFUSED = re.compile(r'manifest unknown|failed to resolve reference "[^"]*": [^\n]*: not found\s*$|'
+                           r"unauthorized|access denied|pull access denied", re.IGNORECASE)
 _LABEL_VALUE_RE = re.compile(r"[A-Za-z0-9]([A-Za-z0-9_.-]{0,61}[A-Za-z0-9])?")
 #: How long a provision waits for the reaper to delete a pod whose executor it retired, before taking it back.
 _RETIRED_WAIT_S = 20.0
@@ -116,7 +117,7 @@ class ImagePods:
         except ApiException as exc:
             if exc.status == 404:
                 return None
-            raise SandboxUnavailableError(f"Could not read the session's pod {name}: {exc}") from exc
+            raise SandboxUnavailableError(f"Could not read the session's pod {name}: {exc.status} {exc.reason}") from exc
 
     async def _force_delete_if_stuck(self, api: Any, pod: Any) -> None:
         if self._stuck_going(pod):
@@ -169,8 +170,7 @@ class ImagePods:
                 continue
             if waiting.reason in _NEVER_STARTS:
                 return True
-            if waiting.reason in ("ErrImagePull", "ImagePullBackOff") and any(
-                    word in (waiting.message or "").lower() for word in _PULL_REFUSED):
+            if waiting.reason in ("ErrImagePull", "ImagePullBackOff") and _PULL_REFUSED.search(waiting.message or ""):
                 return True
         return False
 
@@ -191,12 +191,14 @@ class ImagePods:
         body = client.V1DeleteOptions(grace_period_seconds=0, preconditions=client.V1Preconditions(uid=uid or None))
         try:
             await api.delete_namespaced_pod(name, self._namespace, body=body)
+        except (aiohttp.ClientError, OSError, asyncio.TimeoutError):
+            return False  # the API not reached: unsure, kept (asked again)
         except ApiException as exc:
             if exc.status == 404:
                 return True
             if exc.status == 409:  # another pod by now
                 return False
-            raise SandboxUnavailableError(f"Could not delete the session's pod {name}: {exc}") from exc
+            raise SandboxUnavailableError(f"Could not delete the session's pod {name}: {exc.status} {exc.reason}") from exc
         return True
 
     async def _executor_answers(self, ip: str, session: str) -> int | None:
@@ -389,8 +391,12 @@ class ImagePods:
                     made = await api.create_namespaced_pod(self._namespace, manifest)
                     made_uid = self._uid(made)
                 except ApiException as exc:
-                    if exc.status != 409:  # 409: another worker made the session's pod just now (waited for)
+                    if exc.status == 429 or (exc.status or 0) >= 500:
+                        why = f"the API answered {exc.status} {exc.reason}"
+                    elif exc.status != 409:  # 409: another worker made the session's pod just now (waited for)
                         raise SandboxUnavailableError(self._classify_create_pod_failure(exc)) from exc
+                except (aiohttp.ClientError, OSError, asyncio.TimeoutError) as exc:
+                    why = f"the API was not reached ({type(exc).__name__})"
             elif pod is not False:
                 uid = self._uid(pod)
                 if self._terminating(pod):
@@ -411,6 +417,8 @@ class ImagePods:
                     # Asked whether ready or not: a retired executor's /healthz answers 410, so its pod reads not
                     # ready, and it is still the session's to take back.
                     answered = await self._executor_answers(ip, spec.session_id)
+                    if answered is not None:
+                        silent_since = None
                     if answered not in (401, 410) and not self._is_pod_ready(pod):
                         answered, why = -1, self._why_not(pod) or "starting"
                     if answered == 401:
@@ -467,6 +475,14 @@ class ImagePods:
         pod = await self._read_pod(api, name)
         if pod is None or self._terminating(pod):
             return
+        # One Stop a pod: a pause asks twice in a row (this worker's sandbox, then the session's pod anywhere).
+        stops = self.__dict__.setdefault("_recent_stops", {})
+        now = time.monotonic()
+        for uid in [u for u, t in stops.items() if now - t > 60]:
+            stops.pop(uid, None)
+        if self._uid(pod) in stops:
+            return
+        stops[self._uid(pod)] = now
         session = ((pod.metadata.annotations or {}) if pod.metadata else {}).get("surogates.ai/session") or ""
         ip = pod.status.pod_ip if pod.status else ""
         refused = False
@@ -493,7 +509,8 @@ class ImagePods:
                     # The kubelet reaches its executor: alive, the worker's own network blinked. Kept.
                     logger.warning("The pod %s could not be reached for its Stop but is ready: kept", name)
                     return
-        await self._delete_pod(api, name, self._uid(pod))
+        if not await self._delete_pod(api, name, self._uid(pod)):
+            return  # another pod by now
         logger.info("Deleted the pod %s: its executor %s", name,
                     "refuses this deployment's token" if refused else "could not be reached for the Stop")
 

@@ -201,11 +201,13 @@ async def test_a_pod_that_never_gets_ready_is_kept_and_the_call_fails(k8s, monke
 
 
 async def test_a_pod_this_provision_made_that_cannot_pull_is_deleted_and_says_why(k8s):
-    k8s._api = _api(GONE, _pod(False, uid="mine", phase="Pending", waiting="ImagePullBackOff",
-                               said="manifest unknown"),
+    k8s._api = _api(GONE, _pod(False, uid="mine", phase="Pending", waiting="ErrImagePull",
+                               said='failed to pull and unpack image "registry.example/tasks/repo-fix:1": failed to '
+                                    'resolve reference "registry.example/tasks/repo-fix:1": registry.example/tasks/'
+                                    'repo-fix:1: not found'),
                     create={"return_value": _pod(uid="mine")})
     with patch("surogates.sandbox.kubernetes_image.asyncio.sleep", AsyncMock()), \
-            pytest.raises(SandboxUnavailableError, match="ImagePullBackOff"):
+            pytest.raises(SandboxUnavailableError, match="ErrImagePull"):
         await k8s.provision(_spec())
     assert k8s._api.delete_namespaced_pod.await_args.kwargs["body"].preconditions.uid == "mine"
 
@@ -419,7 +421,11 @@ async def test_the_executors_stop_ends_every_command_from_outside_only(tmp_path)
 
 
 async def test_a_transient_pull_error_is_waited_out(k8s):
-    k8s._api = _api(GONE, _pod(False, uid="mine", phase="Pending", waiting="ErrImagePull", said="i/o timeout"),
+    k8s._api = _api(GONE, _pod(False, uid="mine", phase="Pending", waiting="ErrImagePull",
+                               said='failed to pull and unpack image "registry.example/tasks/repo-fix:1": failed to '
+                                    'resolve reference "registry.example/tasks/repo-fix:1": failed to do request: '
+                                    'Head "https://registry.example/v2/tasks/repo-fix/manifests/1": dial tcp '
+                                    '203.0.113.9:443: i/o timeout'),
                     _pod(uid="mine"), create={"return_value": _pod(uid="mine")})
     with patch("surogates.sandbox.kubernetes_image.asyncio.sleep", AsyncMock()):
         sid = await k8s.provision(_spec())
@@ -509,3 +515,21 @@ def test_on_kubernetes_the_mark_must_be_a_label_value(k8s):
     from surogates.sandbox.docker_image import deployment_id
 
     assert deployment_id("stack-a-") == "stack-a-"  # still a Docker mark, as before
+
+
+async def test_one_stop_a_pod_when_a_pause_asks_twice(k8s, monkeypatch):
+    import httpx
+
+    asked = []
+    real = httpx.AsyncClient
+
+    def client(*a, **kw):
+        def answer(request):
+            asked.append(request.url.path)
+            return httpx.Response(200, json={"killed": 0})
+        return real(transport=httpx.MockTransport(answer), timeout=5.0)
+    monkeypatch.setattr(httpx, "AsyncClient", client)
+    k8s._api = _api(_pod(), _pod())
+    await k8s.stop_image_of_session(SESSION)
+    await k8s.stop_image_of_session(SESSION)
+    assert asked == ["/stop"]
