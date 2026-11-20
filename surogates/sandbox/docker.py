@@ -203,11 +203,13 @@ class DockerSandbox(ImageSessions):
         executor_bundle_image: str = "",
         image_pull: str = "missing",
         image_pull_timeout: float = 900,
+        image_deployment: str = "",
         docker: _DockerDriver | None = None,
         httpx_transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self._image = image
-        self._init_image_sessions(bundle_image=executor_bundle_image, pull=image_pull, pull_timeout=image_pull_timeout)
+        self._init_image_sessions(bundle_image=executor_bundle_image, pull=image_pull, pull_timeout=image_pull_timeout,
+                                  deployment=image_deployment)
         self._port_base = executor_port_base
         self._ready_timeout = ready_timeout
         self._network = network
@@ -243,6 +245,7 @@ class DockerSandbox(ImageSessions):
             executor_bundle_image=sandbox.executor_bundle_image,
             image_pull=sandbox.docker_image_pull,
             image_pull_timeout=sandbox.docker_image_pull_timeout,
+            image_deployment=sandbox.image_deployment,
         )
 
     # ------------------------------------------------------------------
@@ -394,6 +397,12 @@ class DockerSandbox(ImageSessions):
         entry = self._entries.get(sandbox_id)
         if entry is None:
             raise ValueError(f"Unknown sandbox: {sandbox_id}")
+        if entry.image:
+            try:
+                return await self.execute_in_image(entry, name, input, timeout)
+            except SandboxUnavailableError:
+                entry.status = SandboxStatus.FAILED
+                raise
         try:
             return await self._client.execute(
                 host="127.0.0.1",

@@ -123,7 +123,13 @@ class SandboxPool:
                     session_id,
                     status.value,
                 )
-                await self._backend.destroy(sandbox_id)
+                forget = getattr(self._backend, "forget", None)
+                if self._in_its_image(session_id) and forget is not None:
+                    # Its container is the session's work, and another worker may be calling into it: never stopped
+                    # here.  The provision takes it over, starts it again, or makes a new one.
+                    forget(sandbox_id)
+                else:
+                    await self._backend.destroy(sandbox_id)
 
             # Provision a new sandbox.
             sandbox_id = await self._backend.provision(spec)

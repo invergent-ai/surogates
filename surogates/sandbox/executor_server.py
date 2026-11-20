@@ -68,6 +68,8 @@ logger = logging.getLogger("tool-executor")
 DEFAULT_PORT = 8071
 DEFAULT_TIMEOUT = 300
 MAX_CONCURRENCY = 8
+# How long a background command a session waits on counts as use of its sandbox: as long as the worker watches one.
+_WATCHED_AT_MOST_S = 3600.0
 # How often a running call looks whether its caller has hung up.
 _DISCONNECT_POLL_S = 0.5
 
@@ -656,6 +658,8 @@ def create_app(
     @app.get("/healthz")
     async def healthz() -> Response:
         nonlocal opened, failed
+        if activity["retired"]:
+            return Response(content="retired", status_code=410)
         # When the workspace is not a FUSE mount (Docker bind-mount or
         # ephemeral), the FUSE check is the wrong readiness signal; the
         # backend disables it via require_fuse=False.
@@ -681,13 +685,17 @@ def create_app(
         return Response(content="ok", status_code=200)
 
     def waited_on() -> int:
-        """The background commands still running that a session waits to hear the end of (or a monitor watches):
-        a forgotten server or ``tail -f`` nobody waits on does not keep a sandbox in use."""
+        """What a session still waits on here: background commands running that it waits to hear the end of (or a
+        monitor watches), for at most the hour a watch lasts, and ends not yet drained by the worker.  A forgotten
+        server or ``tail -f`` nobody waits on does not keep a sandbox in use."""
         from surogates.tools.utils.process_registry import process_registry
 
         with process_registry._lock:
             running = list(process_registry._running.values())
-        return sum(1 for p in running if not p.exited and (p.notify_on_complete or p.watch_lines))
+        now = time.time()
+        watched = sum(1 for p in running if not p.exited and (p.notify_on_complete or p.watch_lines)
+                      and now - (p.started_at or now) < _WATCHED_AT_MOST_S)
+        return watched + process_registry.completion_queue.qsize()
 
     def activity_now() -> dict:
         idle = 0.0 if activity["running"] else time.monotonic() - activity["last"]
@@ -733,13 +741,33 @@ def create_app(
         if activity["retired"]:
             # Retired for its reaper (``/retire``): a call now would be lost with it.
             return Response(content="this sandbox is retired", status_code=410)
+        # Counted before any await: a /retire between the look above and the count could not see it.
+        activity["running"] += 1
 
-        payload = await request.json()
+        def uncount(used: bool = True) -> None:
+            activity["running"] -= 1
+            if used:
+                activity["last"] = time.monotonic()
+
+        try:
+            payload = await request.json()
+        except Exception:
+            uncount()
+            raise
         name = payload.get("name") or ""
         args = payload.get("args") or {}
         timeout = float(payload.get("timeout") or default_timeout)
 
+        if name == "_background":
+            # A drain reads memory and never waits on a tool: no slot, so the
+            # worker's watch is answered while long calls fill them.  The
+            # worker's own look, no use of the sandbox: the idle clock stays.
+            uncount(used=False)
+            result = drain_background(args)
+            return Response(content=result, media_type="application/json")
+
         if not name:
+            uncount()
             return Response(
                 content=json.dumps({
                     "exit_code": 1,
@@ -760,16 +788,12 @@ def create_app(
         if name == "_history" and history is not None and require_fuse and not workspace_mounted(mount, mounts_path):
             # The sidecar went, and /project is an empty folder: a landing
             # written there would never reach the bucket.
+            uncount()
             return Response(
                 content=json.dumps({"error": f"The project's files are not mounted at {mount}"}),
                 media_type="application/json",
             )
 
-        if name == "_background":
-            # A drain reads memory and never waits on a tool: no slot, so the
-            # worker's watch is answered while long calls fill them.
-            result = drain_background(args)
-            return Response(content=result, media_type="application/json")
         async def run() -> str:
             async with sem:
                 if runs_in_daemon(name, args):
@@ -783,14 +807,11 @@ def create_app(
 
         # A caller that hangs up (a stopped agent's call, cancelled) wants no result: the call stops, its child
         # killed, and frees its slot, instead of running on to its own timeout.
-        activity["running"] += 1
-
         async def counted() -> str:
             try:
                 return await run()
             finally:
-                activity["running"] -= 1
-                activity["last"] = time.monotonic()
+                uncount()
 
         work = asyncio.ensure_future(counted())
         while not work.done():

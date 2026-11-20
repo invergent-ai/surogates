@@ -54,6 +54,8 @@ COPY surogates/ /build/surogates/
 # The locked dependencies as wheels for the oldest glibc we serve, checked against uv.lock's
 # hashes; the project itself last, without them. A dependency with no such wheel fails the
 # build here, not a session.
+# And the time zone database as a package: many task images have none in /usr/share/zoneinfo
+# (ubuntu:24.04), and the executor's modules read ZoneInfo("UTC") at import.
 RUN case "$TARGETARCH" in \
         amd64) platform=x86_64-manylinux_2_28 ;; \
         arm64) platform=aarch64-manylinux_2_28 ;; \
@@ -63,8 +65,10 @@ RUN case "$TARGETARCH" in \
     && uv export --frozen --no-dev --no-emit-project -o /tmp/requirements.txt \
     && uv pip install --python /opt/surogates/bin/python3 --break-system-packages \
         --python-platform "$platform" --only-binary :all: -r /tmp/requirements.txt \
+    && printf 'tzdata==2025.2 --hash=sha256:1a403fada01ff9221ca8044d701868fa132215d84beb92242d9acd2147f667a8\n' > /tmp/tz.txt \
+    && uv pip install --python /opt/surogates/bin/python3 --break-system-packages --only-binary :all: -r /tmp/tz.txt \
     && uv pip install --python /opt/surogates/bin/python3 --break-system-packages --no-deps /build \
-    && rm -rf /build /tmp/requirements.txt
+    && rm -rf /build /tmp/requirements.txt /tmp/tz.txt
 COPY --from=static /static/ /opt/surogates/bin/
 # Byte-compiled with hashes that are never checked against the sources' times: the tree is
 # read-only where it runs. A few dependencies ship Python 2 files that never import (aenum's
@@ -72,6 +76,7 @@ COPY --from=static /static/ /opt/surogates/bin/
 # from the bundle alone.
 RUN (/opt/surogates/bin/python3 -m compileall -qq -j 4 --invalidation-mode unchecked-hash /opt/surogates/python || true) \
     && /opt/surogates/bin/python3 -I -c "import surogates.image_entry; from surogates.sandbox.executor_server import init_registry; init_registry()" \
+    && /opt/surogates/bin/python3 -I -c "import importlib.util, sys; sys.exit(importlib.util.find_spec('tzdata') is None)" \
     && /opt/surogates/bin/python3 -I -c "import json, platform, sys; json.dump({'python': platform.python_version(), 'glibc_floor': '2.28', 'arch': platform.machine()}, open('/opt/surogates/bundle.json', 'w'))"
 
 # ── The bundle ──────────────────────────────────────────────────────
