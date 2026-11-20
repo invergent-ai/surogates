@@ -1980,7 +1980,18 @@ class AgentHarness(
             for skill in skills
             if needs_unavailable_tool(skill, unavailable) or expert_unreachable(skill, unavailable)
         ) - {None}
-        skill_scope.set(SkillScope(hidden=hidden, experts_reachable=CONSULT_TOOL not in unavailable))
+        skill_scope.set(SkillScope(
+            hidden=hidden, experts_reachable=CONSULT_TOOL not in unavailable,
+            can_run_commands=self._commands_reachable(session),
+        ))
+
+    def _commands_reachable(self, session: Session) -> bool:
+        """Whether the session can run a command in its sandbox, where a skill's files are staged: its terminal,
+        or a coding agent working there (``run_coding_agent``).  An environment's own terminal (an MCP tool)
+        runs elsewhere."""
+        self._narrow_prompt_tools(session)
+        unavailable = getattr(self._prompt, "unavailable_tools", frozenset())
+        return not ({"terminal", "run_coding_agent"} <= set(unavailable))
 
     def _scope_experts_before_the_turn(self, session: Session) -> None:
         """``_withhold_from_experts`` for an expert run before the turn's tool
@@ -2730,7 +2741,7 @@ class AgentHarness(
                 self._scope_experts_before_the_turn(session)
                 # A user's /<skill> is the user's choice: no skill is hidden
                 # from it (nor by an earlier attempt's scope in this task).
-                skill_scope.set(SkillScope())
+                skill_scope.set(SkillScope(can_run_commands=self._commands_reachable(session)))
                 expansion = await expand_slash_skill(
                     text=last_user_content,
                     tools=self._tools,

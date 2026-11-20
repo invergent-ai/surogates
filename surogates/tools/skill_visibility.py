@@ -57,6 +57,8 @@ class SkillScope:
 
     hidden: frozenset[str] = frozenset()
     experts_reachable: bool = True
+    #: Whether the session has a terminal in its sandbox: a skill's files staged there can be run.
+    can_run_commands: bool = True
 
 
 #: Set by the worker for the turn's tool calls (``AgentHarness``); outside a turn it hides nothing.

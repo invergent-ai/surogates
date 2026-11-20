@@ -155,7 +155,7 @@ class HarnessAPIClient:
             "hint": "Use skill_view(name) to see full content, tags, and linked files",
         }, ensure_ascii=False)
 
-    async def view_skill(self, name: str, file_path: str | None = None) -> str:
+    async def view_skill(self, name: str, file_path: str | None = None, *, stage: bool = True) -> str:
         """View a skill's content or a linked file.  Returns JSON string.
 
         Forwards the client's ``session_id`` (if set) to the API so that
@@ -172,16 +172,18 @@ class HarnessAPIClient:
             )
         session = {} if self._session_id is None else {"session_id": self._session_id}
         try:
+            unstaged = {} if stage else {"stage": "false"}
             if file_path:
-                data = await self._get(f"/v1/skills/{name}/file", params={**session, "path": file_path})
+                data = await self._get(f"/v1/skills/{name}/file", params={**session, "path": file_path, **unstaged})
             else:
-                data = await self._get(f"/v1/skills/{name}", params=session or None)
+                params = {**session, **unstaged}
+                data = await self._get(f"/v1/skills/{name}", params=params or None)
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code not in (403, 404):
                 raise
             if not file_path or exc.response.status_code == 403:
                 return _error_response(exc)
-            return await self._missing_skill_file(name, file_path, session)
+            return await self._missing_skill_file(name, file_path, {**session, **unstaged})
         return json.dumps({"success": True, **data}, ensure_ascii=False)
 
     async def _missing_skill_file(self, name: str, file_path: str, session: dict[str, Any]) -> str:

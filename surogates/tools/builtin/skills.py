@@ -385,6 +385,32 @@ def _without_experts(listed: str) -> str:
     return json.dumps(payload, ensure_ascii=False)
 
 
+#: What a skill with scripts says in a session that cannot run a command where they would be.
+SCRIPTS_OUT_OF_REACH = (
+    "> This session has no terminal, so this skill's scripts cannot run here. Its files can still be read with "
+    "skill_view(name, file_path). Do the work with the tools you have."
+)
+_SCRIPT_SUFFIXES = (".py", ".sh", ".bash", ".js", ".mjs", ".cjs", ".ts", ".rb", ".pl", ".ps1")
+
+
+def _scripts_out_of_reach(raw: str) -> str:
+    """The api's view of a skill, unstaged, told that its scripts cannot run in this session; as it was when the
+    skill has no scripts (references and assets are read with skill_view)."""
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        return raw
+    if not isinstance(payload, dict) or not payload.get("success"):
+        return raw
+    linked = payload.get("linked_files") or []
+    if isinstance(linked, dict):
+        linked = [path for paths in linked.values() for path in (paths or [])]
+    if not any(str(p).startswith("scripts/") or str(p).endswith(_SCRIPT_SUFFIXES) for p in linked):
+        return raw
+    payload["content"] = f"{SCRIPTS_OUT_OF_REACH}\n\n{payload.get('content') or ''}"
+    return json.dumps(payload, ensure_ascii=False)
+
+
 def _expert_refusal(name: str) -> str:
     """Refuse to hand an expert's own instructions to the executor.
 
@@ -485,7 +511,8 @@ async def _skill_view_handler(
     # API-mediated mode: delegate to the API server.
     api_client = kwargs.get("api_client")
     if api_client is not None:
-        raw = await api_client.view_skill(name, file_path)
+        can_run = skill_scope.get().can_run_commands
+        raw = await api_client.view_skill(name, file_path, **({} if can_run else {"stage": False}))
         # The API serves experts too -- the Studio UI renders them. Filter
         # on the way back rather than at the route, so the human surface
         # keeps working while the executor cannot read one.
@@ -494,6 +521,9 @@ async def _skill_view_handler(
                 return _expert_refusal(name)
         except (ValueError, AttributeError):
             pass
+        if not can_run:
+            # Nothing staged, in the sandbox or a computer's folder: no command of this session could run it.
+            return _scripts_out_of_reach(raw) if file_path is None else raw
         if file_path is None and device_of(kwargs.get("session_config")) is not None:
             return await _staged_in_folder(raw, name, api_client, kwargs)
         return raw
