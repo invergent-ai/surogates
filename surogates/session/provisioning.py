@@ -68,7 +68,7 @@ _WORKSPACE_SHARING_FIELDS = (
 # own.  Thinking switched off for a session stays off in its sub-agents.
 # Not for a child on another model: a chat-template switch or an OpenAI
 # field one endpoint takes, another refuses.
-_SAMPLING_FIELDS = ("enable_thinking", "reasoning_effort", "temperature", "max_tokens")
+_SAMPLING_FIELDS = ("enable_thinking", "reasoning_effort", "temperature", "max_tokens", "chat_template_kwargs")
 
 # Boundary fields a child session inherits verbatim from its parent so it
 # lands in the same partitioned workspace/memory as the rest of the thread,

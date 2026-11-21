@@ -50,6 +50,7 @@ Surogates is configured via a YAML file merged with environment variables. Envir
 | `llm.base_url` | `SUROGATES_LLM_BASE_URL` | -- | Provider API base URL |
 | `llm.api_key` | `SUROGATES_LLM_API_KEY` | -- | Primary API key |
 | `llm.temperature` | `SUROGATES_LLM_TEMPERATURE` | `0.7` | Default sampling temperature |
+| `llm.chat_template_kwargs` | `SUROGATES_LLM_CHAT_TEMPLATE_KWARGS` | `{}` | Chat-template arguments sent with every main-loop request (sub-agents and a fallback model included; not titles, turn summaries, vision or session search) in `extra_body.chat_template_kwargs`, e.g. `{"reasoning_effort": 0.99}` for a model whose template reads a numeric reasoning effort. A session's own `chat_template_kwargs` wins key by key. The built-in advisor gets them only with `llm.advisor_same_model`. A mapping in `config.yaml`, JSON in the environment. Set it only where every model is served by a chat-template server (vLLM, SGLang): an OpenAI endpoint refuses the field |
 | `llm.provider` | `SUROGATES_LLM_PROVIDER` | auto-detected | Provider name override |
 | `llm.credential_pool` | -- | `[]` | Additional API keys for rotation |
 | `llm.fallback_providers` | -- | `[]` | Fallback provider chain |

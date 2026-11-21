@@ -51,7 +51,7 @@ _MAX_TOOL_RESULT_CHARS: int = 20_000
 # Generation params that map onto standard OpenAI create() kwargs vs the ones
 # that are vLLM-only and must ride in ``extra_body``.
 _STANDARD_GEN_KEYS = ("temperature", "top_p", "max_tokens")
-_EXTRA_BODY_GEN_KEYS = ("top_k", "repetition_penalty")
+_EXTRA_BODY_GEN_KEYS = ("top_k", "repetition_penalty", "chat_template_kwargs")
 
 
 def _generation_kwargs(gen: dict[str, Any] | None) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -185,6 +185,16 @@ async def run_expert_loop(
         )
 
     gen_kwargs, gen_extra = _generation_kwargs(expert.expert_generation)
+    from surogates.tools.builtin.advisor_expert import _same_model, is_advisor_expert
+
+    if is_advisor_expert(expert) and "chat_template_kwargs" not in gen_extra and _same_model():
+        # The built-in advisor runs on the deployment's own model (``llm.advisor_same_model``): it is asked as the
+        # deployment asks that model.  On another tier (``surogate-pro``) the deployment's arguments are not its.
+        from surogates.harness.llm_call import merged_chat_template_kwargs
+
+        advisor_kwargs = merged_chat_template_kwargs(None)
+        if advisor_kwargs:
+            gen_extra = {**gen_extra, "chat_template_kwargs": advisor_kwargs}
 
     try:
         for iteration in range(expert.expert_max_iterations):

@@ -14,6 +14,7 @@ individually configurable — there is no single "home directory".
 
 from __future__ import annotations
 
+import json
 import os
 import threading
 from functools import lru_cache
@@ -77,6 +78,10 @@ def _parse_yaml_config(content: bytes | None) -> dict[str, Any]:
         return {}
 
 
+#: Settings whose value is a mapping: ``_flatten_yaml`` passes them on whole.
+_JSON_VALUED_KEYS = frozenset({"SUROGATES_LLM_CHAT_TEMPLATE_KWARGS"})
+
+
 def _flatten_yaml(data: dict[str, Any], prefix: str = "") -> dict[str, str]:
     """Flatten a nested YAML dict into ``SUROGATES_*`` env-var-style keys.
 
@@ -85,16 +90,22 @@ def _flatten_yaml(data: dict[str, Any], prefix: str = "") -> dict[str, str]:
         {"db": {"url": "postgres://..."}}
         → {"SUROGATES_DB_URL": "postgres://..."}
 
-    Only leaf string/int/float/bool values are included.
+    Only leaf string/int/float/bool values are included, except a setting
+    whose value is itself a mapping (``_JSON_VALUED_KEYS``), which goes in
+    whole as one JSON value.
     """
     result: dict[str, str] = {}
     for key, value in data.items():
         env_key = f"{prefix}{key}".upper()
-        if isinstance(value, dict):
+        full_key = f"SUROGATES_{env_key}" if not prefix else env_key
+        if isinstance(value, dict) and full_key in _JSON_VALUED_KEYS:
+            # A setting that is itself a mapping: one JSON value, which
+            # pydantic-settings parses, not keys no setting reads.
+            result[full_key] = json.dumps(value, default=str)
+        elif isinstance(value, dict):
             child_prefix = f"SUROGATES_{key}_" if not prefix else f"{prefix}{key}_"
             result.update(_flatten_yaml(value, child_prefix))
         elif isinstance(value, (str, int, float, bool)):
-            full_key = f"SUROGATES_{env_key}" if not prefix else env_key
             result[full_key] = str(value)
     return result
 
@@ -382,6 +393,18 @@ class LLMSettings(BaseSettings):
     # opinion in a fresh context, not "a stronger model", and is not invited
     # to stop the work by default.  False: the text as before.
     advisor_same_model: bool = False
+    # Chat-template arguments every main-loop request of this deployment
+    # sends (``extra_body.chat_template_kwargs``), its sub-agents' and its
+    # fallback model's included (not titles, turn summaries, vision or
+    # session search), so set it only where every such model is served by a
+    # chat-template server (vLLM, SGLang); an OpenAI endpoint refuses the
+    # field.  E.g. ``{"reasoning_effort": 0.99}`` for
+    # a model whose template reads its reasoning effort there (Inkling).
+    # The built-in advisor gets them too when ``advisor_same_model`` is
+    # true.  A session's own ``config.chat_template_kwargs`` wins key by
+    # key.  Empty: nothing is sent, as before.  In config.yaml a mapping;
+    # in the environment JSON (SUROGATES_LLM_CHAT_TEMPLATE_KWARGS).
+    chat_template_kwargs: dict[str, Any] = {}
 
     # Per-model metadata overrides.  Keyed by model id; values are dicts
     # accepting ``context_window`` and ``max_output_tokens``.  Takes
