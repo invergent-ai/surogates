@@ -925,6 +925,12 @@ class PromptBuilder:
         # across the day -- minute-grain timestamps would invalidate every
         # provider's implicit prefix cache on each new build.
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d UTC")
+        # A session that lives in another day (a simulated world, an evaluation's task dated in the past) says so
+        # with ``config.current_date``: the model reasons from that date, not the run's (11-21: AutomationBench
+        # worlds are dated 2026-02, and the run date made the model call valid records expired).
+        world_date = (getattr(self._session, "config", None) or {}).get("current_date")
+        if isinstance(world_date, str) and world_date.strip():
+            today = " ".join(world_date.split())[:64]
 
         parts = [
             "# Context",
