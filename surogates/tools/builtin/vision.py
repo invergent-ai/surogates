@@ -10,7 +10,7 @@ import logging
 import mimetypes
 from pathlib import PurePosixPath
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import unquote, urljoin, urlparse
 
 import httpx
 
@@ -22,12 +22,17 @@ from surogates.sandbox.copy_files import has_copy, read_copy
 from surogates.storage.tenant import boundary_workspace_key, workspace_session_shim
 from surogates.tools.registry import ToolRegistry, ToolSchema
 from surogates.tools.utils.url_safety import is_safe_url
-from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError, validate_path
+from surogates.tools.utils.workspace_sandbox import (
+    WorkspaceSandboxError,
+    in_workspace_terms,
+    validate_path,
+)
 
 logger = logging.getLogger(__name__)
 
 _MAX_IMAGE_BYTES = 20 * 1024 * 1024
 _MAX_REDIRECTS = 5
+_MAX_PATH_DECODES = 4
 _DEFAULT_PROMPT = "Describe the image. Include any visible text and important details."
 # Long-edge caps before sending to the vision model. Anthropic resizes anything
 # beyond ~1568 px server-side; OpenAI's ``low`` detail uses a single 512x512
@@ -304,18 +309,44 @@ def _validate_workspace_storage_path(
     *,
     workspace_path: str | None,
 ) -> str:
+    """*image_ref* as a key below the session's workspace, or refused.
+
+    ``/workspace/...`` is the workspace, as the model sees it in its sandbox,
+    also where the session's ``workspace_path`` is a folder on the host (local
+    storage).  The check is on the text alone: links are the storage's to
+    refuse, which reaches a key with no link followed.
+    """
+    key = image_ref
     if workspace_path:
         workspace_root = PurePosixPath(workspace_path)
-        ref_path = PurePosixPath(image_ref)
+        ref_path = PurePosixPath(in_workspace_terms(workspace_path, image_ref))
         try:
-            image_ref = ref_path.relative_to(workspace_root).as_posix()
+            key = ref_path.relative_to(workspace_root).as_posix()
         except ValueError:
             pass
 
-    path = PurePosixPath(image_ref)
-    if path.is_absolute() or not path.parts or any(part == ".." for part in path.parts):
+    path = PurePosixPath(key)
+    if path.is_absolute() or not path.parts or _names_parent_folder(key):
+        # Named as the model wrote it: the host's paths are not its to see.
         raise WorkspaceSandboxError(f"Path traversal blocked: {image_ref}")
     return path.as_posix()
+
+
+def _names_parent_folder(key: str) -> bool:
+    """Whether *key* holds a ``..`` segment, also percent-encoded or with backslashes.
+
+    Decoded a few times over, and a key still encoded after that is refused:
+    each pass is linear, so a long crafted key cannot hold the worker.
+    """
+    decoded = key
+    for _ in range(_MAX_PATH_DECODES):
+        if ".." in decoded.replace("\\", "/").split("/"):
+            return True
+        once = unquote(decoded)
+        if once == decoded:
+            return False
+        decoded = once
+    return True
 
 
 def _validate_data_url(data_url: str) -> str:
