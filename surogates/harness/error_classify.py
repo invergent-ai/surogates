@@ -78,6 +78,10 @@ _CONTEXT_PHRASES: Final[tuple[str, ...]] = (
     "request entity too large",
     "prompt is too long",
     "prompt exceeds max length",
+    # OpenAI-style code, and this platform's engine:
+    # "prepared prompt has N tokens, exceeding Engine max_context M".
+    "context_length_exceeded",
+    "engine max_context",
 )
 
 # Substrings that mark an OpenAI-style "empty response" wrapper raised
