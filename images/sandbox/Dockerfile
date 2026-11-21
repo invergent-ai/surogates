@@ -382,6 +382,12 @@ COPY --from=modules /standin/lib/ /
 # ── The cloud sandbox ───────────────────────────────────────────────
 FROM tools AS sandbox
 
+# pptxgenjs's title placeholders, written as PowerPoint writes them (no idx). Here and not in
+# the shared tools stage: that stage is hashed into the desktop guest's image key.
+COPY images/sandbox/patch_pptxgenjs.py /tmp/patch_pptxgenjs.py
+RUN /opt/venv/bin/python /tmp/patch_pptxgenjs.py /usr/lib/node_modules/pptxgenjs \
+    && rm /tmp/patch_pptxgenjs.py
+
 LABEL org.opencontainers.image.title="surogates-agent-sandbox" \
       org.opencontainers.image.description="Surogates agent sandbox execution environment" \
       org.opencontainers.image.vendor="Invergent SA" \
