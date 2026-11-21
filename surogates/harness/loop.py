@@ -626,19 +626,33 @@ def _to_api_message(msg: dict) -> dict:
     return api_msg
 
 
-def _to_api_messages(msgs: list[dict]) -> list[dict]:
+#: What a reasoning-less tool-call turn carries once the history has reasoning (``llm.reasoning_placeholder``).
+REASONING_PLACEHOLDER = "(no reasoning recorded)"
+
+
+def _reasoning_fill() -> str:
+    """The deployment's ``llm.reasoning_placeholder`` (``load_settings`` keeps it current)."""
+    from surogates.config import load_settings
+
+    return load_settings().llm.reasoning_placeholder
+
+
+def _to_api_messages(msgs: list[dict], fill: str | None = None) -> list[dict]:
     """*msgs* for the wire, each tool call carrying reasoning where the model reasons.
 
     A thinking model (DeepSeek) refuses a history holding a tool call
     without its reasoning, and the harness makes some calls up (a final
     reply turned into ``ask_user_question``).  Only once the model has
-    reasoned: one that never did may not accept the field.
+    reasoned: one that never did may not accept the field.  What such a turn
+    carries is the deployment's choice (*fill*, default ``llm.reasoning_placeholder``):
+    the placeholder text, an empty field, or nothing.
     """
+    fill = fill or _reasoning_fill()
     api = [_to_api_message(m) for m in msgs]
-    if any(m.get("role") == "assistant" and m.get("reasoning_content") for m in api):
+    if fill != "omit" and any(m.get("role") == "assistant" and m.get("reasoning_content") for m in api):
         for m in api:
             if m.get("role") == "assistant" and m.get("tool_calls") and not m.get("reasoning_content"):
-                m["reasoning_content"] = "(no reasoning recorded)"
+                m["reasoning_content"] = REASONING_PLACEHOLDER if fill == "placeholder" else ""
     return api
 
 

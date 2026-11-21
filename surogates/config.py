@@ -405,6 +405,17 @@ class LLMSettings(BaseSettings):
     # key.  Empty: nothing is sent, as before.  In config.yaml a mapping;
     # in the environment JSON (SUROGATES_LLM_CHAT_TEMPLATE_KWARGS).
     chat_template_kwargs: dict[str, Any] = {}
+    # What a tool-call turn without reasoning carries in a history that has
+    # reasoning elsewhere (the turn is re-sent to the model each request).
+    # ``placeholder`` (default): "(no reasoning recorded)", which a thinking
+    # model that refuses a tool call without reasoning (DeepSeek) needs.
+    # ``empty``: an empty reasoning field.  ``omit``: no reasoning field,
+    # for servers that take a reasoning-less turn (vLLM): a model that reads
+    # the placeholder as reasoning can copy it as its own (Inkling did, in
+    # 5-19 % of its calls, with its reasoning shrinking after it).  It holds
+    # for every model of the deployment, a fallback model included: set
+    # ``omit`` / ``empty`` only where none of them refuses such a turn.
+    reasoning_placeholder: Literal["placeholder", "empty", "omit"] = "placeholder"
 
     # Per-model metadata overrides.  Keyed by model id; values are dicts
     # accepting ``context_window`` and ``max_output_tokens``.  Takes
