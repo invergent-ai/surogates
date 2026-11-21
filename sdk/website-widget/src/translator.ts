@@ -214,7 +214,9 @@ export class Translator {
         return this.handleExpertResult(frame);
 
       case SURG_EVENT.EXPERT_FAILURE:
-        return this.asCustom(frame);
+        // Closes the step its delegation opened, as a result does: a step left
+        // open makes the client reject the run's end and the widget stays busy.
+        return [...this.handleExpertResult(frame), ...this.asCustom(frame)];
 
       case SURG_EVENT.SESSION_FAIL:
       case SURG_EVENT.HARNESS_CRASH:

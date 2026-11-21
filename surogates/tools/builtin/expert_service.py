@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
+from surogates.harness.reasoning import THINK_RE
 from surogates.session.events import EventType
 from surogates.tools.builtin.expert_feedback import record_expert_outcome
 from surogates.tools.builtin.expert_loop import ExpertBudgetExceeded, expert_scope, run_expert_loop
@@ -69,6 +70,12 @@ class ExpertConsultationResult:
     content: str
     iterations_used: int = 0
     error: str | None = None
+
+
+def _has_visible_text(text: str | None) -> bool:
+    """Whether a reply says anything outside its reasoning, closed or cut off."""
+    visible = THINK_RE.sub("", text or "").strip()
+    return bool(visible) and not visible.startswith(("<think>", "<thinking>"))
 
 
 class ExpertConsultationService:
@@ -149,7 +156,7 @@ class ExpertConsultationService:
                 api_key=api_key,
                 client=client,
             )
-            if not (result or "").strip():
+            if not _has_visible_text(result):
                 # No answer is not a successful one: the consulting model is told, not handed an empty result.
                 error = f"Expert '{expert.name}' returned no text."
                 await self._record_failure(expert, error, iterations_used=iterations_used)
@@ -158,7 +165,12 @@ class ExpertConsultationService:
                     success=False,
                     content=json.dumps({
                         "error": error,
-                        "suggestion": "Nothing was reviewed. Continue on your own judgment.",
+                        "suggestion": (
+                            "It ran tools before it stopped: check what they changed before repeating any of it. "
+                            "It gave no answer, so proceed without one."
+                            if iterations_used > 1 else
+                            "It gave no answer, so proceed without one."
+                        ),
                     }),
                     iterations_used=iterations_used,
                     error=error,

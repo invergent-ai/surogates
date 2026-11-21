@@ -154,8 +154,9 @@ async def run_expert_loop(
     tool_schemas = tool_registry.get_schemas(names=allowed_tools) if allowed_tools else []
 
     # Build expert messages with system prompt + user task.
+    # None of its tools registered is none sent: the prompt says what the request holds.
     system_prompt = _build_expert_system_prompt(
-        expert, [name for name in expert.expert_tools or () if name in allowed_tools],
+        expert, [name for name in expert.expert_tools or () if name in allowed_tools] if tool_schemas else [],
     )
     user_content = _build_user_message(task, context)
 

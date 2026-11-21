@@ -8,7 +8,12 @@ from uuid import uuid4
 import pytest
 
 from surogates.session.events import EventType
-from surogates.tools.builtin.expert_loop import _build_expert_system_prompt
+from surogates.tools.builtin.expert_loop import (
+    ExpertScope,
+    _build_expert_system_prompt,
+    expert_scope,
+    run_expert_loop,
+)
 from surogates.tools.builtin.expert_service import ExpertConsultationService
 from surogates.tools.loader import SkillDef
 
@@ -34,11 +39,36 @@ def test_an_expert_sent_no_tools_is_told_it_has_none(declared, sent):
     assert "Expert body." in prompt
 
 
-def test_an_expert_with_tools_reads_what_it_read_before():
-    prompt = _build_expert_system_prompt(_expert(["terminal"]), ["terminal"])
-    assert WITH_TOOLS in prompt
-    assert "You have access to these tools: terminal." in prompt
-    assert "You have no tools" not in prompt
+def test_an_expert_with_tools_reads_exactly_what_it_read_before():
+    assert _build_expert_system_prompt(_expert(["terminal", "read_file"]), ["terminal", "read_file"]) == (
+        "You are an expert assistant specialised in: Reviews work\n\n"
+        f"{WITH_TOOLS}\n"
+        "\nYou have access to these tools: terminal, read_file. Do not attempt to call tools not in this list.\n"
+        "\n# Expert Instructions\nExpert body."
+    )
+
+
+@pytest.mark.parametrize("registered, withheld", [(False, frozenset()), (True, frozenset({"terminal"}))])
+async def test_the_loop_says_no_tools_when_the_request_holds_none(registered, withheld, monkeypatch):
+    """Its one tool is unregistered, or the consulting session may not send it."""
+    monkeypatch.setattr("surogates.config.load_settings", lambda: SimpleNamespace(platform_api_url="", llm=SimpleNamespace()))
+    registry = MagicMock()
+    registry.get_schemas.side_effect = lambda names: (
+        [{"function": {"name": n}} for n in names] if registered else []
+    )
+    client = _client("Check row 4.")
+    token = expert_scope.set(ExpertScope(withheld=withheld))
+    try:
+        await run_expert_loop(
+            expert=_expert(["terminal"]), task="t", context=None, tool_router=MagicMock(), tool_registry=registry,
+            tenant=SimpleNamespace(org_config={}), session_id=uuid4(), client=client,
+        )
+    finally:
+        expert_scope.reset(token)
+    sent = client.chat.completions.create.await_args.kwargs
+    assert "tools" not in sent
+    assert "You have no tools here" in sent["messages"][0]["content"]
+    assert "You have access" not in sent["messages"][0]["content"]
 
 
 def _service(store) -> ExpertConsultationService:
@@ -54,13 +84,14 @@ def _client(content, tool_calls=None):
     return SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
 
 
-@pytest.mark.parametrize("content", ["", "   \n", None])
+@pytest.mark.parametrize("content", ["", "   \n", None, "<think>only reasoning</think>", "<thinking>cut off"])
 async def test_a_consult_with_no_text_is_a_failure_the_caller_reads(content, monkeypatch):
     monkeypatch.setattr("surogates.config.load_settings", lambda: SimpleNamespace(platform_api_url="", llm=SimpleNamespace()))
     store = AsyncMock()
     result = await _service(store).consult(expert=_expert(), task="review", client=_client(content))
     assert result.success is False
-    assert "returned no text" in result.content and "own judgment" in result.content
+    assert "returned no text" in result.content and "proceed without" in result.content
+    assert "ran tools" not in result.content
     assert result.iterations_used == 1
     assert [c.args[1] for c in store.emit_event.await_args_list] == [
         EventType.EXPERT_DELEGATION, EventType.EXPERT_FAILURE,
@@ -74,3 +105,25 @@ async def test_a_consult_with_text_stays_a_success(monkeypatch):
     assert result.success is True and result.content == "Check row 4."
     assert [c.args[1] for c in store.emit_event.await_args_list][0] == EventType.EXPERT_DELEGATION
     assert EventType.EXPERT_FAILURE not in [c.args[1] for c in store.emit_event.await_args_list]
+
+
+async def test_a_consult_that_ran_tools_and_then_said_nothing_warns_of_their_effects(monkeypatch):
+    store = AsyncMock()
+    service = _service(store)
+    monkeypatch.setattr(
+        "surogates.tools.builtin.expert_service.run_expert_loop", AsyncMock(return_value=("", 3)),
+    )
+    result = await service.consult(expert=_expert(["terminal"]), task="fix it", client=_client(""))
+    assert result.success is False and result.iterations_used == 3
+    assert "ran tools" in result.content and "before repeating" in result.content
+
+
+async def test_text_beside_reasoning_is_an_answer(monkeypatch):
+    store = AsyncMock()
+    service = _service(store)
+    monkeypatch.setattr(
+        "surogates.tools.builtin.expert_service.run_expert_loop",
+        AsyncMock(return_value=("<think>weigh it</think>Check row 4.", 1)),
+    )
+    result = await service.consult(expert=_expert(), task="review", client=_client(""))
+    assert result.success is True
