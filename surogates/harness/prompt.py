@@ -359,6 +359,10 @@ class PromptBuilder:
             parts.append(self._prompts.get("guidance/ask_user_question"))
         if "create_artifact" in self._available_tools:
             parts.append(self._prompts.get("guidance/artifact"))
+            # A session read through its reply text (an API caller, an evaluation): the deliverable goes in the
+            # reply, an artifact only in addition (session config ``artifact_reply: "full"``; default unchanged).
+            if (getattr(self._session, "config", None) or {}).get("artifact_reply") == "full":
+                parts.append(self._prompts.get("guidance/artifact_reply_full"))
         # A held-back browser group carries this guidance in its load result.
         if any(tool.startswith("browser_") for tool in self._available_tools) and not self._held_back("browser_navigate"):
             parts.append(self._prompts.get("guidance/browser"))
