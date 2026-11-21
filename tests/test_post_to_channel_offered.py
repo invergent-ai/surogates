@@ -171,7 +171,10 @@ def _roster(hidden):
     tenant = SimpleNamespace(org_id=uuid4(), user_id=uuid4(), service_account_id=None, org_config={}, user_config={})
     agent = SimpleNamespace(name="notifier", description="Posts updates", tools=["post_to_channel", "read_file"], model=None, enabled=True)
     only = SimpleNamespace(name="poster", description="Only posts", tools=["post_to_channel"], model=None, enabled=True)
-    builder = PromptBuilder(tenant, available_agents=[agent, only], available_tools={"agent"}, roster_hidden_tools=hidden)
+    builder = PromptBuilder(
+        tenant, session=SimpleNamespace(config={}, channel="web", id=uuid4()),
+        available_agents=[agent, only], available_tools={"agent"}, roster_hidden_tools=hidden,
+    )
     return builder._available_agents_section()
 
 
