@@ -26,15 +26,16 @@ PATCHED = (
     " && !tgt._slideObjects.some((o) => o.options && o.options._placeholderType === 'title')"
     " ? 0 : 100 + idx;"
 )
-# What require() and import load; the browser bundles never run in a sandbox.
+# The Node builds: require() loads the first, a bundler the second. The browser bundles never run in a sandbox.
 BUILDS = ("dist/pptxgen.cjs.js", "dist/pptxgen.es.js")
 
 
-def patch_text(text: str, name: str) -> str:
+def patch_text(text: bytes, name: str) -> bytes:
     """*text* with the line changed; already changed is fine, anything else is an error."""
-    if text.count(ORIGINAL) == 1 and PATCHED not in text:
-        return text.replace(ORIGINAL, PATCHED)
-    if text.count(PATCHED) == 1 and ORIGINAL not in text:
+    original, patched = ORIGINAL.encode(), PATCHED.encode()
+    if text.count(original) == 1 and patched not in text:
+        return text.replace(original, patched)
+    if text.count(patched) == 1 and original not in text:
         return text
     raise SystemExit(f"{name}: expected the placeholder index line exactly once; update {Path(__file__).name}")
 
@@ -47,9 +48,9 @@ def main(argv: list[str]) -> int:
     changed = {}
     for build in BUILDS:
         path = package / build
-        changed[path] = patch_text(path.read_text(encoding="utf-8"), str(path))
+        changed[path] = patch_text(path.read_bytes(), str(path))
     for path, text in changed.items():
-        path.write_text(text, encoding="utf-8")
+        path.write_bytes(text)
     return 0
 
 

@@ -382,8 +382,9 @@ COPY --from=modules /standin/lib/ /
 # ── The cloud sandbox ───────────────────────────────────────────────
 FROM tools AS sandbox
 
-# pptxgenjs's title placeholders, written as PowerPoint writes them (no idx). Here and not in
-# the shared tools stage: that stage is hashed into the desktop guest's image key.
+# pptxgenjs's title placeholders, written without an idx. Cloud sandbox only, for now: the
+# shared tools stage is hashed into the desktop guest's key, so moving this there publishes a
+# new desktop image, which is a release decision.
 COPY images/sandbox/patch_pptxgenjs.py /tmp/patch_pptxgenjs.py
 RUN /opt/venv/bin/python /tmp/patch_pptxgenjs.py /usr/lib/node_modules/pptxgenjs \
     && rm /tmp/patch_pptxgenjs.py

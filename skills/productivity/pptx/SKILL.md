@@ -34,7 +34,7 @@ Paths are relative to this skill's directory — the `staged_at` path `skill_vie
 
 ## Creating with pptxgenjs — gotchas
 
-`pptxgenjs` is preinstalled — do not run `npm install` first. Start from `scripts/example_deck.js`: copy it into the workspace and change the theme and slides; its calls are tested. These are the footguns:
+`pptxgenjs` is preinstalled — do not run `npm install` first, and load it with `require("pptxgenjs")`: an ES `import` does not search `NODE_PATH`, and a copy you install yourself writes title placeholders that python-pptx cannot find. Start from `scripts/example_deck.js`: copy it into the workspace and change the theme and slides; its calls are tested. These are the footguns:
 
 - **A name that doesn't exist fails silently.** Chart types are `pres.ChartType.area`, `bar`, `bar3d`, `bubble`, `doughnut`, `line`, `pie`, `radar`, `scatter`. A column chart is `ChartType.bar` with `barDir: "col"`: **there is no `ChartType.col`**, and it writes an empty chart frame without an error. Shapes are `pres.ShapeType.rect`, `ellipse`, `line` — on the instance, lower camelCase; there is no `pptxgen.shapes`.
 - **Set `pres.layout` before adding slides.** The default canvas is `LAYOUT_16x9` = **10" × 5.625"**, not 13.3" wide. Coordinates past the edge are written, not clamped — the shape just isn't on the slide. (`LAYOUT_WIDE` is 13.3" × 7.5".)
