@@ -328,7 +328,15 @@ def _build_expert_system_prompt(expert: SkillDef, tools: list[str] | None = None
         "",
         "You are running as a sub-agent inside a larger system. Complete the "
         "given task using your available tools and return your final answer as "
-        "text. Be concise and precise.",
+        "text. Be concise and precise."
+        if tools else
+        # Told to use "your available tools" with none sent, a model set out to read the files
+        # first: its call went nowhere and the consult came back with no text.
+        "You are running as a sub-agent inside a larger system. You have no "
+        "tools here: you cannot read files, search or run anything. Answer now, "
+        "as text, from what this message gives you; where you need something it "
+        "does not hold, say exactly what the caller should check or run. Be "
+        "concise and precise.",
     ]
 
     if tools:

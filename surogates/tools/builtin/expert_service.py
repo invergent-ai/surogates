@@ -149,6 +149,20 @@ class ExpertConsultationService:
                 api_key=api_key,
                 client=client,
             )
+            if not (result or "").strip():
+                # No answer is not a successful one: the consulting model is told, not handed an empty result.
+                error = f"Expert '{expert.name}' returned no text."
+                await self._record_failure(expert, error, iterations_used=iterations_used)
+                return ExpertConsultationResult(
+                    expert=expert.name,
+                    success=False,
+                    content=json.dumps({
+                        "error": error,
+                        "suggestion": "Nothing was reviewed. Continue on your own judgment.",
+                    }),
+                    iterations_used=iterations_used,
+                    error=error,
+                )
             await record_expert_outcome(
                 session_store=self._session_store,
                 session_id=self._session_id,
