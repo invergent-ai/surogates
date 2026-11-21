@@ -274,12 +274,16 @@ def _runs_in_its_image(session: Any, tool_name: str, tool_args: Any, *, sandbox_
             return False
     from surogates.config import load_settings
 
-    sandbox_settings = load_settings().sandbox
-    if sandbox_settings.backend not in ("docker", "kubernetes"):
-        return False
     try:
+        sandbox_settings = load_settings().sandbox
+        if sandbox_settings.backend not in ("docker", "kubernetes"):
+            return False
         return session_image_of(session.config, sandbox_settings) is not None
     except SessionImageRefused:
+        return False
+    except Exception:
+        # Settings that cannot be read now: keep the host check (fail closed); the call itself goes on as before.
+        logger.warning("Session %s: could not tell whether %s runs in its image", session.id, tool_name, exc_info=True)
         return False
 
 

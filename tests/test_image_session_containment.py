@@ -5,8 +5,9 @@ boundary and has no storage mount. Judged against the host folder, ``/app/x`` "r
 and was refused although the call runs in the container. The check is now left out exactly when the call goes to the
 container of an image the operator's list admits, on a backend that runs session images; everywhere else (no image,
 an image the list refuses, another backend, no sandbox pool so the harness-local handler would read this host, a
-picture that the worker reads for the vision model) it applies as before. The argument checks (protected system
-folders) apply in every case.
+picture that the worker reads for the vision model) it applies as before. The platform gate's argument checks
+(protected system folders) apply either way; inside the container the executor also confines the file tools to the
+workspace folder.
 """
 
 from __future__ import annotations
@@ -23,8 +24,6 @@ import surogates.harness.tool_exec as tool_exec
 from surogates.harness.tool_exec import _runs_in_its_image, execute_single_tool
 from surogates.sandbox.base import SandboxSpec
 from surogates.tools.registry import ToolRegistry, ToolSchema
-
-pytestmark = pytest.mark.asyncio
 
 TASK_IMAGE = "registry.example/tasks/repo-fix:2026-11-20"
 _ids = iter(range(1, 1_000_000))
@@ -182,3 +181,11 @@ def test_only_calls_into_the_container_leave_the_host_check_out(tmp_path):
     assert not _runs_in_its_image(img, "mcp__fs__read", {"path": "/app/x"}, sandbox_pool=pool)
     assert not _runs_in_its_image(img, "read_file", {"path": "/app/x.py"}, sandbox_pool=None)
     assert not _runs_in_its_image(session(tmp_path), "read_file", {"path": "/app/x.py"}, sandbox_pool=pool)
+
+
+def test_settings_that_cannot_be_read_keep_the_host_check(tmp_path, monkeypatch):
+    def broken():
+        raise ValueError("config file is not valid now")
+
+    monkeypatch.setattr(config_module, "load_settings", broken)
+    assert not _runs_in_its_image(image_session(tmp_path), "read_file", {"path": "/app/x.py"}, sandbox_pool=container_pool())
