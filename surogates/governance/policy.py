@@ -43,6 +43,10 @@ _DEFAULT_ROLE = "agent"
 # Tools whose arguments contain filesystem paths that must be validated
 # against the workspace sandbox.  Maps tool name → list of argument keys
 # that hold paths.
+# The AGT PolicyEngine's default protected folders (``PolicyEngine.protected_paths``): the frozen gate's own argument
+# checks (``_check_arguments_direct``) hold the same list.
+_PROTECTED_PATHS: tuple[str, ...] = ("/etc/", "/sys/", "/proc/", "/dev/", "C:\\Windows\\System32")
+
 _PATH_ARGUMENT_MAP: dict[str, list[str]] = {
     "read_file": ["path"],
     "write_file": ["path"],
@@ -546,7 +550,10 @@ class GovernanceGate:
         """Fallback argument checks when AGT engine is frozen.
 
         Reimplements the key AGT argument-level validations:
-        path traversal, dangerous code patterns.
+        path traversal, the protected system folders, dangerous code patterns.
+        The protected folders are the AGT engine's own default list, so a
+        profiled (frozen) gate refuses what the platform's gate refuses
+        (issue #702: before, /etc, /sys, /proc and /dev passed a profiled gate).
         """
         import os
 
@@ -556,12 +563,18 @@ class GovernanceGate:
             if isinstance(path, str):
                 if any(c in path for c in ("\n", "\r", "\x00")):
                     return "Path contains control characters"
+                for protected in _PROTECTED_PATHS:
+                    if path.startswith(protected):
+                        return f"Path Violation: Cannot access protected directory {protected}"
                 try:
                     normalized = os.path.normpath(os.path.abspath(path))
                     if ".." in normalized.split(os.sep):
                         return f"Path traversal detected: {path}"
                 except (ValueError, OSError):
                     return "Invalid path format"
+                for protected in _PROTECTED_PATHS:
+                    if normalized.startswith(os.path.normpath(protected)):
+                        return f"Path Violation: Cannot access protected directory {protected}"
 
         return None
 
