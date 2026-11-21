@@ -70,6 +70,11 @@ _WORKSPACE_SHARING_FIELDS = (
 # field one endpoint takes, another refuses.
 _SAMPLING_FIELDS = ("enable_thinking", "reasoning_effort", "temperature", "max_tokens", "chat_template_kwargs")
 
+# The day a session lives in (``current_date``: a simulated world, a task
+# dated in the past): a sub-agent works in the same world, unless the code
+# making it sets its own.
+_WORLD_FIELDS = ("current_date",)
+
 # Boundary fields a child session inherits verbatim from its parent so it
 # lands in the same partitioned workspace/memory as the rest of the thread,
 # and inside the same simulation run.
@@ -293,6 +298,9 @@ async def create_child_session(
     for field in _BOUNDARY_SHARING_FIELDS:
         merged_config.pop(field, None)
         if field in parent_config:
+            merged_config[field] = parent_config[field]
+    for field in _WORLD_FIELDS:
+        if parent_config.get(field) is not None and merged_config.get(field) is None:
             merged_config[field] = parent_config[field]
     # So does the session's own image and its workspace folder: the child works in its root's sandbox, and one
     # it named itself would run another image under the root's sandbox, or none where the root has one.
