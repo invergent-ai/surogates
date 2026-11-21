@@ -108,14 +108,19 @@ print(json.dumps(out))
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
 def test_a_generated_deck_has_titles_python_pptx_finds(tmp_path):
-    """Against the real library, where it is installed (the sandbox image)."""
+    """Against the real library, wherever node or npm finds it; skipped where neither does."""
     pytest.importorskip("pptx")
     found = subprocess.run(
         ["node", "-p", "require.resolve('pptxgenjs')"], capture_output=True, text=True,
     )
-    if found.returncode != 0:
-        pytest.skip("needs pptxgenjs")
-    source = Path(found.stdout.strip()).parents[1]  # <package>/dist/pptxgen.cjs.js
+    if found.returncode == 0:
+        source = Path(found.stdout.strip()).parents[1]  # <package>/dist/pptxgen.cjs.js
+    else:  # require() does not search npm's global root
+        npm = shutil.which("npm")
+        root = subprocess.run([npm, "root", "-g"], capture_output=True, text=True).stdout.strip() if npm else ""
+        source = Path(root) / "pptxgenjs"
+        if not root or not source.is_dir():
+            pytest.skip("needs pptxgenjs")
     modules = tmp_path / "node_modules"
     shutil.copytree(source, modules / "pptxgenjs", symlinks=True)
     if patch.ORIGINAL.encode() in (modules / "pptxgenjs" / "dist" / "pptxgen.cjs.js").read_bytes():

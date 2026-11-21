@@ -26,7 +26,7 @@ PATCHED = (
     " && !tgt._slideObjects.some((o) => o.options && o.options._placeholderType === 'title')"
     " ? 0 : 100 + idx;"
 )
-# The Node builds: require() loads the first, a bundler the second. The browser bundles never run in a sandbox.
+# The Node builds: require() loads the first, `import` and bundlers the second. The browser bundles never run in a sandbox.
 BUILDS = ("dist/pptxgen.cjs.js", "dist/pptxgen.es.js")
 
 
