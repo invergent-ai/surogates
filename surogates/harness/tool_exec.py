@@ -1272,7 +1272,11 @@ async def _run_single_tool(
     decision = gate.check(
         tool_name, tool_args,
         # The computer checks containment; this host cannot resolve its paths.
-        workspace_path=None if on_device else workspace_path,
+        # A session in its own image works in that image's container, whose
+        # folder (``sandbox_workdir``, e.g. ``/app``) is no path on this host
+        # and has no storage mount: the container is its boundary, so a path
+        # of the image (``/app/x``, ``/etc/nginx/x``) is not checked here.
+        workspace_path=None if on_device or (session.config or {}).get("sandbox_image") else workspace_path,
     )
     if replay_of is not None:
         # A resumed call passed this check before its operations reached the
