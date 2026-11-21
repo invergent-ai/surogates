@@ -1321,6 +1321,13 @@ async def deliver_message(
             body.content,
             source=injection_source,
         )
+        # Only a service account's own message on its channel: a person
+        # writing into such a session is screened as everywhere else.
+        log_only = (
+            session.channel in SERVICE_ACCOUNT_CHANNELS
+            and tenant.service_account_id is not None
+            and getattr(getattr(getattr(request.app.state, "settings", None), "api", None), "injection_screen_service_accounts", "block") == "log"
+        )
         if injection_result.is_injection:
             # Record the block on the session before refusing. A 422 is
             # seen only by whoever made the call, and a rejected message
@@ -1356,12 +1363,16 @@ async def deliver_message(
                     # The rejected text is the evidence; cap it so a
                     # large paste cannot bloat the event log.
                     "content_preview": (body.content or "")[:2000],
+                    # A service account's message under ``api.injection_screen_service_accounts: log`` is recorded,
+                    # not refused.
+                    "action": "logged" if log_only else "blocked",
                 },
             )
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=(f"Message blocked: {injection_result.explanation}"),
-            )
+            if not log_only:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=(f"Message blocked: {injection_result.explanation}"),
+                )
 
     # A message typed while the agent is blocked on ask_user_question IS
     # that question's answer — the same call the Telegram inbound

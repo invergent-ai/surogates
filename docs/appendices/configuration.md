@@ -30,6 +30,7 @@ Surogates is configured via a YAML file merged with environment variables. Envir
 | `api.cors_origins` | `SUROGATES_API_CORS_ORIGINS` | `["*"]` | CORS allowed origins |
 | `api.web_url` | `SUROGATES_API_WEB_URL` | -- | Public URL for the web UI (used in pairing links) |
 | `api.console_url` | `SUROGATES_API_CONSOLE_URL` | -- | The console's address, served as `/auth/config`'s `console_url`: where Surogate Desktop opens Usage and Plans and billing. Empty, it names none, and the desktop shows neither |
+| `api.injection_screen_service_accounts` | `SUROGATES_API_INJECTION_SCREEN_SERVICE_ACCOUNTS` | `block` | What the prompt-injection screen does with the text of a message a service account sends to a session on the `api` or `studio` channel (`POST /sessions/{id}/messages`) when it flags it: `block` refuses it (HTTP 422), as before; `log` records the finding (event `security.injection_blocked` with `action: logged`) and lets the message through. Everything else is screened as before in both modes: a person's message, other channels, attachment filenames, seeded turns and the OpenAI-compatible route |
 
 ## Worker (`worker`)
 

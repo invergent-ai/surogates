@@ -191,6 +191,17 @@ class APISettings(BaseSettings):
     # The Surogate console's own address, where the agent's users see their usage and
     # billing. Served on /auth/config, so Surogate Desktop links there. Empty: none.
     console_url: str = ""
+    # What the prompt-injection screen does with the text of a message a
+    # service account sends to a session on the API or Studio channel
+    # (``POST /sessions/{id}/messages``: a deployment's own callers, e.g. an
+    # evaluation sending task texts).  ``block`` (default, as before): a 422
+    # and a security event.  ``log``: the security event only (action
+    # ``logged``), the message goes through -- the screen refused an
+    # ordinary coding task as an "encoding attack" (11-21, 1 of 179
+    # SWE-Bench Pro tasks).  Everything else is screened as before in both
+    # modes: a person's message, every other channel, attachment filenames,
+    # seeded turns and the OpenAI-compatible route.
+    injection_screen_service_accounts: Literal["block", "log"] = "block"
 
 
 class ToolOutputSettings(BaseSettings):
