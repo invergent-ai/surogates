@@ -274,6 +274,12 @@ class WorkerSettings(BaseSettings):
 
     concurrency: int = 50
     poll_timeout: int = 5
+    # The most model calls one wake of a session may make (its iteration
+    # budget).  A session's ``config.max_iterations`` may lower it, never
+    # raise it.  Raise it for workloads that bound a task by its own time
+    # limit instead (long agentic benchmarks).  Anything below 1 is read as
+    # the default.
+    max_iterations_ceiling: int = 90
     api_base_url: str = "http://localhost:8000"
     use_api_for_harness_tools: bool = True
     # Where the ops server lives, and a runtime-scoped API key for it. Used
