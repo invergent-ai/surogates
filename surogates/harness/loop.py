@@ -6143,7 +6143,12 @@ class AgentHarness(
         # sessions keep only the case's tools, and only its step's own
         # session gets the step tools, which every other session loses.
         # Then the sub-agent family's companions, where ``agent`` is offered.
-        return offer_family(gate_case_tools(tool_filter, session), config, root=not reports_elsewhere(session))
+        offered = offer_family(gate_case_tools(tool_filter, session), config, root=not reports_elsewhere(session))
+        # No Slack to post to: off the filter too, so the skill index, the skill
+        # tools and the request all leave ``post_to_channel`` out.
+        if not getattr(self, "_has_slack", True):
+            offered = set(offered) - {"post_to_channel"}
+        return offered
 
     @staticmethod
     def _dynamic_loop_wait_succeeded(

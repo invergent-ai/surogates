@@ -2167,8 +2167,8 @@ async def run_worker(settings: Settings) -> None:
         # reads its allow-list here, and the harness gets this same gate.
         governance_gate = await kept_family_gate(build_governance_gate(ctx.governance), session, session_store)
         # Whether ``post_to_channel`` has a Slack to post to, for the prompt
-        # surface below and the harness's schemas alike.  Not asked of ops for
-        # a session that is not offered the tool anyway.
+        # surface below and the harness's filter alike.  Not asked of ops once
+        # the session's tool set has already lost it.
         has_slack = "post_to_channel" not in effective_tools or await has_slack_connection(session, platform_client)
         # Principal-aware tool-set filtering: ``create_artifact``
         # requires the harness API client (so the session must have a
@@ -2261,6 +2261,7 @@ async def run_worker(settings: Settings) -> None:
             # tool set keeps those fragments in sync with what the LLM
             # actually has access to this turn.
             available_tools=effective_tools,
+            roster_hidden_tools=frozenset() if has_slack else frozenset({"post_to_channel"}),
             soul_md_content=soul_md_content,
             agent_md_content=agent_md_content,
             slash_commands=ctx.slash_commands,

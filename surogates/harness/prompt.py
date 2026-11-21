@@ -115,8 +115,12 @@ class PromptBuilder:
         speaker: tuple[str, str] | None = None,
         model_id: str | None = None,
         mcp_unavailable: list[tuple[str, str]] | None = None,
+        roster_hidden_tools: frozenset[str] = frozenset(),
     ) -> None:
         self.tenant = tenant
+        # Tools the sub-agent roster does not name: ones no session of this agent could use now.
+        # Not every tool the parent lacks: an agent type may hold more than its parent.
+        self._roster_hidden_tools: frozenset[str] = roster_hidden_tools
         # The model this wake runs on, as the worker resolved it.  A new
         # session's row has no model yet (the worker records it while
         # building this prompt), so ``session.model`` alone would fall back
@@ -546,8 +550,9 @@ class PromptBuilder:
             entry = f"- **{agent.name}**"
             if safe_desc:
                 entry += f" — {safe_desc}"
-            if agent.tools:
-                entry += f"\n  Tools: {', '.join(agent.tools)}"
+            shown_tools = [t for t in agent.tools or () if t not in self._roster_hidden_tools]
+            if shown_tools:
+                entry += f"\n  Tools: {', '.join(shown_tools)}"
             if agent.model:
                 entry += f"\n  Model: {agent.model}"
             lines.append(entry)

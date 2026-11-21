@@ -12,11 +12,13 @@ the channel adapters; the governance gate already ran in the tool router.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
 import time
 import unicodedata
+from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any
 from weakref import WeakKeyDictionary
@@ -128,25 +130,58 @@ async def _slack_app_id(session: Any, platform_client: Any, *, cached: bool = Fa
 # ops lists every agent's Slack routing in one answer; a worker asks at each wake.  A Slack connected a
 # moment ago is offered from the next wake after this long, and one removed is refused by the post itself.
 _ROUTINGS_TTL_S = 30.0
-_routings_seen: WeakKeyDictionary[Any, tuple[float, list[dict]]] = WeakKeyDictionary()
+# After a failed lookup: wakes do not each wait for ops, and keep the last answer, so the tool list (the
+# start of the prompt) does not change because ops was briefly away.
+_ROUTINGS_RETRY_S = 10.0
+
+
+def _now() -> float:
+    return time.monotonic()
+
+
+@dataclass
+class _RoutingCopy:
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    routings: list[dict] | None = None
+    fresh_until: float = 0.0
+
+
+_routings_seen: WeakKeyDictionary[Any, _RoutingCopy] = WeakKeyDictionary()
+
+
+def _known_routings(copy: _RoutingCopy) -> list[dict]:
+    if copy.routings is None:
+        raise LookupError("no Slack routings known yet")
+    return copy.routings
 
 
 async def _recent_routings(platform_client: Any) -> list[dict]:
-    seen = _routings_seen.get(platform_client)
-    now = time.monotonic()
-    if seen is not None and now - seen[0] < _ROUTINGS_TTL_S:
-        return seen[1]
-    routings = await platform_client.list_channel_routings("slack")
-    _routings_seen[platform_client] = (now, routings)
-    return routings
+    copy = _routings_seen.get(platform_client)
+    if copy is None:
+        copy = _routings_seen[platform_client] = _RoutingCopy()
+    if _now() < copy.fresh_until:
+        return _known_routings(copy)
+    async with copy.lock:  # one wake asks; the others read its answer
+        if _now() < copy.fresh_until:
+            return _known_routings(copy)
+        try:
+            routings = await platform_client.list_channel_routings("slack")
+        except Exception:
+            copy.fresh_until = _now() + _ROUTINGS_RETRY_S
+            if copy.routings is None:
+                raise
+            logger.warning("post_to_channel: could not refresh slack routings; keeping the last", exc_info=True)
+            return copy.routings
+        copy.routings, copy.fresh_until = routings, _now() + _ROUTINGS_TTL_S
+        return routings
 
 
 async def has_slack_connection(session: Any, platform_client: Any) -> bool:
     """Whether ``post_to_channel`` could reach a Slack for *session*: the tool is offered only then.
 
     Without a connection it could only answer that there is none, and a model that reads that stops
-    looking, though another of its tools may reach Slack.  A lookup that fails says nothing about the
-    connection, so the tool stays and the post reports the failure.
+    looking, though another of its tools may reach Slack.  A lookup that fails keeps the last answer; with
+    none yet it says nothing about the connection, so the tool stays and the post reports the failure.
     """
     allowed = dimension_allowlist(getattr(session, "config", None), "channels")
     if allowed is not None and "slack" not in allowed:
