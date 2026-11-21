@@ -38,6 +38,7 @@ Surogates is configured via a YAML file merged with environment variables. Envir
 | `worker.concurrency` | `SUROGATES_WORKER_CONCURRENCY` | `50` | Max concurrent sessions per worker |
 | `worker.queue_name` | `SUROGATES_WORKER_QUEUE_NAME` | `surogates:work_queue` | Redis queue key |
 | `worker.poll_timeout` | `SUROGATES_WORKER_POLL_TIMEOUT` | `5` | Queue poll timeout (seconds) |
+| `worker.max_iterations_ceiling` | `SUROGATES_WORKER_MAX_ITERATIONS_CEILING` | `90` | Most model calls in one wake of a session; a session's `max_iterations` may lower it, never raise it. Also the budget of sessions that name none |
 | `worker.api_base_url` | `SUROGATES_WORKER_API_BASE_URL` | -- | API server URL for harness tool calls |
 | `worker.use_api_for_harness_tools` | `SUROGATES_WORKER_USE_API_FOR_HARNESS_TOOLS` | `false` | Route skill/memory operations through API server |
 

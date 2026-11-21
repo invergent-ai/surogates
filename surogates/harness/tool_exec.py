@@ -248,6 +248,45 @@ IMAGE_REMADE = (
 )
 
 
+def _runs_in_its_image(session: Any, tool_name: str, tool_args: Any, *, sandbox_pool: Any) -> bool:
+    """Whether this call runs in the container of the session's own image, which is then its only boundary.
+
+    Only then is the host-side containment check left out: a session image the operator's list admits, on a backend
+    that runs session images (Docker, Kubernetes), a tool that runs in the sandbox, and a sandbox pool to run it in.
+    Anything else keeps the check: no pool (the harness-local fallback reads this host's files), an image the list
+    refuses (no container is made; the call fails there too), a harness tool, and ``read_file`` of a picture, which
+    the worker reads for the vision model, not the container.
+    """
+    if sandbox_pool is None:
+        return False
+    from surogates.sandbox.session_image import SessionImageRefused, names_image, session_image_of
+
+    if not names_image(session.config):
+        return False
+    from surogates.tools.router import TOOL_LOCATIONS, ToolLocation
+
+    if tool_name.startswith("mcp__") or TOOL_LOCATIONS.get(tool_name, ToolLocation.SANDBOX) != ToolLocation.SANDBOX:
+        return False
+    if tool_name == "read_file" and isinstance(tool_args, dict) and isinstance(tool_args.get("path"), str):
+        from surogates.tools.builtin.file_ops import IMAGE_EXTENSIONS
+
+        if os.path.splitext(tool_args["path"])[1].lower() in IMAGE_EXTENSIONS:
+            return False
+    from surogates.config import load_settings
+
+    try:
+        sandbox_settings = load_settings().sandbox
+        if sandbox_settings.backend not in ("docker", "kubernetes"):
+            return False
+        return session_image_of(session.config, sandbox_settings) is not None
+    except SessionImageRefused:
+        return False
+    except Exception:
+        # Settings that cannot be read now: keep the host check (fail closed); the call itself goes on as before.
+        logger.warning("Session %s: could not tell whether %s runs in its image", session.id, tool_name, exc_info=True)
+        return False
+
+
 async def _worked_in_a_sandbox_before(store: Any, session: Any, before: int | None) -> bool:
     """Whether *session* had a sandbox tool's result before the call *before*: a call of the same step, run beside
     it, has none yet, and is no earlier work.  Each session sharing a sandbox (the root, its sub-agents) is asked
@@ -1272,7 +1311,12 @@ async def _run_single_tool(
     decision = gate.check(
         tool_name, tool_args,
         # The computer checks containment; this host cannot resolve its paths.
-        workspace_path=None if on_device else workspace_path,
+        # So does the container of a session's own image, for a call that runs
+        # in it (``_runs_in_its_image``): its folder (``sandbox_workdir``, e.g.
+        # ``/app``) is no path on this host.  The argument checks still apply.
+        workspace_path=None if on_device or _runs_in_its_image(
+            session, tool_name, tool_args, sandbox_pool=sandbox_pool,
+        ) else workspace_path,
     )
     if replay_of is not None:
         # A resumed call passed this check before its operations reached the

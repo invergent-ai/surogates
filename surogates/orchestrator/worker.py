@@ -105,12 +105,13 @@ from surogates.session.execution_context import is_unattended  # noqa: E402
 AGENT_CREDENTIAL_CHANNELS = MANAGED_CREDENTIAL_CHANNELS | {BUY_PAGE_CHANNEL}
 
 
-# Platform ceiling on iterations per wake.  Agent-supplied configuration may
-# lower it, never raise it.
+# Platform ceiling on iterations per wake, unless the operator sets
+# ``worker.max_iterations_ceiling``.  Agent-supplied configuration may lower
+# it, never raise it.
 _DEFAULT_MAX_ITERATIONS: int = 90
 
 
-def _resolve_iteration_budget(session: Any) -> IterationBudget:
+def _resolve_iteration_budget(session: Any, ceiling: Any = _DEFAULT_MAX_ITERATIONS) -> IterationBudget:
     """Build the wake's iteration budget, honouring the per-agent cap.
 
     ``max_iterations`` is derived and written into the child's config by the
@@ -126,7 +127,12 @@ def _resolve_iteration_budget(session: Any) -> IterationBudget:
     having done no work.  ``bool`` is rejected explicitly: it is an ``int``
     subclass in Python, and a config that says ``true`` would otherwise
     silently cap the session at one iteration.
+
+    *ceiling* is the operator's ``worker.max_iterations_ceiling``; an unusable
+    one (not a positive integer) is the default.
     """
+    if isinstance(ceiling, bool) or not isinstance(ceiling, int) or ceiling <= 0:
+        ceiling = _DEFAULT_MAX_ITERATIONS
     config = getattr(session, "config", None) or {}
     raw = config.get("max_iterations")
     if isinstance(raw, bool) or not isinstance(raw, int) or raw <= 0:
@@ -134,10 +140,10 @@ def _resolve_iteration_budget(session: Any) -> IterationBudget:
             logger.warning(
                 "Session %s: ignoring unusable max_iterations %r; "
                 "falling back to %d",
-                getattr(session, "id", "?"), raw, _DEFAULT_MAX_ITERATIONS,
+                getattr(session, "id", "?"), raw, ceiling,
             )
-        return IterationBudget(max_total=_DEFAULT_MAX_ITERATIONS)
-    return IterationBudget(max_total=min(raw, _DEFAULT_MAX_ITERATIONS))
+        return IterationBudget(max_total=ceiling)
+    return IterationBudget(max_total=min(raw, ceiling))
 
 
 def resolve_credential_principal(
@@ -1849,7 +1855,9 @@ async def run_worker(settings: Settings) -> None:
         # the model, the worker reports what it picked.
         _warn_if_base_model_missing_from_metadata(model_id)
         await session_store.record_session_model(session.id, model_id)
-        budget = _resolve_iteration_budget(session)
+        budget = _resolve_iteration_budget(
+            session, getattr(settings.worker, "max_iterations_ceiling", _DEFAULT_MAX_ITERATIONS),
+        )
         summary_slot = llm_bundle.summary
         vision_slot = llm_bundle.vision
         advisor_slot = llm_bundle.advisor
