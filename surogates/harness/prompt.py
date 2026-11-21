@@ -30,7 +30,7 @@ from surogates.harness.prompt_library import PromptLibrary, default_library
 from surogates.runtime.context import SlashCommandConfig
 from surogates.sandbox.session_image import IMAGE_KEY, WORKDIR_KEY
 from surogates.tools.loader import AGENT_SOURCE_PLATFORM
-from surogates.tools.skill_visibility import fallback_hidden, needs_unavailable_tool
+from surogates.tools.skill_visibility import fallback_hidden, needs_unavailable_tool, tools_named
 from surogates.session.execution_context import platform_hint_channel
 from surogates.workstreams import is_project_master, is_project_thread
 
@@ -115,8 +115,12 @@ class PromptBuilder:
         speaker: tuple[str, str] | None = None,
         model_id: str | None = None,
         mcp_unavailable: list[tuple[str, str]] | None = None,
+        roster_hidden_tools: frozenset[str] = frozenset(),
     ) -> None:
         self.tenant = tenant
+        # Tools the sub-agent roster does not name: ones no session of this agent could use now.
+        # Not every tool the parent lacks: an agent type may hold more than its parent.
+        self._roster_hidden_tools: frozenset[str] = roster_hidden_tools
         # The model this wake runs on, as the worker resolved it.  A new
         # session's row has no model yet (the worker records it while
         # building this prompt), so ``session.model`` alone would fall back
@@ -170,7 +174,7 @@ class PromptBuilder:
         # once at construction because disabled agents never render and
         # the list is immutable for the lifetime of the builder.
         self._available_agents: list[AgentDef] = [
-            a for a in (available_agents or []) if a.enabled
+            a for a in (available_agents or []) if a.enabled and self._roster_lists(a)
         ]
         self.has_agents: bool = bool(self._available_agents)
 
@@ -516,6 +520,24 @@ class PromptBuilder:
             parts.append(safe)
         return "\n\n".join(parts)
 
+    def _roster_lists(self, agent: Any) -> bool:
+        """Whether a sub-agent type can do its work without the roster's hidden tools.  No line of tools reads
+        as "every tool", so a type left with none is not listed; nor one whose description or instructions
+        name a hidden tool it does not itself deny.  The roster and the skill index's ``requires_agents``
+        follow; a type can still be started by name, and its session then has no such tool."""
+        hidden = self._roster_hidden_tools
+        if not hidden:
+            return True
+        tools = agent.tools or ()
+        named = tools_named(
+            (agent.description, getattr(agent, "system_prompt", None)),
+            hidden - set(getattr(agent, "disallowed_tools", None) or ()),
+        )
+        if (tools and not set(tools) - hidden) or named:
+            logger.info("sub-agent type %s not listed: it needs %s", agent.name, sorted(named or hidden))
+            return False
+        return True
+
     def _available_agents_section(self) -> str:
         """Render an "# Available Sub-Agents" block for a session offered ``agent``.
 
@@ -540,14 +562,15 @@ class PromptBuilder:
 
         lines: list[str] = []
         for agent in self._available_agents:
+            shown_tools = [t for t in agent.tools or () if t not in self._roster_hidden_tools]
             safe_desc = self._sanitise(
                 agent.description or "", f"agent:{agent.name}",
             )
             entry = f"- **{agent.name}**"
             if safe_desc:
                 entry += f" — {safe_desc}"
-            if agent.tools:
-                entry += f"\n  Tools: {', '.join(agent.tools)}"
+            if shown_tools:
+                entry += f"\n  Tools: {', '.join(shown_tools)}"
             if agent.model:
                 entry += f"\n  Model: {agent.model}"
             lines.append(entry)
@@ -820,6 +843,10 @@ class PromptBuilder:
                 name = skill.get("name") or ""
                 content = skill.get("content") or ""
             else:
+                continue
+            if name in wanted and needs_unavailable_tool(skill, self._roster_hidden_tools):
+                wanted.discard(name)  # it would send the model to a tool no session of this agent has now
+                logger.warning("preloaded skill %s not inlined: it needs a tool this session lacks", name)
                 continue
             if name in wanted and content:
                 safe = self._sanitise(content, f"skill:{name}")
