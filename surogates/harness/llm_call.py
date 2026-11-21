@@ -343,18 +343,43 @@ def sampling_kwargs(config: dict[str, Any]) -> dict[str, Any]:
 
     ``reasoning_effort`` is the OpenAI field. ``enable_thinking`` is for a
     chat-template server, and goes in ``extra_body`` because the client
-    refuses an argument it does not know.
+    refuses an argument it does not know.  So do the chat-template
+    arguments the deployment sets for its model (``llm.chat_template_kwargs``,
+    e.g. a numeric ``reasoning_effort`` a template reads, where the OpenAI
+    field only takes a word) and the session's own ``chat_template_kwargs``,
+    which win key by key.
     """
     kwargs: dict[str, Any] = {
         key: config[key]
         for key in ("temperature", "max_tokens", "reasoning_effort")
         if config.get(key) is not None
     }
+    template_kwargs = merged_chat_template_kwargs(config)
     if config.get("enable_thinking") is not None:
-        kwargs["extra_body"] = {
-            "chat_template_kwargs": {"enable_thinking": config["enable_thinking"]},
-        }
+        template_kwargs["enable_thinking"] = config["enable_thinking"]
+    if template_kwargs:
+        kwargs["extra_body"] = {"chat_template_kwargs": template_kwargs}
     return kwargs
+
+
+def deployment_chat_template_kwargs() -> dict[str, Any]:
+    """The deployment's ``llm.chat_template_kwargs`` (``load_settings`` keeps them current)."""
+    from surogates.config import load_settings
+
+    return dict(load_settings().llm.chat_template_kwargs or {})
+
+
+def merged_chat_template_kwargs(config: dict[str, Any] | None) -> dict[str, Any]:
+    """The deployment's chat-template arguments, overridden key by key by the session's.
+
+    A session value that is not a mapping is ignored (the deployment's
+    stand), so a malformed config cannot drop them silently.
+    """
+    merged = deployment_chat_template_kwargs()
+    own = (config or {}).get("chat_template_kwargs")
+    if isinstance(own, dict):
+        merged.update(own)
+    return merged
 
 
 def apply_developer_role(messages: list[dict], model_id: str) -> list[dict]:
