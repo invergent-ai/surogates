@@ -626,7 +626,7 @@ def test_storage_path_refuses_a_key_encoded_past_the_decode_limit() -> None:
 
 
 def _local_session(tmp_path: Path) -> tuple[Path, dict]:
-    """A session's workspace on real local storage, and the kwargs of its tool calls."""
+    """A workspace on real local storage at the path its keys name, and its tool kwargs."""
     from surogates.storage.backend import LocalBackend
 
     session_id = UUID("00000000-0000-0000-0000-000000000126")
@@ -735,3 +735,52 @@ async def test_vision_analyze_refuses_paths_out_of_a_local_workspace(
 
     assert "Path traversal blocked" in json.loads(result)["error"]
     create.assert_not_awaited()
+
+
+def test_storage_path_caps_a_long_path_of_many_segments() -> None:
+    from surogates.tools.builtin.vision import (
+        _MAX_IMAGE_PATH_CHARS,
+        _validate_workspace_storage_path,
+    )
+    from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
+
+    head = "/workspace/"
+    at_limit = head + "a" * (_MAX_IMAGE_PATH_CHARS - len(head))
+    assert _validate_workspace_storage_path(at_limit, workspace_path=_HOST_ROOT) == at_limit[len(head):]
+
+    with pytest.raises(WorkspaceSandboxError, match="too long") as refused:
+        _validate_workspace_storage_path(head + "a/" * 20_000 + "x.png", workspace_path=_HOST_ROOT)
+    assert "a/a/" not in str(refused.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("image_ref", ["/workspace/a\0.png", "a\0.png"])
+async def test_vision_analyze_refuses_a_nul_without_naming_the_key(
+    tmp_path: Path, image_ref: str,
+) -> None:
+    from surogates.tools.builtin.vision import _vision_analyze_handler
+    from surogates.tools.utils.workspace_sandbox import NUL_REFUSED
+
+    _workspace, kwargs = _local_session(tmp_path)
+    create = AsyncMock(return_value=_fake_response("leaked"))
+
+    result = await _vision_analyze_handler(
+        {"image": image_ref}, llm_client=_client(create), **kwargs,
+    )
+
+    assert json.loads(result)["error"] == NUL_REFUSED
+    create.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_image_cache_key_is_one_for_the_sandbox_and_relative_path(tmp_path: Path) -> None:
+    from surogates.harness.image_read import _build_key
+
+    workspace, kwargs = _local_session(tmp_path)
+    _png(workspace / "a.png")
+
+    key = await _build_key("/workspace/a.png", kwargs)
+
+    assert key is not None
+    assert key == await _build_key("a.png", kwargs)
+    assert await _build_key("/workspace/../a.png", kwargs) is None

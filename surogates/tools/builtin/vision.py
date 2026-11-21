@@ -25,6 +25,7 @@ from surogates.tools.utils.url_safety import is_safe_url
 from surogates.tools.utils.workspace_sandbox import (
     WorkspaceSandboxError,
     in_workspace_terms,
+    refuse_nul,
     validate_path,
 )
 
@@ -33,6 +34,7 @@ logger = logging.getLogger(__name__)
 _MAX_IMAGE_BYTES = 20 * 1024 * 1024
 _MAX_REDIRECTS = 5
 _MAX_PATH_DECODES = 4
+_MAX_IMAGE_PATH_CHARS = 4096  # PATH_MAX; an S3 key is shorter still
 _DEFAULT_PROMPT = "Describe the image. Include any visible text and important details."
 # Long-edge caps before sending to the vision model. Anthropic resizes anything
 # beyond ~1568 px server-side; OpenAI's ``low`` detail uses a single 512x512
@@ -315,7 +317,15 @@ def _validate_workspace_storage_path(
     also where the session's ``workspace_path`` is a folder on the host (local
     storage).  The check is on the text alone: links are the storage's to
     refuse, which reaches a key with no link followed.
+
+    The length is capped first: comparing paths costs the square of their
+    segments, on the worker's event loop.
     """
+    refuse_nul(image_ref)
+    if len(image_ref) > _MAX_IMAGE_PATH_CHARS:
+        raise WorkspaceSandboxError(
+            f"Image path is too long: over {_MAX_IMAGE_PATH_CHARS} characters"
+        )
     key = image_ref
     if workspace_path:
         workspace_root = PurePosixPath(workspace_path)
@@ -335,8 +345,8 @@ def _validate_workspace_storage_path(
 def _names_parent_folder(key: str) -> bool:
     """Whether *key* holds a ``..`` segment, also percent-encoded or with backslashes.
 
-    Decoded a few times over, and a key still encoded after that is refused:
-    each pass is linear, so a long crafted key cannot hold the worker.
+    Decoded a few times over, and a key still encoded after that is refused,
+    so the work stays linear in the key's length.
     """
     decoded = key
     for _ in range(_MAX_PATH_DECODES):
