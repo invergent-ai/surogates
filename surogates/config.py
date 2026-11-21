@@ -377,6 +377,11 @@ class LLMSettings(BaseSettings):
     # deployment-level model setting could only ever disagree with it.
     base_url: str = ""  # custom endpoint (e.g. vLLM, Ollama)
     api_key: str = ""  # provider API key
+    # The built-in advisor runs on the executor's own model in this
+    # deployment (no stronger tier behind it): it is introduced as a second
+    # opinion in a fresh context, not "a stronger model", and is not invited
+    # to stop the work by default.  False: the text as before.
+    advisor_same_model: bool = False
 
     # Per-model metadata overrides.  Keyed by model id; values are dicts
     # accepting ``context_window`` and ``max_output_tokens``.  Takes

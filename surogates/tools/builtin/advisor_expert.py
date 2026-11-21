@@ -66,6 +66,40 @@ _ADVISOR_DESCRIPTION = (
     "a correction, or a stop signal"
 )
 
+# The advisor when it runs on the executor's own model (``llm.advisor_same_model``): a second opinion in a fresh
+# context, not a stronger model, and no standing invitation to stop. On 11-21 Inkling-2-Mini, advising itself under the
+# text above, told itself to halt in 44 % (AutomationBench) and 46 % (EnterpriseOps-Gym) of consulted sessions, W4
+# 13 / 20 %, and failed 27 of 29 EnterpriseOps-Gym sessions after a halt.
+_SAME_MODEL_INSTRUCTIONS = """\
+You are a reviewer giving a second opinion on the executor's work, in a
+fresh context. The executor will continue the task after reading your
+guidance. Give concise, high-leverage advice.
+
+Work the problem as far as you can yourself: state the key intermediate
+results, the pitfalls, and -- when you are confident -- your own answer,
+plus how the executor should verify it. Concrete numbers, enumerations,
+and near-code help more than method-only advice. If the task needs tools
+you do not have, say exactly what to run and what output to expect.
+
+If the executor is heading somewhere that will not work, say so plainly
+and say what to do instead. Recommend stopping only when the task cannot
+be completed with the tools available; otherwise give the next concrete
+step.
+"""
+
+_SAME_MODEL_DESCRIPTION = (
+    "A reviewer in a fresh context that checks the work so far and returns "
+    "strategy or a correction"
+)
+
+
+def _same_model() -> bool:
+    """Whether the advisor runs on the executor's own model (``llm.advisor_same_model``)."""
+    from surogates.config import load_settings
+
+    return bool(getattr(load_settings().llm, "advisor_same_model", False))
+
+
 # The caller-side half of the advisor protocol. The executor decides when
 # to consult on its own -- the classifier preflight that used to make that
 # call was measured useful 0.7% of the time and deleted -- so the timing
@@ -97,10 +131,11 @@ _ADVISOR_TRIGGER = (
 
 def build_advisor_expert() -> SkillDef:
     """Return the built-in advisor as an active, tool-less expert."""
+    same = _same_model()
     return SkillDef(
         name=ADVISOR_EXPERT_NAME,
-        description=_ADVISOR_DESCRIPTION,
-        content=_ADVISOR_INSTRUCTIONS,
+        description=_SAME_MODEL_DESCRIPTION if same else _ADVISOR_DESCRIPTION,
+        content=_SAME_MODEL_INSTRUCTIONS if same else _ADVISOR_INSTRUCTIONS,
         source=SKILL_SOURCE_PLATFORM,
         builtin=True,
         type="expert",
@@ -141,10 +176,14 @@ def build_expert_transcript(messages: list[dict]) -> str:
     character cut. An expert consult bills at its own model's rate, and
     an unbounded transcript would let a long session quietly multiply
     the cost of every consult.
+
+    The session's first user message (the task) leads it, cut to 4,000
+    characters, when it is not among the last 12: without it the advisor
+    judged work against a task it could not read (11-21: the task was in
+    the window for 0 % of AutomationBench consults, 3 % Claw-Eval, 35 %
+    EnterpriseOps-Gym). The 16k bound holds for the whole.
     """
-    fragments: list[str] = []
-    for msg in messages[-12:]:
-        role = msg.get("role", "unknown")
+    def text_of(msg: dict) -> str:
         content = msg.get("content") or ""
         if isinstance(content, list):
             content = _collapse_text_parts([
@@ -152,7 +191,17 @@ def build_expert_transcript(messages: list[dict]) -> str:
                 for part in content
                 if isinstance(part, dict) and part.get("type") == "text"
             ])
-        if not isinstance(content, str) or not content.strip():
+        return content if isinstance(content, str) else ""
+
+    recent = messages[-12:]
+    fragments: list[str] = []
+    for msg in recent:
+        content = text_of(msg)
+        if not content.strip():
             continue
-        fragments.append(f"{role}: {content}")
-    return "\n\n".join(fragments)[-16_000:]
+        fragments.append(f"{msg.get('role', 'unknown')}: {content}")
+    task = next((m for m in messages if m.get("role") == "user" and text_of(m).strip()), None)
+    head = ""
+    if task is not None and not any(m is task for m in recent):
+        head = f"user (the task, the session's first message): {text_of(task)[:4_000]}\n\n"
+    return head + "\n\n".join(fragments)[-(16_000 - len(head)):]

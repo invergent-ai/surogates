@@ -114,12 +114,16 @@ async def _consult_expert_handler(
     task: str = arguments.get("task", "")
     context: str | None = arguments.get("context")
 
-    if not expert_name:
-        return json.dumps({"error": "expert name is required"})
     if not task:
         return json.dumps({"error": "task is required"})
 
     session_id = UUID(str(session_id_str))
+
+    from surogates.tools.builtin.advisor_expert import (
+        ADVISOR_EXPERT_NAME,
+        advisor_available,
+        is_advisor_expert,
+    )
 
     # Resolve the expert.  In the shared-runtime (API-mediated) deployment
     # per-agent bundle experts are only visible to the bundle-aware API
@@ -127,18 +131,25 @@ async def _consult_expert_handler(
     # ``skills_list``/``skill_view`` already take.  The worker-local loader
     # is bundle-blind and would report the expert as "not found".
     api_client = kwargs.get("api_client")
-    if api_client is not None:
-        expert, available = await _resolve_expert_via_api(api_client, expert_name)
-    else:
-        expert, available = await _resolve_expert_local(
-            expert_name, loaded_skills, kwargs,
-        )
 
-    from surogates.tools.builtin.advisor_expert import (
-        ADVISOR_EXPERT_NAME,
-        advisor_available,
-        is_advisor_expert,
-    )
+    async def resolve(name: str):
+        if api_client is not None:
+            return await _resolve_expert_via_api(api_client, name)
+        return await _resolve_expert_local(name, loaded_skills, kwargs)
+
+    if not expert_name:
+        # A consult that names no expert goes to the only one there is (11-21: 18 % of Inkling-2-Mini's consults
+        # named none and were refused, W4 3 of 1,149); with several, the caller is told which there are.
+        if api_client is not None:
+            available = await _active_experts_via_api(api_client)
+        else:
+            _none, available = await _resolve_expert_local("", loaded_skills, kwargs)
+        if not advisor_available(kwargs.get("model")):
+            available = [n for n in available if n != ADVISOR_EXPERT_NAME]
+        if len(available) != 1:
+            return json.dumps({"error": "expert name is required", "available_experts": available})
+        expert_name = available[0]
+    expert, available = await resolve(expert_name)
 
     # A Pro-tier session is already on the advisor's model, so the
     # advisor is withheld; this is the hard gate behind the prompt roster.

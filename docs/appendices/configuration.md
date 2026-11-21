@@ -54,6 +54,7 @@ Surogates is configured via a YAML file merged with environment variables. Envir
 | `llm.credential_pool` | -- | `[]` | Additional API keys for rotation |
 | `llm.fallback_providers` | -- | `[]` | Fallback provider chain |
 | `llm.session_headers` | `SUROGATES_LLM_SESSION_HEADERS` | `false` | Send `x-surogates-session` (the session's id) and `x-surogates-root` (the top of its `parent_id` chain, as in the session tree; a project's threads and a schedule's runs share their parent chat's root) on every call through the session's LLM clients: main loop, sub-agents, summaries, titles, advisor, fallbacks. Not on video generation or tenant experts with their own endpoint. Request bodies unchanged. Off by default: the ids would reach whatever provider a slot points at, BYO keys included |
+| `llm.advisor_same_model` | `SUROGATES_LLM_ADVISOR_SAME_MODEL` | `false` | The built-in advisor runs on the executor's own model (no stronger tier behind it): it is introduced as a second opinion in a fresh context, not "a stronger model", and is told to recommend stopping only when the task cannot be completed with the tools available. `false`: the text as before |
 
 ## Sandbox (`sandbox`)
 
