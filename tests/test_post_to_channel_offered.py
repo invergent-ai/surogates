@@ -217,6 +217,12 @@ def test_a_type_whose_instructions_name_it_is_not_listed():
     assert "**tracker**" in _builder(agents, frozenset())._available_agents_section()
 
 
+def test_a_type_that_denies_the_tool_stays_listed():
+    agent = _kind("careful", system_prompt="Never use post_to_channel.")
+    agent.disallowed_tools = ["post_to_channel"]
+    assert "**careful**" in _builder([agent], HIDDEN)._available_agents_section()
+
+
 def test_a_skill_that_needs_a_hidden_type_leaves_the_index():
     agents = [_kind("poster", tools=("post_to_channel",))]
     assert _builder(agents, frozenset())._skill_visible([], [], ["poster"]) is True

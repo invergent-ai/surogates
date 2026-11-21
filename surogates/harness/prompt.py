@@ -523,14 +523,20 @@ class PromptBuilder:
     def _roster_lists(self, agent: Any) -> bool:
         """Whether a sub-agent type can do its work without the roster's hidden tools.  No line of tools reads
         as "every tool", so a type left with none is not listed; nor one whose description or instructions
-        send it to a hidden tool.  Everything reading the catalog (the roster, ``requires_agents``) follows."""
+        name a hidden tool it does not itself deny.  The roster and the skill index's ``requires_agents``
+        follow; a type can still be started by name, and its session then has no such tool."""
         hidden = self._roster_hidden_tools
         if not hidden:
             return True
         tools = agent.tools or ()
-        if tools and not set(tools) - hidden:
+        named = tools_named(
+            (agent.description, getattr(agent, "system_prompt", None)),
+            hidden - set(getattr(agent, "disallowed_tools", None) or ()),
+        )
+        if (tools and not set(tools) - hidden) or named:
+            logger.info("sub-agent type %s not listed: it needs %s", agent.name, sorted(named or hidden))
             return False
-        return not tools_named((agent.description, getattr(agent, "system_prompt", None)), hidden)
+        return True
 
     def _available_agents_section(self) -> str:
         """Render an "# Available Sub-Agents" block for a session offered ``agent``.
@@ -840,6 +846,7 @@ class PromptBuilder:
                 continue
             if name in wanted and needs_unavailable_tool(skill, self._roster_hidden_tools):
                 wanted.discard(name)  # it would send the model to a tool no session of this agent has now
+                logger.warning("preloaded skill %s not inlined: it needs a tool this session lacks", name)
                 continue
             if name in wanted and content:
                 safe = self._sanitise(content, f"skill:{name}")
