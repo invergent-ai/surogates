@@ -174,7 +174,7 @@ class PromptBuilder:
         # once at construction because disabled agents never render and
         # the list is immutable for the lifetime of the builder.
         self._available_agents: list[AgentDef] = [
-            a for a in (available_agents or []) if a.enabled
+            a for a in (available_agents or []) if a.enabled and self._roster_lists(a)
         ]
         self.has_agents: bool = bool(self._available_agents)
 
@@ -520,6 +520,18 @@ class PromptBuilder:
             parts.append(safe)
         return "\n\n".join(parts)
 
+    def _roster_lists(self, agent: Any) -> bool:
+        """Whether a sub-agent type can do its work without the roster's hidden tools.  No line of tools reads
+        as "every tool", so a type left with none is not listed; nor one whose description or instructions
+        send it to a hidden tool.  Everything reading the catalog (the roster, ``requires_agents``) follows."""
+        hidden = self._roster_hidden_tools
+        if not hidden:
+            return True
+        tools = agent.tools or ()
+        if tools and not set(tools) - hidden:
+            return False
+        return not tools_named((agent.description, getattr(agent, "system_prompt", None)), hidden)
+
     def _available_agents_section(self) -> str:
         """Render an "# Available Sub-Agents" block for a session offered ``agent``.
 
@@ -545,13 +557,6 @@ class PromptBuilder:
         lines: list[str] = []
         for agent in self._available_agents:
             shown_tools = [t for t in agent.tools or () if t not in self._roster_hidden_tools]
-            # No line of tools reads as "every tool", so a type left with none is not listed; nor one
-            # whose description sends the parent to a hidden tool.
-            if self._roster_hidden_tools and (
-                (agent.tools and not shown_tools)
-                or tools_named((agent.description,), self._roster_hidden_tools)
-            ):
-                continue
             safe_desc = self._sanitise(
                 agent.description or "", f"agent:{agent.name}",
             )
@@ -832,6 +837,9 @@ class PromptBuilder:
                 name = skill.get("name") or ""
                 content = skill.get("content") or ""
             else:
+                continue
+            if name in wanted and needs_unavailable_tool(skill, self._roster_hidden_tools):
+                wanted.discard(name)  # it would send the model to a tool no session of this agent has now
                 continue
             if name in wanted and content:
                 safe = self._sanitise(content, f"skill:{name}")

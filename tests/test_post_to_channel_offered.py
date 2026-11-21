@@ -194,6 +194,51 @@ def test_the_sub_agent_roster_does_not_name_it_without_a_slack():
     assert "**poster**" not in text and "**announcer**" not in text
 
 
+def _builder(agents, hidden, **kwargs):
+    tenant = SimpleNamespace(org_id=uuid4(), user_id=uuid4(), service_account_id=None, org_config={}, user_config={})
+    return PromptBuilder(
+        tenant, session=SimpleNamespace(config={}, channel="web", id=uuid4()),
+        available_agents=agents, available_tools={"agent"}, roster_hidden_tools=hidden, **kwargs,
+    )
+
+
+HIDDEN = frozenset({"post_to_channel"})
+
+
+def _kind(name, description="Does work", tools=("read_file",), system_prompt=None):
+    return SimpleNamespace(name=name, description=description, tools=list(tools), model=None, enabled=True,
+                           system_prompt=system_prompt)
+
+
+def test_a_type_whose_instructions_name_it_is_not_listed():
+    agents = [_kind("tracker", system_prompt="Post the result with post_to_channel."), _kind("reader")]
+    text = _builder(agents, HIDDEN)._available_agents_section()
+    assert "**tracker**" not in text and "**reader**" in text
+    assert "**tracker**" in _builder(agents, frozenset())._available_agents_section()
+
+
+def test_a_skill_that_needs_a_hidden_type_leaves_the_index():
+    agents = [_kind("poster", tools=("post_to_channel",))]
+    assert _builder(agents, frozenset())._skill_visible([], [], ["poster"]) is True
+    builder = _builder(agents, HIDDEN)
+    assert builder._skill_visible([], [], ["poster"]) is False
+    assert builder.has_agents is False
+
+
+def test_a_preloaded_skill_naming_it_is_not_inlined():
+    skills = [
+        {"name": "announce", "content": "Send it with post_to_channel."},
+        {"name": "plain", "content": "Read the file."},
+    ]
+    def section(hidden):
+        builder = _builder([_kind("reader")], hidden, skills=skills)
+        builder._session.config["preloaded_skills"] = ["announce", "plain"]
+        return builder._preloaded_skills_section()
+    assert "announce" in section(frozenset())
+    text = section(HIDDEN)
+    assert "post_to_channel" not in text and "Read the file." in text
+
+
 def test_the_worker_hands_the_answer_to_each_surface():
     tree = ast.parse((Path(worker.__file__)).read_text(encoding="utf-8"))
     calls = {n.func.id: {k.arg: k.value for k in n.keywords} for n in ast.walk(tree)
@@ -204,6 +249,7 @@ def test_the_worker_hands_the_answer_to_each_surface():
         assert isinstance(value, ast.Name) and value.id == "has_slack"
     roster = calls["PromptBuilder"]["roster_hidden_tools"]
     assert isinstance(roster, ast.IfExp) and isinstance(roster.test, ast.Name) and roster.test.id == "has_slack"
+    assert "post_to_channel" not in ast.dump(roster.body) and "post_to_channel" in ast.dump(roster.orelse)
 
 
 async def test_while_ops_is_being_asked_other_wakes_read_the_last_answer(monkeypatch):
