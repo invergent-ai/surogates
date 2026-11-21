@@ -15,9 +15,11 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 import unicodedata
 from types import SimpleNamespace
 from typing import Any
+from weakref import WeakKeyDictionary
 
 from surogates.channels.credentials import resolve_channel_credentials
 from surogates.channels.platform_resolve import effective_channel_platform
@@ -103,19 +105,57 @@ def _build_blocks(text: str, blocks: Any, image_url: str | None) -> list[dict] |
     return blocks
 
 
-async def _slack_app_id(session: Any, platform_client: Any) -> str | None:
-    """The agent's Slack app: this conversation's, else the one ops routes to it."""
+async def _slack_app_id(session: Any, platform_client: Any, *, cached: bool = False) -> str | None:
+    """The agent's Slack app: this conversation's, else the one ops routes to it.
+
+    *cached*: read ops' routings through a short-lived copy, for the question
+    asked at every wake (:func:`has_slack_connection`).  A post always asks ops.
+    """
     cfg = getattr(session, "config", None) or {}
     if effective_channel_platform(session) == "slack" and cfg.get("channel_identifier"):
         return str(cfg["channel_identifier"])
     if platform_client is None:
         return None
-    for routing in await platform_client.list_channel_routings("slack"):
+    routings = await (_recent_routings(platform_client) if cached else platform_client.list_channel_routings("slack"))
+    for routing in routings:
         if (str(routing.get("agent_id")) == str(session.agent_id)
                 and str(routing.get("org_id")) == str(session.org_id)
                 and routing.get("channel_identifier")):
             return str(routing["channel_identifier"])
     return None
+
+
+# ops lists every agent's Slack routing in one answer; a worker asks at each wake.  A Slack connected a
+# moment ago is offered from the next wake after this long, and one removed is refused by the post itself.
+_ROUTINGS_TTL_S = 30.0
+_routings_seen: WeakKeyDictionary[Any, tuple[float, list[dict]]] = WeakKeyDictionary()
+
+
+async def _recent_routings(platform_client: Any) -> list[dict]:
+    seen = _routings_seen.get(platform_client)
+    now = time.monotonic()
+    if seen is not None and now - seen[0] < _ROUTINGS_TTL_S:
+        return seen[1]
+    routings = await platform_client.list_channel_routings("slack")
+    _routings_seen[platform_client] = (now, routings)
+    return routings
+
+
+async def has_slack_connection(session: Any, platform_client: Any) -> bool:
+    """Whether ``post_to_channel`` could reach a Slack for *session*: the tool is offered only then.
+
+    Without a connection it could only answer that there is none, and a model that reads that stops
+    looking, though another of its tools may reach Slack.  A lookup that fails says nothing about the
+    connection, so the tool stays and the post reports the failure.
+    """
+    allowed = dimension_allowlist(getattr(session, "config", None), "channels")
+    if allowed is not None and "slack" not in allowed:
+        return False
+    try:
+        return await _slack_app_id(session, platform_client, cached=True) is not None
+    except Exception:
+        logger.warning("post_to_channel: could not list slack routings to offer the tool", exc_info=True)
+        return True
 
 
 async def _resolve_channel(client: Any, channel: str) -> str:

@@ -137,6 +137,7 @@ def drop_unusable_tools(
     has_image_model: bool = True,
     has_video_model: bool = True,
     on_device: bool = False,
+    has_slack: bool = True,
 ) -> list[dict[str, Any]]:
     """Drop tools whose backing resource this agent does not have.
 
@@ -166,6 +167,9 @@ def drop_unusable_tools(
     The tools on files outside a chat's folder go only to a chat on a
     computer (*on_device*): nowhere else is there a folder outside it.
 
+    ``post_to_channel`` goes only to a session with a Slack to post to
+    (*has_slack*); unknown counts as having one.
+
     Never returns an empty list (a request with no tools at all is worse
     than an oversized one), except where only unwired media tools were left.
     """
@@ -182,6 +186,7 @@ def drop_unusable_tools(
         has_image_model=has_image_model,
         has_video_model=has_video_model,
         on_device=on_device,
+        has_slack=has_slack,
     )
     if not drop:
         return schemas
@@ -212,6 +217,7 @@ def unusable_tool_names(
     has_image_model: bool = True,
     has_video_model: bool = True,
     on_device: bool = False,
+    has_slack: bool = True,
 ) -> frozenset[str]:
     """The tools ``drop_unusable_tools`` takes off a request with these facts, whichever tools the request holds:
     what a consulted expert's model, which picks its own tools, must not be sent either."""
@@ -240,6 +246,8 @@ def unusable_tool_names(
         drop.add("generate_video")
     if not on_device:
         drop |= OUTSIDE_FOLDER_TOOLS
+    if not has_slack:
+        drop.add("post_to_channel")
     return frozenset(drop)
 
 

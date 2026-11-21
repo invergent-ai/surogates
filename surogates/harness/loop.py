@@ -791,6 +791,7 @@ class AgentHarness(
         runtime_config_cache: Any | None = None,
         whatsapp_forms: tuple[dict[str, Any], ...] = (),
         intake: Sequence[dict[str, Any]] = (),
+        has_slack: bool = True,
         entitlement_excluded_tools: frozenset[str] = frozenset(),
         fallback_chain: tuple[Any, ...] = (),
         delta_policy: DeltaPolicy | None = None,
@@ -858,6 +859,8 @@ class AgentHarness(
         # The case types Keel lets this agent start, as the worker asked at
         # the wake: ``start_case`` is offered only when there is one.
         self._intake: tuple[dict[str, Any], ...] = tuple(intake or ())
+        # Whether ``post_to_channel`` has a Slack to post to, as the worker asked at the wake.
+        self._has_slack = has_slack
         self._worker_id = worker_id
         self._budget = budget
         self._compressor = context_compressor
@@ -1960,6 +1963,7 @@ class AgentHarness(
             has_video_model="generate_video" not in _unwired_media,
             # A project's thread works in a copy of the chat's folder: the rest of the computer is the main chat's.
             on_device=device_of(session.config) is not None and not under_a_thread(session.config),
+            has_slack=getattr(self, "_has_slack", True),
         )
 
     def _withhold_from_experts(self, usable: dict[str, bool], offered: Iterable[str] | None) -> None:

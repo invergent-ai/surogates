@@ -38,6 +38,7 @@ from surogates.runtime.governance import (
     KEEL_DESIGNER_TOOLS,
     build_governance_gate,
 )
+from surogates.tools.builtin.channel_post import has_slack_connection
 from surogates.tools.builtin.team import team_tool_exclusions
 from surogates.tools.owner_scope import is_ops_chat_service_account
 from surogates.tools.builtin.followup import followup_tool_exclusions
@@ -251,6 +252,8 @@ def _filter_effective_tools(
     # The designer's tools the agent's policy allow-lists
     # (``GovernanceGate.allow_listed``): none, no designer tool.
     allow_listed: frozenset[str] = frozenset(),
+    # Whether the session has a Slack for ``post_to_channel`` to post to.
+    has_slack: bool = True,
 ) -> set[str]:
     """Return the LLM-visible tool set after principal-aware filtering.
 
@@ -357,6 +360,11 @@ def _filter_effective_tools(
     # The designer's tools go only to an agent whose policy's allow-list names
     # them, as the schemas keep (``AgentHarness._tool_filter_for_session_impl``).
     result -= KEEL_DESIGNER_TOOLS - allow_listed
+
+    # ``post_to_channel`` needs a Slack to post to: the same rule the schemas
+    # keep (``drop_unusable_tools``).
+    if not has_slack:
+        result.discard("post_to_channel")
 
     # Last: a Keel case's sessions are offered only the case's tools, and only
     # its step's own session the step tools.  The schemas apply the same gate
@@ -2158,6 +2166,10 @@ async def run_worker(settings: Settings) -> None:
         # family whatever the policy says.  Built once: the prompt surface
         # reads its allow-list here, and the harness gets this same gate.
         governance_gate = await kept_family_gate(build_governance_gate(ctx.governance), session, session_store)
+        # Whether ``post_to_channel`` has a Slack to post to, for the prompt
+        # surface below and the harness's schemas alike.  Not asked of ops for
+        # a session that is not offered the tool anyway.
+        has_slack = "post_to_channel" not in effective_tools or await has_slack_connection(session, platform_client)
         # Principal-aware tool-set filtering: ``create_artifact``
         # requires the harness API client (so the session must have a
         # principal AND ``use_api_for_harness_tools`` must be on), and
@@ -2173,6 +2185,7 @@ async def run_worker(settings: Settings) -> None:
             whiteboard_enabled=ctx.whiteboard_enabled,
             intake=intake,
             allow_listed=governance_gate.allow_listed(KEEL_DESIGNER_TOOLS),
+            has_slack=has_slack,
         )
 
         # Purchased-package tool exclusions: browser toolset, the coding
@@ -2414,6 +2427,7 @@ async def run_worker(settings: Settings) -> None:
             runtime_config_cache=runtime_config_cache,
             whatsapp_forms=ctx.whatsapp_forms,
             intake=intake,
+            has_slack=has_slack,
         )
         # Stash the bundle so the dispatcher can
         # aclose its four connection pools at session retirement.
