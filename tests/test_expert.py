@@ -89,8 +89,12 @@ class TestConsultExpertHandler:
             tool_registry=MagicMock(),
         )
         data = json.loads(result)
+        # Only the built-in advisor is there, so a consult naming no expert goes to it (it then needs an LLM
+        # client, which this call has none of); with several experts the name is still required
+        # (tests/test_advisor_consults.py).
         assert "error" in data
-        assert "expert name" in data["error"].lower()
+        assert "expert name" not in data["error"].lower()
+        assert "advisor" in data["error"].lower()
 
     @pytest.mark.asyncio
     async def test_missing_task(self):
