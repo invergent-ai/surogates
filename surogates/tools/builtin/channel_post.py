@@ -149,9 +149,13 @@ class _RoutingCopy:
 _routings_seen: WeakKeyDictionary[Any, _RoutingCopy] = WeakKeyDictionary()
 
 
+class _NoRoutingsYet(Exception):
+    """Ops has not answered yet, and the last attempt failed a moment ago."""
+
+
 def _known_routings(copy: _RoutingCopy) -> list[dict]:
     if copy.routings is None:
-        raise LookupError("no Slack routings known yet")
+        raise _NoRoutingsYet
     return copy.routings
 
 
@@ -161,6 +165,8 @@ async def _recent_routings(platform_client: Any) -> list[dict]:
         copy = _routings_seen[platform_client] = _RoutingCopy()
     if _now() < copy.fresh_until:
         return _known_routings(copy)
+    if copy.lock.locked() and copy.routings is not None:  # being refreshed: no wake waits on a slow ops
+        return copy.routings
     async with copy.lock:  # one wake asks; the others read its answer
         if _now() < copy.fresh_until:
             return _known_routings(copy)
@@ -188,6 +194,8 @@ async def has_slack_connection(session: Any, platform_client: Any) -> bool:
         return False
     try:
         return await _slack_app_id(session, platform_client, cached=True) is not None
+    except _NoRoutingsYet:  # still in the pause after a failure that was logged
+        return True
     except Exception:
         logger.warning("post_to_channel: could not list slack routings to offer the tool", exc_info=True)
         return True

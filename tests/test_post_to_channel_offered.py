@@ -169,29 +169,71 @@ def test_a_harness_built_without_the_answer_keeps_the_tool():
 
 def _roster(hidden):
     tenant = SimpleNamespace(org_id=uuid4(), user_id=uuid4(), service_account_id=None, org_config={}, user_config={})
-    agent = SimpleNamespace(name="notifier", description="Posts updates", tools=["post_to_channel", "read_file"], model=None, enabled=True)
-    only = SimpleNamespace(name="poster", description="Only posts", tools=["post_to_channel"], model=None, enabled=True)
+    def kind(name, description, tools):
+        return SimpleNamespace(name=name, description=description, tools=tools, model=None, enabled=True)
     builder = PromptBuilder(
         tenant, session=SimpleNamespace(config={}, channel="web", id=uuid4()),
-        available_agents=[agent, only], available_tools={"agent"}, roster_hidden_tools=hidden,
+        available_agents=[
+            kind("notifier", "Keeps the tracker", ["post_to_channel", "read_file"]),
+            kind("poster", "Only posts", ["post_to_channel"]),
+            kind("announcer", "Uses post_to_channel for the report", ["read_file"]),
+            kind("free", "Any tool", None),
+        ],
+        available_tools={"agent"}, roster_hidden_tools=hidden,
     )
     return builder._available_agents_section()
 
 
 def test_the_sub_agent_roster_does_not_name_it_without_a_slack():
-    assert "post_to_channel" in _roster(frozenset())
+    with_slack = _roster(frozenset())
+    assert "post_to_channel" in with_slack and "poster" in with_slack and "announcer" in with_slack
     text = _roster(frozenset({"post_to_channel"}))
     assert "post_to_channel" not in text
-    assert "Tools: read_file" in text and "poster" in text
+    assert "Tools: read_file" in text and "**notifier**" in text and "**free**" in text
+    # With its only tool gone a type would read as unrestricted; a description would still name it.
+    assert "**poster**" not in text and "**announcer**" not in text
 
 
 def test_the_worker_hands_the_answer_to_each_surface():
     tree = ast.parse((Path(worker.__file__)).read_text(encoding="utf-8"))
-    calls = {n.func.id: {k.arg for k in n.keywords} for n in ast.walk(tree)
+    calls = {n.func.id: {k.arg: k.value for k in n.keywords} for n in ast.walk(tree)
              if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
              and n.func.id in ("AgentHarness", "PromptBuilder", "_filter_effective_tools")}
-    assert "has_slack" in calls["AgentHarness"] and "has_slack" in calls["_filter_effective_tools"]
-    assert "roster_hidden_tools" in calls["PromptBuilder"]
+    for name in ("AgentHarness", "_filter_effective_tools"):
+        value = calls[name]["has_slack"]
+        assert isinstance(value, ast.Name) and value.id == "has_slack"
+    roster = calls["PromptBuilder"]["roster_hidden_tools"]
+    assert isinstance(roster, ast.IfExp) and isinstance(roster.test, ast.Name) and roster.test.id == "has_slack"
+
+
+async def test_while_ops_is_being_asked_other_wakes_read_the_last_answer(monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr(channel_post, "_now", lambda: clock[0])
+    release = asyncio.Event()
+
+    class _Held(_Ops):
+        hold = False
+
+        async def list_channel_routings(self, kind):
+            if self.hold:
+                await release.wait()
+            return await super().list_channel_routings(kind)
+
+    ops = _Held([MINE])
+    assert await has_slack_connection(_session(), ops) is True
+    clock[0] += channel_post._ROUTINGS_TTL_S
+    ops.hold = True
+    refresh = asyncio.create_task(has_slack_connection(_session(), ops))
+    await asyncio.sleep(0)
+    assert await asyncio.wait_for(has_slack_connection(_session(), ops), 1) is True
+    release.set()
+    assert await refresh is True
+
+
+async def test_an_error_that_is_not_the_pause_is_logged(caplog):
+    ops = _Ops(error=KeyError("routings"))
+    assert await has_slack_connection(_session(), ops) is True
+    assert "could not list slack routings" in caplog.text
 
 
 async def test_ops_going_away_keeps_the_last_answer_and_is_not_asked_each_wake(monkeypatch):

@@ -30,7 +30,7 @@ from surogates.harness.prompt_library import PromptLibrary, default_library
 from surogates.runtime.context import SlashCommandConfig
 from surogates.sandbox.session_image import IMAGE_KEY, WORKDIR_KEY
 from surogates.tools.loader import AGENT_SOURCE_PLATFORM
-from surogates.tools.skill_visibility import fallback_hidden, needs_unavailable_tool
+from surogates.tools.skill_visibility import fallback_hidden, needs_unavailable_tool, tools_named
 from surogates.session.execution_context import platform_hint_channel
 from surogates.workstreams import is_project_master, is_project_thread
 
@@ -544,13 +544,20 @@ class PromptBuilder:
 
         lines: list[str] = []
         for agent in self._available_agents:
+            shown_tools = [t for t in agent.tools or () if t not in self._roster_hidden_tools]
+            # No line of tools reads as "every tool", so a type left with none is not listed; nor one
+            # whose description sends the parent to a hidden tool.
+            if self._roster_hidden_tools and (
+                (agent.tools and not shown_tools)
+                or tools_named((agent.description,), self._roster_hidden_tools)
+            ):
+                continue
             safe_desc = self._sanitise(
                 agent.description or "", f"agent:{agent.name}",
             )
             entry = f"- **{agent.name}**"
             if safe_desc:
                 entry += f" — {safe_desc}"
-            shown_tools = [t for t in agent.tools or () if t not in self._roster_hidden_tools]
             if shown_tools:
                 entry += f"\n  Tools: {', '.join(shown_tools)}"
             if agent.model:
