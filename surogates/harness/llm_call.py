@@ -1041,6 +1041,10 @@ async def call_llm_with_retry(
                 "request entity too large",
                 "prompt is too long",
                 "prompt exceeds max length",
+                # OpenAI-style code, and this platform's engine:
+                # "prepared prompt has N tokens, exceeding Engine max_context M".
+                "context_length_exceeded",
+                "engine max_context",
             )
             is_context_length_error = (
                 classified.reason == FailoverReason.context_overflow
@@ -1100,6 +1104,11 @@ async def call_llm_with_retry(
                     parsed_limit = parse_context_limit_from_error(error_msg)
                     if parsed_limit and parsed_limit < old_ctx:
                         new_ctx = parsed_limit
+                    elif parsed_limit and parsed_limit >= old_ctx:
+                        # The provider named the window already assumed (or a
+                        # larger one): the prompt outgrew a window that is
+                        # right, so compaction is the fix, not halving it.
+                        new_ctx = None
                     else:
                         new_ctx = get_next_probe_tier(old_ctx)
 

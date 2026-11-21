@@ -650,6 +650,7 @@ def parse_context_limit_from_error(error_msg: str) -> int | None:
     """
     error_lower = error_msg.lower()
     patterns = [
+        r'max_context\s*(?:is|of|:|=)?\s*(\d{4,})',
         r'(?:max(?:imum)?|limit)\s*(?:context\s*)?(?:length|size|window)?\s*(?:is|of|:)?\s*(\d{4,})',
         r'context\s*(?:length|size|window)\s*(?:is|of|:)?\s*(\d{4,})',
         r'(\d{4,})\s*(?:token)?\s*(?:context|limit)',

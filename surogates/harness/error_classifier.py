@@ -87,6 +87,10 @@ _CONTEXT_OVERFLOW_PATTERNS = (
     "exceeds the limit",
     "maximum context length exceeded",
     "request entity too large",
+    # OpenAI-style code, and this platform's engine:
+    # "prepared prompt has N tokens, exceeding Engine max_context M".
+    "context_length_exceeded",
+    "engine max_context",
 )
 _IMAGE_TOO_LARGE_PATTERNS = (
     "image is too large",
