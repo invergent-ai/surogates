@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
@@ -71,6 +72,25 @@ class ExpertConsultationResult:
     error: str | None = None
 
 
+_REASONING_BLOCK = re.compile(r"<(think|thinking|reasoning_scratchpad)>.*?</\1>", re.DOTALL | re.IGNORECASE)
+_REASONING_CLOSE = re.compile(r"</(?:think|thinking|reasoning_scratchpad)>", re.IGNORECASE)
+_REASONING_OPEN = re.compile(r"<(?:think|thinking|reasoning_scratchpad)>", re.IGNORECASE)
+
+
+def _has_visible_text(text: str | None) -> bool:
+    """Whether a reply says anything outside its reasoning: closed, cut off, or with its opening tag
+    prefilled by the template (so the first tag in the text is a closing one)."""
+    visible = (text or "").strip()
+    close, opened = _REASONING_CLOSE.search(visible), _REASONING_OPEN.search(visible)
+    if close and (opened is None or close.start() < opened.start()):
+        visible = visible[close.end():]
+    visible = _REASONING_BLOCK.sub("", visible).strip()
+    if _REASONING_OPEN.match(visible):  # a mismatched pair, or cut off
+        close = _REASONING_CLOSE.search(visible)
+        visible = visible[close.end():].strip() if close else ""
+    return bool(visible)
+
+
 class ExpertConsultationService:
     """Run expert consultations with common events, stats, and fallbacks."""
 
@@ -136,6 +156,7 @@ class ExpertConsultationService:
                     self._credential_vault, self._tenant, expert,
                 )
             )
+            executed: list[str] = []
             result, iterations_used = await run_expert_loop(
                 expert=expert,
                 task=task,
@@ -148,7 +169,27 @@ class ExpertConsultationService:
                 session_config=self._session_config,
                 api_key=api_key,
                 client=client,
+                executed=executed,
             )
+            if not _has_visible_text(result):
+                # No answer is not a successful one: the consulting model is told, not handed an empty result.
+                error = f"Expert '{expert.name}' returned no text."
+                await self._record_failure(expert, error, iterations_used=iterations_used)
+                return ExpertConsultationResult(
+                    expert=expert.name,
+                    success=False,
+                    content=json.dumps({
+                        "error": error,
+                        "suggestion": (
+                            "It ran tools before it stopped: check what they changed before repeating any of it. "
+                            "It gave no answer, so proceed without one."
+                            if executed else
+                            "It gave no answer, so proceed without one."
+                        ),
+                    }),
+                    iterations_used=iterations_used,
+                    error=error,
+                )
             await record_expert_outcome(
                 session_store=self._session_store,
                 session_id=self._session_id,

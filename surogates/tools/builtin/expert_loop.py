@@ -106,6 +106,7 @@ async def run_expert_loop(
     api_key: str | None = None,
     client: Any | None = None,
     session_config: dict[str, Any] | None = None,
+    executed: list[str] | None = None,
 ) -> tuple[str, int]:
     """Run a scoped agent loop using the expert's configured model.
 
@@ -130,6 +131,9 @@ async def run_expert_loop(
     session_store:
         Optional :class:`~surogates.session.store.SessionStore` for
         emitting expert events.
+    executed:
+        When given, each tool the expert actually ran is appended to it
+        (a refused call is not).
 
     Returns
     -------
@@ -152,10 +156,13 @@ async def run_expert_loop(
     withheld = expert_scope.get().withheld
     allowed_tools = {name for name in expert.expert_tools or () if name not in withheld}
     tool_schemas = tool_registry.get_schemas(names=allowed_tools) if allowed_tools else []
+    # What the request holds is what it may call: a declared tool no one registered is neither.
+    sent_tools = {schema["function"]["name"] for schema in tool_schemas}
 
     # Build expert messages with system prompt + user task.
+    # None of its tools registered is none sent: the prompt says what the request holds.
     system_prompt = _build_expert_system_prompt(
-        expert, [name for name in expert.expert_tools or () if name in allowed_tools],
+        expert, [name for name in expert.expert_tools or () if name in allowed_tools] if tool_schemas else [],
     )
     user_content = _build_user_message(task, context)
 
@@ -246,12 +253,12 @@ async def run_expert_loop(
 
                 # Enforce scoping: the expert calls only what it was sent.  An
                 # expert sent no tools runs none (a withheld one included).
-                if tool_name not in allowed_tools:
+                if tool_name not in sent_tools:
                     result = json.dumps({
                         "error": f"Tool '{tool_name}' is not available to this expert. "
                         + (
-                            f"Available tools: {', '.join(sorted(allowed_tools))}"
-                            if allowed_tools
+                            f"Available tools: {', '.join(sorted(sent_tools))}"
+                            if sent_tools
                             else "It has no tools."
                         ),
                     })
@@ -271,6 +278,8 @@ async def run_expert_loop(
                         # A simulation's expert is simulated too: the MCP proxy reads it from here.
                         session_config=session_config,
                     )
+                    if executed is not None and not _policy_denied(result):
+                        executed.append(tool_name)
 
                 # Truncate large tool results to avoid blowing the expert's context.
                 result_str = str(result)
@@ -292,6 +301,15 @@ async def run_expert_loop(
         # connection down with the consult.
         if owns_client:
             await client.close()
+
+
+def _policy_denied(result: Any) -> bool:
+    """Whether the router refused the call on policy, so nothing ran."""
+    try:
+        payload = json.loads(result) if isinstance(result, str) else result
+    except ValueError:
+        return False
+    return isinstance(payload, dict) and payload.get("error") == "policy_denied"
 
 
 def _absolute_endpoint(endpoint: str, llm_base_url: str | None) -> str:
@@ -328,7 +346,15 @@ def _build_expert_system_prompt(expert: SkillDef, tools: list[str] | None = None
         "",
         "You are running as a sub-agent inside a larger system. Complete the "
         "given task using your available tools and return your final answer as "
-        "text. Be concise and precise.",
+        "text. Be concise and precise."
+        if tools else
+        # Told to use "your available tools" with none sent, a model set out to read the files
+        # first: its call went nowhere and the consult came back with no text.
+        "You are running as a sub-agent inside a larger system. You have no "
+        "tools here: you cannot read files, search or run anything. Answer now, "
+        "as text, from what this message gives you; where you need something it "
+        "does not hold, say exactly what the caller should check or run. Be "
+        "concise and precise.",
     ]
 
     if tools:

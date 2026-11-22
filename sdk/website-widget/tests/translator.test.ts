@@ -314,6 +314,24 @@ describe('Translator -- policy + experts + fallthrough', () => {
     });
   });
 
+  it('closes the expert step on expert.failure and still forwards it', () => {
+    const t = new Translator();
+    t.translate(frame(SURG_EVENT.EXPERT_DELEGATION, { expert: 'advisor' }));
+    const out = t.translate(
+      frame(SURG_EVENT.EXPERT_FAILURE, { expert: 'advisor', error: 'returned no text' }),
+    );
+    expect(out[0]).toMatchObject({ type: EventType.STEP_FINISHED, stepName: 'expert:expert' });
+    expect(out[1]).toMatchObject({ type: EventType.CUSTOM, name: SURG_EVENT.EXPERT_FAILURE });
+  });
+
+  it('finishes no step for an expert outcome whose delegation it never saw', () => {
+    const t = new Translator();
+    const failed = t.translate(frame(SURG_EVENT.EXPERT_FAILURE, { expert: 'advisor', error: 'x' }));
+    expect(failed).toHaveLength(1);
+    expect(failed[0]).toMatchObject({ type: EventType.CUSTOM, name: SURG_EVENT.EXPERT_FAILURE });
+    expect(t.translate(frame(SURG_EVENT.EXPERT_RESULT, { expert: 'advisor' }))).toEqual([]);
+  });
+
   it('forwards memory.update as CUSTOM without changing shape', () => {
     const t = new Translator();
     const out = t.translate(

@@ -154,6 +154,9 @@ export class Translator {
    */
   private currentReasoningId: string | undefined;
 
+  /** Expert steps this translator opened and has not closed yet. */
+  private readonly openExpertSteps = new Set<string>();
+
   /**
    * The assistant message the last ``llm.response`` closed, if it had
    * text.  The tool calls that response makes belong to it; without a
@@ -214,7 +217,9 @@ export class Translator {
         return this.handleExpertResult(frame);
 
       case SURG_EVENT.EXPERT_FAILURE:
-        return this.asCustom(frame);
+        // Closes the step its delegation opened, as a result does: a step left
+        // open makes the client reject the run's end and the widget stays busy.
+        return [...this.handleExpertResult(frame), ...this.asCustom(frame)];
 
       case SURG_EVENT.SESSION_FAIL:
       case SURG_EVENT.HARNESS_CRASH:
@@ -435,6 +440,7 @@ export class Translator {
   private handleExpertDelegation(frame: SurogatesFrame): BaseEvent[] {
     const payload = (frame.data ?? {}) as ExpertDelegationPayload;
     const name = payload.expert_name ?? 'expert';
+    this.openExpertSteps.add(`expert:${name}`);
     // Expert delegation is a natural fit for STEP_STARTED -- it's a
     // bounded sub-task the host can render as a progress row.  Kept
     // paired with STEP_FINISHED in ``handleExpertResult``.
@@ -449,6 +455,9 @@ export class Translator {
   private handleExpertResult(frame: SurogatesFrame): BaseEvent[] {
     const payload = (frame.data ?? {}) as ExpertResultPayload;
     const name = payload.expert_name ?? 'expert';
+    // A consult started before this run (a reload, a dropped stream) ends with no
+    // step open here, and the client rejects a run that finishes an unopened step.
+    if (!this.openExpertSteps.delete(`expert:${name}`)) return [];
     return [
       {
         type: EventType.STEP_FINISHED,
