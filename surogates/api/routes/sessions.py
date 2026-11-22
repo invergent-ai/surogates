@@ -2112,13 +2112,21 @@ async def retry_session(
 async def _cleanup_archived_workspaces(
     storage,
     archived_sessions: list[Session],
+    session_factory,
 ) -> None:
-    """Bulk-delete each archived session's workspace objects.
+    """Bulk-delete the workspace objects no other session still uses.
 
     Runs out-of-band via ``BackgroundTasks`` so the HTTP response returns
     as soon as the DB archive completes. Failures are logged, not raised
     — the periodic cleanup job sweeps anything left behind.
+
+    A delegated child works in its root's workspace, so a prefix goes only
+    with the last session using it, asked of the database here.
     """
+    from surogates.session.workspace_claims import workspace_still_used
+
+    deleting = {archived.id for archived in archived_sessions}
+    looked_at: set[tuple[str, str]] = set()
     for archived_session in archived_sessions:
         if device_of(archived_session.config) is not None:
             # Its files are its folder, on its computer: deleting a chat never deletes them.
@@ -2147,11 +2155,20 @@ async def _cleanup_archived_workspaces(
 
         from surogates.session.attachment_ingest import workspace_root_id
 
-        prefix = boundary_workspace_prefix(
-            archived_session.config,
-            archived_session,
-            workspace_root_id(archived_session),
-        )
+        root_id = workspace_root_id(archived_session)
+        prefix = boundary_workspace_prefix(archived_session.config, archived_session, root_id)
+        if (storage_bucket, prefix) in looked_at:
+            continue  # another of the sessions being deleted works in the same workspace
+        looked_at.add((storage_bucket, prefix))
+        if await workspace_still_used(
+            session_factory, org_id=archived_session.org_id, root_id=root_id, deleting=deleting,
+        ):
+            logger.info(
+                "Archived session %s shares workspace %s with a session still using it; retaining it",
+                archived_session.id,
+                root_id,
+            )
+            continue
         try:
             deleted = await storage.delete_prefix(storage_bucket, prefix)
             logger.info(
@@ -2333,4 +2350,5 @@ async def archive_session_tree(
         _cleanup_archived_workspaces,
         request.app.state.storage,
         archived_sessions,
+        request.app.state.session_factory,
     )
