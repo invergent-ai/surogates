@@ -13,6 +13,8 @@ from __future__ import annotations
 import posixpath
 import zipfile
 
+from wsbench.legacy_doc import NotWordDocument, extract_legacy_doc, is_ole2
+
 _CODE_TEXT_EXTS = {
     ".md", ".txt", ".csv", ".tsv", ".json", ".jsonl", ".yaml", ".yml",
     ".toml", ".ini", ".cfg", ".xml", ".html", ".css", ".svg", ".sql",
@@ -192,6 +194,11 @@ def extract_text(
             return _truncate(_extract_pptx(local_path), max_chars)
         if ext == ".pdf":
             return _truncate(_extract_pdf(local_path), max_chars)
+        if ext == ".doc" and is_ole2(local_path):
+            try:
+                return _truncate(extract_legacy_doc(local_path), max_chars)
+            except NotWordDocument:
+                pass  # another OLE2 format under this name: reported as binary below
         if ext in _CODE_TEXT_EXTS or not ext:
             with open(local_path, encoding="utf-8", errors="replace") as fh:
                 return _truncate(fh.read(), max_chars)
