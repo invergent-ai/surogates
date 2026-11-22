@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -42,8 +43,11 @@ class ToolEntry:
     max_result_size: int = 50_000  # chars
 
 
+_LONE_SURROGATE = re.compile("[\ud800-\udfff]")
+
+
 def _with_short_error(result: str) -> str:
-    """*result* with a long top-level ``error`` text bounded; any other result exactly as it was."""
+    """A JSON string result with a long top-level ``error`` text bounded; any other result exactly as it was."""
     # An "error" inside a JSON string is escaped, so file contents do not pass this.
     if len(result) <= MAX_ERROR_CHARS or not result.startswith("{") or '"error"' not in result:
         return result
@@ -55,12 +59,9 @@ def _with_short_error(result: str) -> str:
     if not isinstance(error, str) or len(error) <= MAX_ERROR_CHARS:
         return result
     payload["error"] = short_error(error)
-    bounded = json.dumps(payload, ensure_ascii=False)
-    try:
-        bounded.encode("utf-8")
-    except UnicodeEncodeError:  # a lone surrogate the result held escaped stays escaped
-        return json.dumps(payload)
-    return bounded
+    # A lone surrogate the result held escaped stays escaped: raw, it cannot be encoded.
+    bounded = _LONE_SURROGATE.sub(lambda found: f"\\u{ord(found.group()):04x}", json.dumps(payload, ensure_ascii=False))
+    return bounded if len(bounded) < len(result) else result
 
 
 class ToolRegistry:

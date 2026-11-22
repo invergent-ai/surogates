@@ -33,7 +33,7 @@ from surogates.sandbox.copy_files import TooLargeForCopy, write_copy, writes_to_
 from surogates.tools.builtin import image_request
 from surogates.tools.builtin.artifact import artifact_client
 from surogates.storage.tenant import sandbox_workspace_key
-from surogates.tools.builtin.vision import _image_ref_to_data_url
+from surogates.tools.builtin.vision import _image_ref_to_data_url, fetch_failure
 from surogates.tools.registry import ToolRegistry, ToolSchema
 from surogates.tools.utils.tool_result_storage import HARNESS_FOLDER_REFUSAL, in_harness_folder
 from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError, shown_path, validate_path
@@ -370,7 +370,7 @@ async def _generate_image_handler(arguments: dict[str, Any], **kwargs: Any) -> s
         except (ValueError, WorkspaceSandboxError) as exc:
             return _json_error(str(exc))
         except httpx.HTTPError as exc:
-            return _json_error(f"Failed to fetch input image: {exc}")
+            return _json_error(f"Failed to fetch input image: {fetch_failure(exc)}")
         data_urls.append(data_url)
 
     aspect_ratio = str(arguments.get("aspect_ratio") or "").strip()
@@ -551,7 +551,7 @@ async def _generate_video_handler(arguments: dict[str, Any], **kwargs: Any) -> s
         except (ValueError, WorkspaceSandboxError) as exc:
             return _json_error(str(exc))
         except httpx.HTTPError as exc:
-            return _json_error(f"Failed to fetch first frame image: {exc}")
+            return _json_error(f"Failed to fetch first frame image: {fetch_failure(exc)}")
         body["frame_images"] = [
             {
                 "type": "image_url",

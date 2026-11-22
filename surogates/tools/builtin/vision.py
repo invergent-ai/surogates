@@ -29,7 +29,6 @@ from surogates.tools.utils.workspace_sandbox import (
     WorkspaceSandboxError,
     in_workspace_terms,
     refuse_nul,
-    short_error,
     shown_path,
     validate_path,
 )
@@ -137,8 +136,7 @@ async def _vision_analyze_handler(arguments: dict[str, Any], **kwargs: Any) -> s
         return _json_error(str(exc))
     except httpx.HTTPError as exc:
         logger.warning("vision_analyze image fetch failed: %s", exc)
-        # httpx names the URL it was asked for.
-        return _json_error(short_error(f"Failed to fetch image: {exc}".replace(image_ref, shown_path(image_ref))))
+        return _json_error(f"Failed to fetch image: {fetch_failure(exc)}")
 
     image_url: dict[str, Any] = {"url": data_url}
     if detail != "auto":
@@ -386,6 +384,13 @@ def _validate_data_url(data_url: str) -> str:
             f"Image data URL is too large: {len(raw)} bytes exceeds {_MAX_IMAGE_BYTES}"
         )
     return data_url
+
+
+def fetch_failure(exc: httpx.HTTPError) -> str:
+    """Why an image could not be fetched, without the URL httpx's own words repeat, encoded or redirected."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"HTTP {exc.response.status_code}"
+    return type(exc).__name__
 
 
 async def _download_image(url: str, *, max_bytes: int = _MAX_IMAGE_BYTES) -> bytes:

@@ -15,13 +15,14 @@ from surogates.harness import image_read
 from surogates.harness.api_client import HarnessAPIClient
 from surogates.harness.image_read import handle_image_read
 from surogates.storage.backend import LocalBackend, read_first
-from surogates.tools.builtin import skills as skills_mod, vision as vision_mod
+from surogates.tools.builtin import media_gen, skills as skills_mod, vision as vision_mod
 from surogates.tools.builtin.file_ops import _read_file_handler
 from surogates.tools.builtin.skills import _skill_view_handler
 from surogates.tools.loader import SKILL_SOURCE_PLATFORM, SkillDef
 from surogates.tools.registry import ToolRegistry, ToolSchema
 from surogates.tools.utils.workspace_sandbox import MAX_ERROR_CHARS, short_error, shown_path
 from tests.test_image_read_cache_scoped import BLUE, RED, Vision
+from tests.test_media_gen_tools import _FakeImageClient, _image_cfg, _video_cfg
 from tests.test_skill_view_hides_graph_file import _make_tenant, _stub_load_all_skills
 
 BUCKET = "agent-bucket"
@@ -247,17 +248,41 @@ async def test_a_name_too_long_for_the_disk_is_refused_short_through_the_registr
     assert len(said["error"]) < 500 and name not in said["error"]
 
 
-@pytest.mark.asyncio
-async def test_a_failed_fetch_does_not_repeat_a_long_url(monkeypatch) -> None:
-    url = "https://images.invalid/" + "u" * 4000 + ".png"
+URL = "https://images.invalid/a%20b/" + "u" * 4000 + ".png?x=1"
 
-    async def refused(asked, **_kwargs):
-        raise httpx.ConnectError(f"could not reach '{asked}'")
+
+def _not_fetched(kind: str) -> httpx.HTTPError:
+    request = httpx.Request("GET", URL)
+    if kind == "HTTP 403":
+        return httpx.HTTPStatusError(f"Client error for url '{URL}'", request=request, response=httpx.Response(403))
+    return httpx.ConnectError(f"could not reach '{URL}'", request=request)
+
+
+async def _fetch_through(tool: str, tmp_path) -> dict:
+    if tool == "vision":
+        client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=None)))
+        return json.loads(await vision_mod._vision_analyze_handler({"image": URL}, llm_client=client, model="m"))
+    if tool == "input image":
+        return json.loads(await media_gen._generate_image_handler(
+            {"prompt": "p", "input_images": [URL]},
+            media_gen=_image_cfg(_FakeImageClient(images=[])), workspace_path=str(tmp_path),
+        ))
+    return json.loads(await media_gen._generate_video_handler(
+        {"prompt": "p", "first_frame_image": URL}, media_gen=_video_cfg(), workspace_path=str(tmp_path),
+    ))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", ["vision", "input image", "first frame"])
+@pytest.mark.parametrize("kind", ["HTTP 403", "ConnectError"])
+async def test_a_failed_fetch_names_why_and_never_the_url(tool, kind, tmp_path, monkeypatch) -> None:
+    async def refused(_asked, **_kwargs):
+        raise _not_fetched(kind)
 
     monkeypatch.setattr(vision_mod, "_download_image", refused)
-    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=None)))
-    said = json.loads(await vision_mod._vision_analyze_handler({"image": url}, llm_client=client, model="m"))
-    assert said["error"].startswith("Failed to fetch image") and len(said["error"]) < 500
+    said = await _fetch_through(tool, tmp_path)
+    assert said["error"].startswith("Failed to fetch") and said["error"].endswith(kind)
+    assert "images.invalid" not in said["error"] and len(said["error"]) < 100
 
 
 @pytest.mark.asyncio
@@ -306,6 +331,30 @@ async def test_a_bounded_error_stays_encodable() -> None:
     answer = await _registry(handler).dispatch("probe", {})
     answer.encode("utf-8")
     assert len(json.loads(answer)["error"]) <= MAX_ERROR_CHARS
+
+
+@pytest.mark.asyncio
+async def test_a_bounded_error_with_a_lone_surrogate_and_much_other_text_stays_valid() -> None:
+    note = "é" * 30000
+    original = '{"error": "' + "e" * 3000 + '", "mark": "\\ud800", "note": "' + note + '"}'
+
+    async def handler(_arguments, **_kwargs):
+        return original
+
+    answer = await _registry(handler).dispatch("probe", {})
+    answer.encode("utf-8")
+    said = json.loads(answer)
+    assert len(answer) < len(original) and said["mark"] == "\ud800" and said["note"] == note
+
+
+@pytest.mark.asyncio
+async def test_a_result_the_bound_would_make_longer_is_returned_as_it_was() -> None:
+    original = json.dumps({"error": "e" * 2100, "items": [1] * 5000}, separators=(",", ":"))
+
+    async def handler(_arguments, **_kwargs):
+        return original
+
+    assert await _registry(handler).dispatch("probe", {}) == original
 
 
 def test_short_error_leaves_a_text_at_the_bound_alone() -> None:
