@@ -20,7 +20,7 @@ import pytest
 
 from surogates.coding_agents import pod_runner
 from surogates.sandbox import executor_server
-from surogates.sandbox.history import History
+from surogates.sandbox.history import History, HistoryError
 
 SECRET = b"outside the workspace"
 # In range for a pid, and above any kernel's pid_max: no test here may name a real process.
@@ -789,3 +789,125 @@ def test_a_real_folder_swapped_after_the_check_is_not_read(tmp_path, monkeypatch
 
     monkeypatch.setattr("surogates.sandbox.history.os.path.realpath", at_the_check)
     assert history._real("docs/a.txt") != plain
+
+
+def _landing(tmp_path):
+    project, elsewhere = tmp_path / "project", tmp_path / "elsewhere"
+    (project / "docs").mkdir(parents=True)
+    elsewhere.mkdir()
+    (project / "docs" / "a.txt").write_bytes(b"inside")
+    (elsewhere / "a.txt").write_bytes(SECRET)
+    history = _history(project)
+    object.__setattr__(history, "repo", tmp_path / "repo")
+    return history, project, elsewhere
+
+
+def _swap_after_the_check(monkeypatch, project, elsewhere):
+    """Swap ``docs`` for a link once ``_inside`` has checked it."""
+    checked = History._inside
+
+    def swapped(self, path):
+        target = checked(self, path)
+        (project / "docs").rename(project / "moved")
+        (project / "docs").symlink_to(elsewhere)
+        return target
+
+    monkeypatch.setattr(History, "_inside", swapped)
+
+
+def _blob_is(monkeypatch, data):
+    """``git cat-file`` answering *data*: these tests need no repository."""
+
+    def ran(_argv, *, stdout, **_):
+        stdout.write(data)
+        stdout.flush()
+        return subprocess.CompletedProcess(_argv, 0, b"", b"")
+
+    monkeypatch.setattr("surogates.sandbox.history.subprocess.run", ran)
+
+
+def test_a_landing_write_does_not_go_through_a_folder_swapped_after_the_check(tmp_path, monkeypatch):
+    history, project, elsewhere = _landing(tmp_path)
+    _blob_is(monkeypatch, b"landed")
+    _swap_after_the_check(monkeypatch, project, elsewhere)
+    with pytest.raises(HistoryError):
+        history._put("docs/a.txt", "0" * 40)
+    assert (elsewhere / "a.txt").read_bytes() == SECRET
+    assert [entry.name for entry in elsewhere.iterdir()] == ["a.txt"]
+
+
+def test_a_landing_removal_does_not_go_through_a_folder_swapped_after_the_check(tmp_path, monkeypatch):
+    history, project, elsewhere = _landing(tmp_path)
+    _swap_after_the_check(monkeypatch, project, elsewhere)
+    with pytest.raises(HistoryError):
+        history._remove("docs/a.txt", [])
+    assert (elsewhere / "a.txt").read_bytes() == SECRET
+
+
+def test_taking_a_folder_away_does_not_go_through_a_link(tmp_path):
+    history, project, elsewhere = _landing(tmp_path)
+    (elsewhere / "empty").mkdir()
+    (project / "link").symlink_to(elsewhere)
+    history._take_away([project / "link" / "empty"])
+    assert (project / "link").is_symlink() and (elsewhere / "empty").is_dir()
+
+
+def test_a_landing_does_not_write_or_remove_through_a_folder_link_inside_the_project(tmp_path, monkeypatch):
+    history, project, _ = _landing(tmp_path)
+    _blob_is(monkeypatch, b"landed")
+    (project / "link").symlink_to(project / "docs")
+    with pytest.raises(HistoryError):
+        history._put("link/a.txt", "0" * 40)
+    with pytest.raises(HistoryError):
+        history._remove("link/a.txt", [])
+    assert (project / "docs" / "a.txt").read_bytes() == b"inside"
+
+
+def test_a_removal_syncs_no_folder_through_a_link_put_there_after_the_unlink(tmp_path, monkeypatch):
+    history, project, elsewhere = _landing(tmp_path)
+    real_unlink, real_fsync, synced = os.unlink, os.fsync, []
+
+    def unlink(name, *, dir_fd=None):
+        real_unlink(name, dir_fd=dir_fd)
+        (project / "docs").rename(project / "moved")
+        (project / "docs").symlink_to(elsewhere)
+
+    def fsync(fd):
+        synced.append(os.fstat(fd).st_ino)
+        real_fsync(fd)
+
+    monkeypatch.setattr("surogates.sandbox.history.os.unlink", unlink)
+    monkeypatch.setattr("surogates.sandbox.history.os.fsync", fsync)
+    history._remove("docs/a.txt", [])
+    assert synced == [project.stat().st_ino]
+
+
+def test_a_removal_whose_folders_cannot_be_named_removes_nothing(tmp_path):
+    history, project, _ = _landing(tmp_path)
+    with pytest.raises(HistoryError):
+        history._remove("docs/a.txt", (history._inside(folder) for folder in ["../outside"]))
+    assert (project / "docs" / "a.txt").read_bytes() == b"inside"
+
+
+def test_a_landing_writes_and_removes_an_ordinary_file(tmp_path, monkeypatch):
+    history, project, _ = _landing(tmp_path)
+    _blob_is(monkeypatch, b"landed")
+    assert history._put("new/deep/b.txt", "0" * 40) == ["new/deep", "new"]
+    assert (project / "new" / "deep" / "b.txt").read_bytes() == b"landed"
+    assert [p.name for p in (project / "new" / "deep").iterdir()] == ["b.txt"]
+    history._remove("new/deep/b.txt", [project / "new" / "deep", project / "new"])
+    assert not (project / "new").exists()
+    history._remove("never/there.txt", [])
+
+
+def test_a_landing_write_cut_short_leaves_the_file_and_nothing_beside_it(tmp_path, monkeypatch):
+    history, project, _ = _landing(tmp_path)
+
+    def failed(_argv, **_):
+        return subprocess.CompletedProcess(_argv, 1, b"", b"no such blob")
+
+    monkeypatch.setattr("surogates.sandbox.history.subprocess.run", failed)
+    with pytest.raises(HistoryError):
+        history._put("docs/a.txt", "0" * 40)
+    assert (project / "docs" / "a.txt").read_bytes() == b"inside"
+    assert [p.name for p in (project / "docs").iterdir()] == ["a.txt"]

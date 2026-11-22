@@ -471,7 +471,7 @@ def test_a_write_cut_short_leaves_the_real_file_whole_and_nothing_beside_it(tmp_
         with pytest.raises(HistoryError, match="timed out"):
             history.apply(change["path"], change["before"], change["after"])
     with monkeypatch.context() as patch:
-        patch.setattr(os, "replace", lambda *_: (_ for _ in ()).throw(IsADirectoryError(21, "Is a directory")))
+        patch.setattr(os, "replace", lambda *_, **__: (_ for _ in ()).throw(IsADirectoryError(21, "Is a directory")))
         with pytest.raises(OSError):
             history.apply(change["path"], change["before"], change["after"])
     assert (project / "Report.docx").read_bytes() == b"PK\x03\x04 report v1"
