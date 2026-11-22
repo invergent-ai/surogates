@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from wsbench import legacy_doc
 from wsbench.extract import DEFAULT_MAX_CHARS, extract_text
 from wsbench.legacy_doc import (
     OLE2_MAGIC,
@@ -277,6 +278,14 @@ def test_a_long_document_keeps_its_text_across_chunks(tmp_path):
     text = "ab\x07" * 40_000 + "\r"
     out = extract_legacy_doc(_write(tmp_path, _word([(text, False)])))
     assert out == " | ".join(["ab"] * 40_000) + " | "
+
+
+def test_a_row_end_right_after_a_chunk_boundary_still_drops_its_separator(monkeypatch):
+    monkeypatch.setattr(legacy_doc, "_PARTS_PER_CHUNK", 2)
+    builder = legacy_doc._TextBuilder([(2, 3)])
+    for offset, char in enumerate("a\x07\x07"):
+        builder.add(char, offset)
+    assert builder.text() == "a"
 
 
 def test_header_slots_padded_with_zeros_are_ignored(tmp_path):
