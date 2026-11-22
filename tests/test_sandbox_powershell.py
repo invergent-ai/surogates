@@ -48,6 +48,7 @@ def test_the_wrapper_sets_what_the_terminal_tools_filtered_environment_drops():
 
     wrapper = SANDBOX[SANDBOX.index("'#!/bin/sh'"):SANDBOX.index("> /usr/local/bin/pwsh")]
     assert "export POWERSHELL_TELEMETRY_OPTOUT=1 POWERSHELL_UPDATECHECK=Off" in wrapper
-    assert 'XDG_DATA_HOME="${XDG_DATA_HOME:-/home/sandbox/.local/share}"' in wrapper
+    # The sandbox user's only: another image user keeps its own modules under its own HOME.
+    assert '[ "$(id -u)" != 1000 ] || export XDG_DATA_HOME="${XDG_DATA_HOME:-/home/sandbox/.local/share}"' in wrapper
     assert 'exec /opt/microsoft/powershell/7/pwsh "$@"' in wrapper
     assert not {"POWERSHELL_TELEMETRY_OPTOUT", "POWERSHELL_UPDATECHECK", "XDG_DATA_HOME"} & _ALWAYS_INHERIT

@@ -451,7 +451,7 @@ RUN case "$(dpkg --print-architecture)" in \
     && chmod 0755 /opt/microsoft/powershell/7/pwsh \
     && printf '%s\n' '#!/bin/sh' \
         'export POWERSHELL_TELEMETRY_OPTOUT=1 POWERSHELL_UPDATECHECK=Off' \
-        'export XDG_DATA_HOME="${XDG_DATA_HOME:-/home/sandbox/.local/share}"' \
+        '[ "$(id -u)" != 1000 ] || export XDG_DATA_HOME="${XDG_DATA_HOME:-/home/sandbox/.local/share}"' \
         'exec /opt/microsoft/powershell/7/pwsh "$@"' > /usr/local/bin/pwsh \
     && chmod 0755 /usr/local/bin/pwsh \
     && test "$(HOME=/tmp/pwsh-build XDG_CACHE_HOME=/tmp/pwsh-build/.cache XDG_DATA_HOME=/tmp/pwsh-build/.local/share pwsh -NoLogo -NoProfile -NonInteractive -Command '$PSVersionTable.PSVersion.ToString()')" = "${POWERSHELL_VERSION}" \
