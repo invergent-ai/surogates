@@ -269,8 +269,6 @@ async def run_expert_loop(
                                  "Please retry with valid JSON.",
                     })
                 else:
-                    if executed is not None:
-                        executed.append(tool_name)
                     result = await tool_router.execute(
                         name=tool_name,
                         # As its history has them: no arguments ("", null) are {}.
@@ -280,6 +278,8 @@ async def run_expert_loop(
                         # A simulation's expert is simulated too: the MCP proxy reads it from here.
                         session_config=session_config,
                     )
+                    if executed is not None and not _policy_denied(result):
+                        executed.append(tool_name)
 
                 # Truncate large tool results to avoid blowing the expert's context.
                 result_str = str(result)
@@ -301,6 +301,15 @@ async def run_expert_loop(
         # connection down with the consult.
         if owns_client:
             await client.close()
+
+
+def _policy_denied(result: Any) -> bool:
+    """Whether the router refused the call on policy, so nothing ran."""
+    try:
+        payload = json.loads(result) if isinstance(result, str) else result
+    except ValueError:
+        return False
+    return isinstance(payload, dict) and payload.get("error") == "policy_denied"
 
 
 def _absolute_endpoint(endpoint: str, llm_base_url: str | None) -> str:

@@ -79,13 +79,16 @@ _REASONING_OPEN = re.compile(r"<(?:think|thinking|reasoning_scratchpad)>", re.IG
 
 def _has_visible_text(text: str | None) -> bool:
     """Whether a reply says anything outside its reasoning: closed, cut off, or with its opening tag
-    prefilled by the template (so only the closing tag is in the text)."""
-    visible = _REASONING_BLOCK.sub("", text or "")
-    closes = list(_REASONING_CLOSE.finditer(visible))
-    if closes:
-        visible = visible[closes[-1].end():]
-    visible = visible.strip()
-    return bool(visible) and not _REASONING_OPEN.match(visible)
+    prefilled by the template (so the first tag in the text is a closing one)."""
+    visible = (text or "").strip()
+    close, opened = _REASONING_CLOSE.search(visible), _REASONING_OPEN.search(visible)
+    if close and (opened is None or close.start() < opened.start()):
+        visible = visible[close.end():]
+    visible = _REASONING_BLOCK.sub("", visible).strip()
+    if _REASONING_OPEN.match(visible):  # a mismatched pair, or cut off
+        close = _REASONING_CLOSE.search(visible)
+        visible = visible[close.end():].strip() if close else ""
+    return bool(visible)
 
 
 class ExpertConsultationService:

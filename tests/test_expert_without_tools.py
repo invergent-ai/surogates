@@ -14,7 +14,7 @@ from surogates.tools.builtin.expert_loop import (
     expert_scope,
     run_expert_loop,
 )
-from surogates.tools.builtin.expert_service import ExpertConsultationService
+from surogates.tools.builtin.expert_service import ExpertConsultationService, _has_visible_text
 from surogates.tools.loader import SkillDef
 
 WITH_TOOLS = (
@@ -160,6 +160,28 @@ async def test_a_refused_call_is_not_reported_as_a_tool_that_ran(monkeypatch):
     router.execute.assert_not_awaited()
     assert result.success is False and result.iterations_used == 2
     assert "ran tools" not in result.content
+
+
+async def test_a_call_the_policy_denied_is_not_reported_as_a_tool_that_ran(monkeypatch):
+    monkeypatch.setattr("surogates.config.load_settings", lambda: SimpleNamespace(platform_api_url="", llm=SimpleNamespace()))
+    router = SimpleNamespace(execute=AsyncMock(return_value='{"error": "policy_denied", "reason": "egress"}'))
+    result = await _with_tools(AsyncMock(), True, router).consult(
+        expert=_two_rounds(["terminal"]), task="review",
+        client=_replies((None, [_call("terminal")]), ("", None)),
+    )
+    router.execute.assert_awaited_once()
+    assert result.success is False and "ran tools" not in result.content
+
+
+@pytest.mark.parametrize("answer", [
+    "<think>r</think>Remove the stray </think>",
+    "plan</think>Remove the stray </think>",
+    "<think>r</think>Answer: 42</think>",
+    "<think>r</think>Check row 4.",
+    "Check row 4.",
+])
+def test_a_real_answer_that_mentions_a_tag_is_an_answer(answer):
+    assert _has_visible_text(answer) is True
 
 
 async def test_a_declared_tool_no_one_registered_cannot_be_called(monkeypatch):
