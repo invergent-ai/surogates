@@ -84,7 +84,10 @@ def _client(content, tool_calls=None):
     return SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
 
 
-@pytest.mark.parametrize("content", ["", "   \n", None, "<think>only reasoning</think>", "<thinking>cut off"])
+@pytest.mark.parametrize("content", [
+    "", "   \n", None, "<think>only reasoning</think>", "<thinking>cut off", "<THINK>x</THINK>",
+    "plan only</think>", "<REASONING_SCRATCHPAD>x</REASONING_SCRATCHPAD>", "<REASONING_SCRATCHPAD>x",
+])
 async def test_a_consult_with_no_text_is_a_failure_the_caller_reads(content, monkeypatch):
     monkeypatch.setattr("surogates.config.load_settings", lambda: SimpleNamespace(platform_api_url="", llm=SimpleNamespace()))
     store = AsyncMock()
@@ -107,15 +110,69 @@ async def test_a_consult_with_text_stays_a_success(monkeypatch):
     assert EventType.EXPERT_FAILURE not in [c.args[1] for c in store.emit_event.await_args_list]
 
 
-async def test_a_consult_that_ran_tools_and_then_said_nothing_warns_of_their_effects(monkeypatch):
-    store = AsyncMock()
-    service = _service(store)
-    monkeypatch.setattr(
-        "surogates.tools.builtin.expert_service.run_expert_loop", AsyncMock(return_value=("", 3)),
+def _call(name):
+    return SimpleNamespace(id="call-1", function=SimpleNamespace(name=name, arguments="{}"))
+
+
+def _replies(*messages):
+    create = AsyncMock(side_effect=[
+        SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=c, tool_calls=t))])
+        for c, t in messages
+    ])
+    return SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+
+
+def _with_tools(store, registered, router):
+    registry = MagicMock()
+    registry.get_schemas.side_effect = lambda names: (
+        [{"function": {"name": n}} for n in names] if registered else []
     )
-    result = await service.consult(expert=_expert(["terminal"]), task="fix it", client=_client(""))
-    assert result.success is False and result.iterations_used == 3
-    assert "ran tools" in result.content and "before repeating" in result.content
+    return ExpertConsultationService(
+        tenant=SimpleNamespace(org_id=uuid4(), user_id=uuid4(), org_config={}),
+        session_id=uuid4(), tool_registry=registry, session_store=store, tool_router=router,
+    )
+
+
+def _two_rounds(tools):
+    expert = _expert(tools)
+    expert.expert_max_iterations = 2
+    return expert
+
+
+async def test_a_consult_that_ran_a_tool_and_then_said_nothing_warns_of_its_effects(monkeypatch):
+    monkeypatch.setattr("surogates.config.load_settings", lambda: SimpleNamespace(platform_api_url="", llm=SimpleNamespace()))
+    router = SimpleNamespace(execute=AsyncMock(return_value="ok"))
+    result = await _with_tools(AsyncMock(), True, router).consult(
+        expert=_two_rounds(["terminal"]), task="fix it",
+        client=_replies((None, [_call("terminal")]), ("", None)),
+    )
+    router.execute.assert_awaited_once()
+    assert result.success is False and "ran tools" in result.content and "before repeating" in result.content
+
+
+async def test_a_refused_call_is_not_reported_as_a_tool_that_ran(monkeypatch):
+    monkeypatch.setattr("surogates.config.load_settings", lambda: SimpleNamespace(platform_api_url="", llm=SimpleNamespace()))
+    router = SimpleNamespace(execute=AsyncMock(return_value="ok"))
+    result = await _with_tools(AsyncMock(), True, router).consult(
+        expert=_two_rounds(None), task="review",
+        client=_replies((None, [_call("read_file")]), ("", None)),
+    )
+    router.execute.assert_not_awaited()
+    assert result.success is False and result.iterations_used == 2
+    assert "ran tools" not in result.content
+
+
+async def test_a_declared_tool_no_one_registered_cannot_be_called(monkeypatch):
+    monkeypatch.setattr("surogates.config.load_settings", lambda: SimpleNamespace(platform_api_url="", llm=SimpleNamespace()))
+    router = SimpleNamespace(execute=AsyncMock(return_value="ok"))
+    client = _replies((None, [_call("terminal")]), ("Check row 4.", None))
+    result = await _with_tools(AsyncMock(), False, router).consult(
+        expert=_two_rounds(["terminal"]), task="review", client=client,
+    )
+    router.execute.assert_not_awaited()
+    assert result.success is True
+    sent = client.chat.completions.create.await_args_list[1].kwargs["messages"]
+    assert "It has no tools." in sent[-1]["content"]
 
 
 async def test_text_beside_reasoning_is_an_answer(monkeypatch):

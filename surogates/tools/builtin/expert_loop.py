@@ -106,6 +106,7 @@ async def run_expert_loop(
     api_key: str | None = None,
     client: Any | None = None,
     session_config: dict[str, Any] | None = None,
+    executed: list[str] | None = None,
 ) -> tuple[str, int]:
     """Run a scoped agent loop using the expert's configured model.
 
@@ -130,6 +131,9 @@ async def run_expert_loop(
     session_store:
         Optional :class:`~surogates.session.store.SessionStore` for
         emitting expert events.
+    executed:
+        When given, each tool the expert actually ran is appended to it
+        (a refused call is not).
 
     Returns
     -------
@@ -152,6 +156,8 @@ async def run_expert_loop(
     withheld = expert_scope.get().withheld
     allowed_tools = {name for name in expert.expert_tools or () if name not in withheld}
     tool_schemas = tool_registry.get_schemas(names=allowed_tools) if allowed_tools else []
+    # What the request holds is what it may call: a declared tool no one registered is neither.
+    sent_tools = {schema["function"]["name"] for schema in tool_schemas}
 
     # Build expert messages with system prompt + user task.
     # None of its tools registered is none sent: the prompt says what the request holds.
@@ -247,12 +253,12 @@ async def run_expert_loop(
 
                 # Enforce scoping: the expert calls only what it was sent.  An
                 # expert sent no tools runs none (a withheld one included).
-                if tool_name not in allowed_tools:
+                if tool_name not in sent_tools:
                     result = json.dumps({
                         "error": f"Tool '{tool_name}' is not available to this expert. "
                         + (
-                            f"Available tools: {', '.join(sorted(allowed_tools))}"
-                            if allowed_tools
+                            f"Available tools: {', '.join(sorted(sent_tools))}"
+                            if sent_tools
                             else "It has no tools."
                         ),
                     })
@@ -263,6 +269,8 @@ async def run_expert_loop(
                                  "Please retry with valid JSON.",
                     })
                 else:
+                    if executed is not None:
+                        executed.append(tool_name)
                     result = await tool_router.execute(
                         name=tool_name,
                         # As its history has them: no arguments ("", null) are {}.

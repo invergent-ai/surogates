@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
-from surogates.harness.reasoning import THINK_RE
 from surogates.session.events import EventType
 from surogates.tools.builtin.expert_feedback import record_expert_outcome
 from surogates.tools.builtin.expert_loop import ExpertBudgetExceeded, expert_scope, run_expert_loop
@@ -72,10 +72,20 @@ class ExpertConsultationResult:
     error: str | None = None
 
 
+_REASONING_BLOCK = re.compile(r"<(think|thinking|reasoning_scratchpad)>.*?</\1>", re.DOTALL | re.IGNORECASE)
+_REASONING_CLOSE = re.compile(r"</(?:think|thinking|reasoning_scratchpad)>", re.IGNORECASE)
+_REASONING_OPEN = re.compile(r"<(?:think|thinking|reasoning_scratchpad)>", re.IGNORECASE)
+
+
 def _has_visible_text(text: str | None) -> bool:
-    """Whether a reply says anything outside its reasoning, closed or cut off."""
-    visible = THINK_RE.sub("", text or "").strip()
-    return bool(visible) and not visible.startswith(("<think>", "<thinking>"))
+    """Whether a reply says anything outside its reasoning: closed, cut off, or with its opening tag
+    prefilled by the template (so only the closing tag is in the text)."""
+    visible = _REASONING_BLOCK.sub("", text or "")
+    closes = list(_REASONING_CLOSE.finditer(visible))
+    if closes:
+        visible = visible[closes[-1].end():]
+    visible = visible.strip()
+    return bool(visible) and not _REASONING_OPEN.match(visible)
 
 
 class ExpertConsultationService:
@@ -143,6 +153,7 @@ class ExpertConsultationService:
                     self._credential_vault, self._tenant, expert,
                 )
             )
+            executed: list[str] = []
             result, iterations_used = await run_expert_loop(
                 expert=expert,
                 task=task,
@@ -155,6 +166,7 @@ class ExpertConsultationService:
                 session_config=self._session_config,
                 api_key=api_key,
                 client=client,
+                executed=executed,
             )
             if not _has_visible_text(result):
                 # No answer is not a successful one: the consulting model is told, not handed an empty result.
@@ -168,7 +180,7 @@ class ExpertConsultationService:
                         "suggestion": (
                             "It ran tools before it stopped: check what they changed before repeating any of it. "
                             "It gave no answer, so proceed without one."
-                            if iterations_used > 1 else
+                            if executed else
                             "It gave no answer, so proceed without one."
                         ),
                     }),
