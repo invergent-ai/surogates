@@ -2067,43 +2067,77 @@ class History:
             str(folder.relative_to(self.project))
             for folder in takewhile(lambda f: f != self.project and not f.exists(), target.parents)
         ]
+        # From the real files' root with no link followed, as _real reads it: history has no file behind a link.
+        root = os.path.realpath(self.project)
+        folders, name = _real_parts(root, os.path.join(root, path))
+        try:
+            folder = _real_folder(root, folders, make=True)
+        except _LinkOnTheWay:
+            raise HistoryError(f"{path}: a folder on its path was replaced by a link") from None
         # Written beside the real file, then renamed over it: a write cut
         # short leaves the real file whole.  A short name, so a real file's
         # near the length limit fits too; history leaves out the *~ name.
-        target.parent.mkdir(parents=True, exist_ok=True)
-        staged = target.with_name(f".~{os.urandom(4).hex()}.landing~")
+        staged = f".~{os.urandom(4).hex()}.landing~"
         try:
-            with open(staged, "wb") as out:
-                result = subprocess.run(
-                    ["git", "cat-file", "blob", blob], stdout=out, stderr=subprocess.PIPE,
-                    env=_environ({"GIT_DIR": str(self.repo)}), timeout=_GIT_TIMEOUT,
-                )
-                if result.returncode != 0:
-                    raise HistoryError(f"git cat-file failed: {result.stderr.decode(errors='replace').strip()}")
-                os.fsync(out.fileno())
-            os.replace(staged, target)
-            _sync(target.parent)
+            fd = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o666, dir_fd=folder)
+            try:
+                with os.fdopen(fd, "wb") as out:
+                    result = subprocess.run(
+                        ["git", "cat-file", "blob", blob], stdout=out, stderr=subprocess.PIPE,
+                        env=_environ({"GIT_DIR": str(self.repo)}), timeout=_GIT_TIMEOUT,
+                    )
+                    if result.returncode != 0:
+                        raise HistoryError(f"git cat-file failed: {result.stderr.decode(errors='replace').strip()}")
+                    os.fsync(out.fileno())
+                os.replace(staged, name, src_dir_fd=folder, dst_dir_fd=folder)
+            except BaseException:
+                # Only a write that did not land: once renamed, the name is no longer ours.
+                with contextlib.suppress(OSError):
+                    os.unlink(staged, dir_fd=folder)
+                raise
+            _sync_held(folder)
         except subprocess.TimeoutExpired as exc:
             raise HistoryError(f"git cat-file timed out after {_GIT_TIMEOUT}s") from exc
         finally:
-            # Gone once renamed; whatever cut the write short, nothing is left beside the real file.
-            staged.unlink(missing_ok=True)
+            os.close(folder)
         return made
 
     def _remove(self, path: str, folders: Iterable[Path]) -> None:
         """Remove the real file at *path*, then each of *folders* while it is empty; durable before it returns."""
-        target = self._inside(path)
-        target.unlink(missing_ok=True)
-        self._take_away(folders)
-        _sync(target.parent)
+        self._inside(path)
+        root = os.path.realpath(self.project)
+        parts, name = _real_parts(root, os.path.join(root, path))
+        # Named before anything goes: a folder that cannot be named stops the removal here, not halfway.
+        away = list(folders)
+        try:
+            folder = _real_folder(root, parts)
+        except _LinkOnTheWay:
+            raise HistoryError(f"{path}: a folder on its path was replaced by a link") from None
+        except (FileNotFoundError, NotADirectoryError):
+            folder = None  # no folder, so no file: as a removal of a missing file
+        if folder is not None:
+            try:
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(name, dir_fd=folder)
+            finally:
+                os.close(folder)
+        try:
+            self._take_away(away)
+        finally:
+            _sync_real(root, parts)
 
-    @staticmethod
-    def _take_away(folders: Iterable[Path]) -> None:
-        """Remove each of *folders*, deepest first, until one is not empty."""
+    def _take_away(self, folders: Iterable[Path]) -> None:
+        """Remove each of *folders*, deepest first, until one is not empty; never through a link."""
+        root = os.path.realpath(self.project)
         for folder in folders:
             try:
-                folder.rmdir()
-            except OSError:  # not empty, or gone
+                parts, name = _real_parts(root, os.path.join(root, os.path.relpath(folder, self.project)))
+                held = _real_folder(root, parts)
+                try:
+                    os.rmdir(name, dir_fd=held)
+                finally:
+                    os.close(held)
+            except (OSError, HistoryError, _LinkOnTheWay):  # not empty, gone, or no longer the folder it was
                 return
 
     # ------------------------------------------------------------------
@@ -2226,40 +2260,90 @@ def _sync(folder: Path) -> None:
         os.close(fd)
 
 
+def _sync_held(folder: int) -> None:
+    """fsync the folder held as *folder* (an O_PATH descriptor cannot be): geesefs then uploads the changes in it."""
+    fd = os.open(".", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC, dir_fd=folder)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _sync_real(root: str, folders: list[str]) -> None:
+    """fsync the deepest of *folders* below *root* still there, reached with no link followed."""
+    for depth in range(len(folders), -1, -1):
+        try:
+            held = _real_folder(root, folders[:depth])
+        except (FileNotFoundError, NotADirectoryError, _LinkOnTheWay):
+            continue
+        try:
+            _sync_held(held)
+        finally:
+            os.close(held)
+        return
+
+
 class _LinkOnTheWay(Exception):
     """A link at a real file's name or on the way to it: never followed."""
 
 
-def _open_real(root: str, path: str) -> int:
-    """The real file at *path* (resolved, below *root*) open to read, reached one folder at a time with no link followed.
+#: How a folder on the way to a real file is held: O_PATH where there is one, so it needs search permission only, as with a path.
+_THROUGH = getattr(os, "O_PATH", os.O_RDONLY) | os.O_DIRECTORY | os.O_CLOEXEC
 
-    Here and not through the tools' walk: this module also runs alone on a computer's agent disk.
-    Non-blocking, so a FIFO answers at once and is no file.
-    """
+
+def _real_parts(root: str, path: str) -> tuple[list[str], str]:
+    """The folders of *path* (resolved) below *root*, and its name; refused if it is not below it."""
     *folders, name = os.path.relpath(path, root).split(os.sep)
     if any(part in ("", ".", "..") for part in (*folders, name)):
         raise HistoryError(f"{path} is outside the project's files")
-    # O_PATH where there is one: a folder on the way needs search permission only, as with a path.
-    through = getattr(os, "O_PATH", os.O_RDONLY) | os.O_DIRECTORY | os.O_CLOEXEC
-    held = os.open(root, through)
+    return folders, name
+
+
+def _real_folder(root: str, folders: list[str], *, make: bool = False) -> int:
+    """The folder *folders* below *root*, held one folder at a time with no link followed; with *make*, missing ones are made.
+
+    Here and not through the tools' walk: this module also runs alone on a computer's agent disk.
+    """
+    held = os.open(root, _THROUGH)
     try:
         for part in folders:
-            try:
-                deeper = os.open(part, through | os.O_NOFOLLOW, dir_fd=held)
-            except OSError as exc:
-                if exc.errno == errno.ELOOP or (
-                    exc.errno == errno.ENOTDIR and stat.S_ISLNK(os.stat(part, dir_fd=held, follow_symlinks=False).st_mode)
-                ):
-                    raise _LinkOnTheWay from None
-                raise
+            for again in (False, True):
+                try:
+                    deeper = os.open(part, _THROUGH | os.O_NOFOLLOW, dir_fd=held)
+                    break
+                except FileNotFoundError:
+                    if not make or again:
+                        raise
+                    with contextlib.suppress(FileExistsError):
+                        os.mkdir(part, dir_fd=held)
+                except OSError as exc:
+                    if exc.errno == errno.ELOOP or (
+                        exc.errno == errno.ENOTDIR
+                        and stat.S_ISLNK(os.stat(part, dir_fd=held, follow_symlinks=False).st_mode)
+                    ):
+                        raise _LinkOnTheWay from None
+                    raise
             os.close(held)
             held = deeper
-        try:
-            return os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, dir_fd=held)
-        except OSError as exc:
-            if exc.errno == errno.ELOOP:
-                raise _LinkOnTheWay from None
-            raise
+        return held
+    except BaseException:
+        os.close(held)
+        raise
+
+
+def _open_real(root: str, path: str) -> int:
+    """The real file at *path* (resolved, below *root*) open to read, reached with no link followed.
+
+    Non-blocking, so a FIFO answers at once and is no file.
+    """
+    folders, name = _real_parts(root, path)
+    held = _real_folder(root, folders)
+    try:
+        return os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, dir_fd=held)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise _LinkOnTheWay from None
+        raise
     finally:
         os.close(held)
 
