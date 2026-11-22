@@ -1287,7 +1287,7 @@ async def _read_file_handler(
         if _is_image(key):
             return json.dumps({
                 "error": (
-                    f"Image file detected: '{path}'. "
+                    f"Image file detected: '{shown_path(path)}'. "
                     "Use vision_analyze with this file path to inspect the image contents."
                 ),
             })

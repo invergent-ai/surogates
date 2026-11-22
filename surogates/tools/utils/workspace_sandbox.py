@@ -58,9 +58,12 @@ def path_too_long(path: str | os.PathLike[str]) -> bool:
     return len(os.fspath(path)) > MAX_PATH_CHARS
 
 
-def shown_path(path: str | os.PathLike[str]) -> str:
-    """*path* as a message may repeat it: a long one only by its start."""
-    text = os.fspath(path)
+def shown_path(path: object) -> str:
+    """*path* as a message may repeat it, whatever a caller passed: a long one only by its start."""
+    try:
+        text = os.fsdecode(path)  # type: ignore[arg-type]
+    except TypeError:
+        text = str(path)
     return text if len(text) <= _SHOWN_PATH_CHARS else f"{text[:_SHOWN_PATH_CHARS]}... ({len(text)} characters)"
 
 

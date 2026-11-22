@@ -78,6 +78,23 @@ async def test_an_image_within_its_limit_is_sent_whole(api):  # noqa: F811
     assert base64.b64decode(answer.json()["content"]) == data
 
 
+async def test_a_large_preview_survives_a_failed_look_at_its_size(api):  # noqa: F811
+    data = b"x" * (workspace_route._MAX_READ_BYTES + 5000)
+    session = await a_file(api, "big.txt", data)
+
+    class Away(Counting):
+        async def exists(self, bucket, key):
+            raise ConnectionError("the store did not answer")
+
+    api.app.state.storage = Away(api.app.state.storage._base)
+    answer = await api.client.get(
+        f"/v1/sessions/{session.id}/workspace/file", params={"path": "big.txt"}, headers=api.auth(),
+    )
+    assert answer.status_code == 200, answer.text
+    body = answer.json()
+    assert body["truncated"] is True and len(body["content"]) == workspace_route._MAX_READ_BYTES
+
+
 async def test_a_download_is_read_no_further_than_its_cap(api, monkeypatch):  # noqa: F811
     data = b"0123456789"
     session = await a_file(api, "a.bin", data)

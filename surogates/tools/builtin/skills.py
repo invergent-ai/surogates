@@ -731,7 +731,7 @@ async def _skill_view_handler(
             return json.dumps(
                 {
                     "success": False,
-                    "error": f"File '{file_path}' not found in skill '{name}'.",
+                    "error": f"File '{shown_path(file_path)}' not found in skill '{name}'.",
                     "available_files": available_files,
                     "hint": "Use one of the available file paths listed above",
                 },
