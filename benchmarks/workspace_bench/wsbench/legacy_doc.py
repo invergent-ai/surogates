@@ -111,10 +111,11 @@ class _CompoundFile:
             page = self._sector(next_difat)
             sectors += [_u32(page, 4 * i) for i in range(per_sector)]
             next_difat = _u32(page, 4 * per_sector)
+        sectors = [sector for sector in sectors if sector != _FREE_SECTOR]
+        if len(set(sectors)) != len(sectors) or len(sectors) > len(self.data) // self.sector_bytes:
+            raise LegacyDocError("bad sector allocation table")
         fat: list[int] = []
         for sector in sectors:
-            if sector == _FREE_SECTOR:
-                continue
             page = self._sector(sector)
             fat += struct.unpack(f"<{len(page) // 4}I", page)
         return fat
@@ -232,9 +233,34 @@ def _pieces(table: bytes, fc_clx: int, lcb_clx: int) -> list[tuple[int, int, int
     return out
 
 
-def _has_row_end(grpprl: bytes, data_stream: bytes = b"") -> bool:
+class _PropertyBudget:
+    """Bytes of paragraph properties one file may make the reader walk: pages and long lists can be
+    named many times over, so a crafted file could otherwise stall grading."""
+
+    def __init__(self, limit: int) -> None:
+        self.left = limit
+
+    def spend(self, count: int) -> None:
+        self.left -= count
+        if self.left < 0:
+            raise LegacyDocError("paragraph properties are repeated beyond the file's size")
+
+
+def _chg_tabs_size(grpprl: bytes, pos: int) -> int | None:
+    """The size of a ``sprmPChgTabs`` operand whose length byte is 255, which stores no length."""
+    if pos + 1 >= len(grpprl):
+        return None
+    add_at = pos + 2 + 4 * grpprl[pos + 1]
+    if add_at >= len(grpprl):
+        return None
+    return add_at - pos + 1 + 3 * grpprl[add_at]
+
+
+def _has_row_end(grpprl: bytes, data_stream: bytes = b"", budget: _PropertyBudget | None = None) -> bool:
     """Whether a paragraph's property list marks it as a table row's end.  A list too long for its page
     (a wide table's row) is one property pointing into the ``Data`` stream."""
+    if budget is not None:
+        budget.spend(len(grpprl))
     pos = 0
     while pos + 2 <= len(grpprl):
         sprm = _u16(grpprl, pos)
@@ -244,7 +270,7 @@ def _has_row_end(grpprl: bytes, data_stream: bytes = b"") -> bool:
             size = _u16(data_stream, at)
             if at + 2 + size > len(data_stream):
                 raise LegacyDocError("paragraph properties are outside the Data stream")
-            return _has_row_end(data_stream[at + 2:at + 2 + size])
+            return _has_row_end(data_stream[at + 2:at + 2 + size], b"", budget)
         kind = sprm >> 13
         if kind in (0, 1):
             size = 1
@@ -260,7 +286,10 @@ def _has_row_end(grpprl: bytes, data_stream: bytes = b"") -> bool:
                     return False
                 size = _u16(grpprl, pos) + 1
             elif sprm == _SPRM_P_CHG_TABS and pos < len(grpprl) and grpprl[pos] == 255:
-                return False  # its length is not stored; what follows cannot be walked
+                tabs_size = _chg_tabs_size(grpprl, pos)
+                if tabs_size is None:
+                    return False
+                size = tabs_size
             else:
                 if pos >= len(grpprl):
                     return False
@@ -278,9 +307,14 @@ def _row_end_ranges(
     if lcb < 12 or (lcb - 4) % 8 or fc + lcb > len(table):
         return []
     count = (lcb - 4) // 8
+    budget = _PropertyBudget(4 * (len(word) + len(data_stream)) + _FKP_BYTES)
+    pages_seen: set[int] = set()
     ranges: list[tuple[int, int]] = []
     for i in range(count):
         page_at = (_u32(table, fc + 4 * (count + 1) + 4 * i) & 0x3FFFFF) * _FKP_BYTES
+        if page_at in pages_seen:
+            continue
+        pages_seen.add(page_at)
         page = word[page_at:page_at + _FKP_BYTES]
         if len(page) < _FKP_BYTES:
             raise LegacyDocError("a paragraph page is outside the file")
@@ -295,7 +329,7 @@ def _row_end_ranges(
                 body = page[at + 1:at + 2 * size]
             else:
                 body = page[at + 2:at + 2 + 2 * page[at + 1]]
-            if _has_row_end(body[2:], data_stream):
+            if _has_row_end(body[2:], data_stream, budget):
                 ranges.append((_u32(page, 4 * run), _u32(page, 4 * (run + 1))))
     ranges.sort()
     return ranges
@@ -307,6 +341,7 @@ class _TextBuilder:
     def __init__(self, row_ends: list[tuple[int, int]]) -> None:
         self.parts: list[str] = []
         self.fields: list[bool] = []  # one per open field: True while in its code
+        self.fields_in_code = 0
         self.row_ends = row_ends
         self.row_starts = [start for start, _ in row_ends]
         self.after_cell = False
@@ -321,13 +356,15 @@ class _TextBuilder:
         code = ord(char)
         if code == 0x13:
             self.fields.append(True)
+            self.fields_in_code += 1
         elif code == 0x14:
-            if self.fields:
+            if self.fields and self.fields[-1]:
                 self.fields[-1] = False
+                self.fields_in_code -= 1
         elif code == 0x15:
-            if self.fields:
-                self.fields.pop()
-        elif any(self.fields):
+            if self.fields and self.fields.pop():
+                self.fields_in_code -= 1
+        elif self.fields_in_code:
             return
         elif code == 0x07:
             if self._ends_row(file_offset):
@@ -373,20 +410,23 @@ def extract_legacy_doc(path: str) -> str:
         )
     except (LegacyDocError, IndexError):
         row_ends = []  # the text is still right; only where table rows end is then a guess
+    spans = [
+        (start, min(stop, ccp_text) - start, offset, compressed)
+        for start, stop, offset, compressed in sorted(pieces) if start < ccp_text
+    ]
+    if sum(count * (1 if compressed else 2) for _, count, _, compressed in spans) > len(word):
+        raise LegacyDocError("text pieces repeat the same bytes")
     builder = _TextBuilder(row_ends)
-    for start, stop, offset, compressed in sorted(pieces):
-        if start >= ccp_text:
-            break
-        count = min(stop, ccp_text) - start
+    for _, count, offset, compressed in spans:
         width = 1 if compressed else 2
         raw = word[offset:offset + count * width]
         if len(raw) < count * width:
             raise LegacyDocError("a text piece is outside the WordDocument stream")
         chars = raw.decode("cp1252", "replace") if compressed else raw.decode("utf-16-le", "replace")
-        if len(chars) != count:  # a surrogate pair decodes to one character: keep offsets by unit
-            chars = "".join(
-                raw[i:i + 2].decode("utf-16-le", "replace") for i in range(0, len(raw), 2)
-            )
-        for index, char in enumerate(chars):
-            builder.add(char, offset + index * width)
+        position = offset
+        for char in chars:
+            builder.add(char, position)
+            position += 4 if ord(char) > 0xFFFF else width  # a surrogate pair is two 16-bit units
+    if builder.fields:
+        raise LegacyDocError("a field is not closed")
     return builder.text()
