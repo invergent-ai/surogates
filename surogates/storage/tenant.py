@@ -219,6 +219,18 @@ def workspace_session_shim(config: dict | None, session_id: object) -> Any:
     return SimpleNamespace(id=session_id, channel=cfg.get("channel", ""), config=cfg)
 
 
+def sandbox_workspace_key(config: dict | None, session_id: object, key: str = "") -> str:
+    """Physical object key of *key* in the workspace the session's sandbox mounts.
+
+    For tools that hold only ``session_config`` and ``session_id``.  A
+    delegated child shares its root's sandbox, so its files are under the
+    root's prefix (``sandbox_root_session_id``, stamped by the server), not
+    its own.  A child from before that stamp keeps its own prefix.
+    """
+    root = (config or {}).get("sandbox_root_session_id") or session_id
+    return boundary_workspace_key(config, workspace_session_shim(config, session_id), root, key)
+
+
 class TenantStorage:
     """Tenant-aware storage operations.
 

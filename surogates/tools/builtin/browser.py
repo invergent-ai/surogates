@@ -40,8 +40,8 @@ from surogates.devices.workspace import DeviceWorkspaceIO
 from surogates.sandbox.copy_files import write_copy, writes_to_copy
 
 from surogates.storage.tenant import (
-    boundary_workspace_key,
     boundary_workspace_prefix,
+    sandbox_workspace_key,
     workspace_session_shim,
 )
 from surogates.harness.redact import mask_values
@@ -66,24 +66,11 @@ def build_browser_session_source_ref(
     )
 
 
-def build_browser_screenshot_key(
-    *,
-    session: object,
-    session_id: object,
-    relative_path: str,
-) -> str:
-    """Return the physical object key for a browser screenshot."""
-    return boundary_workspace_key(
-        session.config,
-        session,
-        session_id,
-        relative_path,
-    )
 from surogates.devices.workspace import DeviceOperationError, said
 from surogates.session.events import EventType
 from surogates.tools.registry import ToolRegistry, ToolSchema
 from surogates.tools.utils.tool_result_storage import WORKSPACE_STORAGE_DIR, keep_out_of_git
-from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError, validate_path
+from surogates.tools.utils.workspace_sandbox import WORKSPACE_MOUNT, WorkspaceSandboxError, validate_path
 from surogates.tools.workspace_io.local import write_in_workspace
 
 logger = logging.getLogger(__name__)
@@ -1305,12 +1292,7 @@ async def _save_screenshot_to_storage(
     if not storage_bucket:
         return None
 
-    session_for_workspace = workspace_session_shim(session_config, session_id)
-    key = build_browser_screenshot_key(
-        session=session_for_workspace,
-        session_id=session_id,
-        relative_path=relative_path,
-    )
+    key = sandbox_workspace_key(session_config, session_id, relative_path)
     try:
         await storage.write(storage_bucket, key, png_bytes)
     except Exception as exc:
@@ -1413,7 +1395,11 @@ async def _browser_screenshot_handler(
     relative_path = _new_screenshot_path()
     # A thread's screenshot goes to its copy alone: the browser's own mount is the real files.
     copy = writes_to_copy(sandbox_pool, task_id, session_config)
-    browser_save_path = f"/workspace/{relative_path}" if workspace_path and not copy else None
+    # A sub-agent's browser mounts the sub-agent's own prefix of object storage, not the workspace its
+    # sandbox shows: a file saved there could not be read back, so the worker's write is the only one.
+    root = (session_config or {}).get("sandbox_root_session_id")
+    own_prefix = workspace_path == WORKSPACE_MOUNT and bool(root) and str(root) != str(session_id)
+    browser_save_path = f"/workspace/{relative_path}" if workspace_path and not copy and not own_prefix else None
     result_path = _workspace_result_path(
         workspace_path=workspace_path,
         storage_bucket=storage_bucket,
@@ -1453,7 +1439,7 @@ async def _browser_screenshot_handler(
             session_config=session_config,
             relative_path=relative_path,
         )
-    if saved is None and not saved_in_browser and not copy:
+    if saved is None and not saved_in_browser and not copy and not own_prefix:
         saved = _save_screenshot_to_workspace(
             png_bytes,
             workspace_path=workspace_path,

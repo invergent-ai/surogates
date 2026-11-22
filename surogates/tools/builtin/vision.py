@@ -19,7 +19,7 @@ from surogates.harness.auxiliary_llm import create_without_reasoning
 from surogates.harness.image_shrink import shrink_image_parts_in_messages
 from surogates.harness.message_utils import message_to_dict
 from surogates.sandbox.copy_files import has_copy, read_copy
-from surogates.storage.tenant import boundary_workspace_key, workspace_session_shim
+from surogates.storage.tenant import sandbox_workspace_key
 from surogates.tools.registry import ToolRegistry, ToolSchema
 from surogates.tools.utils.url_safety import is_safe_url
 from surogates.tools.utils.workspace_sandbox import (
@@ -245,12 +245,7 @@ async def _image_ref_to_data_url(
                 image_ref,
                 workspace_path=workspace_path,
             )
-            key = boundary_workspace_key(
-                session_config,
-                workspace_session_shim(session_config, session_id),
-                session_id,
-                relative_path,
-            )
+            key = sandbox_workspace_key(session_config, session_id, relative_path)
             try:
                 if has_copy(sandbox_pool, owner):
                     # A thread sees the image as its copy has it.

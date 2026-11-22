@@ -873,6 +873,50 @@ class TestScreenshotHandler:
         assert "base64" not in body
         assert "error" not in body
 
+    async def test_a_sub_agents_screenshot_is_written_only_where_its_sandbox_shows_it(self, tenant) -> None:
+        from surogates.tools.builtin.browser import _browser_screenshot_handler
+
+        child, root = uuid4(), uuid4()
+        storage = FakeStorage()
+        client = FakeSavePathScreenshotClient()
+
+        body = json.loads(await _browser_screenshot_handler(
+            {},
+            tenant=tenant,
+            session_id=child,
+            browser_pool=FakePool(),
+            browser_control=FakeControlStore(),
+            workspace_path="/workspace",
+            session_config={"storage_bucket": "agent-bucket", "sandbox_root_session_id": str(root)},
+            storage=storage,
+            _client_factory=lambda endpoint: client,
+        ))
+
+        assert body["saved"] is True
+        assert client.captured[0]["save_path"] is None
+        assert [key for _bucket, key, _data in storage.writes] == [f"{root}/{body['relative_path']}"]
+
+    async def test_a_sub_agents_screenshot_that_cannot_be_written_is_reported(self, tenant) -> None:
+        from surogates.tools.builtin.browser import _browser_screenshot_handler
+
+        class Refusing(FakeStorage):
+            async def write(self, bucket: str, key: str, data: bytes) -> None:
+                raise OSError("store refused")
+
+        body = json.loads(await _browser_screenshot_handler(
+            {},
+            tenant=tenant,
+            session_id=uuid4(),
+            browser_pool=FakePool(),
+            browser_control=FakeControlStore(),
+            workspace_path="/workspace",
+            session_config={"storage_bucket": "agent-bucket", "sandbox_root_session_id": str(uuid4())},
+            storage=Refusing(),
+            _client_factory=lambda endpoint: FakeSavePathScreenshotClient(),
+        ))
+
+        assert body["error"] == "screenshot_save_failed"
+
     async def test_oversized_png_is_saved_to_workspace_storage(
         self,
         tenant,
