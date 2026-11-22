@@ -154,7 +154,7 @@ async def handle_image_read(
     """
     # Import lazily — file_ops pulls in the whole tool registry.
     from surogates.tools.builtin.vision import image_read_from
-    from surogates.tools.utils.workspace_sandbox import NUL_REFUSED, shown_path
+    from surogates.tools.utils.workspace_sandbox import NUL_REFUSED, short_error, shown_path
     from surogates.tools.builtin.file_ops import (
         _apply_line_window,
         _render_read_window,
@@ -202,7 +202,7 @@ async def handle_image_read(
             }, ensure_ascii=False)
         if "error" in parsed:
             return json.dumps({
-                "error": (
+                "error": short_error(
                     f"read_file could not analyze image '{shown_path(path)}': "
                     f"{parsed['error']}"
                 ),

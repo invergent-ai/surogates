@@ -29,6 +29,7 @@ from surogates.tools.utils.workspace_sandbox import (
     WorkspaceSandboxError,
     in_workspace_terms,
     refuse_nul,
+    short_error,
     shown_path,
     validate_path,
 )
@@ -136,7 +137,8 @@ async def _vision_analyze_handler(arguments: dict[str, Any], **kwargs: Any) -> s
         return _json_error(str(exc))
     except httpx.HTTPError as exc:
         logger.warning("vision_analyze image fetch failed: %s", exc)
-        return _json_error(f"Failed to fetch image: {exc}")
+        # httpx names the URL it was asked for.
+        return _json_error(short_error(f"Failed to fetch image: {exc}".replace(image_ref, shown_path(image_ref))))
 
     image_url: dict[str, Any] = {"url": data_url}
     if detail != "auto":
@@ -268,6 +270,8 @@ async def _image_ref_to_data_url(
                         noted.append(read_key)
             except KeyError:
                 raise ValueError(f"Image file not found: {shown_path(image_ref)}") from None
+            except OSError as exc:
+                raise ValueError(f"Could not read image {shown_path(image_ref)}: {said(exc)}") from None
             if len(data) > _MAX_IMAGE_BYTES:
                 raise ValueError(f"Image file is too large: over {_MAX_IMAGE_BYTES} bytes")
             mime_type = _detect_mime_type(

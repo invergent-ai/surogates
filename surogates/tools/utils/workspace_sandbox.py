@@ -52,6 +52,11 @@ PATH_TOO_LONG = f"Path is too long: over {MAX_PATH_CHARS} characters"
 #: How much of a path a refusal repeats.
 _SHOWN_PATH_CHARS = 200
 
+#: The longest error text a tool result carries.  Past it, only its start and its end.
+MAX_ERROR_CHARS = 2000
+_ERROR_HEAD_CHARS = 1500
+_ERROR_TAIL_CHARS = 400
+
 
 def path_too_long(path: str | os.PathLike[str]) -> bool:
     """Whether *path* is over :data:`MAX_PATH_CHARS`: to ask before anything resolves it."""
@@ -59,12 +64,19 @@ def path_too_long(path: str | os.PathLike[str]) -> bool:
 
 
 def shown_path(path: object) -> str:
-    """*path* as a message may repeat it, whatever a caller passed: a long one only by its start."""
+    """*path* as a message may repeat it, a long one only by its start.  A value that is no path is shown as ``str``."""
     try:
         text = os.fsdecode(path)  # type: ignore[arg-type]
     except TypeError:
         text = str(path)
     return text if len(text) <= _SHOWN_PATH_CHARS else f"{text[:_SHOWN_PATH_CHARS]}... ({len(text)} characters)"
+
+
+def short_error(text: str) -> str:
+    """*text*, an error for a tool result: as it is up to :data:`MAX_ERROR_CHARS`, past that its start and end."""
+    if len(text) <= MAX_ERROR_CHARS:
+        return text
+    return f"{text[:_ERROR_HEAD_CHARS]}... ({len(text)} characters) ...{text[-_ERROR_TAIL_CHARS:]}"
 
 
 def holds_nul(*texts: object) -> bool:
