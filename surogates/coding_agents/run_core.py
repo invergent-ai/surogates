@@ -261,6 +261,7 @@ async def execute_coding_run(
             "run_id": run_id, "agent": agent,
             "final_message": result.final_message, "error": result.error,
             "input_tokens": result.input_tokens, "output_tokens": result.output_tokens,
+            **({"cleanup_incomplete": True} if result.cleanup_incomplete else {}),
         },
     )
 

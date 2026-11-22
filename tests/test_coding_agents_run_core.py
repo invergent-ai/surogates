@@ -143,6 +143,26 @@ async def test_codex_writeback_surfaced():
     assert stored["auth_json"]["tokens"]["access_token"] == "fresh"
 
 
+async def test_a_run_whose_directory_was_not_removed_says_so_in_its_result():
+    store = _FakeStore()
+    creds = CodingAgentCredentials(_FakeVault({
+        "code_cred:anthropic": CredentialBundle(
+            provider="anthropic", auth_mode="api_key", api_key="sk-ant-api-synthetic",
+        ).to_json(),
+    }))
+    execute, _calls = _sbx([{
+        "ok": True, "done": True, "exit_code": 0, "offset": 0, "new_output": "", "cleaned": False,
+    }])
+    await execute_coding_run(
+        store=store, tenant=_tenant(), session=SimpleNamespace(id=uuid4()),
+        credentials=creds, agent="claude", provider="anthropic",
+        prompt="review", model=None, effort=None, read_only=False,
+        ensure_sandbox=_noop_ensure, execute=execute, should_cancel=lambda: False,
+    )
+    result = next(d for et, d in store.events if et == EventType.CODE_RUN_RESULT)
+    assert result["cleanup_incomplete"] is True
+
+
 class _FakeSummaryClient:
     def __init__(self, content):
         self._content = content

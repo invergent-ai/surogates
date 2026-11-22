@@ -2031,11 +2031,17 @@ class History:
         """
         target = self._inside(path)
         _invalidate(target if os.path.lexists(target) else target.parent)
+        # Reached from the real files' root with no link followed, on the way or
+        # at the name: history has no file behind a link.  A link answers with
+        # an id no blob has, so the file reads as changed and what it points
+        # at is never read.
+        root = os.path.realpath(self.project)
         try:
-            # Non-blocking, so a FIFO answers at once and is no file.
-            fd = os.open(target, os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK)
+            fd = _open_real(root, os.path.join(root, path))
         except (FileNotFoundError, NotADirectoryError):
             return None
+        except _LinkOnTheWay:
+            return hashlib.sha1(b"link\0" + os.fsencode(path)).hexdigest()
         try:
             # Looked at before it is read: a folder opens, and open() refuses it without closing it.
             info = os.fstat(fd)
@@ -2218,6 +2224,44 @@ def _sync(folder: Path) -> None:
         os.fsync(fd)
     finally:
         os.close(fd)
+
+
+class _LinkOnTheWay(Exception):
+    """A link at a real file's name or on the way to it: never followed."""
+
+
+def _open_real(root: str, path: str) -> int:
+    """The real file at *path* (resolved, below *root*) open to read, reached one folder at a time with no link followed.
+
+    Here and not through the tools' walk: this module also runs alone on a computer's agent disk.
+    Non-blocking, so a FIFO answers at once and is no file.
+    """
+    *folders, name = os.path.relpath(path, root).split(os.sep)
+    if any(part in ("", ".", "..") for part in (*folders, name)):
+        raise HistoryError(f"{path} is outside the project's files")
+    # O_PATH where there is one: a folder on the way needs search permission only, as with a path.
+    through = getattr(os, "O_PATH", os.O_RDONLY) | os.O_DIRECTORY | os.O_CLOEXEC
+    held = os.open(root, through)
+    try:
+        for part in folders:
+            try:
+                deeper = os.open(part, through | os.O_NOFOLLOW, dir_fd=held)
+            except OSError as exc:
+                if exc.errno == errno.ELOOP or (
+                    exc.errno == errno.ENOTDIR and stat.S_ISLNK(os.stat(part, dir_fd=held, follow_symlinks=False).st_mode)
+                ):
+                    raise _LinkOnTheWay from None
+                raise
+            os.close(held)
+            held = deeper
+        try:
+            return os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, dir_fd=held)
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                raise _LinkOnTheWay from None
+            raise
+    finally:
+        os.close(held)
 
 
 def _opened_folder(name: str, inside: int | None, make: bool) -> int | None:

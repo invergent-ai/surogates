@@ -87,7 +87,7 @@ def test_codex_auth_json_written_and_home_exported(tmp_path):
 
 def test_cancel_kills_running_process(tmp_path):
     base = str(tmp_path)
-    pod_runner.launch(
+    launched = pod_runner.launch(
         {"run_id": "r4", "argv": ["sleep", "30"], "stdin": None, "env": {}},
         base=base,
     )
@@ -95,7 +95,9 @@ def test_cancel_kills_running_process(tmp_path):
     res = pod_runner.poll({"run_id": "r4", "offset": 0}, base=base)
     assert res["done"] is False
 
-    cancelled = pod_runner.cancel({"run_id": "r4"}, base=base)
+    cancelled = pod_runner.cancel(
+        {"run_id": "r4", "pid": launched["pid"], "start": launched["start"]}, base=base,
+    )
     assert cancelled["ok"] is True
 
     # After cancel the process is gone.
