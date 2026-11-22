@@ -455,7 +455,16 @@ class GovernanceGate:
             # workspace root too (a host folder with local storage), as the
             # file tools read it (``in_workspace_terms``).
             import os
-            from surogates.tools.utils.workspace_sandbox import in_workspace_terms
+            from surogates.tools.utils.workspace_sandbox import (
+                PATH_TOO_LONG,
+                in_workspace_terms,
+                path_too_long,
+                shown_path,
+            )
+
+            # Before anything resolves it: this runs on the worker's event loop.
+            if path_too_long(raw_path):
+                return f"Workspace sandbox violation: {PATH_TOO_LONG}."
 
             expanded = in_workspace_terms(workspace_path, os.path.expanduser(raw_path))
             if not os.path.isabs(expanded):
@@ -468,7 +477,7 @@ class GovernanceGate:
                 allowed = False
             if not allowed:
                 return (
-                    f"Workspace sandbox violation: '{raw_path}' resolves "
+                    f"Workspace sandbox violation: '{shown_path(raw_path)}' resolves "
                     f"outside the session workspace. All file operations "
                     f"must stay within the workspace directory."
                 )

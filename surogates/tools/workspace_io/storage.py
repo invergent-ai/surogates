@@ -18,7 +18,7 @@ from datetime import datetime
 from pathlib import Path, PurePosixPath
 
 from surogates.storage.backend import Changed, StorageBackend, read_capped
-from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
+from surogates.tools.utils.workspace_sandbox import PATH_TOO_LONG, WorkspaceSandboxError, path_too_long, shown_path
 from surogates.tools.workspace_io.base import FileStat, RevisionConflict, Walk, refuse_nul
 
 
@@ -47,8 +47,10 @@ class StorageWorkspaceIO:
     async def resolve(self, path: str) -> str:
         # Refused here, as every workspace refuses it, and never left to what a store says of such a key.
         refuse_nul(path)
+        if path_too_long(path):
+            raise WorkspaceSandboxError(PATH_TOO_LONG)
         if path.startswith("/") or ".." in PurePosixPath(path).parts:
-            raise WorkspaceSandboxError(f"Path traversal blocked: {path}")
+            raise WorkspaceSandboxError(f"Path traversal blocked: {shown_path(path)}")
         # As given: the routes used it literally, and an object stored under
         # "./a.md" or "a//b.md" keeps its name.  The root itself is "".
         return "" if path in ("", ".") else path

@@ -44,6 +44,25 @@ class WorkspaceSandboxError(Exception):
 # 3.12.3, "lstat: embedded null character in path" since).
 NUL_REFUSED = "A path, a command or a search pattern cannot hold a NUL character"
 
+#: The longest path a tool may name (Linux's PATH_MAX).  Resolving a path costs
+#: the square of its segments, on the worker's event loop, so a longer one is
+#: refused before anything looks at it.
+MAX_PATH_CHARS = 4096
+PATH_TOO_LONG = f"Path is too long: over {MAX_PATH_CHARS} characters"
+#: How much of a path a refusal repeats.
+_SHOWN_PATH_CHARS = 200
+
+
+def path_too_long(path: str | os.PathLike[str]) -> bool:
+    """Whether *path* is over :data:`MAX_PATH_CHARS`: to ask before anything resolves it."""
+    return len(os.fspath(path)) > MAX_PATH_CHARS
+
+
+def shown_path(path: str | os.PathLike[str]) -> str:
+    """*path* as a message may repeat it: a long one only by its start."""
+    text = os.fspath(path)
+    return text if len(text) <= _SHOWN_PATH_CHARS else f"{text[:_SHOWN_PATH_CHARS]}... ({len(text)} characters)"
+
 
 def holds_nul(*texts: object) -> bool:
     """Whether one of *texts* is a string that holds a NUL."""
@@ -124,8 +143,10 @@ def resolve_in_workspace(
     Returns the resolved absolute path.
 
     Raises :class:`WorkspaceSandboxError` if the resolved path escapes
-    the workspace root.
+    the workspace root, or if *user_path* is over :data:`MAX_PATH_CHARS`.
     """
+    if path_too_long(user_path):
+        raise WorkspaceSandboxError(PATH_TOO_LONG)
     expanded = in_workspace_terms(workspace_root, os.path.expanduser(user_path))
     candidate = Path(expanded)
 
@@ -139,7 +160,7 @@ def resolve_in_workspace(
         # Named as the model wrote it: the message reaches the model, and
         # the host's paths are not its to see.
         raise WorkspaceSandboxError(
-            f"Path traversal blocked: '{user_path}' resolves outside the workspace."
+            f"Path traversal blocked: '{shown_path(user_path)}' resolves outside the workspace."
         )
 
     return resolved

@@ -57,6 +57,7 @@ from fastapi import FastAPI, Request, Response
 
 from surogates.sandbox.base import MAX_FILE_BYTES
 from surogates.sandbox.history import UNKNOWN_STEP, History, HistoryError
+from surogates.tools.utils.workspace_sandbox import PATH_TOO_LONG, path_too_long, shown_path
 from surogates.tools.utils.process_tree import (
     become_subreaper,
     go_first_out_of_memory,
@@ -124,7 +125,7 @@ def _record_read(name: str, args: dict, workspace: str, result: str) -> None:
     if name not in _READ_TOOL_NAMES:
         return
     path = args.get("path")
-    if not isinstance(path, str) or not path:
+    if not isinstance(path, str) or not path or path_too_long(path):
         return
     try:
         if json.loads(result).get("error"):
@@ -341,19 +342,22 @@ def _run_file(args: dict, workspace: str) -> str:
     from surogates.tools.workspace_io.local import LinkOnPath, _contained_parts, _open_folder, _open_to_read
 
     path = str(args.get("path") or "")
-    outside = json.dumps({"error": f"{path} is outside the workspace"})
+    if path_too_long(path):  # before anything resolves it
+        return json.dumps({"error": PATH_TOO_LONG})
+    named = shown_path(path)
+    outside = json.dumps({"error": f"{named} is outside the workspace"})
     try:
         root = os.path.realpath(workspace)
         target = os.path.realpath(os.path.join(root, path))
         if not path or os.path.commonpath([root, target]) != root or target == root:
             return outside
-        too_large = f"{path} is over the 50 MiB a file may be"
+        too_large = f"{named} is over the 50 MiB a file may be"
         if args.get("action") == "read":
             # A caller may ask for less than the most a file may be, and is then sent no more.
             asked = args.get("max_bytes")
             limit = asked if type(asked) is int and 0 <= asked < MAX_FILE_BYTES else MAX_FILE_BYTES
             if limit != MAX_FILE_BYTES:
-                too_large = f"{path} is over the {limit} bytes this read may take"
+                too_large = f"{named} is over the {limit} bytes this read may take"
             try:
                 with _open_to_read(root, target) as fh:
                     if os.fstat(fh.fileno()).st_size > limit:
@@ -361,11 +365,11 @@ def _run_file(args: dict, workspace: str) -> str:
                     # No further than the cap: the file may have grown since its size was read.
                     data = fh.read(limit + 1)
             except (FileNotFoundError, NotADirectoryError, IsADirectoryError):
-                return json.dumps({"error": f"{path} not found"})
+                return json.dumps({"error": f"{named} not found"})
             except OSError as exc:
                 if exc.errno not in (errno.EINVAL, errno.ENXIO):  # there, but not a regular file (ENXIO: a socket)
                     raise
-                return json.dumps({"error": f"{path} not found"})
+                return json.dumps({"error": f"{named} not found"})
             if len(data) > limit:
                 return json.dumps({"error": too_large, "too_large": True})
             return json.dumps({"content_b64": base64.b64encode(data).decode()})
@@ -405,7 +409,7 @@ def _run_file(args: dict, workspace: str) -> str:
     except LinkOnPath:  # a link put on the path after the check: refused, never followed
         return outside
     except (OSError, ValueError) as exc:  # a bad name or encoding, a folder in the way, a full disk
-        return json.dumps({"error": str(exc)})
+        return json.dumps({"error": shown_path(str(exc))})  # its text can hold the whole path
 
 
 def run_tool(

@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any, BinaryIO
 
 from surogates.tools.utils.process_tree import start_time
+from surogates.tools.utils.workspace_sandbox import PATH_TOO_LONG, path_too_long
 
 # Pod-local, off the s3fs ``/workspace`` mount, and writable by the non-root
 # sandbox user (UID 1000).  ``/run`` is root-owned, so credential dirs live
@@ -200,6 +201,9 @@ def _launch(payload: dict[str, Any], *, base: str, made: dict[str, Any]) -> dict
         # repo workdir cannot exist either.
         workdir = None
     else:
+        if path_too_long(str(requested_workdir)):
+            close_stdin()
+            return {"ok": False, "run_id": run_id, "run_dir": identity, "error": PATH_TOO_LONG}
         workspace_root = Path(workspace_dir).resolve()
         candidate_workdir = Path(str(requested_workdir)).resolve()
         if (

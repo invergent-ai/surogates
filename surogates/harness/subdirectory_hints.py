@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from surogates.harness.context_files import read_context_file, scan_context_content
+from surogates.tools.utils.workspace_sandbox import path_too_long
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +136,9 @@ class SubdirectoryHintTracker:
     def _add_path_candidate(self, raw_path: str, candidates: set[str]) -> None:
         """Resolve a path and add its directory + ancestors to candidates."""
         try:
+            # A path no tool would take: left unresolved, on the worker's event loop.
+            if path_too_long(raw_path):
+                return
             p = Path(raw_path).expanduser()
             if not p.is_absolute():
                 p = Path(self._cwd) / p
