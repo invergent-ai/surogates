@@ -32,7 +32,7 @@ from surogates.devices.workspace import MAX_WRITE_BYTES, DeviceOperationError, s
 from surogates.sandbox.copy_files import TooLargeForCopy, write_copy, writes_to_copy
 from surogates.tools.builtin import image_request
 from surogates.tools.builtin.artifact import artifact_client
-from surogates.storage.tenant import boundary_workspace_key, workspace_session_shim
+from surogates.storage.tenant import sandbox_workspace_key
 from surogates.tools.builtin.vision import _image_ref_to_data_url
 from surogates.tools.registry import ToolRegistry, ToolSchema
 from surogates.tools.utils.tool_result_storage import HARNESS_FOLDER_REFUSAL, in_harness_folder
@@ -881,12 +881,7 @@ async def _save_media_bytes(
             )
     bucket = (session_config or {}).get("storage_bucket")
     if storage is not None and session_id is not None and bucket:
-        key = boundary_workspace_key(
-            session_config,
-            workspace_session_shim(session_config, session_id),
-            session_id,
-            relative_path,
-        )
+        key = sandbox_workspace_key(session_config, session_id, relative_path)
         try:
             await storage.write(bucket, key, data)
             saved = True

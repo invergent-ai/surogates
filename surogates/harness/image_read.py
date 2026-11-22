@@ -93,7 +93,7 @@ async def _build_key(path: str, kwargs: dict[str, Any]) -> tuple | None:
 
     # Lazy, as file_ops below: these pull in the tool registry.
     from surogates.sandbox.copy_files import has_copy
-    from surogates.storage.tenant import boundary_workspace_key, workspace_session_shim
+    from surogates.storage.tenant import sandbox_workspace_key
     from surogates.tools.builtin.vision import _validate_workspace_storage_path
     from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError, validate_path
     from surogates.tools.workspace_io.local import LocalWorkspaceIO
@@ -108,12 +108,7 @@ async def _build_key(path: str, kwargs: dict[str, Any]) -> tuple | None:
             relative = _validate_workspace_storage_path(ref, workspace_path=workspace_path)
             if has_copy(kwargs.get("sandbox_pool"), kwargs.get("task_id")):
                 return None
-            object_key = boundary_workspace_key(
-                session_config,
-                workspace_session_shim(session_config, session_id),
-                session_id,
-                relative,
-            )
+            object_key = sandbox_workspace_key(session_config, session_id, relative)
             info = await storage.stat(bucket, object_key)
             return (
                 "storage", str(session_id), bucket, object_key,
