@@ -186,8 +186,16 @@ def test_a_generated_deck_keeps_every_chart_feature(tmp_path):
     assert decks["patched"][4]["depth"] == 2
     assert '<c:symbol val="none"/>' in no_marker
 
-    # The two elements the schema refused in a series are no longer among its complaints.
+    # The two elements the schema refused in a series are no longer among its complaints. pptxgenjs
+    # writes no c:grouping on a line chart, and the validator stops there before it reads the series,
+    # so the check supplies one; the stock chart shows that it can fail.
     schema = etree.XMLSchema(etree.parse(str(SCHEMA)))
-    for xml in (line, area, radar):
+
+    def series_errors(xml: str) -> list[str]:
+        xml = xml.replace("<c:lineChart>", '<c:lineChart><c:grouping val="standard"/>')
         schema.validate(etree.fromstring(xml.encode("utf-8")))
-        assert not [e.message for e in schema.error_log if "invertIfNegative" in e.message or "'marker'" in e.message]
+        return [e.message for e in schema.error_log if "invertIfNegative" in e.message or "}marker'" in e.message]
+
+    assert series_errors(decks["stock"][0]["xml"])
+    for xml in (line, area, radar, no_marker):
+        assert not series_errors(xml)
