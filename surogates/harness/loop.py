@@ -4992,7 +4992,9 @@ class AgentHarness(
         if self._storage is None:
             return None
         try:
+            from surogates.harness.loop_vision_inject import MAX_INJECTED_IMAGE_BYTES
             from surogates.session.attachment_ingest import workspace_root_id
+            from surogates.storage.backend import read_capped
             from surogates.storage.tenant import boundary_workspace_key
 
             cfg = session.config or {}
@@ -5006,10 +5008,15 @@ class AgentHarness(
             owner = sandbox_session_key(session)
             if has_copy(self._sandbox_pool, owner):
                 # A thread sees the image as its copy has it.
-                return await read_copy(self._sandbox_pool, owner, path) or None
+                data = await read_copy(self._sandbox_pool, owner, path, max_bytes=MAX_INJECTED_IMAGE_BYTES)
+                return data if data and len(data) <= MAX_INJECTED_IMAGE_BYTES else None
             root_id = workspace_root_id(session)
             key = boundary_workspace_key(cfg, session, root_id, path)
-            data = await self._storage.read(bucket, key)
+            # No further than the cap: the rest of a larger file is not fetched.
+            data = await read_capped(self._storage, bucket, key, MAX_INJECTED_IMAGE_BYTES + 1)
+            if len(data) > MAX_INJECTED_IMAGE_BYTES:
+                logger.debug("Session %s: workspace image over the cap: %s", session.id, path)
+                return None
             return data or None
         except Exception:
             logger.debug(

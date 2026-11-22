@@ -647,12 +647,16 @@ async def get_workspace_file(
             too_large = (is_image or is_pdf) and size > preview_bytes
             data = b"" if too_large else await files.read(key, max_bytes=preview_bytes)
         else:
-            # As before: one read of the whole object, its size its length.
+            # One byte past what is shown tells a larger file, and the rest is not fetched.
             try:
-                data = await files.read(key)
+                data = await files.read(key, max_bytes=preview_bytes + 1)
             except FileNotFoundError:
                 raise HTTPException(status_code=404, detail=f"File not found: {path}") from None
             size = len(data)
+            if size > preview_bytes:
+                # Only to say how large it is: a look that finds nothing leaves the bytes read.
+                st = await files.stat(key)
+                size = st.size if st is not None and st.size > size else size
 
     if is_image or is_pdf:
         kind = "PDF" if is_pdf else "Image"
@@ -812,7 +816,13 @@ async def download_file(
                 status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                 detail="File too large to download.",
             )
-        data = await files.read(key)
+        # No further than the cap: the file may have grown since its stat.
+        data = await files.read(key, max_bytes=_MAX_DOWNLOAD_BYTES + 1)
+        if len(data) > _MAX_DOWNLOAD_BYTES:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail="File too large to download.",
+            )
     mime, _ = mimetypes.guess_type(path)
     filename = PurePosixPath(path).name
 

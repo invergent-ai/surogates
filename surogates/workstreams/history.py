@@ -34,6 +34,7 @@ from surogates.db.models import Session as SessionRow
 from surogates.db.models import WorkstreamHistory, WorkstreamThread
 from surogates.governance.saga import Saga
 from surogates.sandbox.history import HISTORY_CAP, PRUNE_DAYS, YOU, _who, tracked
+from surogates.storage.backend import read_capped
 from surogates.storage.tenant import boundary_workspace_prefix
 from surogates.workstreams.derive import undone_files, utc
 
@@ -340,7 +341,11 @@ async def waits_to_land(session_factory: Any, storage: Any, session: Any, *, fen
         if (await storage.stat(bucket, key))["size"] > REFS_BOUND:
             # Not a size a history's refs have: left unread here.  The pod's open reads them, each line checked.
             return True
-        text = (await storage.read(bucket, key)).decode(errors="replace")
+        # No further than the bound: the file may have grown since its stat.
+        data = await read_capped(storage, bucket, key, REFS_BOUND + 1)
+        if len(data) > REFS_BOUND:
+            return True
+        text = data.decode(errors="replace")
     except KeyError:
         return False
     refs = {ref: sha for sha, _, ref in (line.partition(" ") for line in text.splitlines())}

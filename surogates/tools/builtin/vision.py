@@ -18,7 +18,8 @@ from surogates.devices.workspace import DeviceOperationError, said
 from surogates.harness.auxiliary_llm import create_without_reasoning
 from surogates.harness.image_shrink import shrink_image_parts_in_messages
 from surogates.harness.message_utils import message_to_dict
-from surogates.sandbox.copy_files import has_copy, read_copy
+from surogates.sandbox.copy_files import TooLargeForCopy, has_copy, read_copy
+from surogates.storage.backend import read_capped
 from surogates.storage.tenant import sandbox_workspace_key
 from surogates.tools.registry import ToolRegistry, ToolSchema
 from surogates.tools.utils.url_safety import is_safe_url
@@ -249,15 +250,17 @@ async def _image_ref_to_data_url(
             try:
                 if has_copy(sandbox_pool, owner):
                     # A thread sees the image as its copy has it.
-                    data = await read_copy(sandbox_pool, owner, relative_path)
+                    try:
+                        data = await read_copy(sandbox_pool, owner, relative_path, max_bytes=_MAX_IMAGE_BYTES)
+                    except TooLargeForCopy:
+                        raise ValueError(f"Image file is too large: over {_MAX_IMAGE_BYTES} bytes") from None
                 else:
-                    data = await storage.read(storage_bucket, key)
+                    # No further than the cap: the rest of a larger file is not fetched.
+                    data = await read_capped(storage, storage_bucket, key, _MAX_IMAGE_BYTES + 1)
             except KeyError:
                 raise ValueError(f"Image file not found: {image_ref}") from None
             if len(data) > _MAX_IMAGE_BYTES:
-                raise ValueError(
-                    f"Image file is too large: {len(data)} bytes exceeds {_MAX_IMAGE_BYTES}"
-                )
+                raise ValueError(f"Image file is too large: over {_MAX_IMAGE_BYTES} bytes")
             mime_type = _detect_mime_type(
                 data,
                 fallback=mimetypes.guess_type(relative_path)[0] or "",

@@ -22,6 +22,9 @@ from surogates.session.attachment_ingest import is_raster_image_mime
 
 logger = logging.getLogger(__name__)
 
+#: The largest fetched image put into a request, as ``vision_analyze`` takes.
+MAX_INJECTED_IMAGE_BYTES = 20 * 1024 * 1024
+
 
 def _tool_name_for_call_id(tool_calls_raw: list[dict], call_id: str) -> str:
     """Return the tool name for *call_id*, or '' if not found."""
