@@ -996,13 +996,13 @@ async def read_capped(storage: Any, bucket: str, key: str, max_bytes: int) -> by
     return await storage.read_at_most(bucket, key, max_bytes)
 
 
-async def read_first(storage: Any, bucket: str, keys: list[str], max_bytes: int) -> bytes:
-    """The first of *keys* that can be read, up to *max_bytes*.  The last one's error when none can."""
+async def read_first(storage: Any, bucket: str, keys: list[str], max_bytes: int) -> tuple[str, bytes]:
+    """The first of *keys* that can be read and its bytes, up to *max_bytes*.  The last one's error when none can."""
     for key in keys[:-1]:
         # A file its owner made unreadable at one key does not hide the next.
         with contextlib.suppress(KeyError, PermissionError):
-            return await read_capped(storage, bucket, key, max_bytes)
-    return await read_capped(storage, bucket, keys[-1], max_bytes)
+            return key, await read_capped(storage, bucket, key, max_bytes)
+    return keys[-1], await read_capped(storage, bucket, keys[-1], max_bytes)
 
 
 def _walk() -> Any:

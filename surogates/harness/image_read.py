@@ -153,7 +153,8 @@ async def handle_image_read(
     the same shape ``_handle_text`` / ``_handle_document`` produce.
     """
     # Import lazily — file_ops pulls in the whole tool registry.
-    from surogates.tools.utils.workspace_sandbox import NUL_REFUSED
+    from surogates.tools.builtin.vision import image_read_from
+    from surogates.tools.utils.workspace_sandbox import NUL_REFUSED, short_error, shown_path
     from surogates.tools.builtin.file_ops import (
         _apply_line_window,
         _render_read_window,
@@ -177,13 +178,18 @@ async def handle_image_read(
         cached_hit = analysis is not None
 
     if analysis is None:
-        raw = await dispatch("vision_analyze", {"image": path}, **kwargs)
+        read_from: list[str] = []
+        reading = image_read_from.set(read_from)
+        try:
+            raw = await dispatch("vision_analyze", {"image": path}, **kwargs)
+        finally:
+            image_read_from.reset(reading)
         try:
             parsed = json.loads(raw)
         except json.JSONDecodeError:
             return json.dumps({
                 "error": (
-                    f"vision_analyze returned non-JSON output for '{path}': "
+                    f"vision_analyze returned non-JSON output for '{shown_path(path)}': "
                     f"{raw[:200]}"
                 ),
             }, ensure_ascii=False)
@@ -191,20 +197,22 @@ async def handle_image_read(
             return json.dumps({
                 "error": (
                     f"vision_analyze returned unexpected payload type "
-                    f"({type(parsed).__name__}) for '{path}'."
+                    f"({type(parsed).__name__}) for '{shown_path(path)}'."
                 ),
             }, ensure_ascii=False)
         if "error" in parsed:
             return json.dumps({
-                "error": (
-                    f"read_file could not analyze image '{path}': "
+                "error": short_error(
+                    f"read_file could not analyze image '{shown_path(path)}': "
                     f"{parsed['error']}"
                 ),
             }, ensure_ascii=False)
         analysis = parsed.get("analysis") or ""
-        # Kept only if the image is still the version the key names: one
-        # changed while it was analyzed is analyzed anew on the next read.
-        if key is not None and analysis and await _build_key(path, kwargs) == key:
+        # Kept only if the bytes analyzed came from the object the key names,
+        # and it is still the version the key names: one changed while it
+        # was analyzed is analyzed anew on the next read.
+        same_object = key is not None and (key[0] != "storage" or read_from == [key[3]])
+        if same_object and analysis and await _build_key(path, kwargs) == key:
             _CACHE.put(key, analysis)
 
     filename = Path(path).name

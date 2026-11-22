@@ -8,6 +8,7 @@ import binascii
 import json
 import logging
 import mimetypes
+from contextvars import ContextVar
 from pathlib import PurePosixPath
 from typing import Any
 from urllib.parse import unquote, urljoin, urlparse
@@ -33,6 +34,9 @@ from surogates.tools.utils.workspace_sandbox import (
 )
 
 logger = logging.getLogger(__name__)
+
+#: Where the storage route read an image, for a caller that keeps what was made of those bytes (the image cache).
+image_read_from: ContextVar[list[str] | None] = ContextVar("image_read_from", default=None)
 
 _MAX_IMAGE_BYTES = 20 * 1024 * 1024
 _MAX_REDIRECTS = 5
@@ -132,7 +136,7 @@ async def _vision_analyze_handler(arguments: dict[str, Any], **kwargs: Any) -> s
         return _json_error(str(exc))
     except httpx.HTTPError as exc:
         logger.warning("vision_analyze image fetch failed: %s", exc)
-        return _json_error(f"Failed to fetch image: {exc}")
+        return _json_error(f"Failed to fetch image: {fetch_failure(exc)}")
 
     image_url: dict[str, Any] = {"url": data_url}
     if detail != "auto":
@@ -258,9 +262,14 @@ async def _image_ref_to_data_url(
                         raise ValueError(f"Image file is too large: over {_MAX_IMAGE_BYTES} bytes") from None
                 else:
                     # No further than the cap: the rest of a larger file is not fetched.
-                    data = await read_first(storage, storage_bucket, keys, _MAX_IMAGE_BYTES + 1)
+                    read_key, data = await read_first(storage, storage_bucket, keys, _MAX_IMAGE_BYTES + 1)
+                    noted = image_read_from.get()
+                    if noted is not None:
+                        noted.append(read_key)
             except KeyError:
-                raise ValueError(f"Image file not found: {image_ref}") from None
+                raise ValueError(f"Image file not found: {shown_path(image_ref)}") from None
+            except OSError as exc:
+                raise ValueError(f"Could not read image {shown_path(image_ref)}: {said(exc)}") from None
             if len(data) > _MAX_IMAGE_BYTES:
                 raise ValueError(f"Image file is too large: over {_MAX_IMAGE_BYTES} bytes")
             mime_type = _detect_mime_type(
@@ -289,7 +298,7 @@ async def _image_from_workspace_io(workspace_io: Any, image_ref: str) -> tuple[s
         key = await workspace_io.resolve(image_ref)
         found = await workspace_io.stat(key)
         if found is None or found.is_dir:
-            raise ValueError(f"Image file not found: {image_ref}")
+            raise ValueError(f"Image file not found: {shown_path(image_ref)}")
         if found.size > _MAX_IMAGE_BYTES:
             raise ValueError(
                 f"Image file is too large: {found.size} bytes exceeds {_MAX_IMAGE_BYTES}"
@@ -297,7 +306,7 @@ async def _image_from_workspace_io(workspace_io: Any, image_ref: str) -> tuple[s
         # No further than the cap: the file may have grown since its stat.
         data = await workspace_io.read(key, max_bytes=_MAX_IMAGE_BYTES + 1)
     except (OSError, DeviceOperationError) as exc:
-        raise ValueError(f"Could not read image {image_ref}: {said(exc)}") from None
+        raise ValueError(f"Could not read image {shown_path(image_ref)}: {said(exc)}") from None
     if len(data) > _MAX_IMAGE_BYTES:
         raise ValueError(f"Image file is too large: over {_MAX_IMAGE_BYTES} bytes")
     mime_type = _detect_mime_type(data, fallback=mimetypes.guess_type(key)[0] or "")
@@ -375,6 +384,13 @@ def _validate_data_url(data_url: str) -> str:
             f"Image data URL is too large: {len(raw)} bytes exceeds {_MAX_IMAGE_BYTES}"
         )
     return data_url
+
+
+def fetch_failure(exc: httpx.HTTPError) -> str:
+    """Why an image could not be fetched, without the URL httpx's own words repeat, encoded or redirected."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"HTTP {exc.response.status_code}"
+    return type(exc).__name__
 
 
 async def _download_image(url: str, *, max_bytes: int = _MAX_IMAGE_BYTES) -> bytes:

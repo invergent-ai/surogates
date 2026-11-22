@@ -1287,7 +1287,7 @@ async def _read_file_handler(
         if _is_image(key):
             return json.dumps({
                 "error": (
-                    f"Image file detected: '{path}'. "
+                    f"Image file detected: '{shown_path(path)}'. "
                     "Use vision_analyze with this file path to inspect the image contents."
                 ),
             })
@@ -1301,7 +1301,7 @@ async def _read_file_handler(
         if has_binary_extension(key):
             return json.dumps({
                 "error": (
-                    f"Cannot read binary file '{path}' ({ext}). "
+                    f"Cannot read binary file '{shown_path(path)}' ({ext}). "
                     "Use vision_analyze for images, or terminal to inspect binary files."
                 ),
             })
@@ -1331,7 +1331,7 @@ async def _handle_document(
     st = await wio.stat(key)
     if st is None:
         return json.dumps(
-            {"error": f"File not found: {path}"},
+            {"error": f"File not found: {shown_path(path)}"},
             ensure_ascii=False,
         )
 
@@ -1362,7 +1362,7 @@ async def _handle_document(
     except DocumentParseError as exc:
         ext = Path(key).suffix.lower().lstrip(".")
         return _tool_error(
-            f"Could not parse {path} as a {ext} document: {exc.reason}. "
+            f"Could not parse {shown_path(path)} as a {ext} document: {exc.reason}. "
             "You can retry with a subprocess fallback: try running "
             "`pdftotext`, `pandoc`, or a Python script using "
             "pypdf/python-docx/openpyxl (all pre-installed)."
@@ -1443,7 +1443,7 @@ async def _handle_text(
 
     # ── Perform the read ──────────────────────────────────────────
     if st is None:
-        result_dict: dict[str, Any] = {"error": f"File not found: {path}"}
+        result_dict: dict[str, Any] = {"error": f"File not found: {shown_path(path)}"}
         similar = await _suggest_similar_files(wio, path)
         if similar:
             result_dict["similar_files"] = similar
@@ -1475,7 +1475,7 @@ async def _handle_text(
             if b"\x00" in raw_head:
                 return json.dumps({
                     "error": (
-                        f"Cannot read binary file '{path}'. "
+                        f"Cannot read binary file '{shown_path(path)}'. "
                         "Use vision_analyze for images, or terminal to inspect binary files."
                     ),
                 })

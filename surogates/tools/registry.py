@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from surogates.tools.schema_sanitizer import restore_json_nulls, sanitize_tool_schemas
+from surogates.tools.utils.workspace_sandbox import MAX_ERROR_CHARS, short_error
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +41,27 @@ class ToolEntry:
     toolset: str  # logical grouping: "core", "terminal", "web", "memory", "skills"
     is_async: bool = True
     max_result_size: int = 50_000  # chars
+
+
+_LONE_SURROGATE = re.compile("[\ud800-\udfff]")
+
+
+def _with_short_error(result: str) -> str:
+    """A JSON string result with a long top-level ``error`` text bounded; any other result exactly as it was."""
+    # An "error" inside a JSON string is escaped, so file contents do not pass this.
+    if len(result) <= MAX_ERROR_CHARS or not result.startswith("{") or '"error"' not in result:
+        return result
+    try:
+        payload = json.loads(result)
+    except (ValueError, RecursionError):
+        return result
+    error = payload.get("error") if isinstance(payload, dict) else None
+    if not isinstance(error, str) or len(error) <= MAX_ERROR_CHARS:
+        return result
+    payload["error"] = short_error(error)
+    # A lone surrogate the result held escaped stays escaped: raw, it cannot be encoded.
+    bounded = _LONE_SURROGATE.sub(lambda found: f"\\u{ord(found.group()):04x}", json.dumps(payload, ensure_ascii=False))
+    return bounded if len(bounded) < len(result) else result
 
 
 class ToolRegistry:
@@ -201,10 +224,10 @@ class ToolRegistry:
                 result = entry.handler(parsed, **kwargs)
         except Exception as exc:
             logger.exception("Tool %s raised an exception", name)
-            return json.dumps({"error": f"Tool execution failed: {exc}"})
+            return json.dumps({"error": short_error(f"Tool execution failed: {exc}")})
 
         # Coerce to str and truncate.
-        result_str = str(result) if not isinstance(result, str) else result
+        result_str = _with_short_error(str(result) if not isinstance(result, str) else result)
         if len(result_str) > entry.max_result_size:
             truncated_at = entry.max_result_size
             result_str = (

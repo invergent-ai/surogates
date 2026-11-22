@@ -654,8 +654,12 @@ async def get_workspace_file(
                 raise HTTPException(status_code=404, detail=f"File not found: {path}") from None
             size = len(data)
             if size > preview_bytes:
-                # Only to say how large it is: a look that finds nothing leaves the bytes read.
-                st = await files.stat(key)
+                # Only to say how large it is: a look that finds nothing, or fails, leaves the bytes read.
+                try:
+                    st = await files.stat(key)
+                except Exception as exc:  # noqa: BLE001 — the file was read; its exact size is not worth a 500
+                    logger.warning("Could not look up the size of a large workspace file: %s", type(exc).__name__)
+                    st = None
                 size = st.size if st is not None and st.size > size else size
 
     if is_image or is_pdf:
