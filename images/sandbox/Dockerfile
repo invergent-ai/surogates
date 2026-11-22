@@ -424,6 +424,33 @@ RUN echo "user_allow_other" >> /etc/fuse.conf \
         "https://github.com/yandex-cloud/geesefs/releases/download/${GEESEFS_VERSION}/geesefs-linux-amd64" \
     && chmod +x /usr/local/bin/geesefs
 
+# ── PowerShell ──────────────────────────────────────────────────────
+# For tasks that hand over or ask for a .ps1 script: without it the agent cannot run what it
+# writes. Cloud sandbox only, for now: the shared tools stage is hashed into the desktop guest's
+# key, so moving this there publishes a new desktop image, which is a release decision.
+# 7.6 is the current LTS line (supported to 2028-11-14). A new version changes the two hashes
+# with it, so an unchecked archive cannot get in. Root owns the files, nothing in them is setuid
+# or writable by the sandbox user, and the build fails if pwsh does not start.
+ARG POWERSHELL_VERSION=7.6.10
+ENV POWERSHELL_TELEMETRY_OPTOUT=1 \
+    POWERSHELL_UPDATECHECK=Off
+RUN case "$(dpkg --print-architecture)" in \
+        amd64) ps_arch=x64;   ps_sha256=e261cabc91c78a9afe8d1e5f24731ab0d38204735ab2ec94b0af55102652e10d ;; \
+        arm64) ps_arch=arm64; ps_sha256=439432cdecf4418413b9a8f547e3ab4d9b40e8e4258913ec3d15fc92c67a9235 ;; \
+        *) echo "no PowerShell pin for $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac \
+    && curl -fsSL -o /tmp/powershell.tar.gz \
+        "https://github.com/PowerShell/PowerShell/releases/download/v${POWERSHELL_VERSION}/powershell-${POWERSHELL_VERSION}-linux-${ps_arch}.tar.gz" \
+    && echo "${ps_sha256}  /tmp/powershell.tar.gz" | sha256sum -c - \
+    && mkdir -p /opt/microsoft/powershell/7 \
+    && tar -xzf /tmp/powershell.tar.gz --no-same-owner -C /opt/microsoft/powershell/7 \
+    && rm /tmp/powershell.tar.gz \
+    && chmod -R u=rwX,go=rX /opt/microsoft/powershell \
+    && chmod 0755 /opt/microsoft/powershell/7/pwsh \
+    && ln -s /opt/microsoft/powershell/7/pwsh /usr/local/bin/pwsh \
+    && test "$(HOME=/tmp/pwsh-build pwsh -NoLogo -NoProfile -NonInteractive -Command '$PSVersionTable.PSVersion.ToString()')" = "${POWERSHELL_VERSION}" \
+    && rm -rf /tmp/pwsh-build
+
 # ── Non-root user ───────────────────────────────────────────────────
 RUN groupadd --gid 1000 sandbox \
     && useradd --uid 1000 --gid sandbox --create-home sandbox \
