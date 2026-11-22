@@ -389,6 +389,12 @@ COPY images/sandbox/patch_pptxgenjs.py /tmp/patch_pptxgenjs.py
 RUN /opt/venv/bin/python /tmp/patch_pptxgenjs.py /usr/lib/node_modules/pptxgenjs \
     && rm /tmp/patch_pptxgenjs.py
 
+# pptxgenjs's chart series: the schema's order for line markers, and plain categories for one
+# level. Cloud sandbox only, for the same reason.
+COPY images/sandbox/patch_pptxgenjs_charts.py /tmp/patch_pptxgenjs_charts.py
+RUN /opt/venv/bin/python /tmp/patch_pptxgenjs_charts.py /usr/lib/node_modules/pptxgenjs \
+    && rm /tmp/patch_pptxgenjs_charts.py
+
 LABEL org.opencontainers.image.title="surogates-agent-sandbox" \
       org.opencontainers.image.description="Surogates agent sandbox execution environment" \
       org.opencontainers.image.vendor="Invergent SA" \
