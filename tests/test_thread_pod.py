@@ -230,7 +230,7 @@ async def test_every_file_failure_answers_an_error_and_a_write_is_whole_or_not_a
 
     # A write that cannot finish leaves the file as it was, and nothing beside it.
     with monkeypatch.context() as patch:
-        patch.setattr(executor_server.os, "replace", lambda *_: (_ for _ in ()).throw(OSError(28, "No space left")))
+        patch.setattr(executor_server.os, "replace", lambda *_, **__: (_ for _ in ()).throw(OSError(28, "No space left")))
         answer = await call(pods, pod, "_file", action="write", path="notes.md", content_b64=x)
     assert "No space left" in answer["error"]
     assert (copy / "notes.md").read_text() == "notes v1"

@@ -14,6 +14,7 @@ launch payload sent over the exec channel.
 from __future__ import annotations
 
 import json
+import logging
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -34,6 +35,9 @@ _DEFAULT_MAX_WAIT = 3600.0
 class RunnerConfig:
     poll_interval: float = 2.0
     max_wait: float = _DEFAULT_MAX_WAIT
+
+
+logger = logging.getLogger(__name__)
 
 
 def _parse_exec_result(raw: str) -> dict[str, Any]:
@@ -94,10 +98,24 @@ async def run_code_agent(
         launch_payload["workdir"] = workdir
 
     launched = _parse_exec_result(await execute("_code", json.dumps(launch_payload)))
+    # A pod that says it answers ``cleaned``: from one, no answer is no proof.
+    reports_cleaned = launched.get("reports_cleaned") is True
+    cleanup_incomplete = False
+
+    def _note_cleanup(answer: dict[str, Any] | None) -> None:
+        """Say so when the pod did not confirm it removed the run's directory, which holds its credential."""
+        nonlocal cleanup_incomplete
+        cleaned = (answer or {}).get("cleaned")
+        if cleaned is False or (reports_cleaned and cleaned is not True):
+            cleanup_incomplete = True
+            logger.warning("event=code_run.cleanup_incomplete run_id=%s", run_id)
+
     if not launched.get("ok"):
+        _note_cleanup(launched)
         return CodeResult(
             final_message="",
             error=f"Failed to start {agent}: {launched.get('error', 'unknown error')}",
+            cleanup_incomplete=cleanup_incomplete,
         )
 
     async def _emit(chunk: str) -> None:
@@ -107,9 +125,14 @@ async def run_code_agent(
 
     async def _cancel() -> None:
         try:
-            await execute("_code", json.dumps({"action": "cancel", "run_id": run_id}))
+            # The run as launch named it: the pod's own files do not say which process to stop.
+            answer = _parse_exec_result(await execute("_code", json.dumps({
+                "action": "cancel", "run_id": run_id, "launched": True, "run_dir": launched.get("run_dir"),
+                "pid": launched.get("pid"), "start": launched.get("start"),
+            })))
         except Exception:  # cancellation is best-effort
-            pass
+            answer = None
+        _note_cleanup(answer)
 
     transcript: list[str] = []
     emitted_readable = 0
@@ -123,6 +146,7 @@ async def run_code_agent(
             return CodeResult(
                 final_message="",
                 error=f"{agent} run interrupted.",
+                cleanup_incomplete=cleanup_incomplete,
             )
 
         if now() - started > cfg.max_wait:
@@ -130,11 +154,15 @@ async def run_code_agent(
             return CodeResult(
                 final_message="",
                 error=f"{agent} run exceeded the maximum runtime (deadline).",
+                cleanup_incomplete=cleanup_incomplete,
             )
 
         poll = _parse_exec_result(
             await execute(
-                "_code", json.dumps({"action": "poll", "run_id": run_id, "offset": offset}),
+                "_code", json.dumps({
+                    "action": "poll", "run_id": run_id, "offset": offset,
+                    "launched": True, "run_dir": launched.get("run_dir"),
+                }),
             )
         )
 
@@ -154,6 +182,7 @@ async def run_code_agent(
         if poll.get("done"):
             exit_code = poll.get("exit_code")
             updated_codex_auth = poll.get("codex_auth_json")
+            _note_cleanup(poll)
             break
 
         await sleep(cfg.poll_interval)
@@ -162,4 +191,5 @@ async def run_code_agent(
     if result.error and exit_code not in (0, None):
         result.error = f"{agent} exited with code {exit_code}: {result.error}"
     result.updated_codex_auth_json = updated_codex_auth
+    result.cleanup_incomplete = cleanup_incomplete
     return result

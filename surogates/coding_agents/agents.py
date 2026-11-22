@@ -47,6 +47,8 @@ class CodeResult:
     # updated contents are surfaced here so the worker can re-store the
     # bundle and keep the vault copy fresh (spec §6.2/§11.4).
     updated_codex_auth_json: str | None = None
+    # The pod could not remove the run's directory, which holds its credential.
+    cleanup_incomplete: bool = False
 
 
 def build_invocation(

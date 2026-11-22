@@ -39,6 +39,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import errno
 import hmac
 import json
 import logging
@@ -75,6 +76,9 @@ _WATCHED_AT_MOST_S = 3600.0
 _UNDRAINED_AT_MOST_S = 600.0
 # How often a running call looks whether its caller has hung up.
 _DISCONNECT_POLL_S = 0.5
+
+# Linux's limit on a path, its final NUL included.
+_PATH_MAX = 4096
 
 # Fork context: children inherit the warm registry copy-on-write.  The
 # spawn context would re-import everything and defeat the daemon.
@@ -328,21 +332,38 @@ def _run_file(args: dict, workspace: str) -> str:
 
     In a thread's pod the workspace is its copy: the harness tools that
     would reach the project's files through object storage come here.
+
+    Commands of the sandbox change the workspace while this runs.  So the
+    resolved path is only where to go: the file is then reached from the
+    workspace's root one folder at a time with no link followed, and its type
+    and size are those of the open file.
     """
+    from surogates.tools.workspace_io.local import LinkOnPath, _contained_parts, _open_folder, _open_to_read
+
     path = str(args.get("path") or "")
+    outside = json.dumps({"error": f"{path} is outside the workspace"})
     try:
         root = os.path.realpath(workspace)
         target = os.path.realpath(os.path.join(root, path))
         if not path or os.path.commonpath([root, target]) != root or target == root:
-            return json.dumps({"error": f"{path} is outside the workspace"})
+            return outside
         too_large = f"{path} is over the 50 MiB a file may be"
         if args.get("action") == "read":
-            if not os.path.isfile(target):
+            try:
+                with _open_to_read(root, target) as fh:
+                    if os.fstat(fh.fileno()).st_size > MAX_FILE_BYTES:
+                        return json.dumps({"error": too_large})
+                    # No further than the cap: the file may have grown since its size was read.
+                    data = fh.read(MAX_FILE_BYTES + 1)
+            except (FileNotFoundError, NotADirectoryError, IsADirectoryError):
                 return json.dumps({"error": f"{path} not found"})
-            if os.path.getsize(target) > MAX_FILE_BYTES:
+            except OSError as exc:
+                if exc.errno not in (errno.EINVAL, errno.ENXIO):  # there, but not a regular file (ENXIO: a socket)
+                    raise
+                return json.dumps({"error": f"{path} not found"})
+            if len(data) > MAX_FILE_BYTES:
                 return json.dumps({"error": too_large})
-            with open(target, "rb") as fh:
-                return json.dumps({"content_b64": base64.b64encode(fh.read()).decode()})
+            return json.dumps({"content_b64": base64.b64encode(data).decode()})
         if args.get("action") == "write":
             content = args.get("content_b64") or ""
             # Refused before it is decoded: base64 spends four characters on three bytes.
@@ -351,18 +372,33 @@ def _run_file(args: dict, workspace: str) -> str:
             data = base64.b64decode(content)
             if len(data) > MAX_FILE_BYTES:
                 return json.dumps({"error": too_large})
-            os.makedirs(os.path.dirname(target), exist_ok=True)
-            # Written beside the file, then renamed over it: a write cut short
-            # leaves the file whole.  A short name, so a file's near the length
-            # limit fits too; history leaves out the *~ name.
-            staged = Path(target).with_name(f".~{os.urandom(4).hex()}.file~")
+            # The walk has no limit of its own: a file past it could be made, and nothing could name it again.
+            if len(os.fsencode(target)) >= _PATH_MAX:
+                raise OSError(errno.ENAMETOOLONG, "File name too long")
+            folders, name = _contained_parts(root, target)
+            folder = _open_folder(root, folders, create=True)
             try:
-                staged.write_bytes(data)
-                os.replace(staged, target)
+                # Written beside the file, then renamed over it: a write cut short
+                # leaves the file whole.  A short name, so a file's near the length
+                # limit fits too; history leaves out the *~ name.
+                staged = f".~{os.urandom(4).hex()}.file~"
+                flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+                fd = os.open(staged, flags, 0o666, dir_fd=folder)
+                try:
+                    with os.fdopen(fd, "wb") as fh:
+                        fh.write(data)
+                    os.replace(staged, name, src_dir_fd=folder, dst_dir_fd=folder)
+                except BaseException:
+                    # Only a write that did not land: once renamed, the name is no longer ours.
+                    with contextlib.suppress(OSError):
+                        os.unlink(staged, dir_fd=folder)
+                    raise
             finally:
-                staged.unlink(missing_ok=True)
+                os.close(folder)
             return json.dumps({"ok": True, "bytes": len(data)})
         return json.dumps({"error": f"Unknown file action: {args.get('action')}"})
+    except LinkOnPath:  # a link put on the path after the check: refused, never followed
+        return outside
     except (OSError, ValueError) as exc:  # a bad name or encoding, a folder in the way, a full disk
         return json.dumps({"error": str(exc)})
 

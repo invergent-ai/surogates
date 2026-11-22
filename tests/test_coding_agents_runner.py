@@ -27,7 +27,7 @@ class _FakeSandbox:
         if action == "launch":
             if not self.launch_ok:
                 return json.dumps({"ok": False, "error": "spawn failed"})
-            return json.dumps({"ok": True, "run_id": payload["run_id"], "pid": 99})
+            return json.dumps({"ok": True, "run_id": payload["run_id"], "pid": 99, "start": 1234})
         if action == "poll":
             return json.dumps(self.polls.pop(0))
         if action == "cancel":
@@ -137,6 +137,9 @@ async def test_interrupt_cancels_run():
     assert result.error is not None
     assert "interrupt" in result.error.lower() or "cancel" in result.error.lower()
     assert any(c[0] == "cancel" for c in sandbox.calls)
+    # Named as launch answered, never by a file the sandbox can change.
+    cancel = next(c[1] for c in sandbox.calls if c[0] == "cancel")
+    assert (cancel["pid"], cancel["start"]) == (99, 1234)
 
 
 async def test_deadline_exceeded_cancels():
@@ -248,3 +251,120 @@ async def test_extra_env_and_workdir_forwarded_to_launch():
     assert launch_payload["env"]["GH_TOKEN"] == "github_pat_x"
     assert launch_payload["env"]["CLAUDE_CODE_OAUTH_TOKEN"] == "tok"
     assert launch_payload["workdir"] == "/workspace/api"
+
+
+async def test_a_run_whose_directory_the_pod_could_not_remove_is_reported(caplog):
+    sandbox = _FakeSandbox([
+        {"ok": True, "done": True, "exit_code": 0, "offset": 0, "new_output": "", "cleaned": False},
+    ])
+    with caplog.at_level("WARNING", logger="surogates.coding_agents.runner"):
+        result = await run_code_agent(
+            run_id="r-left", agent="claude", invocation=_inv(), env={}, codex_auth_json=None,
+            execute=sandbox.execute, emit_progress=lambda _chunk: None, should_cancel=lambda: False,
+            sleep=_noop_sleep,
+        )
+    assert result.cleanup_incomplete is True
+    assert "event=code_run.cleanup_incomplete run_id=r-left" in caplog.text
+
+
+async def test_a_cancelled_run_whose_directory_the_pod_could_not_remove_is_reported():
+    class LeftBehind(_FakeSandbox):
+        async def execute(self, name, input_json):
+            if json.loads(input_json)["action"] == "cancel":
+                await super().execute(name, input_json)
+                return json.dumps({"ok": True, "cleaned": False})
+            return await super().execute(name, input_json)
+
+    sandbox = LeftBehind([])
+    result = await run_code_agent(
+        run_id="r-stop", agent="claude", invocation=_inv(), env={}, codex_auth_json=None,
+        execute=sandbox.execute, emit_progress=lambda _chunk: None, should_cancel=lambda: True,
+        sleep=_noop_sleep,
+    )
+    assert result.cleanup_incomplete is True
+
+
+async def test_an_older_pod_that_does_not_say_is_not_reported():
+    sandbox = _FakeSandbox([{"ok": True, "done": True, "exit_code": 0, "offset": 0, "new_output": ""}])
+    result = await run_code_agent(
+        run_id="r-old", agent="claude", invocation=_inv(), env={}, codex_auth_json=None,
+        execute=sandbox.execute, emit_progress=lambda _chunk: None, should_cancel=lambda: False,
+        sleep=_noop_sleep,
+    )
+    assert result.cleanup_incomplete is False
+
+
+class _ReportingSandbox(_FakeSandbox):
+    """A pod that says it answers ``cleaned``."""
+
+    def __init__(self, polls, *, cancel=None, cancel_raises=False):
+        super().__init__(polls)
+        self.cancel_answer, self.cancel_raises = cancel, cancel_raises
+
+    async def execute(self, name, input_json):
+        payload = json.loads(input_json)
+        if payload["action"] == "launch":
+            await super().execute(name, input_json)
+            return json.dumps({
+                "ok": True, "run_id": payload["run_id"], "pid": 99, "start": 1234,
+                "run_dir": [7, 8], "reports_cleaned": True,
+            })
+        if payload["action"] == "cancel":
+            await super().execute(name, input_json)
+            if self.cancel_raises:
+                raise ConnectionError("pod gone")
+            return json.dumps(self.cancel_answer)
+        return await super().execute(name, input_json)
+
+
+async def _run(sandbox, *, cancelled=False):
+    return await run_code_agent(
+        run_id="r", agent="claude", invocation=_inv(), env={}, codex_auth_json=None,
+        execute=sandbox.execute, emit_progress=lambda _chunk: None, should_cancel=lambda: cancelled,
+        sleep=_noop_sleep,
+    )
+
+
+async def test_a_reporting_pods_final_poll_with_no_answer_counts_as_not_cleaned():
+    sandbox = _ReportingSandbox([{"ok": True, "done": True, "exit_code": 0, "offset": 0, "new_output": ""}])
+    assert (await _run(sandbox)).cleanup_incomplete is True
+
+
+async def test_a_reporting_pods_confirmed_cleanup_is_not_reported():
+    sandbox = _ReportingSandbox([
+        {"ok": True, "done": True, "exit_code": 0, "offset": 0, "new_output": "", "cleaned": True},
+    ])
+    assert (await _run(sandbox)).cleanup_incomplete is False
+
+
+@pytest.mark.parametrize("answer", [{"ok": True}, {"ok": False, "error": "x"}, {"ok": True, "cleaned": "yes"}])
+async def test_a_reporting_pods_cancel_with_no_boolean_answer_counts_as_not_cleaned(answer):
+    assert (await _run(_ReportingSandbox([], cancel=answer), cancelled=True)).cleanup_incomplete is True
+
+
+async def test_a_reporting_pods_failed_cancel_counts_as_not_cleaned():
+    assert (await _run(_ReportingSandbox([], cancel_raises=True), cancelled=True)).cleanup_incomplete is True
+
+
+async def test_poll_and_cancel_name_the_run_as_launch_did():
+    polled = _ReportingSandbox([
+        {"ok": True, "done": True, "exit_code": 0, "offset": 0, "new_output": "", "cleaned": True},
+    ])
+    await _run(polled)
+    poll = next(c[1] for c in polled.calls if c[0] == "poll")
+    assert poll["launched"] is True and poll["run_dir"] == [7, 8]
+
+    stopped = _ReportingSandbox([], cancel={"ok": True, "cleaned": True})
+    await _run(stopped, cancelled=True)
+    cancel = next(c[1] for c in stopped.calls if c[0] == "cancel")
+    assert cancel["launched"] is True and cancel["run_dir"] == [7, 8]
+    assert (cancel["pid"], cancel["start"]) == (99, 1234)
+
+
+async def test_a_refused_launch_that_left_its_directory_is_reported():
+    class Refused(_FakeSandbox):
+        async def execute(self, name, input_json):
+            return json.dumps({"ok": False, "error": "no", "cleaned": False, "reports_cleaned": True})
+
+    result = await _run(Refused([]))
+    assert result.error and result.cleanup_incomplete is True

@@ -17,17 +17,38 @@ exec into the pod with no shared memory.
 
 from __future__ import annotations
 
+import contextlib
+import errno
 import json
 import os
 import signal
+import stat
 import subprocess
+import time
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
+
+from surogates.tools.utils.process_tree import start_time
 
 # Pod-local, off the s3fs ``/workspace`` mount, and writable by the non-root
 # sandbox user (UID 1000).  ``/run`` is root-owned, so credential dirs live
 # under ``/tmp`` with 0700 perms instead.
 CODE_RUN_DIR = "/tmp/.code-runs"
+# A pid or an exit code is short; a refreshed auth.json is a small JSON file.
+_MAX_NUMBER_BYTES = 32
+_MAX_PID = 2**31 - 1
+_MAX_AUTH_BYTES = 1 << 20
+# A folder held to work in: never through a link, and needing no read permission where O_PATH exists.
+_HELD_FOLDER = (
+    getattr(os, "O_PATH", os.O_RDONLY) | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    | getattr(os, "O_CLOEXEC", 0)
+)
+# What a cleanup may spend, so commands adding files as fast as it removes them cannot hold it:
+# inside the executor's 300 s, a number of removals no real run comes near, and failures in a row.
+_CLEANUP_S = 120.0
+_CLEANUP_STEPS = 5_000_000
+_CLEANUP_FAILURES = 4000
 
 # Provider env vars scrubbed from the child by default so a stray value in the
 # pod environment can't override the user's injected credential.  ``claude``
@@ -46,8 +67,80 @@ def _run_dir(run_id: str, base: str) -> Path:
     return Path(base) / run_id
 
 
+def _open_run_file(base: str, run_id: str, *names: str) -> BinaryIO | None:
+    """A regular file of the run's directory, open to read; None where there is none.
+
+    Commands of the sandbox run as the same user and can change this
+    directory, so the file is reached from the folder holding *base*, one
+    folder at a time with no link followed, *base* included.  A file with a
+    second name is refused too.  This keeps a poll from reading *through*
+    what they put here; a file they move in is theirs to have put there.
+    """
+    from surogates.tools.workspace_io.local import _open_to_read
+
+    held = os.path.abspath(base)
+    root = os.path.realpath(os.path.dirname(held))
+    try:
+        opened = _open_to_read(root, os.path.join(root, os.path.basename(held), run_id, *names))
+    # PermissionError: a link on the way, or a file whose mode was taken away.
+    except (FileNotFoundError, NotADirectoryError, IsADirectoryError, PermissionError):
+        return None
+    except OSError as exc:
+        if exc.errno in (errno.EINVAL, errno.ENXIO):  # there, but not a regular file (ENXIO: a socket)
+            return None
+        raise
+    if os.fstat(opened.fileno()).st_nlink > 1:
+        opened.close()
+        return None
+    return opened
+
+
+def _read_number(base: str, run_id: str, name: str) -> int | None:
+    """The number in the run's file *name*; None where there is no such file or no number in it."""
+    try:
+        opened = _open_run_file(base, run_id, name)
+        if opened is None:
+            return None
+        with opened as fh:
+            return int(fh.read(_MAX_NUMBER_BYTES).strip())
+    except (ValueError, OSError):
+        return None
+
+
+def _read_pid(base: str, run_id: str) -> int:
+    """The run's pid; -1 where there is none a process could have."""
+    pid = _read_number(base, run_id, "pid")
+    # Never 1: a process group of 1 is kill(-1), which signals every process the caller may signal.
+    return pid if pid is not None and 1 < pid <= _MAX_PID else -1
+
+
 def launch(payload: dict[str, Any], *, base: str = CODE_RUN_DIR) -> dict[str, Any]:
-    """Spawn the vendor CLI detached and record its pid + log path."""
+    """Spawn the vendor CLI detached and record its pid + log path.
+
+    A start that is refused or fails leaves no run directory behind, with
+    the credential it may already hold.  ``reports_cleaned`` tells the worker
+    that this pod answers ``cleaned`` at a run's end.
+    """
+    run_dir = _run_dir(payload["run_id"], base)
+    made: dict[str, Any] = {}
+    try:
+        answer = _launch(payload, base=base, made=made)
+    except Exception as exc:
+        # Answered, not raised: the executor's error envelope could not say whether the directory went.
+        # A start that failed before it made the directory has nothing to remove.
+        cleaned = _cleanup(run_dir, launched=True, identity=_run_identity(made)) if made else True
+        # The kind of error only: its text could quote what it was handed, the credential included.
+        error = f"could not start the run ({type(exc).__name__})"
+        return {"ok": False, "run_id": payload["run_id"], "error": error, "cleaned": cleaned, "reports_cleaned": True}
+    if not answer.get("ok"):
+        answer["cleaned"] = _cleanup(run_dir, launched=True, identity=_run_identity(answer))
+        answer.pop("run_dir", None)
+    answer["reports_cleaned"] = True
+    return answer
+
+
+def _launch(payload: dict[str, Any], *, base: str, made: dict[str, Any]) -> dict[str, Any]:
+    """The start itself; *made* is filled in as soon as the run's directory exists."""
     run_id = payload["run_id"]
     argv = list(payload["argv"])
     stdin = payload.get("stdin")
@@ -57,12 +150,17 @@ def launch(payload: dict[str, Any], *, base: str = CODE_RUN_DIR) -> dict[str, An
 
     run_dir = _run_dir(run_id, base)
     run_dir.mkdir(parents=True, exist_ok=True)
+    made["created"] = True
     # Restrict the run dir so only the owner can read the injected credential
     # (mkdir mode is masked by umask, so chmod explicitly).
     try:
         os.chmod(run_dir, 0o700)
     except OSError:
         pass
+    held = os.stat(run_dir, follow_symlinks=False)
+    # Which directory this is: the name alone can be given to another one.
+    identity = [held.st_dev, held.st_ino]
+    made["run_dir"] = identity
     log_path = run_dir / "run.log"
     pid_path = run_dir / "pid"
 
@@ -91,6 +189,10 @@ def launch(payload: dict[str, Any], *, base: str = CODE_RUN_DIR) -> dict[str, An
         stdin_path.write_text(stdin)
         stdin_handle = open(stdin_path, "rb")  # noqa: SIM115 — closed below
 
+    def close_stdin() -> None:
+        if stdin_handle not in (subprocess.DEVNULL, None):
+            stdin_handle.close()
+
     workspace_dir = child_env.get("WORKSPACE_DIR", "/workspace")
     requested_workdir = payload.get("workdir") or workspace_dir
     if not os.path.isdir(workspace_dir):
@@ -104,15 +206,19 @@ def launch(payload: dict[str, Any], *, base: str = CODE_RUN_DIR) -> dict[str, An
             candidate_workdir != workspace_root
             and workspace_root not in candidate_workdir.parents
         ):
+            close_stdin()
             return {
                 "ok": False,
                 "run_id": run_id,
+                "run_dir": identity,
                 "error": "workdir must be inside WORKSPACE_DIR",
             }
         if not candidate_workdir.is_dir():
+            close_stdin()
             return {
                 "ok": False,
                 "run_id": run_id,
+                "run_dir": identity,
                 "error": f"workdir does not exist: {candidate_workdir}",
             }
         workdir = str(candidate_workdir)
@@ -143,18 +249,24 @@ def launch(payload: dict[str, Any], *, base: str = CODE_RUN_DIR) -> dict[str, An
             cwd=workdir,
             start_new_session=True,  # detach: survives the launching exec
         )
-    except (OSError, ValueError) as exc:
+    except OSError as exc:  # its text names the program or the folder, which tells the user what to fix
         log_handle.close()
-        if stdin_handle not in (subprocess.DEVNULL, None):
-            stdin_handle.close()
-        return {"ok": False, "run_id": run_id, "error": str(exc)}
+        close_stdin()
+        return {"ok": False, "run_id": run_id, "run_dir": identity, "error": str(exc)}
+    except ValueError as exc:
+        # The kind of error only: the text of one about the environment can quote part of a value in it.
+        log_handle.close()
+        close_stdin()
+        error = f"could not start the run ({type(exc).__name__})"
+        return {"ok": False, "run_id": run_id, "run_dir": identity, "error": error}
 
     log_handle.close()
-    if stdin_handle not in (subprocess.DEVNULL, None):
-        stdin_handle.close()
+    close_stdin()
 
     pid_path.write_text(str(proc.pid))
-    return {"ok": True, "run_id": run_id, "pid": proc.pid}
+    # What the worker keeps to stop this run and to clean up after it: the
+    # files and names here are the sandbox's to change.
+    return {"ok": True, "run_id": run_id, "pid": proc.pid, "start": start_time(proc.pid), "run_dir": identity}
 
 
 def _pid_alive(pid: int) -> bool:
@@ -173,10 +285,11 @@ def poll(payload: dict[str, Any], *, base: str = CODE_RUN_DIR) -> dict[str, Any]
     offset = int(payload.get("offset") or 0)
 
     run_dir = _run_dir(run_id, base)
-    log_path = run_dir / "run.log"
     pid_path = run_dir / "pid"
 
-    if not pid_path.exists():
+    if not os.path.lexists(pid_path):
+        # This poll is the run's last: whatever is left of it goes, its credential included.
+        cleaned = _cleanup(run_dir, launched=bool(payload.get("launched")), identity=_run_identity(payload))
         return {
             "ok": False,
             "done": True,
@@ -184,12 +297,14 @@ def poll(payload: dict[str, Any], *, base: str = CODE_RUN_DIR) -> dict[str, Any]
             "offset": offset,
             "exit_code": None,
             "error": f"unknown run {run_id!r}",
+            "cleaned": cleaned,
         }
 
     new_output = ""
     new_offset = offset
-    if log_path.exists():
-        with open(log_path, "rb") as fh:
+    log = _open_run_file(base, run_id, "run.log")
+    if log is not None:
+        with log as fh:
             fh.seek(offset)
             chunk = fh.read()
             new_output = chunk.decode("utf-8", errors="replace")
@@ -203,37 +318,42 @@ def poll(payload: dict[str, Any], *, base: str = CODE_RUN_DIR) -> dict[str, Any]
     exit_code: int | None = None
     done = False
 
-    if exit_path.exists():
+    if os.path.lexists(exit_path):
         done = True
         exit_code = _read_exit_code(run_dir)
     else:
-        try:
-            pid = int(pid_path.read_text().strip())
-        except (ValueError, OSError):
-            pid = -1
+        pid = _read_pid(base, run_id)
         if pid <= 0 or not _pid_alive(pid):
             done = True
             exit_code = None  # died without recording an exit code
 
     codex_auth_json: str | None = None
+    cleaned: bool | None = None
     if done:
-        # Read any final bytes the marker race may have left.
-        if log_path.exists():
-            with open(log_path, "rb") as fh:
-                fh.seek(new_offset)
-                tail = fh.read()
-                if tail:
-                    new_output += tail.decode("utf-8", errors="replace")
-                    new_offset += len(tail)
-        # Read codex's (possibly refreshed) auth.json back before cleanup so
-        # the worker can persist it to the vault.
-        codex_auth_path = run_dir / "codex" / "auth.json"
-        if codex_auth_path.exists():
+        try:
+            # Read any final bytes the marker race may have left.
+            log = _open_run_file(base, run_id, "run.log")
+            if log is not None:
+                with log as fh:
+                    fh.seek(new_offset)
+                    tail = fh.read()
+                    if tail:
+                        new_output += tail.decode("utf-8", errors="replace")
+                        new_offset += len(tail)
+            # Read codex's (possibly refreshed) auth.json back before cleanup so
+            # the worker can persist it to the vault.
             try:
-                codex_auth_json = codex_auth_path.read_text()
-            except OSError:
+                auth = _open_run_file(base, run_id, "codex", "auth.json")
+                if auth is not None:
+                    with auth as fh:
+                        raw = fh.read(_MAX_AUTH_BYTES + 1)
+                    if len(raw) <= _MAX_AUTH_BYTES:
+                        codex_auth_json = raw.decode("utf-8")
+            except (OSError, ValueError):
                 codex_auth_json = None
-        _cleanup(run_dir)
+        finally:
+            # Whatever the run left there: the directory holds its credential.
+            cleaned = _cleanup(run_dir, launched=bool(payload.get("launched")), identity=_run_identity(payload))
 
     result = {
         "ok": True,
@@ -244,45 +364,236 @@ def poll(payload: dict[str, Any], *, base: str = CODE_RUN_DIR) -> dict[str, Any]
     }
     if codex_auth_json is not None:
         result["codex_auth_json"] = codex_auth_json
+    if cleaned is not None:
+        result["cleaned"] = cleaned
     return result
 
 
 def _read_exit_code(run_dir: Path) -> int | None:
-    marker = run_dir / "exit_code"
-    if marker.exists():
-        try:
-            return int(marker.read_text().strip())
-        except (ValueError, OSError):
-            return None
-    return None
+    return _read_number(str(run_dir.parent), run_dir.name, "exit_code")
 
 
 def cancel(payload: dict[str, Any], *, base: str = CODE_RUN_DIR) -> dict[str, Any]:
-    """Kill the run's process group and remove its credential directory."""
+    """Stop the run's process group and remove its credential directory.
+
+    The group is named by what ``launch`` answered (``pid`` and ``start``),
+    which the worker kept.  Without them nothing is signalled.  ``cleaned``
+    says whether the run's directory is gone.
+    """
     run_id = payload["run_id"]
     run_dir = _run_dir(run_id, base)
-    pid_path = run_dir / "pid"
+    cleaned = False
+    try:
+        _stop_group(payload.get("pid"), payload.get("start"))
+    finally:
+        cleaned = _cleanup(run_dir, launched=bool(payload.get("launched")), identity=_run_identity(payload))
+    return {"ok": True, "run_id": run_id, "cleaned": cleaned}
 
-    if pid_path.exists():
+
+def _stop_group(pid: Any, started: Any) -> None:
+    """Signal the process group *pid* leads, if it is still the process that started at *started*.
+
+    A run is launched in a session of its own, so it leads its group.  The
+    group is settled once: its leader may exit on the first signal while
+    others in it still need the second.
+    """
+    if not isinstance(pid, int) or isinstance(pid, bool) or not 1 < pid <= _MAX_PID or started is None:
+        return
+    try:
+        if start_time(pid) != started or os.getpgid(pid) != pid or pid == os.getpgrp():
+            return
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            os.killpg(pid, sig)
+    except (ProcessLookupError, PermissionError):
+        return
+
+
+def _run_identity(answer: dict[str, Any]) -> tuple[int, int] | None:
+    """The ``(st_dev, st_ino)`` of the run's directory as ``launch`` named it, or None."""
+    held = answer.get("run_dir")
+    if isinstance(held, list) and len(held) == 2 and all(type(part) is int for part in held):
+        return held[0], held[1]
+    return None
+
+
+def _cleanup(
+    run_dir: Path, *, launched: bool = False, identity: tuple[int, int] | None = None,
+) -> bool:
+    """Remove the pod-local run directory (credentials included), by descriptor; whether it is gone.
+
+    True means only this: the directory ``launch`` created was removed, and
+    no file in it had a second name when it was removed.  It does not cover
+    what left the directory before then, such as a copy or a moved folder.
+    Two names for one file, both inside the directory, also answer False
+    although the whole tree is gone: a false alarm, on the safe side.
+
+    Commands can also work against this while it runs, so it goes on as long
+    as the tree shrinks.  A link at the runs folder is refused: nothing
+    legitimate puts one there, and what it leads to is not this run's.  With
+    *launched* (the worker started this run), a directory that is not where
+    it was made, or (by *identity*) is not the one that was made, counts as
+    not removed, and is left alone.
+    """
+    parent, name = os.path.split(os.path.abspath(run_dir))
+    known = launched or identity is not None
+    try:
+        runs = os.open(parent, _HELD_FOLDER)
+    except FileNotFoundError:
+        return not known
+    except OSError:
+        return False
+    try:
+        with contextlib.suppress(OSError):
+            _own(runs)
+        return _remove_tree(name, runs, known, identity)
+    except OSError:
+        return False
+    finally:
+        os.close(runs)
+
+
+class _CleanupWork:
+    """What a cleanup has spent (see :data:`_CLEANUP_S`), and whether a file it removed had another name."""
+
+    def __init__(self) -> None:
+        self.ends, self.steps, self.failures = time.monotonic() + _CLEANUP_S, 0, 0
+        self.second_name = False
+
+    def left(self) -> bool:
+        return self.steps < _CLEANUP_STEPS and self.failures < _CLEANUP_FAILURES and time.monotonic() < self.ends
+
+    def done(self) -> None:
+        self.steps += 1
+        self.failures = 0
+
+    def failed(self) -> None:
+        self.failures += 1
+        time.sleep(0.001)  # a command changing modes in a loop gets no spin to race against
+
+
+def _own(folder: int) -> None:
+    """Give the owner back what it takes to list and empty the folder held as *folder*."""
+    mode = stat.S_IMODE(os.fstat(folder).st_mode)
+    if mode & 0o700 != 0o700:
+        # By the descriptor's own path: fchmod refuses an O_PATH descriptor.
+        os.chmod(f"/proc/self/fd/{folder}", mode | 0o700)
+
+
+@contextlib.contextmanager
+def _scan(folder: int) -> Iterator[Iterator[os.DirEntry]]:
+    """The entries of the folder held as *folder*, read as they are asked for."""
+    listed = os.open(".", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC, dir_fd=folder)
+    try:
+        with os.scandir(listed) as entries:
+            yield entries
+    finally:
+        os.close(listed)
+
+
+def _remove_tree(name: str, parent: int, known: bool, identity: tuple[int, int] | None) -> bool:
+    """Remove *name* in the folder held as *parent*, at any depth, with a fixed number of descriptors; whether it went.
+
+    What is in a subfolder moves up into the top folder before the subfolder
+    goes, so a tree deeper than the descriptor limit is removed too.  The top
+    folder stays held across its removal: only its own link count says that
+    this folder, and not another put at its name, is the one removed.
+    """
+    work = _CleanupWork()
+    while work.left():
         try:
-            pid = int(pid_path.read_text().strip())
-        except (ValueError, OSError):
-            pid = -1
-        if pid > 0:
-            for sig in (signal.SIGTERM, signal.SIGKILL):
-                try:
-                    os.killpg(os.getpgid(pid), sig)
-                except (ProcessLookupError, PermissionError):
-                    break
-    _cleanup(run_dir)
-    return {"ok": True, "run_id": run_id}
+            top = os.open(name, _HELD_FOLDER, dir_fd=parent)
+        except FileNotFoundError:
+            return not known
+        except OSError as exc:
+            if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                if known:
+                    return False  # not the directory that was made
+                with contextlib.suppress(OSError):
+                    os.unlink(name, dir_fd=parent)
+            else:
+                with contextlib.suppress(OSError):
+                    _own(parent)
+            work.failed()
+            continue
+        try:
+            held = os.fstat(top)
+            if identity is not None and (held.st_dev, held.st_ino) != identity:
+                return False
+            if not _empty(top, work):
+                return False
+            try:
+                os.rmdir(name, dir_fd=parent)
+            except FileNotFoundError:
+                return os.fstat(top).st_nlink == 0 and not work.second_name if known else True
+            except OSError:  # refilled, replaced, or its parent's mode taken away: looked at again
+                with contextlib.suppress(OSError):
+                    _own(parent)
+                work.failed()
+                continue
+            if os.fstat(top).st_nlink == 0:
+                return not work.second_name
+            return not known  # what went was another folder put at the name
+        finally:
+            os.close(top)
+    return False
 
 
-def _cleanup(run_dir: Path) -> None:
-    """Remove the pod-local run directory (credentials included)."""
-    import shutil
+def _empty(top: int, work: _CleanupWork) -> bool:
+    """Empty the folder held as *top*; whether it was, before the cleanup's budget ran out."""
+    while work.left():
+        saw = shrank = False
+        try:
+            _own(top)
+            with _scan(top) as entries:
+                for entry in entries:
+                    if not work.left():
+                        return False
+                    saw = True
+                    try:
+                        _take_one(entry.name, top, work)
+                    except FileNotFoundError:
+                        pass  # gone already: the tree is that much smaller
+                    except OSError:
+                        continue
+                    shrank = True
+                    work.done()
+        except OSError:
+            work.failed()
+            continue
+        if not saw:
+            return True
+        if not shrank:
+            work.failed()
+    return False
 
-    shutil.rmtree(run_dir, ignore_errors=True)
+
+def _take_one(name: str, top: int, work: _CleanupWork) -> None:
+    """Remove the file *name* in *top*; of a folder, move what it holds up into *top* and remove it."""
+    found = os.stat(name, dir_fd=top, follow_symlinks=False)
+    if not stat.S_ISDIR(found.st_mode):
+        if stat.S_ISREG(found.st_mode) and found.st_nlink > 1:
+            work.second_name = True
+        os.unlink(name, dir_fd=top)
+        return
+    inner = os.open(name, _HELD_FOLDER, dir_fd=top)
+    try:
+        _own(inner)
+        with _scan(inner) as entries:
+            for entry in entries:
+                if not work.left():
+                    raise TimeoutError(errno.ETIMEDOUT, "the cleanup's budget ran out")
+                # Moving a folder to another parent takes write permission on the folder itself.
+                with contextlib.suppress(OSError):
+                    if entry.is_dir(follow_symlinks=False):
+                        child = os.open(entry.name, _HELD_FOLDER, dir_fd=inner)
+                        try:
+                            _own(child)
+                        finally:
+                            os.close(child)
+                os.rename(entry.name, f".~{os.urandom(8).hex()}", src_dir_fd=inner, dst_dir_fd=top)
+    finally:
+        os.close(inner)
+    os.rmdir(name, dir_fd=top)
 
 
 def checkout(payload: dict[str, Any]) -> dict[str, Any]:
