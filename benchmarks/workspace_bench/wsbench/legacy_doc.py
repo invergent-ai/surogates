@@ -37,6 +37,7 @@ _SPRM_P_CHG_TABS = 0xC615
 _SPRM_P_HUGE_PAPX = 0x6646
 
 _CELL_SEPARATOR = " | "
+_PARTS_PER_CHUNK = 65_536
 
 
 class LegacyDocError(ValueError):
@@ -111,7 +112,8 @@ class _CompoundFile:
             page = self._sector(next_difat)
             sectors += [_u32(page, 4 * i) for i in range(per_sector)]
             next_difat = _u32(page, 4 * per_sector)
-        sectors = [sector for sector in sectors if sector != _FREE_SECTOR]
+        # Only as many as the header counts: some writers pad the unused slots with zeros.
+        sectors = [sector for sector in sectors if sector != _FREE_SECTOR][:_u32(self.data, 44)]
         if len(set(sectors)) != len(sectors) or len(sectors) > len(self.data) // self.sector_bytes:
             raise LegacyDocError("bad sector allocation table")
         fat: list[int] = []
@@ -339,12 +341,19 @@ class _TextBuilder:
     """Word's control characters as plain text."""
 
     def __init__(self, row_ends: list[tuple[int, int]]) -> None:
-        self.parts: list[str] = []
+        self.parts: list[str] = []  # the latest characters; joined into ``chunks`` as they pile up
+        self.chunks: list[str] = []
         self.fields: list[bool] = []  # one per open field: True while in its code
         self.fields_in_code = 0
         self.row_ends = row_ends
         self.row_starts = [start for start, _ in row_ends]
         self.after_cell = False
+
+    def _emit(self, text: str) -> None:
+        self.parts.append(text)
+        if len(self.parts) >= _PARTS_PER_CHUNK:  # the last stays: a row's end looks at it
+            self.chunks.append("".join(self.parts[:-1]))
+            del self.parts[:-1]
 
     def _ends_row(self, file_offset: int) -> bool:
         if self.row_ends:
@@ -370,22 +379,22 @@ class _TextBuilder:
             if self._ends_row(file_offset):
                 if self.parts and self.parts[-1] == _CELL_SEPARATOR:
                     self.parts.pop()
-                self.parts.append("\n")
+                self._emit("\n")
                 self.after_cell = False
                 return
-            self.parts.append(_CELL_SEPARATOR)
+            self._emit(_CELL_SEPARATOR)
             self.after_cell = True
             return
         elif code in (0x0B, 0x0C, 0x0D):
-            self.parts.append("\n")
+            self._emit("\n")
         elif code == 0x1E:
-            self.parts.append("-")
+            self._emit("-")
         elif code == 0x09 or code >= 0x20:
-            self.parts.append(char)
+            self._emit(char)
         self.after_cell = False
 
     def text(self) -> str:
-        return "".join(self.parts).strip("\n")
+        return ("".join(self.chunks) + "".join(self.parts)).strip("\n")
 
 
 def extract_legacy_doc(path: str) -> str:

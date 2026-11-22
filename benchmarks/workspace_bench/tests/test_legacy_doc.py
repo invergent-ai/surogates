@@ -104,7 +104,7 @@ def _compound(streams, *, nested=None, mini=False, difat=False):
     return bytes(head) + body + struct.pack(f"<{len(fat)}I", *fat)
 
 
-def _word_streams(pieces, *, flags=0x0200, nfib=0xC1, ident=0xA5EC, prc=b"", same_fc=False):
+def _word_streams(pieces, *, flags=0x0200, nfib=0xC1, ident=0xA5EC, prc=b"", same_fc=False, row_end_unit=None):
     """The WordDocument and table streams of a Word file whose text is *pieces*: (text, compressed)."""
     fib_size = 32 + 2 + 28 + 2 + 88 + 2 + 8 * 93
     word = bytearray(fib_size)
@@ -128,11 +128,27 @@ def _word_streams(pieces, *, flags=0x0200, nfib=0xC1, ident=0xA5EC, prc=b"", sam
     plc = struct.pack(f"<{len(cps)}I", *cps) + pcds
     clx = prc + b"\x02" + struct.pack("<I", len(plc)) + plc
     struct.pack_into("<II", word, 154 + 8 * 33, 0, len(clx))
+    if row_end_unit is not None:  # one paragraph page: the 16-bit unit at this index ends a table row
+        row_end_fc = fib_size + 2 * row_end_unit
+        word += b"\0" * (-len(word) % 512)
+        page = bytearray(512)
+        page[511] = 1
+        struct.pack_into("<II", page, 0, row_end_fc, row_end_fc + 2)
+        page[8] = 100
+        props = struct.pack("<H", 0) + struct.pack("<HB", 0x2417, 1)
+        page[200] = (len(props) + 1) // 2
+        page[201:201 + len(props)] = props
+        bte = struct.pack("<III", row_end_fc, row_end_fc + 2, len(word) // 512)
+        struct.pack_into("<II", word, 154 + 8 * 13, len(clx), len(bte))
+        word += page
+        clx += bte
     return bytes(word), clx
 
 
-def _word(pieces, *, flags=0x0200, nfib=0xC1, ident=0xA5EC, prc=b"", same_fc=False, **compound):
-    word, clx = _word_streams(pieces, flags=flags, nfib=nfib, ident=ident, prc=prc, same_fc=same_fc)
+def _word(pieces, *, flags=0x0200, nfib=0xC1, ident=0xA5EC, prc=b"", same_fc=False, row_end_unit=None, **compound):
+    word, clx = _word_streams(
+        pieces, flags=flags, nfib=nfib, ident=ident, prc=prc, same_fc=same_fc, row_end_unit=row_end_unit,
+    )
     return _compound({"WordDocument": word, "1Table" if flags & 0x0200 else "0Table": clx}, **compound)
 
 
@@ -247,6 +263,29 @@ def test_characters_beyond_the_16_bit_plane_survive(tmp_path):
     assert extract_text(_write(tmp_path, _word([("a😀b\r", False)]))) == ("a😀b", None)
 
 
+def test_a_row_end_after_an_emoji_is_found(tmp_path):
+    # Units: emoji 0-1, cell mark 2, b 3, cell mark 4, row end 5.
+    path = _write(tmp_path, _word([("😀\x07b\x07\x07after\r", False)], row_end_unit=5))
+    assert extract_text(path) == ("😀 | b\nafter", None)
+
+
+def test_a_doubled_field_separator_counts_once(tmp_path):
+    assert extract_text(_write(tmp_path, _word([("\x13a\x14b\x14c\x15d\r", True)])))[0] == "bcd"
+
+
+def test_a_long_document_keeps_its_text_across_chunks(tmp_path):
+    text = "ab\x07" * 40_000 + "\r"
+    out = extract_legacy_doc(_write(tmp_path, _word([(text, False)])))
+    assert out == " | ".join(["ab"] * 40_000) + " | "
+
+
+def test_header_slots_padded_with_zeros_are_ignored(tmp_path):
+    data = bytearray(_word([("zero padded\r", True)]))
+    for i in range(1, 109):
+        struct.pack_into("<I", data, 76 + 4 * i, 0)
+    assert extract_text(_write(tmp_path, bytes(data))) == ("zero padded", None)
+
+
 def test_streams_in_the_mini_stream_are_read(tmp_path):
     assert extract_text(_write(tmp_path, _word([("small file\r", True)], mini=True))) == ("small file", None)
 
@@ -294,6 +333,7 @@ def test_a_repeated_fat_sector_is_refused_before_it_is_expanded(tmp_path):
     sector = struct.unpack_from("<I", data, 76)[0]
     for i in range(109):
         struct.pack_into("<I", data, 76 + 4 * i, sector)
+    struct.pack_into("<I", data, 44, 109)  # the header counts them all
     with pytest.raises(LegacyDocError, match="allocation table"):
         extract_legacy_doc(_write(tmp_path, bytes(data)))
 
@@ -312,6 +352,23 @@ def test_repeated_paragraph_properties_stop_at_the_budget():
         _has_row_end(grpprl, b"", budget)
     with pytest.raises(LegacyDocError, match="repeated"):
         _has_row_end(grpprl, b"", budget)
+
+
+def test_many_pages_naming_one_long_property_list_stop_at_the_budget():
+    long_list = struct.pack("<HB", 0x2416, 1) * 20_000
+    data = struct.pack("<H", len(long_list)) + long_list
+    page = bytearray(512)
+    page[511] = 1
+    struct.pack_into("<II", page, 0, 0, 10)
+    page[8] = 100
+    props = struct.pack("<H", 0) + struct.pack("<HI", 0x6646, 0) + b"\0"  # an odd length, as the format stores it
+    page[200] = (len(props) + 1) // 2
+    page[201:201 + len(props)] = props
+    count = 20
+    word = bytes(page) * count
+    table = struct.pack(f"<{count + 1}I", *range(count + 1)) + struct.pack(f"<{count}I", *range(count))
+    with pytest.raises(LegacyDocError, match="repeated"):
+        _row_end_ranges(word, table, 0, len(table), data)
 
 
 def test_many_references_to_one_paragraph_page_read_it_once():
