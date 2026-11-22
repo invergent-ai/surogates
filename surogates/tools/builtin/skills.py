@@ -27,7 +27,7 @@ from surogates.tools.skill_visibility import (
     skill_scope,
     unavailable_tool_refusal,
 )
-from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
+from surogates.tools.utils.workspace_sandbox import PATH_TOO_LONG, WorkspaceSandboxError, path_too_long, shown_path
 from surogates.workstreams import master_skill_refusal, skills_left_out
 
 logger = logging.getLogger(__name__)
@@ -508,6 +508,17 @@ async def _skill_view_handler(
             ensure_ascii=False,
         )
 
+    # Before either route: one sends the path to the API, the other resolves it.
+    if isinstance(file_path, str) and path_too_long(file_path):
+        return json.dumps(
+            {
+                "success": False,
+                "error": PATH_TOO_LONG,
+                "hint": "Use a relative path within the skill directory",
+            },
+            ensure_ascii=False,
+        )
+
     # API-mediated mode: delegate to the API server.
     api_client = kwargs.get("api_client")
     if api_client is not None:
@@ -668,13 +679,24 @@ async def _skill_view_handler(
             return json.dumps(
                 {
                     "success": False,
-                    "error": f"Invalid file path: '{file_path}'",
+                    "error": f"Invalid file path: '{shown_path(file_path)}'",
                     "hint": "Use a valid relative path within the skill directory",
                 },
                 ensure_ascii=False,
             )
 
-        if not target_file.exists():
+        try:
+            present = target_file.exists()
+        except OSError:  # a name the file system cannot hold
+            return json.dumps(
+                {
+                    "success": False,
+                    "error": f"Invalid file path: '{shown_path(file_path)}'",
+                    "hint": "Use a valid relative path within the skill directory",
+                },
+                ensure_ascii=False,
+            )
+        if not present:
             # List available files in the skill directory, organised by type
             available_files: dict[str, list[str]] = {
                 "references": [],

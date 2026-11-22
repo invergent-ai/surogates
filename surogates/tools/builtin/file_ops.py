@@ -546,7 +546,7 @@ async def _suggest_similar_files(wio: WorkspaceIO, path: str) -> list[str]:
 # ---------------------------------------------------------------------------
 from surogates.tools.utils.binary_extensions import has_binary_extension
 from surogates.tools.utils.tool_output_limits import get_max_bytes, get_max_lines
-from surogates.tools.utils.workspace_sandbox import NUL_REFUSED, WorkspaceSandboxError
+from surogates.tools.utils.workspace_sandbox import NUL_REFUSED, WorkspaceSandboxError, shown_path
 from surogates.tools.utils.workspace_sandbox import holds_nul as _holds_nul
 
 # What search_files answers for content outside a desktop chat's folder: the computer searches there by name only.
@@ -1272,7 +1272,7 @@ async def _read_file_handler(
         if _is_blocked_device(path):
             return json.dumps({
                 "error": (
-                    f"Cannot read '{path}': this is a device file that would "
+                    f"Cannot read '{shown_path(path)}': this is a device file that would "
                     "block or produce infinite output."
                 ),
             })

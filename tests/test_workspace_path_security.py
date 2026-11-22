@@ -12,7 +12,14 @@ from surogates.tools.builtin.file_ops import (
 )
 from surogates.harness.image_read import handle_image_read
 from surogates.tools.builtin.terminal import _terminal_handler
-from surogates.tools.utils.workspace_sandbox import validate_path, validate_workdir
+from surogates.tools.builtin.vision import _image_ref_to_data_url
+from surogates.tools.utils import workspace_sandbox
+from surogates.tools.utils.workspace_sandbox import (
+    MAX_PATH_CHARS,
+    WorkspaceSandboxError,
+    validate_path,
+    validate_workdir,
+)
 from surogates.tools.workspace_io import NUL_REFUSED
 
 
@@ -91,3 +98,25 @@ async def test_read_file_of_an_image_path_with_a_nul_is_refused_as_any_other_pat
     )
     assert json.loads(answer) == {"error": NUL_REFUSED}
 
+
+
+@pytest.mark.parametrize("validate", [validate_path, validate_workdir])
+def test_a_path_over_the_limit_is_refused_before_it_is_resolved(tmp_path, monkeypatch, validate) -> None:
+    def looked_at(*_):
+        raise AssertionError("the path was processed")
+
+    monkeypatch.setattr(workspace_sandbox, "in_workspace_terms", looked_at)
+    with pytest.raises(WorkspaceSandboxError, match="too long") as refused:
+        validate(str(tmp_path), "a/" * 20_000 + "x.png")
+    assert "a/a/" not in str(refused.value)
+
+
+def test_a_path_at_the_limit_is_still_resolved(tmp_path) -> None:
+    at_limit = "a" * MAX_PATH_CHARS
+    assert validate_path(str(tmp_path), at_limit) == str(tmp_path.resolve() / at_limit)
+
+
+@pytest.mark.asyncio
+async def test_the_route_with_no_bucket_refuses_a_long_image_path(tmp_path) -> None:
+    with pytest.raises(WorkspaceSandboxError, match="too long"):
+        await _image_ref_to_data_url("a/" * 20_000 + "x.png", workspace_path=str(tmp_path))

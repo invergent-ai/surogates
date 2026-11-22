@@ -24,9 +24,11 @@ from surogates.storage.tenant import sandbox_workspace_key
 from surogates.tools.registry import ToolRegistry, ToolSchema
 from surogates.tools.utils.url_safety import is_safe_url
 from surogates.tools.utils.workspace_sandbox import (
+    MAX_PATH_CHARS,
     WorkspaceSandboxError,
     in_workspace_terms,
     refuse_nul,
+    shown_path,
     validate_path,
 )
 
@@ -35,7 +37,7 @@ logger = logging.getLogger(__name__)
 _MAX_IMAGE_BYTES = 20 * 1024 * 1024
 _MAX_REDIRECTS = 5
 _MAX_PATH_DECODES = 4
-_MAX_IMAGE_PATH_CHARS = 4096  # PATH_MAX; an S3 key is shorter still
+_MAX_IMAGE_PATH_CHARS = MAX_PATH_CHARS  # an S3 key is shorter still
 _DEFAULT_PROMPT = "Describe the image. Include any visible text and important details."
 # Long-edge caps before sending to the vision model. Anthropic resizes anything
 # beyond ~1568 px server-side; OpenAI's ``low`` detail uses a single 512x512
@@ -336,7 +338,7 @@ def _validate_workspace_storage_path(
     path = PurePosixPath(key)
     if path.is_absolute() or not path.parts or _names_parent_folder(key):
         # Named as the model wrote it: the host's paths are not its to see.
-        raise WorkspaceSandboxError(f"Path traversal blocked: {image_ref}")
+        raise WorkspaceSandboxError(f"Path traversal blocked: {shown_path(image_ref)}")
     return path.as_posix()
 
 

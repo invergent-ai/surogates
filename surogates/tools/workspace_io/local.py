@@ -34,7 +34,10 @@ from surogates.tools.utils.process_tree import (
     stop_process_tree_soon,
 )
 from surogates.tools.utils.workspace_sandbox import (
+    PATH_TOO_LONG,
     in_workspace_terms,
+    path_too_long,
+    shown_path,
     WorkspaceSandboxError,
     validate_path,
     validate_workdir,
@@ -535,7 +538,7 @@ def _check_sensitive_path(filepath: str, shown: str | None = None) -> str | None
         resolved = os.path.realpath(os.path.expanduser(filepath))
     except (OSError, ValueError):
         resolved = filepath
-    named = filepath if shown is None else shown
+    named = shown_path(filepath if shown is None else shown)
     for prefix in _SENSITIVE_PATH_PREFIXES:
         if resolved.startswith(prefix):
             return (
@@ -1010,12 +1013,16 @@ class LocalWorkspaceIO:
 
     async def resolve(self, path: str) -> str:
         refuse_nul(path)
+        if path_too_long(path):  # with no workspace too: nothing below would stop it
+            raise WorkspaceSandboxError(PATH_TOO_LONG)
         if self.root:
             return validate_path(self.root, path)
         return str(Path(os.path.expanduser(path)).resolve())
 
     async def check_write(self, path: str) -> str | None:
         refuse_nul(path)
+        if path_too_long(path):
+            return PATH_TOO_LONG
         target = path
         if self.root:
             # The file resolve() will write: ``/workspace/...`` is this
@@ -1026,7 +1033,7 @@ class LocalWorkspaceIO:
             if not os.path.isabs(target):
                 target = os.path.join(root, target)
         if _is_write_denied(target):
-            return f"Write denied: '{path}' is a protected system/credential file."
+            return f"Write denied: '{shown_path(path)}' is a protected system/credential file."
         return _check_sensitive_path(target, shown=path)
 
     async def stat(self, key: str) -> FileStat | None:
@@ -1242,6 +1249,8 @@ class LocalWorkspaceIO:
 
         Raises WorkspaceSandboxError, worded for the model, when it is not allowed.
         """
+        if requested and path_too_long(requested):
+            raise WorkspaceSandboxError(PATH_TOO_LONG)
         if requested and self.root and requested in _HOME_ALIASES:
             requested = self.root
         if self.root:

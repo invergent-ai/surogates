@@ -16,6 +16,7 @@ from urllib.parse import quote
 import httpx
 
 from surogates.harness.tls import shared_ssl_context
+from surogates.tools.utils.workspace_sandbox import shown_path
 
 logger = logging.getLogger(__name__)
 
@@ -197,7 +198,7 @@ class HarnessAPIClient:
             return _error_response(exc)
         return json.dumps({
             "success": False,
-            "error": f"File '{file_path}' not found in skill '{name}'.",
+            "error": f"File '{shown_path(file_path)}' not found in skill '{name}'.",
             "available_files": skill.get("linked_files") or [],
         }, ensure_ascii=False)
 

@@ -36,7 +36,7 @@ from surogates.storage.tenant import sandbox_workspace_key
 from surogates.tools.builtin.vision import _image_ref_to_data_url
 from surogates.tools.registry import ToolRegistry, ToolSchema
 from surogates.tools.utils.tool_result_storage import HARNESS_FOLDER_REFUSAL, in_harness_folder
-from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError, validate_path
+from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError, shown_path, validate_path
 from surogates.tools.workspace_io.local import write_in_workspace
 
 logger = logging.getLogger(__name__)
@@ -820,7 +820,7 @@ def _normalize_output_path(raw: Any, *, default: str, root: str | None = None) -
         return default
     parts = PurePosixPath(path)
     if any(part == ".." for part in parts.parts):
-        raise WorkspaceSandboxError(f"Path traversal blocked: {path}")
+        raise WorkspaceSandboxError(f"Path traversal blocked: {shown_path(path)}")
     return parts.as_posix()
 
 
