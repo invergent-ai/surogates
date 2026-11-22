@@ -13,15 +13,16 @@ Deleting a session archives its row and deletes its workspace prefix. A prefix o
 ### What It Does
 
 ```
-1. List the workspace bucket and take each key's first path segment
-2. Keep the segments that parse as a session UUID (so boundaries/… and
-   anything else in the bucket are skipped)
-3. Ask the database which of those sessions still claim their workspace
-   -- a row that exists and is not archived
+1. List the workspace bucket and take the folders named by a session UUID
+   (so boundaries/… and anything else in the bucket are skipped)
+2. Keep those that are exactly where an archived session's own config puts
+   its workspace, in this bucket
+3. Leave out any workspace a session still uses, any folder inside another
+   session's workspace, and any folder holding a session's key prefix
 4. Delete the prefixes left over, one failure at a time
 ```
 
-A session the user still has keeps its files however old it is, and however long ago it finished. Only the archived ones -- the tombstone the delete route writes -- and prefixes with no row at all are swept.
+A session the user still has keeps its files however old it is, and however long ago it finished. Only the workspaces of archived sessions -- the tombstone the delete route writes -- are swept. A folder with no session row is kept: it cannot be told from other data under a shared key prefix.
 
 ### Usage
 

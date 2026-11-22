@@ -291,6 +291,12 @@ async def test_create_session_drops_client_supplied_sandbox_root():
     )
 
 
+@pytest.fixture(autouse=True)
+def no_other_session_uses_the_workspace(monkeypatch):
+    """These tests have no database: the real check is in tests/integration/test_session_delete_workspace.py."""
+    monkeypatch.setattr("surogates.session.workspace_claims.workspace_still_used", AsyncMock(return_value=False))
+
+
 async def test_delete_session_deletes_session_prefix_not_agent_bucket(monkeypatch):
     monkeypatch.setattr(DeviceOperations, "cancel", AsyncMock(return_value=0))
     org_id = uuid4()
