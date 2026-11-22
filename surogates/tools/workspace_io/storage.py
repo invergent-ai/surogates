@@ -17,7 +17,7 @@ from collections.abc import Collection
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 
-from surogates.storage.backend import Changed, StorageBackend
+from surogates.storage.backend import Changed, StorageBackend, read_capped
 from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError
 from surogates.tools.workspace_io.base import FileStat, RevisionConflict, Walk, refuse_nul
 
@@ -71,10 +71,11 @@ class StorageWorkspaceIO:
 
     async def read(self, key: str, max_bytes: int | None = None) -> bytes:
         try:
-            data = await self._storage.read(self._bucket, self._prefix + key)
+            if max_bytes is None:
+                return await self._storage.read(self._bucket, self._prefix + key)
+            return await read_capped(self._storage, self._bucket, self._prefix + key, max_bytes)
         except KeyError:
             raise _missing(key) from None
-        return data if max_bytes is None else data[:max_bytes]
 
     async def write(self, key: str, data: bytes, *, expected_revision: str | None = None) -> None:
         # expected_revision is not checked: cloud behaviour does not change.

@@ -349,20 +349,25 @@ def _run_file(args: dict, workspace: str) -> str:
             return outside
         too_large = f"{path} is over the 50 MiB a file may be"
         if args.get("action") == "read":
+            # A caller may ask for less than the most a file may be, and is then sent no more.
+            asked = args.get("max_bytes")
+            limit = asked if type(asked) is int and 0 <= asked < MAX_FILE_BYTES else MAX_FILE_BYTES
+            if limit != MAX_FILE_BYTES:
+                too_large = f"{path} is over the {limit} bytes this read may take"
             try:
                 with _open_to_read(root, target) as fh:
-                    if os.fstat(fh.fileno()).st_size > MAX_FILE_BYTES:
-                        return json.dumps({"error": too_large})
+                    if os.fstat(fh.fileno()).st_size > limit:
+                        return json.dumps({"error": too_large, "too_large": True})
                     # No further than the cap: the file may have grown since its size was read.
-                    data = fh.read(MAX_FILE_BYTES + 1)
+                    data = fh.read(limit + 1)
             except (FileNotFoundError, NotADirectoryError, IsADirectoryError):
                 return json.dumps({"error": f"{path} not found"})
             except OSError as exc:
                 if exc.errno not in (errno.EINVAL, errno.ENXIO):  # there, but not a regular file (ENXIO: a socket)
                     raise
                 return json.dumps({"error": f"{path} not found"})
-            if len(data) > MAX_FILE_BYTES:
-                return json.dumps({"error": too_large})
+            if len(data) > limit:
+                return json.dumps({"error": too_large, "too_large": True})
             return json.dumps({"content_b64": base64.b64encode(data).decode()})
         if args.get("action") == "write":
             content = args.get("content_b64") or ""

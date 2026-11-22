@@ -57,16 +57,26 @@ async def _file(sandbox_pool: SandboxPool, owner: Any, request: dict[str, Any], 
         return result
     # The pod's error, or a timeout or an HTTP failure, which carry none.
     said = (result.get("error") or result.get("stderr")) if isinstance(result, dict) else None
+    if isinstance(result, dict) and result.get("too_large") is True:
+        raise TooLargeForCopy(said or "The file is too large")
     raise ValueError(said or "The thread's pod gave no answer")
 
 
 class TooLargeForCopy(ValueError):
-    """A file over what the thread's copy can take: its tool says so, rather than that it has no workspace."""
+    """A file over what the thread's copy can take or a read asked for: its tool says so, rather than that it has no workspace."""
 
 
-async def read_copy(sandbox_pool: SandboxPool, owner: Any, path: str) -> bytes:
-    """*path* from the copy in *owner*'s pod; ValueError when it cannot be read."""
-    result = await _file(sandbox_pool, owner, {"action": "read", "path": path}, "content_b64")
+async def read_copy(sandbox_pool: SandboxPool, owner: Any, path: str, *, max_bytes: int | None = None) -> bytes:
+    """*path* from the copy in *owner*'s pod; ValueError when it cannot be read.
+
+    With *max_bytes*, the pod refuses a larger file rather than send it.  A
+    pod from before this ignores it and sends up to its own limit, so a
+    caller with a cap still checks what it gets.
+    """
+    request: dict[str, Any] = {"action": "read", "path": path}
+    if max_bytes is not None:
+        request["max_bytes"] = max_bytes
+    result = await _file(sandbox_pool, owner, request, "content_b64")
     return base64.b64decode(result["content_b64"])
 
 

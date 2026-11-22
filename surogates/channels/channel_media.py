@@ -20,6 +20,7 @@ from pathlib import PurePosixPath
 from typing import Any
 
 from surogates.session.attachment_ingest import safe_display_name, workspace_root_id
+from surogates.storage.backend import read_capped
 from surogates.storage.tenant import boundary_workspace_key
 
 logger = logging.getLogger(__name__)
@@ -139,9 +140,13 @@ async def resolve_workspace_media(
             logger.warning("[channel_media] media file over cap: %s", rel)
             continue
         try:
-            data = await storage.read(bucket, key)
+            # No further than the cap: the file may have grown since its stat.
+            data = await read_capped(storage, bucket, key, max_bytes + 1)
         except Exception:
             logger.warning("[channel_media] read failed for %s", rel, exc_info=True)
+            continue
+        if len(data) > max_bytes:
+            logger.warning("[channel_media] media file over cap: %s", rel)
             continue
         raw_name = PurePosixPath(rel).name
         filename = safe_display_name(raw_name)

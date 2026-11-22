@@ -74,6 +74,10 @@ class StorageBackend(Protocol):
         """Read an object.  Raises ``KeyError`` if not found."""
         ...
 
+    async def read_at_most(self, bucket: str, key: str, max_bytes: int) -> bytes:
+        """The object's first *max_bytes*, the rest not fetched.  Raises ``KeyError`` if not found."""
+        ...
+
     async def read_text(self, bucket: str, key: str, encoding: str = "utf-8") -> str:
         """Read an object as text.  Raises ``KeyError`` if not found."""
         ...
@@ -302,6 +306,17 @@ class LocalBackend:
     async def read(self, bucket: str, key: str) -> bytes:
         path = self._resolve(bucket, key)
         return self._read_resolved(bucket, key, path)
+
+    async def read_at_most(self, bucket: str, key: str, max_bytes: int) -> bytes:
+        max_bytes = max(max_bytes, 0)  # a negative size would read the whole file
+        path = self._resolve(bucket, key)
+        if not _walk()._BY_FOLDER:
+            if not path.is_file():
+                raise KeyError(f"{bucket}/{key}")
+            with open(path, "rb") as fh:
+                return fh.read(max_bytes)
+        with self._read_resolved_open(bucket, key, path) as fh:
+            return fh.read(max_bytes)
 
     async def read_text(self, bucket: str, key: str, encoding: str = "utf-8") -> str:
         path = self._resolve(bucket, key)
@@ -738,6 +753,26 @@ class S3Backend:
                 raise
             return await resp["Body"].read()
 
+    async def read_at_most(self, bucket: str, key: str, max_bytes: int) -> bytes:
+        max_bytes = max(max_bytes, 0)
+        async with self._client() as s3:
+            try:
+                resp = await s3.get_object(Bucket=bucket, Key=key)
+            except ClientError as exc:
+                if _absent(exc):
+                    raise KeyError(f"{bucket}/{key}") from exc
+                raise
+            body, held = resp["Body"], bytearray()
+            try:
+                async for chunk in body.iter_chunks(min(_CHUNK, max(max_bytes, 1))):
+                    held += chunk[:max_bytes - len(held)]
+                    if len(held) >= max_bytes:
+                        break
+            finally:
+                # Let go at the cap: the rest of the object is not read.
+                body.close()
+            return bytes(held)
+
     async def read_text(self, bucket: str, key: str, encoding: str = "utf-8") -> str:
         data = await self.read(bucket, key)
         return data.decode(encoding)
@@ -936,6 +971,13 @@ def create_backend(settings: Any) -> StorageBackend:
 # ---------------------------------------------------------------------------
 # Atomic write helpers
 # ---------------------------------------------------------------------------
+
+
+async def read_capped(storage: Any, bucket: str, key: str, max_bytes: int) -> bytes:
+    """The object's first *max_bytes*, by the backend's own bounded read where it has one."""
+    if getattr(type(storage), "read_at_most", None) is None:
+        return (await storage.read(bucket, key))[:max_bytes]
+    return await storage.read_at_most(bucket, key, max_bytes)
 
 
 def _walk() -> Any:
