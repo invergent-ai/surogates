@@ -36,6 +36,18 @@ def test_it_is_installed_before_the_image_drops_to_the_sandbox_user():
     assert SANDBOX.index("/usr/local/bin/pwsh") < SANDBOX.index("USER sandbox")
 
 
-def test_it_does_not_phone_home():
-    assert "POWERSHELL_TELEMETRY_OPTOUT=1" in SANDBOX
-    assert "POWERSHELL_UPDATECHECK=Off" in SANDBOX
+def test_its_first_start_leaves_the_sandbox_users_home_to_useradd():
+    """The image sets XDG_CACHE_HOME under /home/sandbox: a cache written there as root makes useradd skip the home."""
+    assert "HOME=/tmp/pwsh-build XDG_CACHE_HOME=/tmp/pwsh-build/.cache XDG_DATA_HOME=/tmp/pwsh-build/.local/share pwsh" in SANDBOX
+    assert SANDBOX.index("test ! -e /home/sandbox") < SANDBOX.index("useradd --uid 1000")
+
+
+def test_the_wrapper_sets_what_the_terminal_tools_filtered_environment_drops():
+    """An image ENV does not reach a command: only the names in the filter's list do."""
+    from surogates.tools.workspace_io.local import _ALWAYS_INHERIT
+
+    wrapper = SANDBOX[SANDBOX.index("'#!/bin/sh'"):SANDBOX.index("> /usr/local/bin/pwsh")]
+    assert "export POWERSHELL_TELEMETRY_OPTOUT=1 POWERSHELL_UPDATECHECK=Off" in wrapper
+    assert 'XDG_DATA_HOME="${XDG_DATA_HOME:-/home/sandbox/.local/share}"' in wrapper
+    assert 'exec /opt/microsoft/powershell/7/pwsh "$@"' in wrapper
+    assert not {"POWERSHELL_TELEMETRY_OPTOUT", "POWERSHELL_UPDATECHECK", "XDG_DATA_HOME"} & _ALWAYS_INHERIT
