@@ -19,8 +19,8 @@ from surogates.harness.auxiliary_llm import create_without_reasoning
 from surogates.harness.image_shrink import shrink_image_parts_in_messages
 from surogates.harness.message_utils import message_to_dict
 from surogates.sandbox.copy_files import TooLargeForCopy, has_copy, read_copy
-from surogates.storage.backend import read_capped
-from surogates.storage.tenant import sandbox_workspace_key
+from surogates.storage.backend import read_first
+from surogates.storage.tenant import sandbox_read_keys
 from surogates.tools.registry import ToolRegistry, ToolSchema
 from surogates.tools.utils.url_safety import is_safe_url
 from surogates.tools.utils.workspace_sandbox import (
@@ -248,7 +248,7 @@ async def _image_ref_to_data_url(
                 image_ref,
                 workspace_path=workspace_path,
             )
-            key = sandbox_workspace_key(session_config, session_id, relative_path)
+            keys = sandbox_read_keys(storage, storage_bucket, session_config, session_id, relative_path)
             try:
                 if has_copy(sandbox_pool, owner):
                     # A thread sees the image as its copy has it.
@@ -258,7 +258,7 @@ async def _image_ref_to_data_url(
                         raise ValueError(f"Image file is too large: over {_MAX_IMAGE_BYTES} bytes") from None
                 else:
                     # No further than the cap: the rest of a larger file is not fetched.
-                    data = await read_capped(storage, storage_bucket, key, _MAX_IMAGE_BYTES + 1)
+                    data = await read_first(storage, storage_bucket, keys, _MAX_IMAGE_BYTES + 1)
             except KeyError:
                 raise ValueError(f"Image file not found: {image_ref}") from None
             if len(data) > _MAX_IMAGE_BYTES:
