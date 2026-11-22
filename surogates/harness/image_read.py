@@ -93,7 +93,7 @@ async def _build_key(path: str, kwargs: dict[str, Any]) -> tuple | None:
 
     # Lazy, as file_ops below: these pull in the tool registry.
     from surogates.sandbox.copy_files import has_copy
-    from surogates.storage.tenant import sandbox_workspace_key
+    from surogates.storage.tenant import sandbox_read_keys
     from surogates.tools.builtin.vision import _validate_workspace_storage_path
     from surogates.tools.utils.workspace_sandbox import WorkspaceSandboxError, validate_path
     from surogates.tools.workspace_io.local import LocalWorkspaceIO
@@ -108,8 +108,17 @@ async def _build_key(path: str, kwargs: dict[str, Any]) -> tuple | None:
             relative = _validate_workspace_storage_path(ref, workspace_path=workspace_path)
             if has_copy(kwargs.get("sandbox_pool"), kwargs.get("task_id")):
                 return None
-            object_key = sandbox_workspace_key(session_config, session_id, relative)
-            info = await storage.stat(bucket, object_key)
+            # The object vision_analyze would read: the first of its keys that exists.
+            keys = sandbox_read_keys(storage, bucket, session_config, session_id, relative)
+            for object_key in keys:
+                try:
+                    info = await storage.stat(bucket, object_key)
+                    break
+                except (KeyError, PermissionError):
+                    if object_key == keys[-1]:
+                        raise
+            if object_key != keys[0]:
+                return None  # a file can appear at the first key: an analysis of this one is not kept for it
             return (
                 "storage", str(session_id), bucket, object_key,
                 info.get("size"), str(info.get("modified")), info.get("etag"),

@@ -231,6 +231,38 @@ def sandbox_workspace_key(config: dict | None, session_id: object, key: str = ""
     return boundary_workspace_key(config, workspace_session_shim(config, session_id), root, key)
 
 
+def sandbox_read_keys(
+    storage: object, bucket: str, config: dict | None, session_id: object, key: str,
+) -> list[str]:
+    """The keys to read *key* at, the first that exists being the file.
+
+    On local storage a sandbox mounts the host folder ``workspace_path``,
+    which need not be the folder the session's key names (``sessions/<id>``,
+    or a managed conversation's boundary): what the sandbox shows comes
+    first.  The session's key stays second, for what is stored there and
+    never reaches that folder, such as a channel's upload or a browser
+    screenshot.  Object storage has one tree, so one key.
+    """
+    from surogates.devices.binding import device_of
+    from surogates.storage.backend import LocalBackend
+    from surogates.tools.workspace_io import local
+
+    logical = sandbox_workspace_key(config, session_id, key)
+    workspace = (config or {}).get("workspace_path")
+    # A session on the user's computer: its path is on that computer, not this host.
+    if not isinstance(storage, LocalBackend) or not workspace or device_of(config) is not None:
+        return [logical]
+    # Where a key cannot be reached with no link followed, the sandbox's folder is not read at all:
+    # a link its commands put there could lead to another session's files.
+    if not local._BY_FOLDER:
+        return [logical]
+    prefix = storage.workspace_key_prefix(bucket, str(workspace))
+    if prefix is None:
+        return [logical]
+    shown = f"{prefix}{key.lstrip('/')}"
+    return [shown] if shown == logical else [shown, logical]
+
+
 class TenantStorage:
     """Tenant-aware storage operations.
 

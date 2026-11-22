@@ -662,6 +662,22 @@ class LocalBackend:
         path.mkdir(parents=True, exist_ok=True)
         return str(path)
 
+    def workspace_key_prefix(self, bucket: str, workspace_path: str) -> str | None:
+        """The key prefix of the host folder *workspace_path*, or None where it is not in the bucket.
+
+        Its parent is resolved, so a deployment's ``sessions -> .`` link names
+        the folder it leads to.  Its own name is not followed: a link there
+        is the storage's to refuse when a key under it is read.
+        """
+        held = Path(workspace_path)
+        if not held.is_absolute() or held.name in ("", ".", ".."):
+            return None
+        try:
+            relative = (held.parent.resolve() / held.name).relative_to(self._bucket_path(bucket))
+        except (OSError, RuntimeError, ValueError):
+            return None
+        return f"{relative.as_posix()}/"
+
 
 # ---------------------------------------------------------------------------
 # S3Backend (stub — implemented in Phase 4)
@@ -978,6 +994,15 @@ async def read_capped(storage: Any, bucket: str, key: str, max_bytes: int) -> by
     if getattr(type(storage), "read_at_most", None) is None:
         return (await storage.read(bucket, key))[:max_bytes]
     return await storage.read_at_most(bucket, key, max_bytes)
+
+
+async def read_first(storage: Any, bucket: str, keys: list[str], max_bytes: int) -> bytes:
+    """The first of *keys* that can be read, up to *max_bytes*.  The last one's error when none can."""
+    for key in keys[:-1]:
+        # A file its owner made unreadable at one key does not hide the next.
+        with contextlib.suppress(KeyError, PermissionError):
+            return await read_capped(storage, bucket, key, max_bytes)
+    return await read_capped(storage, bucket, keys[-1], max_bytes)
 
 
 def _walk() -> Any:
