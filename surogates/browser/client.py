@@ -160,6 +160,39 @@ return {{dialogs: __dialogs}};
 """
 
 
+class NotATextField(RuntimeError):
+    """Nothing was typed: the keyboard focus is not in a text field, so every key would be a site shortcut."""
+
+
+# Where the keyboard focus is, followed through shadow roots and same-origin
+# frames: null when it sits in a text field, else a short name for what holds
+# it.  A cross-origin frame can't be looked into and is let through.
+_FOCUS_OUTSIDE_A_FIELD_JS = """
+(() => {
+  const field = (e) => !!e && (e.isContentEditable
+    || (e.tagName === 'TEXTAREA' && !e.disabled && !e.readOnly)
+    || (e.tagName === 'INPUT' && !e.disabled && !e.readOnly
+        && !/^(button|checkbox|color|file|hidden|image|radio|range|reset|submit)$/i.test(e.type)));
+  let a = document.activeElement;
+  for (;;) {
+    if (a && a.shadowRoot && a.shadowRoot.activeElement) { a = a.shadowRoot.activeElement; continue; }
+    if (a && (a.tagName === 'IFRAME' || a.tagName === 'FRAME')) {
+      let inner = null;
+      try { inner = a.contentDocument && a.contentDocument.activeElement; } catch (e) { return null; }
+      if (!inner) return null;
+      a = inner; continue;
+    }
+    break;
+  }
+  if (field(a)) return null;
+  if (!a || a === document.body || a === document.documentElement) return 'the page itself';
+  const label = (a.getAttribute('aria-label') || a.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 40);
+  return a.tagName.toLowerCase() + (label ? ' "' + label + '"' : '');
+})()
+"""
+_NOT_A_TEXT_FIELD_RE = re.compile(r"not_a_text_field: (.*)")
+
+
 class SecretFieldRefused(RuntimeError):
     """A stored secret was not written: the field is not a secret one, or its page is not the credential's."""
 
@@ -755,19 +788,53 @@ return {
         returns 200, so every ``typed: true`` was a lie. CDP key events are
         delivered to the focused element and trigger its input handling, so
         the text actually lands.
+
+        The focus is checked in the same call, just before the first key:
+        keys that land outside a text field are the site's own shortcuts (on
+        x.com ``?`` opened keyboard shortcuts mid-reply and the reply went out
+        empty), so :class:`NotATextField` is raised with nothing typed.
         """
 
         opts = {"delay": delay_ms} if delay_ms else {}
         code = (
+            f"const __outside = await page.evaluate({json.dumps(_FOCUS_OUTSIDE_A_FIELD_JS)});\n"
+            "if (__outside) throw new Error('not_a_text_field: ' + __outside);\n"
             f"await page.keyboard.type({json.dumps(text)}, {json.dumps(opts)});\n"
             "return true;"
         )
-        await self._playwright_execute(code)
+        try:
+            await self._playwright_execute(code)
+        except RuntimeError as exc:
+            outside = _NOT_A_TEXT_FIELD_RE.search(str(exc))
+            if outside is None:
+                raise
+            raise NotATextField(outside.group(1).strip()) from None
 
     async def type_into_ref(self, ref: str, text: str, **kwargs: Any) -> None:
-        """Re-locate a ref, click it to focus, then type text."""
+        """Re-locate a ref, click it, put the focus in its text field, then type text.
 
-        await self._act_click_on_entry(self._resolve_ref(ref))
+        A click on a rich editor's wrapper or label often leaves the focus on
+        the page, so the field the ref names (itself, the editable inside it,
+        or the one around it) is focused directly before typing.
+        """
+
+        entry = self._resolve_ref(ref)
+        await self._act_click_on_entry(entry)
+        await self._click(_bounded_click(self._ref_object_js(entry) + """
+await cdp.send('Runtime.callFunctionOn', {
+  objectId: objectId,
+  functionDeclaration: function () {
+    const doc = this.ownerDocument;
+    let a = doc.activeElement;
+    while (a && a.shadowRoot && a.shadowRoot.activeElement) a = a.shadowRoot.activeElement;
+    if (a && (a === this || this.contains(a) || a.contains(this)) && (a.isContentEditable || /^(INPUT|TEXTAREA)$/.test(a.tagName))) return;
+    const target = (this.isContentEditable || /^(INPUT|TEXTAREA)$/.test(this.tagName)) ? this
+      : (this.querySelector && this.querySelector('[contenteditable=""], [contenteditable="true"], textarea, input:not([type=hidden])'))
+        || (this.closest && this.closest('[contenteditable=""], [contenteditable="true"]'));
+    if (target) target.focus();
+  }.toString(),
+});
+"""))
         await self.type_text(text, **kwargs)
 
     async def fill_secret(self, ref: str, secret: str, *, origins: list[str]) -> None:
