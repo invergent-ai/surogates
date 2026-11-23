@@ -447,3 +447,56 @@ async def test_a_test_chats_sandbox_spec_carries_its_toolkits():
         tenant = SimpleNamespace(org_id=ORG, user_id=USER, asset_root="/tmp/test")
         spec = await _build_session_sandbox_spec(session, tenant, str(session.id))
         assert spec.test_toolkits == want
+
+
+# --- every site that mints a token for a test chat carries its toolkits ---------
+
+TEST_SPEC_TOOLKITS = ["one_drive"]
+
+
+def test_the_docker_and_k8s_mints_carry_the_toolkits(monkeypatch):
+    from surogates.sandbox.base import SandboxSpec
+    from surogates.sandbox.docker import DockerSandbox
+    from surogates.sandbox.kubernetes import K8sSandbox
+
+    monkeypatch.setenv("SUROGATES_JWT_SECRET", "test-secret")
+    spec = SandboxSpec(env={"ORG_ID": str(ORG), "USER_ID": str(USER)}, simulated=True, test_toolkits=TEST_SPEC_TOOLKITS)
+    assert _claims(DockerSandbox._mint_mcp_token(SimpleNamespace(), spec, uuid4().hex))["test_toolkits"] == TEST_SPEC_TOOLKITS
+    pod = K8sSandbox(mcp_proxy_url="http://proxy")._build_pod_manifest(uuid4().hex, "pod", "secret", spec, executor_token="t")
+    env = {e.name: e.value for e in pod.spec.containers[0].env}
+    assert _claims(env["MCP_PROXY_TOKEN"])["test_toolkits"] == TEST_SPEC_TOOLKITS
+
+
+async def test_the_worker_and_expert_mints_carry_the_toolkits(proxy, monkeypatch):
+    from surogates.governance.policy import PolicyDecision
+    from surogates.sandbox.base import SandboxSpec
+    from surogates.sandbox.docker import DockerSandbox
+    from surogates.tools.router import ToolRouter
+
+    app, _ = proxy
+    config = {"test_mode": {"scratch": None, "toolkits": TEST_SPEC_TOOLKITS}}
+    minted: list[dict] = []
+    real = create_sandbox_token
+
+    def spy(*args, **kwargs):
+        minted.append(kwargs)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr("surogates.orchestrator.mcp_client.create_sandbox_token", spy)
+    registry, mcp = _proxy_client(app)
+    try:
+        await registry.dispatch(FETCH, {}, tenant=TENANT, session_id=SESSION, session_config=config, simulation_read=True)
+    finally:
+        await mcp.close()
+    assert minted[0]["test_toolkits"] == TEST_SPEC_TOOLKITS
+
+    # The expert sandbox's spec (tools/router.py), then its token.
+    allow = SimpleNamespace(check=lambda name, *a, **k: PolicyDecision(allowed=True, reason="", tool_name=name))
+    pool = SimpleNamespace(ensure=AsyncMock(), execute=AsyncMock(return_value="{}"))
+    await ToolRouter(ToolRegistry(), pool, allow).execute(
+        name="terminal", arguments={"command": "ls"},
+        tenant=SimpleNamespace(sandbox_spec=SandboxSpec(env={"ORG_ID": str(ORG), "USER_ID": str(USER)})),
+        session_id=SESSION, session_config=config,
+    )
+    spec = pool.ensure.await_args.args[1]
+    assert _claims(DockerSandbox._mint_mcp_token(SimpleNamespace(), spec, uuid4().hex))["test_toolkits"] == TEST_SPEC_TOOLKITS

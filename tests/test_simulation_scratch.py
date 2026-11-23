@@ -405,19 +405,39 @@ def _cfg(**tm):
     return {"test_mode": {"scratch": SCOPE, **tm}}
 
 
+def _advertised(tool: str) -> str:
+    """The name the proxy advertises for a router tool: debranded, as pool.py builds it."""
+    from surogates.mcp_proxy.loader import COMPOSIO_SERVER_NAME, debrand_composio_text
+    from surogates.tools.mcp.names import fit_tool_name
+
+    return fit_tool_name(debrand_composio_text(COMPOSIO_SERVER_NAME.replace("-", "_")), debrand_composio_text(tool))
+
+
 def test_unchosen_composio_call_rules():
     from surogates.simulation.side_effects import unchosen_composio_call as u
 
+    execute = _advertised("COMPOSIO_MULTI_EXECUTE_TOOL")
+    assert execute == "mcp__tool_router__MULTI_EXECUTE_TOOL"
     cfg = _cfg(toolkits=["one_drive"])
-    assert u(ROUTER, _call("ONE_DRIVE_LIST_FOLDER_CHILDREN"), cfg) is None
-    assert u(ROUTER, _call("OUTLOOK_LIST_MESSAGES"), cfg) == "OUTLOOK_LIST_MESSAGES"
+    assert u(execute, _call("ONE_DRIVE_LIST_FOLDER_CHILDREN"), cfg) is None
+    assert u(execute, _call("OUTLOOK_LIST_MESSAGES"), cfg) == "OUTLOOK_LIST_MESSAGES"
     mixed = {"tools": [{"tool_slug": "ONE_DRIVE_LIST_FOLDER_CHILDREN"}, {"tool_slug": "OUTLOOK_LIST_MESSAGES"}]}
-    assert u(ROUTER, mixed, cfg) == "OUTLOOK_LIST_MESSAGES"
-    assert u(ROUTER, {"tools": "x"}, cfg) is not None
+    assert u(execute, mixed, cfg) == "OUTLOOK_LIST_MESSAGES"
+    assert u(execute, {"tools": "x"}, cfg) is not None
     assert u("mcp__tool_router__OUTLOOK_SEND_EMAIL", {}, cfg) == "OUTLOOK_SEND_EMAIL"
-    assert u(ROUTER, _call("ONE_DRIVE_LIST_FOLDER_CHILDREN"), _cfg()) is not None
-    assert u(ROUTER, _call("OUTLOOK_LIST_MESSAGES"), {}) is None
+    assert u(execute, _call("ONE_DRIVE_LIST_FOLDER_CHILDREN"), _cfg()) is not None
+    assert u(execute, _call("OUTLOOK_LIST_MESSAGES"), {}) is None
+    for meta in ("SEARCH_TOOLS", "GET_TOOL_SCHEMAS", "MANAGE_CONNECTIONS", "REMOTE_WORKBENCH", "REMOTE_BASH_TOOL"):
+        for branded in (False, True):
+            name = _advertised(("COMPOSIO_" if branded else "") + meta)
+            assert u(name, {}, cfg) is None and u(name, {}, _cfg()) is None
     assert u("mcp__tool_router__COMPOSIO_SEARCH_TOOLS", {}, cfg) is None
+
+
+@pytest.mark.asyncio
+async def test_decide_still_fakes_the_debranded_workbench_and_bash():
+    for tool in ("REMOTE_WORKBENCH", "REMOTE_BASH_TOOL"):
+        assert await decide(_advertised(tool), None, llm=None, args={}, scratch=SCOPE)
 
 
 @pytest.mark.asyncio

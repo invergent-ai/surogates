@@ -144,6 +144,12 @@ async def decide(
     return await _cached(key, name, description, annotations, llm)
 
 
+# The router's own tools that only search, describe, plan or manage connections (debranded names).
+_ROUTER_META_TOOLS = frozenset({
+    "SEARCH_TOOLS", "GET_TOOL_SCHEMAS", "CREATE_PLAN", "MANAGE_CONNECTIONS", "WAIT_FOR_CONNECTIONS",
+})
+
+
 def chosen_toolkits(config: dict | None) -> list[str] | None:
     """A test chat's chosen Composio toolkits (``[]`` when none were sent); ``None`` outside a test chat."""
     if not is_test_mode(config):
@@ -157,11 +163,13 @@ def unchosen_composio_call(name: str, args: Any, config: dict | None) -> str | N
     chosen = chosen_toolkits(config)
     if chosen is None or not name.startswith(_ROUTER_PREFIXES):
         return None
-    tool = name.rsplit("__", 1)[-1].upper()
+    tool = name.rsplit("__", 1)[-1].upper().removeprefix("COMPOSIO_")  # the proxy advertises them debranded
     if "EXECUTE" in tool:
         slugs = router_slugs(args) or [name]
+    elif tool in _ROUTER_META_TOOLS or "WORKBENCH" in tool or "BASH" in tool:
+        return None  # not an app call; decide() fakes the workbench and bash executors
     else:
-        slugs = [] if tool.startswith("COMPOSIO_") else [tool]
+        slugs = [tool]  # an unknown name is treated as an app slug: fail closed
     return next((s for s in slugs if not any(s.upper().startswith(t.upper() + "_") for t in chosen)), None)
 
 
