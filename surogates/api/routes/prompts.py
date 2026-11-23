@@ -57,7 +57,8 @@ _KEEL_KEY_PREFIX = "keel:"
 # Bumped when test_mode's meaning changes.  A runtime that predates test
 # mode has no capabilities route, and its PromptRequest silently drops the
 # unknown field, so a client must check this before sending a test chat.
-TEST_MODE_VERSION = 1
+# 2: test_mode.toolkits enforced.
+TEST_MODE_VERSION = 2
 
 
 # ---------------------------------------------------------------------------

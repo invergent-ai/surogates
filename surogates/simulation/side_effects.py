@@ -159,7 +159,7 @@ def chosen_toolkits(config: dict | None) -> list[str] | None:
 
 
 def unchosen_composio_call(name: str, args: Any, config: dict | None) -> str | None:
-    """In a test chat, the first Composio app call outside ``test_mode.toolkits`` (none chosen = all); else ``None``."""
+    """In a test chat, the first Composio app call outside ``test_mode.toolkits`` (none chosen = none); else ``None``."""
     chosen = chosen_toolkits(config)
     if chosen is None or not name.startswith(_ROUTER_PREFIXES):
         return None
