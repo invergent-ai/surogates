@@ -17,11 +17,10 @@ out of training-data exports.
 from __future__ import annotations
 
 import logging
+from typing import Annotated
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from typing import Annotated
-
 from pydantic import BaseModel, Field, StringConstraints
 from sqlalchemy.exc import IntegrityError
 

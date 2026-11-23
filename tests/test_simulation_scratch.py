@@ -413,3 +413,26 @@ async def test_a_toolkit_outside_the_chosen_ones_is_faked_even_a_read():
 @pytest.mark.asyncio
 async def test_missing_toolkits_fails_closed():
     assert await decide(ROUTER, None, llm=None, scratch=SCOPE, toolkits=[], args=_call("ONE_DRIVE_LIST_FOLDER_CHILDREN"))
+
+
+@pytest.mark.asyncio
+async def test_the_glue_fails_closed_on_missing_toolkits_and_runs_a_chosen_read():
+    from types import SimpleNamespace
+
+    from surogates.harness.tool_exec import _simulation_changes
+
+    tools = SimpleNamespace(get=lambda _n: None)
+    args = call("ONE_DRIVE_LIST_FOLDER_CHILDREN", {})
+    session = SimpleNamespace(config={"test_mode": {"scratch": SCOPE}})
+    assert await _simulation_changes(ROUTER, args, session, tools, object(), "m") is True
+    session = SimpleNamespace(config={"test_mode": {"scratch": SCOPE, "toolkits": ["one_drive"]}})
+    assert await _simulation_changes(ROUTER, args, session, tools, object(), "m") is False
+
+
+@pytest.mark.asyncio
+async def test_a_mixed_or_malformed_execute_is_faked():
+    kw = dict(llm=None, scratch=SCOPE, toolkits=["one_drive"])
+    mixed = {"tools": [{"tool_slug": "ONE_DRIVE_LIST_FOLDER_CHILDREN", "arguments": {}},
+                       {"tool_slug": "OUTLOOK_LIST_MESSAGES", "arguments": {}}]}
+    assert await decide(ROUTER, None, args=mixed, **kw)
+    assert await decide(ROUTER, None, args={"tools": "x"}, **kw)
