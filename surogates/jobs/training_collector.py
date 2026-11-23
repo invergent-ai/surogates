@@ -26,6 +26,7 @@ from typing import Any
 from uuid import UUID
 
 from surogates.session.events import EventType
+from surogates.simulation.side_effects import is_simulated
 
 logger = logging.getLogger(__name__)
 
@@ -147,6 +148,9 @@ class TrainingDataCollector:
         )
 
         for session in sessions:
+            # Test-mode and simulated chats are not real usage.
+            if is_simulated(session.config):
+                continue
             session_examples = await self._extract_from_session(
                 session_id=session.id,
                 expert_name=expert_name,
@@ -347,6 +351,9 @@ class TrainingDataCollector:
         skipped_thumbs_down = 0
 
         for session_id, session_invocations in by_session.items():
+            # Test-mode and simulated chats are not real usage.
+            if is_simulated((await self._session_store.get_session(session_id)).config):
+                continue
             if exclude_tainted:
                 if await self._session_store.session_has_taint(session_id):
                     skipped_tainted += 1
