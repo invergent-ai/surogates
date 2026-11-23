@@ -108,20 +108,13 @@ async def _cached(key: str, name: str, description: str, annotations: dict | Non
 
 async def decide(
     name: str, annotations: dict | None, *, llm: Judge | None, args: Any = None, description: str = "",
-    scratch: dict | None = None, toolkits: list[str] | None = None,
+    scratch: dict | None = None,
 ) -> bool:
     """Whether calling *name* would change something; any doubt counts as yes.
 
     With *scratch* (a test chat's copy), a router call's file change inside the copy counts as safe to run,
     and no LLM is asked: a test chat fakes every tool its name does not show to be a read.
-    *toolkits* (a test chat's chosen accounts; ``None`` = not restricted) fakes any Composio app call
-    outside them, read or write.
     """
-    if toolkits is not None and name.startswith(_ROUTER_PREFIXES):
-        tool = name.rsplit("__", 1)[-1].upper()
-        slugs = router_slugs(args) if "EXECUTE" in tool else [] if tool.startswith("COMPOSIO_") else [tool]
-        if any(not any(s.upper().startswith(t.upper() + "_") for t in toolkits) for s in slugs):
-            return True
     if scratch:
         llm = None
     if name.startswith(_ROUTER_PREFIXES):
@@ -149,6 +142,19 @@ async def decide(
             return any(verdicts)
     key = f"{name}:{hashlib.sha256(description.encode()).hexdigest()[:16]}"
     return await _cached(key, name, description, annotations, llm)
+
+
+def unchosen_composio_call(name: str, args: Any, config: dict | None) -> str | None:
+    """In a test chat, the first Composio app call outside ``test_mode.toolkits`` (none chosen = all); else ``None``."""
+    if not is_test_mode(config) or not name.startswith(_ROUTER_PREFIXES):
+        return None
+    chosen = (config["test_mode"].get("toolkits") or []) if isinstance(config["test_mode"], dict) else []
+    tool = name.rsplit("__", 1)[-1].upper()
+    if "EXECUTE" in tool:
+        slugs = router_slugs(args) or [name]
+    else:
+        slugs = [] if tool.startswith("COMPOSIO_") else [tool]
+    return next((s for s in slugs if not any(s.upper().startswith(t.upper() + "_") for t in chosen)), None)
 
 
 def router_slugs(args: Any) -> list[str]:

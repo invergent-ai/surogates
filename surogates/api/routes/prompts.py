@@ -99,7 +99,7 @@ class TestMode(BaseModel):
     __test__ = False  # not a pytest class
 
     scratch: ScratchScope | None = None
-    # Composio toolkits the chat may use; anything else is faked (missing = none).
+    # Composio toolkits the chat may use; anything else is refused (missing = none).
     toolkits: list[Annotated[str, StringConstraints(pattern=r"^[a-z0-9_]{1,64}$")]] | None = None
 
 

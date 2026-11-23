@@ -126,7 +126,7 @@ async def test_junk_batch_entry_is_faked_not_a_crash():
 # --- the agent's own platform-state tools ------------------------------------
 
 
-async def _run_builtin(name: str, config: dict, handler):
+async def _run_builtin(name: str, config: dict, handler, arguments: str = "{}"):
     import json
     from types import SimpleNamespace
     from unittest.mock import AsyncMock
@@ -148,7 +148,7 @@ async def _run_builtin(name: str, config: dict, handler):
     store.advance_harness_cursor = AsyncMock()
     session = SimpleNamespace(id=uuid4(), config={"workspace_path": "", **config}, agent_id="a")
     result = await execute_single_tool(
-        {"id": "c1", "function": {"name": name, "arguments": "{}"}},
+        {"id": "c1", "function": {"name": name, "arguments": arguments}},
         session=session,
         lease=SimpleNamespace(lease_token=uuid4()),
         store=store,
@@ -401,38 +401,35 @@ def _call(slug, args=None):
     return {"tools": [{"tool_slug": slug, "arguments": args or {}}]}
 
 
-@pytest.mark.asyncio
-async def test_a_toolkit_outside_the_chosen_ones_is_faked_even_a_read():
-    kw = dict(llm=None, scratch=SCOPE, toolkits=["one_drive"])
-    assert await decide(ROUTER, None, args=_call("OUTLOOK_LIST_MESSAGES"), **kw)
-    assert not await decide(ROUTER, None, args=_call("ONE_DRIVE_LIST_FOLDER_CHILDREN"), **kw)
-    assert await decide("mcp__tool_router__OUTLOOK_LIST_MESSAGES", None, args={}, **kw)
-    assert not await decide("mcp__tool_router__COMPOSIO_SEARCH_TOOLS", None, args={}, **kw)
+def _cfg(**tm):
+    return {"test_mode": {"scratch": SCOPE, **tm}}
+
+
+def test_unchosen_composio_call_rules():
+    from surogates.simulation.side_effects import unchosen_composio_call as u
+
+    cfg = _cfg(toolkits=["one_drive"])
+    assert u(ROUTER, _call("ONE_DRIVE_LIST_FOLDER_CHILDREN"), cfg) is None
+    assert u(ROUTER, _call("OUTLOOK_LIST_MESSAGES"), cfg) == "OUTLOOK_LIST_MESSAGES"
+    mixed = {"tools": [{"tool_slug": "ONE_DRIVE_LIST_FOLDER_CHILDREN"}, {"tool_slug": "OUTLOOK_LIST_MESSAGES"}]}
+    assert u(ROUTER, mixed, cfg) == "OUTLOOK_LIST_MESSAGES"
+    assert u(ROUTER, {"tools": "x"}, cfg) is not None
+    assert u("mcp__tool_router__OUTLOOK_SEND_EMAIL", {}, cfg) == "OUTLOOK_SEND_EMAIL"
+    assert u(ROUTER, _call("ONE_DRIVE_LIST_FOLDER_CHILDREN"), _cfg()) is not None
+    assert u(ROUTER, _call("OUTLOOK_LIST_MESSAGES"), {}) is None
+    assert u("mcp__tool_router__COMPOSIO_SEARCH_TOOLS", {}, cfg) is None
 
 
 @pytest.mark.asyncio
-async def test_missing_toolkits_fails_closed():
-    assert await decide(ROUTER, None, llm=None, scratch=SCOPE, toolkits=[], args=_call("ONE_DRIVE_LIST_FOLDER_CHILDREN"))
+async def test_dispatch_refuses_an_unchosen_account_without_calling_it():
+    import json
+    from unittest.mock import AsyncMock
 
-
-@pytest.mark.asyncio
-async def test_the_glue_fails_closed_on_missing_toolkits_and_runs_a_chosen_read():
-    from types import SimpleNamespace
-
-    from surogates.harness.tool_exec import _simulation_changes
-
-    tools = SimpleNamespace(get=lambda _n: None)
-    args = call("ONE_DRIVE_LIST_FOLDER_CHILDREN", {})
-    session = SimpleNamespace(config={"test_mode": {"scratch": SCOPE}})
-    assert await _simulation_changes(ROUTER, args, session, tools, object(), "m") is True
-    session = SimpleNamespace(config={"test_mode": {"scratch": SCOPE, "toolkits": ["one_drive"]}})
-    assert await _simulation_changes(ROUTER, args, session, tools, object(), "m") is False
-
-
-@pytest.mark.asyncio
-async def test_a_mixed_or_malformed_execute_is_faked():
-    kw = dict(llm=None, scratch=SCOPE, toolkits=["one_drive"])
-    mixed = {"tools": [{"tool_slug": "ONE_DRIVE_LIST_FOLDER_CHILDREN", "arguments": {}},
-                       {"tool_slug": "OUTLOOK_LIST_MESSAGES", "arguments": {}}]}
-    assert await decide(ROUTER, None, args=mixed, **kw)
-    assert await decide(ROUTER, None, args={"tools": "x"}, **kw)
+    handler = AsyncMock(return_value="{}")
+    args = json.dumps(_call("OUTLOOK_LIST_MESSAGES"))
+    result, event = await _run_builtin(ROUTER, _cfg(toolkits=["one_drive"]), handler, args)
+    handler.assert_not_awaited()
+    assert result == {"error": "No connected account for OUTLOOK_LIST_MESSAGES in this chat."}
+    assert "simulated" not in event
+    await _run_builtin(ROUTER, _cfg(toolkits=["one_drive"]), handler, json.dumps(_call("ONE_DRIVE_LIST_FOLDER_CHILDREN")))
+    handler.assert_awaited_once()

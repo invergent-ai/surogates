@@ -41,7 +41,7 @@ from surogates.runtime.governance import CASE_ITEM_TOOLS, CASE_STEP_TOOLS, floor
 from surogates.runtime.turn_slots import turn_activity
 from surogates.sandbox.history import PROJECT_MOUNT
 from surogates.simulation.scratch import STATE_TOOLS
-from surogates.simulation.side_effects import decide, is_simulated, is_test_mode, summary_judge
+from surogates.simulation.side_effects import decide, is_simulated, unchosen_composio_call, is_test_mode, summary_judge
 from surogates.storage.tenant import boundary_workspace_prefix
 from surogates.workstreams import THREAD_REFUSED_AGENT_TYPES, is_project_thread, sub_agent, thread_refusal, under_a_thread
 from surogates.workstreams.stream import project_of
@@ -343,7 +343,6 @@ async def _simulation_changes(
         args=tool_args,
         description=entry.schema.description if entry else "",
         scratch=(config.get("test_mode") or {}).get("scratch"),
-        toolkits=((config.get("test_mode") or {}).get("toolkits") or []) if test_mode else None,
     )
 
 
@@ -1639,6 +1638,8 @@ async def _run_single_tool(
             # tool also acts off it (it creates an artifact, it pays for a
             # model call), and running it again would do that again.
             result_content = interrupted(tool_name)
+        elif (unchosen := unchosen_composio_call(tool_name, tool_args, session.config)) is not None:
+            result_content = json.dumps({"error": f"No connected account for {unchosen} in this chat."})
         elif (simulation_changes := await _simulation_changes(
             tool_name, tool_args, session, tools, summary_llm_client, summary_model,
         )):
