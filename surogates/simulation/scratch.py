@@ -162,6 +162,11 @@ REFERENCE_KEYS = _DRIVE_KEYS | frozenset({
     "item_id", "itemId", "folder_item_id", "parent_folder", "folder", "folder_path",
     "parentReference.id", "parent_reference_id", "server_relative_url", "site_name",
 })
+# Which drive a call goes through can also be named by site, user or group.  We
+# can't tell which drive that is, so such a call runs for real only when every
+# item it touches is named by an id from the copy (an id exists on one drive;
+# elsewhere the call just fails).  A path would resolve on that unknown drive.
+_DRIVE_CONTEXT_KEYS = frozenset({"siteId", "site_id", "userId", "user_id", "groupId", "group_id"})
 # A name lands in a path ("<folder>/<name>"), so it must be exactly one segment.
 _NAME_KEYS = frozenset({"name", "file_name", "file.name"})
 _HARMLESS = frozenset({
@@ -241,8 +246,13 @@ def inside_scratch(slug: str, args: dict, scratch: dict) -> bool:
         return False
     known = {scratch.get("root_id"), *(scratch.get("item_ids") or ())}
     refs: list[tuple[str, str]] = []
+    via_context = False
     for key, value in _leaves(args):
-        if key in REFERENCE_KEYS:
+        if key in _DRIVE_CONTEXT_KEYS:
+            if not isinstance(value, str) or not value:
+                return False
+            via_context = True
+        elif key in REFERENCE_KEYS:
             if not _reference_ok(key, value, scratch, known):
                 return False
             refs.append((key, value))
@@ -254,6 +264,8 @@ def inside_scratch(slug: str, args: dict, scratch: dict) -> bool:
         elif isinstance(value, str) and value:
             return False  # an unknown key holding text may be a reference ("targetFolderId": "ORIG")
     targets = [value for key, value in refs if key not in _DRIVE_KEYS]
+    if via_context:
+        return bool(targets) and all(value in known for value in targets)
     # A call that names nothing in the copy would act on a default location.
     # A path resolves in the default drive unless a drive (already checked) is named.
     return bool(targets) and (len(targets) < len(refs) or all(value in known for value in targets))

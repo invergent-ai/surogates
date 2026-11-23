@@ -470,8 +470,22 @@ def test_metadata_rename_outside_copy_is_faked():
     assert not inside_scratch(META, {"item_id": "F1", "drive_id": "OTHER", "name": "a.pdf"}, SCOPE)
     assert not inside_scratch(META, {"item_id": "F1", "name": "a.pdf", "parent_reference_id": "ORIG"}, SCOPE)
     assert not inside_scratch(META, {"item_id": "F1", "name": "../a.pdf"}, SCOPE)
-    assert not inside_scratch(META, {"item_id": "F1", "name": "a.pdf", "site_id": "S"}, SCOPE)
 
 
-def test_move_with_an_unknown_site_key_stays_faked():
-    assert not inside_scratch("ONE_DRIVE_MOVE_ITEM", {**RENAME, "siteId": "c7fd62ca"}, SCOPE)
+def test_site_named_call_on_copy_ids_is_real():
+    # The skill's own recipe (live run 5): the item and its parent named by id from the copy.
+    assert inside_scratch("ONE_DRIVE_MOVE_ITEM", {"name": "x.pdf", "itemId": "F1", "siteId": "c7fd62ca",
+                                                  "parentReference": {"id": "R1"}}, SCOPE)
+    assert inside_scratch(META, {"item_id": "F2", "name": "a.pdf", "site_id": "S"}, SCOPE)
+
+
+def test_site_named_call_outside_copy_or_by_path_is_faked():
+    assert not inside_scratch("ONE_DRIVE_MOVE_ITEM", {"name": "x.pdf", "itemId": "ORIG", "siteId": "S",
+                                                      "parentReference": {"id": "R1"}}, SCOPE)
+    assert not inside_scratch("ONE_DRIVE_MOVE_ITEM", {"name": "x.pdf", "itemId": "F1", "siteId": "S",
+                                                      "parentReference": {"id": "ORIG"}}, SCOPE)
+    # A path would resolve on the site's (unknown) drive.
+    assert not inside_scratch(META, {"item_id": "F1", "name": "a.pdf", "site_id": "S",
+                                     "parent_reference_id": "/Surogate - teste/r1/0-1/Fise"}, SCOPE)
+    assert not inside_scratch(META, {"item_id": "F1", "name": "a.pdf", "site_id": ""}, SCOPE)
+    assert not inside_scratch(META, {"name": "a.pdf", "site_id": "S"}, SCOPE)
