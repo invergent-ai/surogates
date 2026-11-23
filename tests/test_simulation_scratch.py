@@ -455,7 +455,7 @@ async def test_dispatch_refuses_an_unchosen_account_without_calling_it():
     handler.assert_awaited_once()
 
 
-# The agent's own first choice in the 2026-11-23 live run (Composio schema keys).
+# The agent's own first choice (Composio schema keys).
 META = "ONE_DRIVE_UPDATE_DRIVE_ITEM_METADATA"
 
 
@@ -473,7 +473,7 @@ def test_metadata_rename_outside_copy_is_faked():
 
 
 def test_site_named_call_on_copy_ids_is_real():
-    # The skill's own recipe (live run 5): the item and its parent named by id from the copy.
+    # The skill's own recipe: the item and its parent named by id from the copy.
     assert inside_scratch("ONE_DRIVE_MOVE_ITEM", {"name": "x.pdf", "itemId": "F1", "siteId": "c7fd62ca",
                                                   "parentReference": {"id": "R1"}}, SCOPE)
     assert inside_scratch(META, {"item_id": "F2", "name": "a.pdf", "site_id": "S"}, SCOPE)
