@@ -17,7 +17,7 @@ from uuid import UUID
 
 import httpx
 
-from surogates.simulation.side_effects import is_simulated
+from surogates.simulation.side_effects import chosen_toolkits, is_simulated
 from surogates.tenant.auth.jwt import create_sandbox_token
 from surogates.tools.mcp.names import mcp_toolset, sanitize_mcp_name_component
 from surogates.tools.registry import ToolRegistry, ToolSchema
@@ -257,6 +257,7 @@ class McpProxyClient:
                 agent_id=str(handler_agent_id) if handler_agent_id else None,
                 is_service_account=tenant.user_id is None,
                 simulated=simulated,
+                test_toolkits=chosen_toolkits(kwargs.get("session_config")),
                 simulation_read=tool_name if simulated and kwargs.get("simulation_read") else None,
             )
             headers = {"Authorization": f"Bearer {token}"}

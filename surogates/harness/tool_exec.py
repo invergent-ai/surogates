@@ -41,7 +41,7 @@ from surogates.runtime.governance import CASE_ITEM_TOOLS, CASE_STEP_TOOLS, floor
 from surogates.runtime.turn_slots import turn_activity
 from surogates.sandbox.history import PROJECT_MOUNT
 from surogates.simulation.scratch import STATE_TOOLS
-from surogates.simulation.side_effects import decide, is_simulated, unchosen_composio_call, is_test_mode, summary_judge
+from surogates.simulation.side_effects import chosen_toolkits, decide, is_simulated, is_test_mode, summary_judge, unchosen_composio_call
 from surogates.storage.tenant import boundary_workspace_prefix
 from surogates.workstreams import THREAD_REFUSED_AGENT_TYPES, is_project_thread, sub_agent, thread_refusal, under_a_thread
 from surogates.workstreams.stream import project_of
@@ -220,6 +220,7 @@ async def _build_session_sandbox_spec(
             raise SandboxUnavailableError(str(exc), classification="config") from None
         if image is not None:
             sandbox_spec.session_image, sandbox_spec.image_workdir = image.image, image.workdir
+    sandbox_spec.test_toolkits = chosen_toolkits(session.config)
     await _apply_ssh_access(session, tenant, sandbox_spec, credential_vault)
     return sandbox_spec
 

@@ -144,11 +144,19 @@ async def decide(
     return await _cached(key, name, description, annotations, llm)
 
 
+def chosen_toolkits(config: dict | None) -> list[str] | None:
+    """A test chat's chosen Composio toolkits (``[]`` when none were sent); ``None`` outside a test chat."""
+    if not is_test_mode(config):
+        return None
+    tm = config["test_mode"]
+    return list(tm.get("toolkits") or []) if isinstance(tm, dict) else []
+
+
 def unchosen_composio_call(name: str, args: Any, config: dict | None) -> str | None:
     """In a test chat, the first Composio app call outside ``test_mode.toolkits`` (none chosen = all); else ``None``."""
-    if not is_test_mode(config) or not name.startswith(_ROUTER_PREFIXES):
+    chosen = chosen_toolkits(config)
+    if chosen is None or not name.startswith(_ROUTER_PREFIXES):
         return None
-    chosen = (config["test_mode"].get("toolkits") or []) if isinstance(config["test_mode"], dict) else []
     tool = name.rsplit("__", 1)[-1].upper()
     if "EXECUTE" in tool:
         slugs = router_slugs(args) or [name]

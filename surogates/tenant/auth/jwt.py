@@ -213,6 +213,7 @@ def create_sandbox_token(
     is_service_account: bool = False,
     simulated: bool = False,
     simulation_read: str | None = None,
+    test_toolkits: list[str] | None = None,
 ) -> str:
     """Create a short-lived token for sandbox-to-MCP-proxy authentication.
 
@@ -251,6 +252,9 @@ def create_sandbox_token(
     if simulation_read:
         # Only a worker mints this: the harness judged this MCP call a read in a simulation.
         payload["simulation_read"] = simulation_read
+    if test_toolkits is not None:
+        # A test chat's chosen Composio accounts; [] means none (fail closed).
+        payload["test_toolkits"] = test_toolkits
     return jwt.encode(payload, _get_secret(), algorithm=_ALGORITHM)
 
 

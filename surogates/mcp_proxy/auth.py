@@ -39,6 +39,8 @@ class ProxyAuthContext:
     simulated: bool = False
     # The one MCP tool the worker's harness judged a read for a simulated session.
     simulation_read: str | None = None
+    # A test chat's chosen Composio toolkits; ``None`` = not a test chat.
+    test_toolkits: list[str] | None = None
 
 
 async def get_proxy_auth(request: Request) -> ProxyAuthContext:
@@ -83,4 +85,9 @@ async def get_proxy_auth(request: Request) -> ProxyAuthContext:
         agent_id=payload.get("agent_id"),
         simulated=payload.get("simulated") is True,
         simulation_read=payload.get("simulation_read"),
+        test_toolkits=(
+            None if "test_toolkits" not in payload
+            else [t for t in payload["test_toolkits"] if isinstance(t, str)] if isinstance(payload["test_toolkits"], list)
+            else []
+        ),
     )

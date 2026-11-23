@@ -396,3 +396,54 @@ async def test_an_experts_sandbox_in_a_simulation_gets_the_claim(monkeypatch):
         assert _claims(token).get("simulated", False) is simulated
     # The tenant's spec is shared by its real sessions: it stays unmarked.
     assert shared.simulated is False
+
+
+# --- a test chat's chosen accounts, enforced for scripts in the sandbox too ---
+
+ROUTER_EXEC = "mcp__tool_router__COMPOSIO_MULTI_EXECUTE_TOOL"
+
+
+def test_the_chosen_toolkits_claim_round_trips(monkeypatch):
+    from surogates.mcp_proxy.auth import ProxyAuthContext  # noqa: F401
+
+    monkeypatch.setenv("SUROGATES_JWT_SECRET", "test-secret")
+    assert "test_toolkits" not in _claims(create_sandbox_token(ORG, USER, SESSION))
+    assert _claims(create_sandbox_token(ORG, USER, SESSION, test_toolkits=[]))["test_toolkits"] == []
+    assert _claims(create_sandbox_token(ORG, USER, SESSION, test_toolkits=["one_drive"]))["test_toolkits"] == ["one_drive"]
+
+
+async def test_the_proxy_refuses_an_unchosen_account_and_passes_a_chosen_read(proxy, monkeypatch):
+    app, upstream = proxy
+    app.state.pool = SimpleNamespace(resolve_call_target=lambda *a: ("srv", "tool", {}))
+    monkeypatch.setattr(proxy_routes, "_ensure_tenant_connected", AsyncMock(return_value=[{"name": ROUTER_EXEC}]))
+    ask = lambda slug, **c: _call_args(app, ROUTER_EXEC, {"tools": [{"tool_slug": slug, "arguments": {}}]}, **c)
+    refused = await ask("OUTLOOK_LIST_MESSAGES", test_toolkits=["one_drive"])
+    assert refused["error"] == "No connected account for OUTLOOK_LIST_MESSAGES in this chat."
+    upstream.assert_not_awaited()
+    assert app.state.audit_store.emit.await_args.kwargs["data"]["outcome"] == "refused"
+    assert (await ask("ONE_DRIVE_LIST_FOLDER_CHILDREN", test_toolkits=["one_drive"])).get("error") is None
+    upstream.assert_awaited_once()
+    # [] refuses every app call; an absent claim is not a test chat.
+    assert (await ask("ONE_DRIVE_LIST_FOLDER_CHILDREN", test_toolkits=[]))["error"]
+    assert (await ask("OUTLOOK_LIST_MESSAGES")).get("error") is None
+
+
+async def _call_args(app, name, arguments, **claims) -> dict:
+    token = create_sandbox_token(ORG, USER, SESSION, agent_id="agent-A", **claims)
+    async with _http(app) as client:
+        resp = await client.post(
+            "/mcp/v1/tools/call", json={"name": name, "arguments": arguments},
+            headers={"Authorization": f"Bearer {token}"}, params={"agent_id": "agent-A"},
+        )
+    return resp.json()
+
+
+async def test_a_test_chats_sandbox_spec_carries_its_toolkits():
+    from surogates.harness.tool_exec import _build_session_sandbox_spec
+
+    for tm, want in (({"toolkits": ["one_drive"]}, ["one_drive"]), ({"scratch": None}, []), (None, None)):
+        config = {"workspace_path": "", **({"test_mode": tm} if tm is not None else {})}
+        session = SimpleNamespace(id=uuid4(), config=config, agent_id="a")
+        tenant = SimpleNamespace(org_id=ORG, user_id=USER, asset_root="/tmp/test")
+        spec = await _build_session_sandbox_spec(session, tenant, str(session.id))
+        assert spec.test_toolkits == want
