@@ -8,12 +8,14 @@ import binascii
 import json
 import logging
 import mimetypes
+import re
 from contextvars import ContextVar
 from pathlib import PurePosixPath
 from typing import Any
 from urllib.parse import unquote, urljoin, urlparse
 
 import httpx
+import openai
 
 from surogates.devices.workspace import DeviceOperationError, said
 from surogates.harness.auxiliary_llm import create_without_reasoning
@@ -34,6 +36,13 @@ from surogates.tools.utils.workspace_sandbox import (
 )
 
 logger = logging.getLogger(__name__)
+
+#: The engine's whole message when the model it serves takes no images.
+_ENGINE_TAKES_NO_IMAGES = re.compile(r"At most 0 image\(s\) may be provided in one prompt\.( \(parameter=image\))?")
+CANNOT_VIEW_IMAGES = (
+    "This model cannot view images here. Do not retry this or another image; "
+    "check the file with text tools instead."
+)
 
 #: Where the storage route read an image, for a caller that keeps what was made of those bytes (the image cache).
 image_read_from: ContextVar[list[str] | None] = ContextVar("image_read_from", default=None)
@@ -162,7 +171,12 @@ async def _vision_analyze_handler(arguments: dict[str, Any], **kwargs: Any) -> s
     # Reading an image is perception; the calling agent reasons over the
     # answer with its own thinking. So no thinking here, and no sampling
     # values: the model's defaults (or what a user set for it) apply.
-    response = await create_without_reasoning(client, model=model, messages=messages)
+    try:
+        response = await create_without_reasoning(client, model=model, messages=messages)
+    except openai.BadRequestError as exc:
+        if not _engine_takes_no_images(exc):
+            raise
+        return _json_error(CANNOT_VIEW_IMAGES)
     content = _extract_response_content(response)
     if not content:
         return _json_error("Vision model returned an empty response")
@@ -176,6 +190,15 @@ async def _vision_analyze_handler(arguments: dict[str, Any], **kwargs: Any) -> s
         },
         ensure_ascii=False,
     )
+
+
+def _engine_takes_no_images(exc: openai.BadRequestError) -> bool:
+    """Whether this 400 is the engine saying its model takes no images, and nothing else."""
+    body = exc.body
+    if isinstance(body, dict) and isinstance(body.get("error"), dict):
+        body = body["error"]
+    message = body.get("message") if isinstance(body, dict) else None
+    return isinstance(message, str) and _ENGINE_TAKES_NO_IMAGES.fullmatch(message) is not None
 
 
 def _select_vision_client_and_model(
