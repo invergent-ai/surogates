@@ -23,7 +23,7 @@ from surogates.browser.base import (
     browser_credits_exhausted_result,
     browser_unavailable_result,
 )
-from surogates.browser.client import ClickTimeoutError, KernelBrowserClient, SecretFieldRefused
+from surogates.browser.client import ClickTimeoutError, KernelBrowserClient, NotATextField, SecretFieldRefused
 from surogates.browser.control import BrowserControlStore, paused_by_user_result
 from surogates.browser.pool import BrowserPool
 from surogates.browser.serialize import render_markdown
@@ -795,6 +795,8 @@ async def _browser_type_handler(
                 )
             except ClickTimeoutError as exc:
                 return _refused("click_timeout", str(exc))
+            except NotATextField as exc:
+                return _not_a_text_field(arguments["ref"], str(exc))
             if secret_field:
                 body["note"] = (
                     f"{arguments['ref']} is a secret field. When the value is "
@@ -802,8 +804,21 @@ async def _browser_type_handler(
                     "pass it as secret_ref so it never enters the conversation."
                 )
         else:
-            await client.type_text(arguments["text"], delay_ms=arguments.get("delay_ms", 0))
+            try:
+                await client.type_text(arguments["text"], delay_ms=arguments.get("delay_ms", 0))
+            except NotATextField as exc:
+                return _not_a_text_field(None, str(exc))
     return json.dumps(_noted(body, client))
+
+
+def _not_a_text_field(ref: str | None, holder: str) -> str:
+    where = f"{ref} took the click, but the" if ref else "The"
+    return _refused(
+        "not_a_text_field",
+        f"{where} keyboard focus is on {holder}, not in a text field, so nothing was typed: keys outside "
+        "a field are the site's shortcuts. Call browser_get_state and aim browser_type at the text box "
+        "itself; use browser_press_key for keys meant for the page.",
+    )
 
 
 async def _fill_secret(
