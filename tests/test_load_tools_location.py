@@ -10,13 +10,16 @@ from uuid import uuid4
 import pytest
 
 from surogates.governance.policy import GovernanceGate
-from surogates.harness.tool_exec import execute_single_tool
+from surogates.governance.saga import SagaOrchestrator
+from surogates.governance.saga.state_machine import SagaState
+from surogates.harness.tool_exec import SAGA_EXCLUDED_TOOLS, _is_saga_step, execute_single_tool
 from surogates.harness.tool_groups import loaded_by
 from surogates.sandbox.base import SandboxUnavailableError
 from surogates.session.events import EventType
 from surogates.tools.builtin import tool_groups
 from surogates.tools.registry import ToolRegistry
 from surogates.tools.router import TOOL_LOCATIONS, ToolLocation
+from surogates.workstreams import THREAD
 
 
 def _pool() -> SimpleNamespace:
@@ -24,6 +27,7 @@ def _pool() -> SimpleNamespace:
     return SimpleNamespace(
         ensure=AsyncMock(side_effect=SandboxUnavailableError("no sandbox")),
         execute=AsyncMock(return_value="{}"),
+        copy_fresh=lambda _owner: False,
     )
 
 
@@ -34,7 +38,7 @@ def _store() -> AsyncMock:
     return store
 
 
-async def _load(session, pool, store=None, groups=("browser",)) -> tuple[dict, dict]:
+async def _load(session, pool, store=None, groups=("browser",), saga=None) -> tuple[dict, dict]:
     tools = ToolRegistry()
     tool_groups.register(tools)
     call = {"id": "call_1", "function": {"name": "load_tools", "arguments": json.dumps({"groups": list(groups)})}}
@@ -47,6 +51,7 @@ async def _load(session, pool, store=None, groups=("browser",)) -> tuple[dict, d
         tenant=SimpleNamespace(org_id=session.org_id),
         governance_gate=GovernanceGate(),
         sandbox_pool=pool,
+        saga=saga,
     )
     return call, result
 
@@ -105,3 +110,43 @@ async def test_the_result_event_is_emitted_for_the_load() -> None:
     await _load(_session(), _pool(), store=store)
     kinds = [c.args[1] for c in store.emit_event.await_args_list]
     assert EventType.TOOL_CALL in kinds and EventType.TOOL_RESULT in kinds
+
+
+def _thread() -> SimpleNamespace:
+    session = _session()
+    session.config = {"workstream_role": THREAD}
+    return session
+
+
+@pytest.mark.asyncio
+async def test_a_load_in_a_cloud_thread_starts_no_sandbox_for_a_snapshot() -> None:
+    pool = SimpleNamespace(
+        ensure=AsyncMock(return_value="sandbox"), execute=AsyncMock(return_value='{"hash": "h"}'),
+        holds_copy=lambda _owner: True, copy_fresh=lambda _owner: False,
+    )
+    session, saga = _thread(), SagaOrchestrator()
+    current = saga.create_saga(session.id)
+    call, result = await _load(session, pool, saga=saga)
+    assert loaded_by([call], [result]) == {"browser"}
+    pool.ensure.assert_not_awaited()
+    pool.execute.assert_not_awaited()
+    assert current.steps == []
+
+
+@pytest.mark.asyncio
+async def test_a_stop_after_a_load_with_the_sandbox_down_leaves_nothing_to_undo() -> None:
+    session, saga = _thread(), SagaOrchestrator()
+    current = saga.create_saga(session.id)
+    await _load(session, _pool(), saga=saga)
+    assert await saga.compensate(current.saga_id, AsyncMock()) == []
+    assert current.state is SagaState.COMPLETED
+
+
+def test_a_load_stays_a_saga_step_on_the_computer_only() -> None:
+    assert _is_saga_step("load_tools", on_device=True) is True
+    assert _is_saga_step("load_tools", on_device=False) is False
+    # What a thread's turn end on the computer counts as work to land.
+    assert "load_tools" not in SAGA_EXCLUDED_TOOLS
+    for on_device in (True, False):
+        assert _is_saga_step("write_file", on_device=on_device) is True
+        assert _is_saga_step("read_file", on_device=on_device) is False

@@ -813,6 +813,15 @@ SAGA_EXCLUDED_TOOLS: frozenset[str] = frozenset({
 })
 
 
+def _is_saga_step(tool_name: str, *, on_device: bool) -> bool:
+    """Whether a call of *tool_name* is a saga step, with the snapshot a thread takes before one.
+
+    ``load_tools`` changes no file, and in the cloud a snapshot would start the
+    sandbox it runs without.  On the user's computer it stays a step as before.
+    """
+    return tool_name not in SAGA_EXCLUDED_TOOLS and (on_device or tool_name != LOAD_TOOLS)
+
+
 def _escape_invalid_chars_in_json_strings(raw: str) -> str:
     """Escape literal control characters inside JSON string values."""
     out: list[str] = []
@@ -1209,7 +1218,7 @@ async def _run_single_tool(
     allowed = session.config.get("tool_allow_list")
     snapshots = (
         saga is not None and replay_of is None
-        and tool_name not in SAGA_EXCLUDED_TOOLS and is_project_thread(session.config)
+        and _is_saga_step(tool_name, on_device=on_device) and is_project_thread(session.config)
         and (offered_tools is None or tool_name in offered_tools)
         and (not allowed or tool_name in allowed) and parse_error is None
         and thread_refuses(tool_name, tool_args, session.config) is None
@@ -1481,7 +1490,7 @@ async def _run_single_tool(
     # --- Saga step tracking ---
     saga_step = None
     _active_saga_id: str | None = None
-    if replay_of is None and saga is not None and tool_name not in SAGA_EXCLUDED_TOOLS:
+    if replay_of is None and saga is not None and _is_saga_step(tool_name, on_device=on_device):
         from surogates.governance.events import saga_step_event as _sse
         from surogates.governance.saga.state_machine import StepState as _StepState
 
