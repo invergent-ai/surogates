@@ -4251,3 +4251,22 @@ async def test_the_folder_wait_key_holds_the_reason_until_it_is_cleared(redis_cl
 
     await operations.waiting(operation_id, None)
     assert await redis_client.get(waiting_key(operation_id)) is None
+
+
+async def test_load_tools_on_the_computer_stays_a_device_call_when_run_as_resumed(
+    laptop_rig, session_factory, redis_client,
+):
+    rig = laptop_rig
+    await rig.laptop.connect()
+    store, tools = SessionStore(session_factory), builtin_tools()
+    io = {"redis_client": redis_client, "session_factory": session_factory}
+    args = {"groups": ["browser"]}
+    first = await tool_call(rig, store, tools, "call_1", "load_tools", args, **io)
+    assert json.loads(first["content"])["loaded"] == ["browser"]
+    await forget_result(store, session_factory, rig.root, "call_1")
+    await take_over(store, rig)
+
+    resumed = await resume_call(rig, store, tools, "call_1", "load_tools", args, **io)
+
+    # Called directly: a real resume runs only a call with journal rows.  A harness tool is answered "interrupted".
+    assert json.loads(resumed["content"])["loaded"] == ["browser"]
