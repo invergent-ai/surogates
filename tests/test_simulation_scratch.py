@@ -418,19 +418,19 @@ def test_unchosen_composio_call_rules():
 
     execute = _advertised("COMPOSIO_MULTI_EXECUTE_TOOL")
     assert execute == "mcp__tool_router__MULTI_EXECUTE_TOOL"
-    cfg = _cfg(toolkits=["one_drive"])
+    cfg = ["one_drive"]
     assert u(execute, _call("ONE_DRIVE_LIST_FOLDER_CHILDREN"), cfg) is None
     assert u(execute, _call("OUTLOOK_LIST_MESSAGES"), cfg) == "OUTLOOK_LIST_MESSAGES"
     mixed = {"tools": [{"tool_slug": "ONE_DRIVE_LIST_FOLDER_CHILDREN"}, {"tool_slug": "OUTLOOK_LIST_MESSAGES"}]}
     assert u(execute, mixed, cfg) == "OUTLOOK_LIST_MESSAGES"
     assert u(execute, {"tools": "x"}, cfg) is not None
     assert u("mcp__tool_router__OUTLOOK_SEND_EMAIL", {}, cfg) == "OUTLOOK_SEND_EMAIL"
-    assert u(execute, _call("ONE_DRIVE_LIST_FOLDER_CHILDREN"), _cfg()) is not None
-    assert u(execute, _call("OUTLOOK_LIST_MESSAGES"), {}) is None
+    assert u(execute, _call("ONE_DRIVE_LIST_FOLDER_CHILDREN"), []) is not None
+    assert u(execute, _call("OUTLOOK_LIST_MESSAGES"), None) is None
     for meta in ("SEARCH_TOOLS", "GET_TOOL_SCHEMAS", "MANAGE_CONNECTIONS", "REMOTE_WORKBENCH", "REMOTE_BASH_TOOL"):
         for branded in (False, True):
             name = _advertised(("COMPOSIO_" if branded else "") + meta)
-            assert u(name, {}, cfg) is None and u(name, {}, _cfg()) is None
+            assert u(name, {}, cfg) is None and u(name, {}, []) is None
     assert u("mcp__tool_router__COMPOSIO_SEARCH_TOOLS", {}, cfg) is None
 
 

@@ -1639,7 +1639,7 @@ async def _run_single_tool(
             # tool also acts off it (it creates an artifact, it pays for a
             # model call), and running it again would do that again.
             result_content = interrupted(tool_name)
-        elif (unchosen := unchosen_composio_call(tool_name, tool_args, session.config)) is not None:
+        elif (unchosen := unchosen_composio_call(tool_name, tool_args, chosen_toolkits(session.config))) is not None:
             result_content = json.dumps({"error": f"No connected account for {unchosen} in this chat."})
         elif (simulation_changes := await _simulation_changes(
             tool_name, tool_args, session, tools, summary_llm_client, summary_model,

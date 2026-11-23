@@ -333,7 +333,7 @@ async def call_tool(
     )
 
     if auth.test_toolkits is not None and (unchosen := unchosen_composio_call(
-        body.name, body.arguments, {"test_mode": {"toolkits": auth.test_toolkits}},
+        body.name, body.arguments, auth.test_toolkits,
     )) is not None:
         await _audit_call(audit_store, auth, ctx, server_name, original_tool, "refused", 0)
         return ToolCallResponse(error=f"No connected account for {unchosen} in this chat.")

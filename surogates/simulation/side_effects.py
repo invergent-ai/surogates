@@ -158,9 +158,8 @@ def chosen_toolkits(config: dict | None) -> list[str] | None:
     return list(tm.get("toolkits") or []) if isinstance(tm, dict) else []
 
 
-def unchosen_composio_call(name: str, args: Any, config: dict | None) -> str | None:
-    """In a test chat, the first Composio app call outside ``test_mode.toolkits`` (none chosen = none); else ``None``."""
-    chosen = chosen_toolkits(config)
+def unchosen_composio_call(name: str, args: Any, chosen: list[str] | None) -> str | None:
+    """The first Composio app call outside *chosen* (``[]`` refuses every one); ``None`` chosen = not a test chat."""
     if chosen is None or not name.startswith(_ROUTER_PREFIXES):
         return None
     tool = name.rsplit("__", 1)[-1].upper().removeprefix("COMPOSIO_")  # the proxy advertises them debranded

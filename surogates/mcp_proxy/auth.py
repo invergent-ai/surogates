@@ -85,9 +85,5 @@ async def get_proxy_auth(request: Request) -> ProxyAuthContext:
         agent_id=payload.get("agent_id"),
         simulated=payload.get("simulated") is True,
         simulation_read=payload.get("simulation_read"),
-        test_toolkits=(
-            None if "test_toolkits" not in payload
-            else [t for t in payload["test_toolkits"] if isinstance(t, str)] if isinstance(payload["test_toolkits"], list)
-            else []
-        ),
+        test_toolkits=payload.get("test_toolkits"),
     )
