@@ -29,6 +29,7 @@ from surogates.session.events import EventType
 from surogates.harness.agent_news import starts_notified_work
 from surogates.harness.message_utils import leading_json_object, make_skipped_tool_result
 from surogates.harness.resilience import json_kind, unknown_tool_error
+from surogates.harness.tool_groups import LOAD_TOOLS
 from surogates.harness.tool_guardrails import (
     ToolGuardrailDecision,
     canonical_tool_args,
@@ -1550,6 +1551,9 @@ async def _run_single_tool(
             location = ToolLocation.HARNESS
         else:
             location = TOOL_LOCATIONS.get(tool_name, ToolLocation.SANDBOX)
+        # On the user's computer it stays a device call, which a resuming worker runs again.
+        if device_call is not None and tool_name == LOAD_TOOLS:
+            location = ToolLocation.SANDBOX
 
         # ── read_file image branch ─────────────────────────────────────
         # Image analysis can't happen inside the sandbox because the

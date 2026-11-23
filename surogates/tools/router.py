@@ -92,6 +92,8 @@ TOOL_LOCATIONS: dict[str, ToolLocation] = {
     "todo": ToolLocation.HARNESS,
     # Procedure step markers: an event append, nothing to isolate.
     "skill_step": ToolLocation.HARNESS,
+    # Reads the group catalog only: never start a sandbox for it.
+    "load_tools": ToolLocation.HARNESS,
     # ``process`` is not here: a background process lives where the command
     # that started it ran, in the sandbox's executor daemon, so it is asked
     # there (the default, SANDBOX).
