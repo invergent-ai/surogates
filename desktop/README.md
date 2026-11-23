@@ -11,6 +11,10 @@ commands, and browses the web in your own browser. You watch it work and step in
 - **Work on your real files.** Point a chat at a folder, and the agent reads, writes and organizes
   what is in it. That can be documents, spreadsheets, code or data. No uploads and no syncing:
   the work happens where your files already are.
+- **Reach files outside the chat's folder.** Ask for something on your Desktop, in Downloads or
+  in another folder, and the agent asks you to let it read that folder. It copies, moves, puts
+  back and deletes files there only through a window where you confirm each step, and an
+  original it replaces or deletes goes to the Recycle Bin (the Trash on a Mac).
 - **Let it run commands, safely.** Builds, scripts, data processing, file conversions: the agent
   runs them in a sandbox on your computer, not on your computer itself.
 - **Browse with your own browser.** The agent drives Chrome, Edge, Brave or Vivaldi, already
@@ -28,8 +32,9 @@ commands, and browses the web in your own browser. You watch it work and step in
 - **Nothing runs directly on your computer.** Every command runs in a lightweight virtual machine
   that Surogate Desktop starts for you. A chat's folder joins it only while that chat is
   working, and files you protect stay read-only there.
-- **The agent sees only what you give it.** The file tools see the chat's folder and nothing
-  else of yours.
+- **The agent sees only what you give it.** The file tools see the chat's folder, and any other
+  folder only after you let the agent read it. Every change outside the chat's folder asks you
+  first, even in a chat that works freely. Commands reach only the chat's folder.
 - **You decide what reaches the network.** Commands reach the package registries they need,
   and your computer's own services stay out of reach. For any other site, your local network
   included, the agent asks you first. A chat can also be set to work freely.
