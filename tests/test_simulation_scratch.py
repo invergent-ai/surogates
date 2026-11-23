@@ -453,3 +453,25 @@ async def test_dispatch_refuses_an_unchosen_account_without_calling_it():
     assert "simulated" not in event
     await _run_builtin(ROUTER, _cfg(toolkits=["one_drive"]), handler, json.dumps(_call("ONE_DRIVE_LIST_FOLDER_CHILDREN")))
     handler.assert_awaited_once()
+
+
+# The agent's own first choice in the 2026-11-23 live run (Composio schema keys).
+META = "ONE_DRIVE_UPDATE_DRIVE_ITEM_METADATA"
+
+
+def test_metadata_rename_inside_copy_is_real():
+    assert inside_scratch(META, {"item_id": "F1", "drive_id": "D", "name": "07.11.2026 Receipt.jpg"}, SCOPE)
+    assert inside_scratch(META, {"item_id": "F1", "name": "a.pdf", "parent_reference_id": "R1",
+                                 "parent_reference_drive_id": "D", "description": "x"}, SCOPE)
+
+
+def test_metadata_rename_outside_copy_is_faked():
+    assert not inside_scratch(META, {"item_id": "ORIG", "drive_id": "D", "name": "a.pdf"}, SCOPE)
+    assert not inside_scratch(META, {"item_id": "F1", "drive_id": "OTHER", "name": "a.pdf"}, SCOPE)
+    assert not inside_scratch(META, {"item_id": "F1", "name": "a.pdf", "parent_reference_id": "ORIG"}, SCOPE)
+    assert not inside_scratch(META, {"item_id": "F1", "name": "../a.pdf"}, SCOPE)
+    assert not inside_scratch(META, {"item_id": "F1", "name": "a.pdf", "site_id": "S"}, SCOPE)
+
+
+def test_move_with_an_unknown_site_key_stays_faked():
+    assert not inside_scratch("ONE_DRIVE_MOVE_ITEM", {**RENAME, "siteId": "c7fd62ca"}, SCOPE)

@@ -33,6 +33,7 @@ FILE_ACTIONS = frozenset({
     "ONE_DRIVE_DELETE_ITEM",
     "ONE_DRIVE_ONEDRIVE_CREATE_FOLDER",
     "SHARE_POINT_UPDATE_DRIVE_ITEM",
+    "ONE_DRIVE_UPDATE_DRIVE_ITEM_METADATA",  # rename; a new parent must be in the copy
 })
 STATE_TOOLS_WHY: dict[str, str] = {
     "memory": "saves/replaces/removes agent or user memory entries",
@@ -156,17 +157,17 @@ CHAT_LOCAL_OR_READ_WHY: dict[str, str] = {
     "draft_process_reference": "reads Keel's reference",
 }
 CHAT_LOCAL_OR_READ_TOOLS = frozenset(CHAT_LOCAL_OR_READ_WHY)
-_DRIVE_KEYS = frozenset({"drive_id", "driveId", "parentReference.driveId"})
+_DRIVE_KEYS = frozenset({"drive_id", "driveId", "parentReference.driveId", "parent_reference_drive_id"})
 REFERENCE_KEYS = _DRIVE_KEYS | frozenset({
     "item_id", "itemId", "folder_item_id", "parent_folder", "folder", "folder_path",
-    "parentReference.id", "server_relative_url", "site_name",
+    "parentReference.id", "parent_reference_id", "server_relative_url", "site_name",
 })
 # A name lands in a path ("<folder>/<name>"), so it must be exactly one segment.
 _NAME_KEYS = frozenset({"name", "file_name", "file.name"})
 _HARMLESS = frozenset({
     "values", "address", "worksheet_id_or_name", "conflict_behavior",
     "mimetype", "content", "select", "top", "orderby", "file.s3key", "file.source_url",
-    "file.mimetype", "s3key", "source_url",
+    "file.mimetype", "s3key", "source_url", "description", "if_match",
 })
 
 
