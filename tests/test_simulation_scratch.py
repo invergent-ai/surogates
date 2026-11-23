@@ -395,3 +395,21 @@ def test_every_builtin_tool_is_classified_once(monkeypatch):
     assert not scratch.STATE_TOOLS & local, "a tool is in both STATE_TOOLS and CHAT_LOCAL_OR_READ_TOOLS"
     assert registered - scratch.STATE_TOOLS - local == set(), "new builtin: classify it in simulation/scratch.py"
     assert (scratch.STATE_TOOLS | local) - registered == set(), "a classified tool is no longer registered"
+
+
+def _call(slug, args=None):
+    return {"tools": [{"tool_slug": slug, "arguments": args or {}}]}
+
+
+@pytest.mark.asyncio
+async def test_a_toolkit_outside_the_chosen_ones_is_faked_even_a_read():
+    kw = dict(llm=None, scratch=SCOPE, toolkits=["one_drive"])
+    assert await decide(ROUTER, None, args=_call("OUTLOOK_LIST_MESSAGES"), **kw)
+    assert not await decide(ROUTER, None, args=_call("ONE_DRIVE_LIST_FOLDER_CHILDREN"), **kw)
+    assert await decide("mcp__tool_router__OUTLOOK_LIST_MESSAGES", None, args={}, **kw)
+    assert not await decide("mcp__tool_router__COMPOSIO_SEARCH_TOOLS", None, args={}, **kw)
+
+
+@pytest.mark.asyncio
+async def test_missing_toolkits_fails_closed():
+    assert await decide(ROUTER, None, llm=None, scratch=SCOPE, toolkits=[], args=_call("ONE_DRIVE_LIST_FOLDER_CHILDREN"))

@@ -799,6 +799,23 @@ async def test_test_mode_stored_on_session(
 _RUN = "8f1c2d3e-4b5a-4c6d-8e7f-901234567890"
 
 
+async def test_test_mode_toolkits_stored_and_validated(
+    client: AsyncClient, session_factory, session_store
+):
+    org_id = await create_org(session_factory)
+    token = await _issue_token(session_factory, org_id)
+    for toolkits, code in ((["one_drive"], 202), (["One Drive"], 422)):
+        resp = await client.post(
+            "/v1/api/prompts",
+            json={"prompt": "hi", "metadata": {"skillopt_run_id": _RUN}, "test_mode": {**_TEST_MODE, "toolkits": toolkits}},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == code, resp.text
+        if code == 202:
+            session = await session_store.get_session(UUID(resp.json()["session_id"]))
+            assert session.config["test_mode"]["toolkits"] == ["one_drive"]
+
+
 async def test_capabilities_advertise_test_mode(client: AsyncClient, session_factory):
     org_id = await create_org(session_factory)
     token = await _issue_token(session_factory, org_id)

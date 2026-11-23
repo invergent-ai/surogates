@@ -343,6 +343,7 @@ async def _simulation_changes(
         args=tool_args,
         description=entry.schema.description if entry else "",
         scratch=(config.get("test_mode") or {}).get("scratch"),
+        toolkits=((config.get("test_mode") or {}).get("toolkits") or []) if test_mode else None,
     )
 
 

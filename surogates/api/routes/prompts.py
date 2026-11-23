@@ -20,7 +20,9 @@ import logging
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from pydantic import BaseModel, Field
+from typing import Annotated
+
+from pydantic import BaseModel, Field, StringConstraints
 from sqlalchemy.exc import IntegrityError
 
 from surogates.channels.constants import API_CHANNEL, session_queue_priority
@@ -98,6 +100,8 @@ class TestMode(BaseModel):
     __test__ = False  # not a pytest class
 
     scratch: ScratchScope | None = None
+    # Composio toolkits the chat may use; anything else is faked (missing = none).
+    toolkits: list[Annotated[str, StringConstraints(pattern=r"^[a-z0-9_]{1,64}$")]] | None = None
 
 
 class PromptRequest(BaseModel):
