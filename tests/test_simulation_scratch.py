@@ -324,6 +324,18 @@ def test_a_client_cannot_put_a_session_in_test_mode(channel):
     assert config == {"x": 1}
 
 
+@pytest.mark.parametrize("channel", ["web", "api"])
+def test_other_pipeline_metadata_survives(channel):
+    """Only the key that marks a test chat is stripped; e.g. Studio's skill dry run keeps its own."""
+    from surogates.api.routes.sessions import apply_eval_isolation
+
+    dry_run = {"skill_dry_run": "s1", "skill_name": "x"}
+    assert apply_eval_isolation({"pipeline_metadata": dict(dry_run)}, channel=channel)["pipeline_metadata"] == dry_run
+    mixed = apply_eval_isolation({"pipeline_metadata": {**dry_run, "skillopt_run_id": "r1"}}, channel=channel)
+    assert mixed["pipeline_metadata"] == dry_run
+    assert "pipeline_metadata" not in apply_eval_isolation({"pipeline_metadata": "x"}, channel=channel)
+
+
 # --- code-review fixes: a name is one path segment ---------------------------
 
 _UP = {"folder_path": SCOPE["root_path"], "drive_id": "D"}
