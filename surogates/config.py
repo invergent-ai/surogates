@@ -344,6 +344,11 @@ class WorkerSettings(BaseSettings):
     # stream with their own parser must pass on frames whose id is negative
     # (see docs/operations/keel-link.md) before this is switched on.
     delta_transport: Literal["log", "redis"] = "log"
+    # Romanian replies get the comma-below letters ș ț Ș Ț in place of the
+    # cedilla ş ţ Ş Ţ before they are stored (surogates.harness.romanian_diacritics);
+    # the model's own text stays on the event as ``raw_content``.  A session
+    # sets its own with ``config.romanian_comma_below``.
+    romanian_comma_below: bool = True
 
 
 class BoardSettings(BaseSettings):

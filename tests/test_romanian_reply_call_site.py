@@ -84,6 +84,8 @@ async def test_final_romanian_reply_is_stored_fixed_and_reasoning_is_not(
     [response] = _of(emits, EventType.LLM_RESPONSE)
     assert response["message"]["content"] == RO_FIXED
     assert response["romanian_comma_below"] == 4
+    # The model's own text stays on the event for training / rewards.
+    assert response["raw_content"] == RO_RAW
     [thinking] = _of(emits, EventType.LLM_THINKING)
     assert thinking["reasoning"] == reasoning
     assert response["message"].get("reasoning") == reasoning
@@ -139,6 +141,7 @@ async def test_tool_call_arguments_keep_their_cedillas(
     # A Turkish reply in the same session passes through byte-identical.
     assert second["message"]["content"] == TR_RAW
     assert "romanian_comma_below" not in second
+    assert "raw_content" not in second
 
 
 @pytest.mark.asyncio
@@ -151,6 +154,183 @@ async def test_switched_off_by_session_config(monkeypatch: pytest.MonkeyPatch) -
     [response] = _of(emits, EventType.LLM_RESPONSE)
     assert response["message"]["content"] == RO_RAW
     assert "romanian_comma_below" not in response
+    assert "raw_content" not in response
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", [False, 0, "false", "0", "off", "No", " OFF "])
+async def test_switched_off_by_any_off_value(monkeypatch: pytest.MonkeyPatch, value: Any) -> None:
+    emits, _ = await _run(
+        monkeypatch,
+        [({"role": "assistant", "content": RO_RAW, "tool_calls": None}, USAGE_STOP)],
+        config={"romanian_comma_below": value},
+    )
+    [response] = _of(emits, EventType.LLM_RESPONSE)
+    assert response["message"]["content"] == RO_RAW
+
+
+@pytest.mark.asyncio
+async def test_worker_default_off_and_session_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The worker setting is the default; a session's own value wins."""
+    from surogates.harness.loop import AgentHarness
+
+    monkeypatch.setattr(AgentHarness, "_romanian_comma_below", False)
+    emits, _ = await _run(
+        monkeypatch, [({"role": "assistant", "content": RO_RAW, "tool_calls": None}, USAGE_STOP)],
+    )
+    assert _of(emits, EventType.LLM_RESPONSE)[0]["message"]["content"] == RO_RAW
+    emits, _ = await _run(
+        monkeypatch, [({"role": "assistant", "content": RO_RAW, "tool_calls": None}, USAGE_STOP)],
+        config={"romanian_comma_below": "on"},
+    )
+    assert _of(emits, EventType.LLM_RESPONSE)[0]["message"]["content"] == RO_FIXED
+
+
+@pytest.mark.asyncio
+async def test_length_partials_are_stored_raw_and_the_joined_reply_fixed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A partial reply cut at the length limit is stored as written (the
+    next part may start inside its code block); the final event holds the
+    joined reply, settled as a whole."""
+    part1 = "Am verificat fişierul şi am găsit erori:\n```python\nx = 'şablon"
+    part2 = "'\n```\nLe-am corectat aşa cum aţi cerut, iar raportul este gata pentru echipă."
+    emits, _ = await _run(monkeypatch, [
+        ({"role": "assistant", "content": part1, "tool_calls": None},
+         {**USAGE_STOP, "finish_reason": "length"}),
+        ({"role": "assistant", "content": part2, "tool_calls": None}, USAGE_STOP),
+    ])
+    first, final = _of(emits, EventType.LLM_RESPONSE)
+    assert first["message"]["content"] == part1
+    assert "raw_content" not in first
+    joined = part1 + part2
+    assert final["raw_content"] == joined
+    assert final["message"]["content"] == (
+        "Am verificat fișierul și am găsit erori:\n```python\nx = 'şablon"
+        "'\n```\nLe-am corectat așa cum ați cerut, iar raportul este gata pentru echipă."
+    )
+
+
+class _StopAfterRescue(Exception):
+    pass
+
+
+@pytest.mark.asyncio
+async def test_question_rescue_copies_the_fixed_reply(monkeypatch: pytest.MonkeyPatch) -> None:
+    """On an end-user channel a question-shaped reply becomes an
+    ``ask_user_question`` call whose arguments carry the reply's text and
+    whose content is emptied.  The text it copies is already fixed, and the
+    question (here quoted by the judge with cedillas) is still cut out."""
+    from surogates.harness.loop import AgentHarness
+
+    question = "Vreţi să trimit raportul echipei?"
+    reply = RO_RAW + " " + question
+    seen: dict[str, Any] = {}
+
+    async def run_rescue_then_stop(self: Any, **kwargs: Any) -> str | None:
+        kind = await AgentHarness._maybe_route_final_response_to_inbox(self, **kwargs)
+        seen["kind"] = kind
+        seen["message"] = kwargs["assistant_message"]
+        raise _StopAfterRescue
+
+    pending = iter([({"role": "assistant", "content": reply, "tool_calls": None}, USAGE_STOP)])
+
+    async def fake_call_llm_with_retry(**_kwargs: Any) -> tuple[dict, dict]:
+        return next(pending)
+
+    monkeypatch.setattr("surogates.harness.loop.call_llm_with_retry", fake_call_llm_with_retry)
+    store = AsyncMock()
+    store.emit_event = AsyncMock(side_effect=range(100, 200))
+    store.get_events = AsyncMock(return_value=[])
+    harness = _make_loop_harness(session_store=store)
+    harness._tools.tool_names = {"ask_user_question"}
+    harness._governance_gate = None
+    harness._judge_final_response_user_action = AsyncMock(return_value={
+        "action_kind": "ask_user_question", "question": question,
+    })
+    harness._maybe_route_final_response_to_inbox = run_rescue_then_stop.__get__(harness)
+
+    with pytest.raises(_StopAfterRescue):
+        await harness._run_loop(
+            _make_session(), [{"role": "user", "content": "Verifică fişierul."}], "system",
+            SimpleNamespace(lease_token=uuid4()), all_events=[],
+        )
+
+    assert seen["kind"] == "ask_user_question"
+    message = seen["message"]
+    assert message["content"] is None
+    import json
+    arguments = json.loads(message["tool_calls"][0]["function"]["arguments"])
+    assert arguments["context"] == RO_FIXED
+    assert arguments["questions"][0]["prompt"] == question
+    judged = harness._judge_final_response_user_action.await_args.kwargs
+    assert judged["assistant_content"] == RO_FIXED + " " + question.replace("ţ", "ț")
+
+
+@pytest.mark.asyncio
+async def test_action_required_rescue_gets_the_fixed_reply(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The other rescue, an ``action_required`` inbox item, quotes the
+    reply as its context: fixed too, and the reply is stored with its raw text."""
+    from surogates.harness.loop import AgentHarness
+
+    pending = iter([({"role": "assistant", "content": RO_RAW, "tool_calls": None}, USAGE_STOP)])
+
+    async def fake_call_llm_with_retry(**_kwargs: Any) -> tuple[dict, dict]:
+        return next(pending)
+
+    monkeypatch.setattr("surogates.harness.loop.call_llm_with_retry", fake_call_llm_with_retry)
+    store = AsyncMock()
+    store.emit_event = AsyncMock(side_effect=range(100, 200))
+    store.get_events = AsyncMock(return_value=[])
+    harness = _make_loop_harness(session_store=store)
+    harness._judge_final_response_user_action = AsyncMock(return_value={
+        "action_kind": "action_required", "instructions": "Autentificaţi-vă.",
+    })
+    harness._maybe_route_final_response_to_inbox = (
+        AgentHarness._maybe_route_final_response_to_inbox.__get__(harness)
+    )
+
+    await harness._run_loop(
+        _make_session(), [{"role": "user", "content": "Verifică fişierul."}], "system",
+        SimpleNamespace(lease_token=uuid4()), all_events=[],
+    )
+
+    emits = [(c.args[1], c.args[2]) for c in store.emit_event.await_args_list]
+    [item] = _of(emits, EventType.INBOX_ACTION_REQUIRED)
+    assert item["context"] == RO_FIXED
+    [response] = _of(emits, EventType.LLM_RESPONSE)
+    assert response["message"]["content"] == RO_FIXED
+    assert response["raw_content"] == RO_RAW
+    assert response["romanian_comma_below"] == 4
+
+
+def test_training_export_uses_the_models_own_text() -> None:
+    """Training export must carry the tokens the model sampled, not the
+    harness's fix: ``raw_content`` when it differs from the stored text only
+    by the swap, else the stored content."""
+    from surogates.jobs.training_collector import TrainingDataCollector
+
+    collector = TrainingDataCollector.__new__(TrainingDataCollector)
+    skill_event = SimpleNamespace(
+        id=1, type=EventType.SKILL_INVOKED.value,
+        data={"skill": "raport", "raw_message": "/raport verifică fişierul"}, created_at=None,
+    )
+    fixed_reply = SimpleNamespace(id=2, type=EventType.LLM_RESPONSE.value, data={
+        "message": {"role": "assistant", "content": RO_FIXED},
+        "raw_content": RO_RAW, "romanian_comma_below": 4,
+    })
+    plain_reply = SimpleNamespace(id=3, type=EventType.LLM_RESPONSE.value, data={
+        "message": {"role": "assistant", "content": "Gata."},
+        # A stale raw text that is not this content: ignored.
+        "raw_content": "Cu totul altceva.",
+    })
+    example, rejected = collector._collect_skill_trajectory(
+        [skill_event, fixed_reply, plain_reply], 0, "raport", uuid4(), skill_event,
+    )
+    assert not rejected and example is not None
+    assistant = [m for m in example.messages if m["role"] == "assistant"]
+    assert [m["content"] for m in assistant] == [RO_RAW, "Gata."]
+    assert all("raw_content" not in m for m in assistant)
 
 
 @pytest.mark.asyncio

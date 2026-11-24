@@ -17,6 +17,8 @@ from surogates.harness.romanian_diacritics import (
     normalize_assistant_message,
     normalize_reply_text,
     prose_spans,
+    sampled_content,
+    settle_response_payload,
 )
 
 CEDILLAS = "şţŞŢ"  # ş ţ Ş Ţ
@@ -245,7 +247,14 @@ def test_normalize_assistant_message_touches_only_content() -> None:
 
 def test_config_switch() -> None:
     assert enabled_for(None) and enabled_for({}) and enabled_for({"romanian_comma_below": True})
-    assert not enabled_for({"romanian_comma_below": False})
+    for off in (False, 0, 0.0, "false", "0", "off", "no", "OFF", " No ", "False"):
+        assert not enabled_for({"romanian_comma_below": off}), off
+    for on in (True, 1, "true", "1", "on", "yes", "YES"):
+        assert enabled_for({"romanian_comma_below": on}, default=False), on
+    # Absent or unreadable: the default (the worker setting).
+    assert not enabled_for({}, default=False)
+    assert enabled_for({"romanian_comma_below": "maybe"})
+    assert not enabled_for({"romanian_comma_below": None}, default=False)
     content = "Aceasta este soluţia pentru voi şi pentru ei, în fine."
     message = {"role": "assistant", "content": content}
     assert normalize_assistant_message(message, {"romanian_comma_below": False}) == 0
@@ -254,3 +263,102 @@ def test_config_switch() -> None:
         msg = {"role": "assistant", "content": value}
         assert normalize_assistant_message(msg, {}) == 0
         assert msg["content"] == value
+
+
+def test_indented_code_block_is_kept_but_list_continuation_is_prose() -> None:
+    text = (
+        "Aceasta este comanda pentru voi, care şterge tot:\n"
+        "\n"
+        "    rm -rf şablon/ţintă\n"
+        "\ttouch ţară.txt\n"
+        "\n"
+        "Paşii sunt aceştia:\n"
+        "\n"
+        "- primul pas:\n"
+        "\n"
+        "    deschideţi fişierul şi verificaţi\n"
+        "\n"
+        "Gata, aşa e mai bine."
+    )
+    fixed, _ = normalize_reply_text(text)
+    _only_the_four_letters_changed(text, fixed)
+    assert "    rm -rf şablon/ţintă\n\ttouch ţară.txt\n" in fixed
+    assert "care șterge tot" in fixed and "Pașii sunt aceștia" in fixed
+    # Indented under a list item: the item's own text, fixed.
+    assert "    deschideți fișierul și verificați" in fixed
+    assert fixed.endswith("Gata, așa e mai bine.")
+
+
+def test_indented_line_continuing_a_paragraph_is_prose() -> None:
+    text = "Aceasta este o propoziţie lungă pentru voi\n    care continuă aşa, în fine."
+    fixed, replaced = normalize_reply_text(text)
+    assert replaced == 2
+
+
+def test_math_spans_are_kept() -> None:
+    text = (
+        "Aceasta este formula pentru viteză, şi se aplică la toţi: "
+        "$v_ş = d/ţ$ sau \\(ş + ţ\\), iar pe larg:\n"
+        "$$\n\\frac{ş}{ţ}\n$$\n"
+        "\\[ ş^2 + ţ^2 \\]\n"
+        "Costul este $5 şi $10 pentru fiecare, în fine."
+    )
+    fixed, _ = normalize_reply_text(text)
+    _only_the_four_letters_changed(text, fixed)
+    for kept in ("$v_ş = d/ţ$", "\\(ş + ţ\\)", "$$\n\\frac{ş}{ţ}\n$$", "\\[ ş^2 + ţ^2 \\]"):
+        assert kept in fixed
+    assert "viteză, și se aplică la toți" in fixed
+    # Dollar amounts are not math: the prose between them is fixed.
+    assert "Costul este $5 și $10 pentru fiecare" in fixed
+
+
+def test_multi_part_paths_are_kept_and_two_part_words_fixed() -> None:
+    text = (
+        "Fişierul este în docs/ţară/raport, iar varianta şi/sau cealaltă este bună "
+        "pentru voi; folosiţi oţet/țelină/lămâie sau garnitura/scaunul/cartuşul."
+    )
+    fixed, _ = normalize_reply_text(text)
+    assert "docs/ţară/raport," in fixed
+    assert "Fișierul este" in fixed and "varianta și/sau" in fixed
+    # Slash lists of Romanian words are prose.
+    assert "oțet/țelină/lămâie" in fixed and "garnitura/scaunul/cartușul." in fixed
+
+
+def test_many_blocks_scan() -> None:
+    """Many fences and think blocks: every one is found (cached scan)."""
+    block = "```\nşablon\n```\n<think>ţintă</think>\nAceasta este soluţia pentru voi şi pentru ei.\n"
+    text = block * 200
+    fixed, replaced = normalize_reply_text(text)
+    assert replaced == 400
+    assert fixed.count("```\nşablon\n```") == 200 and fixed.count("<think>ţintă</think>") == 200
+
+
+def test_settle_response_payload_is_idempotent_and_keeps_raw() -> None:
+    raw = "Aceasta este soluţia pentru voi şi pentru ei, în fine."
+    payload = {"message": {"role": "assistant", "content": raw}}
+    settle_response_payload(payload, {})
+    fixed = "Aceasta este soluția pentru voi și pentru ei, în fine."
+    assert payload["message"]["content"] == fixed
+    assert (payload["raw_content"], payload["romanian_comma_below"]) == (raw, 2)
+    settle_response_payload(payload, {})  # again: nothing new, raw kept
+    assert (payload["raw_content"], payload["romanian_comma_below"]) == (raw, 2)
+    assert sampled_content(payload) == raw
+    # The content revised to other text: the old raw text no longer applies.
+    payload["message"]["content"] = "Gata."
+    settle_response_payload(payload, {})
+    assert "raw_content" not in payload and "romanian_comma_below" not in payload
+    assert sampled_content(payload) == "Gata."
+    # Revised to other Romanian text: raw and count describe the new text.
+    payload["message"]["content"] = "Aşa este pentru voi şi pentru ei, în fine."
+    settle_response_payload(payload, {})
+    assert payload["raw_content"] == "Aşa este pentru voi şi pentru ei, în fine."
+    assert payload["romanian_comma_below"] == 2
+    # Content moved into a tool call (None): left as it is.
+    payload["message"]["content"] = None
+    settle_response_payload(payload, {})
+    assert payload["romanian_comma_below"] == 2
+    assert sampled_content(payload) is None
+    # Off: nothing recorded.
+    off = {"message": {"role": "assistant", "content": raw}}
+    settle_response_payload(off, {"romanian_comma_below": "off"})
+    assert off == {"message": {"role": "assistant", "content": raw}}

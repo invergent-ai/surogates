@@ -91,7 +91,7 @@ from surogates.harness.resilience import (
     try_activate_fallback,
     try_activate_pro_fallback,
 )
-from surogates.harness.romanian_diacritics import normalize_assistant_message
+from surogates.harness.romanian_diacritics import fold_cedillas, settle_response_payload
 from surogates.harness.sanitize import (
     cap_delegate_calls,
     delegate_cap,
@@ -708,7 +708,9 @@ def rescue_context(reply: str | None, question: str) -> str:
     channel shows the context, then the question, so a question left in its
     reply reached the person twice."""
     context = (reply or "").strip()
-    at = context.casefold().find(question.casefold())
+    # The question may quote the reply with cedilla s/t where the reply
+    # (already settled, ``_settle_reply_text``) has comma-below ones.
+    at = fold_cedillas(context).casefold().find(fold_cedillas(question).casefold())
     if at < 0:
         return context
     return (context[:at] + context[at + len(question):]).strip()
@@ -747,6 +749,9 @@ class AgentHarness(
     # harnesses built without ``__init__``, as some tests build them.
     _worker_delta_policy: DeltaPolicy = DeltaPolicy()
     _delta_policy: DeltaPolicy = DeltaPolicy()
+    # Romanian replies get comma-below s/t unless a session's config says
+    # otherwise (``_settle_reply_text``): the worker's default.
+    _romanian_comma_below: bool = True
 
     def __init__(
         self,
@@ -798,6 +803,7 @@ class AgentHarness(
         entitlement_excluded_tools: frozenset[str] = frozenset(),
         fallback_chain: tuple[Any, ...] = (),
         delta_policy: DeltaPolicy | None = None,
+        romanian_comma_below: bool = True,
     ) -> None:
         self._store = session_store
         self._tools = tool_registry
@@ -969,6 +975,7 @@ class AgentHarness(
         # ``delta_coalesce_ms``).
         self._worker_delta_policy: DeltaPolicy = delta_policy or DeltaPolicy()
         self._delta_policy: DeltaPolicy = self._worker_delta_policy
+        self._romanian_comma_below: bool = romanian_comma_below
 
         # Interrupt support -- thread-safe because only a single bool/str
         # is mutated and Python's GIL makes these assignments atomic.
@@ -3746,6 +3753,13 @@ class AgentHarness(
                 model_id=model_id, cost_tracker=cost_tracker,
             )
 
+            # Settled before the inbox rescue, which copies the reply's text
+            # into an ``ask_user_question`` call or an inbox item and empties
+            # its content.  ``_persist_response`` settles it again, for the
+            # recovery paths that revise it.
+            if not tool_calls_raw and finish_reason == "stop":
+                self._settle_reply_text(session, response_data)
+
             if (
                 not tool_calls_raw
                 and finish_reason == "stop"
@@ -3787,10 +3801,11 @@ class AgentHarness(
             # what the next wake replays.
             event_id: int | None = None
 
-            async def _persist_response() -> int:
+            async def _persist_response(*, settle: bool = True) -> int:
                 nonlocal event_id
                 if event_id is None:
-                    self._settle_reply_text(session, response_data)
+                    if settle:
+                        self._settle_reply_text(session, response_data)
                     event_id = await self._store.emit_event(
                         session.id,
                         EventType.LLM_RESPONSE,
@@ -3945,8 +3960,10 @@ class AgentHarness(
                     length_continuation_count + 1, _MAX_LENGTH_CONTINUATIONS,
                 )
                 # Append the partial assistant message so the model sees
-                # what it already produced.
-                await _persist_response()
+                # what it already produced.  Stored as written: the next
+                # part may start inside a code block this one opened, so
+                # only the joined reply (the final part's event) is settled.
+                await _persist_response(settle=False)
                 messages.append(assistant_message)
                 messages.append({"role": "user", "content": _LENGTH_CONTINUATION_PROMPT})
                 length_continuation_count += 1
@@ -5316,30 +5333,31 @@ class AgentHarness(
         self._fallback_activated = activated
         return True
 
-    @staticmethod
-    def _settle_reply_text(session: Session, payload: dict[str, Any]) -> None:
-        """Last edit of a model reply's text, just before its ``llm.response`` is stored.
+    def _settle_reply_text(self, session: Session, payload: dict[str, Any]) -> None:
+        """Last edit of a model reply's text, before its ``llm.response`` is stored.
 
-        Called once per model call, when the reply's content is settled
-        (after thinking is stripped and the recovery paths revised it).
-        ``payload["message"]`` is the same dict the loop keeps in its
-        history, so the stored event, what the user is shown from it and
-        what the next call replays all carry the same text.
+        Runs where the main loop stores a reply (``_persist_response``, after
+        the recovery paths revised it), before the inbox rescue copies a
+        final reply elsewhere, and where the final summary is stored.  It is
+        idempotent.  ``payload["message"]`` is the same dict the loop keeps
+        in its history, so the stored event, what the user is shown from it
+        and what the next call replays all carry the same text.
 
         Today it turns the cedilla s/t of a Romanian reply into the
-        comma-below letters (:mod:`surogates.harness.romanian_diacritics`;
-        session config ``romanian_comma_below: false`` turns it off).  Only
-        ``content`` is read: tool-call arguments and reasoning are not.
-        The count replaced is recorded on the event as
-        ``romanian_comma_below`` so the cosmetic fix can be reported apart
-        from the model's own output.
+        comma-below letters (:mod:`surogates.harness.romanian_diacritics`).
+        Only ``content`` is read: tool-call arguments and reasoning are not.
+        When it changes the text, the payload keeps the model's own text as
+        ``raw_content`` (for training export and rewards, which need the
+        tokens the model sampled) and the count as ``romanian_comma_below``
+        (so the cosmetic fix is reported apart from the model's output).
+        Session config ``romanian_comma_below`` (false / 0 / "off" / "no")
+        turns it off; the worker setting is the default.
         """
-        message = payload.get("message")
-        if not isinstance(message, dict):
-            return
-        replaced = normalize_assistant_message(message, getattr(session, "config", None))
-        if replaced:
-            payload["romanian_comma_below"] = replaced
+        settle_response_payload(
+            payload,
+            getattr(session, "config", None),
+            default=self._romanian_comma_below,
+        )
 
     def _build_llm_response_payload(
         self,

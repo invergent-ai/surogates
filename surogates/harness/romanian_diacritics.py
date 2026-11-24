@@ -167,19 +167,30 @@ _FENCE_OPEN_RE: Final = re.compile(r"^[ \t]*(`{3,}|~{3,})", re.MULTILINE)
 _THINK_OPEN_RE: Final = re.compile(
     r"<(think|thinking|reasoning|thought|REASONING_SCRATCHPAD)>"
 )
+# Display math: ``$$ ... $$`` and ``\[ ... \]``.  Only a closed one counts.
+_DISPLAY_MATH_RE: Final = re.compile(r"\$\$.+?\$\$|\\\[.+?\\\]", re.DOTALL)
+# Inline math on one line: ``\( ... \)`` and ``$x$`` (no blank just inside
+# the dollars, no digit right after the closing one, so "$5 and $10" is
+# prose).
+_INLINE_MATH_RE: Final = re.compile(
+    r"\\\(.+?\\\)|(?<![\\$])\$(?=\S)[^$\n]+?(?<=\S)\$(?![$\d])"
+)
 _BACKTICKS_RE: Final = re.compile(r"`+")
 _TOKEN_RE: Final = re.compile(r"\S+")
 # Punctuation around a token that is not part of the name it may hold.
 _TOKEN_EDGES: Final = "()[]{}<>\"'`„”“«»,;:!?.*_"
 _FILE_EXT_RE: Final = re.compile(r".\.[A-Za-z0-9]{2,8}$")
+_LIST_ITEM_RE: Final = re.compile(r"[ ]{0,3}(?:[-*+]|\d{1,9}[.)])(?:[ \t]|$)")
 
 
 def _is_literal_token(token: str) -> bool:
     """Whether *token* (no whitespace) names something outside the reply.
 
     URLs, e-mail addresses, Windows / absolute / home / dot-relative paths,
-    a directory ending in ``/``, and anything ending in a file extension.
-    A bare ``a/b`` ("și/sau") is prose.
+    a directory ending in ``/``, a path of three or more parts whose first
+    and last parts are ASCII (``docs/ţară/raport``), and anything ending in
+    a file extension.  A bare ``a/b`` ("și/sau") and a slash list of words
+    (``oţet/țelină/lămâie``) are prose.
     """
     if "://" in token or "@" in token or "\\" in token:
         return True
@@ -188,31 +199,44 @@ def _is_literal_token(token: str) -> bool:
         return False
     if core.startswith(("/", "./", "../", "~")) or core.endswith("/"):
         return True
+    if core.count("/") >= 2:
+        # ``docs/ţară/raport`` is a path, ``oţet/țelină/lămâie`` a list of
+        # words: a path's first and last parts are plain ASCII names.
+        parts = core.split("/")
+        if parts[0].isascii() and parts[-1].isascii():
+            return True
     if "/" in token and "." in core.rsplit("/", 1)[-1]:
         return True
     return bool(_FILE_EXT_RE.search(core))
 
 
 def _block_spans(text: str) -> list[tuple[int, int]]:
-    """``(start, end)`` of fenced code blocks and thinking blocks in *text*."""
+    """``(start, end)`` of fenced code, thinking blocks and display math.
+
+    Each pattern's next match is cached and searched again only once the
+    scan has passed it, so the text is scanned once per pattern however
+    many blocks it holds.
+    """
     spans: list[tuple[int, int]] = []
-    pos = 0
     n = len(text)
+    patterns = (_FENCE_OPEN_RE, _THINK_OPEN_RE, _DISPLAY_MATH_RE)
+    nexts: list[re.Match[str] | None] = [p.search(text) for p in patterns]
+    pos = 0
     while pos < n:
-        fence = _FENCE_OPEN_RE.search(text, pos)
-        think = _THINK_OPEN_RE.search(text, pos)
-        first = min(
-            (m for m in (fence, think) if m is not None),
-            key=lambda m: m.start(),
-            default=None,
-        )
-        if first is None:
+        for k, pattern in enumerate(patterns):
+            match = nexts[k]
+            if match is not None and match.start() < pos:
+                nexts[k] = pattern.search(text, pos)
+        live = [(m.start(), k) for k, m in enumerate(nexts) if m is not None]
+        if not live:
             break
-        start = first.start()
-        if first is fence:
-            marker = fence.group(1)
+        start, k = min(live)
+        first = nexts[k]
+        assert first is not None
+        if k == 0:
+            marker = first.group(1)
             # The closing fence: same character, at least as long, alone on
-            # its line (any indent, trailing blanks).
+            # its line (any indent, trailing blanks).  None: to the end.
             close_re = re.compile(
                 r"^[ \t]*" + re.escape(marker[0]) + "{" + str(len(marker)) + r",}[ \t]*$",
                 re.MULTILINE,
@@ -223,12 +247,85 @@ def _block_spans(text: str) -> list[tuple[int, int]]:
             else:
                 close = close_re.search(text, line_end + 1)
                 end = close.end() if close else n
-        else:
+        elif k == 1:
             close_tag = f"</{first.group(1)}>"
             close_at = text.find(close_tag, first.end())
             end = n if close_at == -1 else close_at + len(close_tag)
+        else:
+            end = first.end()
         spans.append((start, end))
         pos = max(end, start + 1)
+    return spans
+
+
+def _indent_width(line: str) -> int:
+    width = 0
+    for ch in line:
+        if ch == " ":
+            width += 1
+        elif ch == "\t":
+            width += 4 - width % 4
+        else:
+            break
+    return width
+
+
+def _indented_code_spans(
+    text: str, blocks: list[tuple[int, int]]
+) -> list[tuple[int, int]]:
+    """``(start, end)`` of Markdown indented code blocks outside lists.
+
+    A run of lines indented by four columns or more (a tab counts to the
+    next multiple of four) that starts after a blank line, the start of the
+    text or a block in *blocks*, and is not inside a list item (an indented
+    line under ``- item`` / ``1. item`` is the item's continuation, as in
+    Markdown).  Blank lines inside the run belong to it.
+    """
+    spans: list[tuple[int, int]] = []
+    block_iter = iter(blocks)
+    block = next(block_iter, None)
+    prev_blank = True
+    in_list = False
+    code_start: int | None = None
+    code_end = 0
+    pos = 0
+    for line in text.splitlines(keepends=True):
+        start, pos = pos, pos + len(line)
+        while block is not None and block[1] <= start:
+            block = next(block_iter, None)
+        if block is not None and block[0] <= start:
+            # Inside a protected block: it ends any run, and counts as a
+            # break before what follows it.
+            if code_start is not None:
+                spans.append((code_start, code_end))
+                code_start = None
+            prev_blank = True
+            continue
+        body = line.rstrip("\r\n")
+        blank = not body.strip()
+        indent = _indent_width(body)
+        if code_start is not None:
+            if blank or indent >= 4:
+                if not blank:
+                    code_end = start + len(body)
+                continue
+            spans.append((code_start, code_end))
+            code_start = None
+        if blank:
+            prev_blank = True
+            continue
+        if indent >= 4:
+            if prev_blank and not in_list:
+                code_start, code_end = start, start + len(body)
+            prev_blank = False
+            continue
+        if _LIST_ITEM_RE.match(body):
+            in_list = True
+        elif prev_blank:
+            in_list = False
+        prev_blank = False
+    if code_start is not None:
+        spans.append((code_start, code_end))
     return spans
 
 
@@ -272,23 +369,27 @@ def _subtract(
 
 
 def prose_spans(text: str) -> list[tuple[int, int]]:
-    """``(start, end)`` of the prose of *text*: what is outside fenced code,
-    thinking blocks, inline code, URLs, e-mail addresses, paths and file
-    names.  Sorted, non-overlapping.
+    """``(start, end)`` of the prose of *text*: what is outside fenced and
+    indented code, thinking blocks, math, inline code, URLs, e-mail
+    addresses, paths and file names.  Sorted, non-overlapping.
     """
-    outer = _subtract(0, len(text), _block_spans(text))
+    blocks = _block_spans(text)
+    protected = sorted(blocks + _indented_code_spans(text, blocks))
+    outer = _subtract(0, len(text), protected)
     result: list[tuple[int, int]] = []
     for s, e in outer:
         segment = text[s:e]
         code = [(s + a, s + b) for a, b in _inline_code_spans(segment)]
-        for ps, pe in _subtract(s, e, code):
-            piece = text[ps:pe]
-            literal = [
-                (ps + m.start(), ps + m.end())
-                for m in _TOKEN_RE.finditer(piece)
-                if _is_literal_token(m.group(0))
-            ]
-            result.extend(_subtract(ps, pe, literal))
+        for cs, ce in _subtract(s, e, code):
+            math = [(cs + m.start(), cs + m.end()) for m in _INLINE_MATH_RE.finditer(text[cs:ce])]
+            for ps, pe in _subtract(cs, ce, math):
+                piece = text[ps:pe]
+                literal = [
+                    (ps + m.start(), ps + m.end())
+                    for m in _TOKEN_RE.finditer(piece)
+                    if _is_literal_token(m.group(0))
+                ]
+                result.extend(_subtract(ps, pe, literal))
     return result
 
 
@@ -329,24 +430,52 @@ def normalize_reply_text(text: str) -> tuple[str, int]:
 # Harness call site
 # ---------------------------------------------------------------------------
 
-#: Session config key; ``False`` turns the substitution off for the session.
+#: Session config key: an "off" value (see :func:`enabled_for`) turns the
+#: substitution off for the session; absent, the worker default applies.
 CONFIG_KEY: Final[str] = "romanian_comma_below"
+#: Key of a stored ``llm.response`` payload holding the reply as the model
+#: wrote it, set only when the substitution changed it.
+RAW_CONTENT_KEY: Final[str] = "raw_content"
+#: Key of a stored ``llm.response`` payload holding how many letters differ
+#: between :data:`RAW_CONTENT_KEY` and the stored content.
+COUNT_KEY: Final[str] = "romanian_comma_below"
+
+_OFF: Final = frozenset({"false", "0", "off", "no"})
+_ON: Final = frozenset({"true", "1", "on", "yes"})
 
 
-def enabled_for(config: dict | None) -> bool:
-    """Whether a session with *config* gets the substitution (default on)."""
-    return (config or {}).get(CONFIG_KEY, True) is not False
+def enabled_for(config: dict | None, default: bool = True) -> bool:
+    """Whether a session with *config* gets the substitution.
+
+    ``False``, ``0`` and the strings "false", "0", "off", "no" (any case)
+    turn it off; ``True``, non-zero numbers and "true", "1", "on", "yes"
+    turn it on.  Absent or anything else: *default* (the worker setting).
+    """
+    value = (config or {}).get(CONFIG_KEY)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        word = value.strip().lower()
+        if word in _OFF:
+            return False
+        if word in _ON:
+            return True
+    return default
 
 
-def normalize_assistant_message(message: dict, config: dict | None = None) -> int:
+def normalize_assistant_message(
+    message: dict, config: dict | None = None, *, default: bool = True,
+) -> int:
     """Apply :func:`normalize_reply_text` to *message*'s ``content`` in place.
 
     Only a string ``content`` is touched.  ``tool_calls`` (their arguments),
     ``reasoning`` / ``reasoning_content`` / ``reasoning_details`` and every
     other key are left as they are.  Returns how many letters were replaced
-    (0 when the session's *config* turns it off).
+    (0 when *config* / *default* turn it off).
     """
-    if not enabled_for(config):
+    if not enabled_for(config, default):
         return 0
     content = message.get("content")
     if not isinstance(content, str):
@@ -355,3 +484,62 @@ def normalize_assistant_message(message: dict, config: dict | None = None) -> in
     if replaced:
         message["content"] = new
     return replaced
+
+
+def _same_text_but_the_swap(raw: object, content: object) -> bool:
+    return (
+        isinstance(raw, str)
+        and isinstance(content, str)
+        and len(raw) == len(content)
+        and fold_cedillas(raw) == fold_cedillas(content)
+    )
+
+
+def settle_response_payload(
+    payload: dict, config: dict | None = None, *, default: bool = True,
+) -> None:
+    """Fix the reply of an ``llm.response`` *payload* in place; idempotent.
+
+    May run more than once on one payload (before a step that copies the
+    reply elsewhere, and again when it is stored, after the content may
+    have been revised).  Afterwards:
+
+    * ``payload["message"]["content"]`` is the fixed text;
+    * :data:`RAW_CONTENT_KEY` holds the text the model wrote and
+      :data:`COUNT_KEY` how many letters differ, both only when they differ;
+      a raw text that no longer matches the content (it was replaced by
+      other text) is dropped.
+
+    A content that is not a string (a reply moved into a tool call) leaves
+    the payload as it is.
+    """
+    message = payload.get("message")
+    if not isinstance(message, dict):
+        return
+    content = message.get("content")
+    if not isinstance(content, str):
+        return
+    raw = payload.get(RAW_CONTENT_KEY)
+    if not _same_text_but_the_swap(raw, content):
+        raw = content
+    normalize_assistant_message(message, config, default=default)
+    fixed = message["content"]
+    if raw != fixed:
+        payload[RAW_CONTENT_KEY] = raw
+        payload[COUNT_KEY] = sum(1 for a, b in zip(raw, fixed) if a != b)
+    else:
+        payload.pop(RAW_CONTENT_KEY, None)
+        payload.pop(COUNT_KEY, None)
+
+
+def sampled_content(payload: dict) -> object:
+    """The content of a stored ``llm.response`` *payload* as the model wrote it.
+
+    :data:`RAW_CONTENT_KEY` when it is present and differs from the stored
+    content only by the swap, else the stored content.  For readers that
+    need the model's own tokens (training export, RL rewards).
+    """
+    message = payload.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    raw = payload.get(RAW_CONTENT_KEY)
+    return raw if _same_text_but_the_swap(raw, content) else content
