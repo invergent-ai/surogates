@@ -91,6 +91,7 @@ from surogates.harness.resilience import (
     try_activate_fallback,
     try_activate_pro_fallback,
 )
+from surogates.harness.romanian_diacritics import normalize_assistant_message
 from surogates.harness.sanitize import (
     cap_delegate_calls,
     delegate_cap,
@@ -3789,6 +3790,7 @@ class AgentHarness(
             async def _persist_response() -> int:
                 nonlocal event_id
                 if event_id is None:
+                    self._settle_reply_text(session, response_data)
                     event_id = await self._store.emit_event(
                         session.id,
                         EventType.LLM_RESPONSE,
@@ -5314,6 +5316,31 @@ class AgentHarness(
         self._fallback_activated = activated
         return True
 
+    @staticmethod
+    def _settle_reply_text(session: Session, payload: dict[str, Any]) -> None:
+        """Last edit of a model reply's text, just before its ``llm.response`` is stored.
+
+        Called once per model call, when the reply's content is settled
+        (after thinking is stripped and the recovery paths revised it).
+        ``payload["message"]`` is the same dict the loop keeps in its
+        history, so the stored event, what the user is shown from it and
+        what the next call replays all carry the same text.
+
+        Today it turns the cedilla s/t of a Romanian reply into the
+        comma-below letters (:mod:`surogates.harness.romanian_diacritics`;
+        session config ``romanian_comma_below: false`` turns it off).  Only
+        ``content`` is read: tool-call arguments and reasoning are not.
+        The count replaced is recorded on the event as
+        ``romanian_comma_below`` so the cosmetic fix can be reported apart
+        from the model's own output.
+        """
+        message = payload.get("message")
+        if not isinstance(message, dict):
+            return
+        replaced = normalize_assistant_message(message, getattr(session, "config", None))
+        if replaced:
+            payload["romanian_comma_below"] = replaced
+
     def _build_llm_response_payload(
         self,
         assistant_message: dict[str, Any],
@@ -6418,6 +6445,7 @@ class AgentHarness(
                     if iteration_index is not None
                     else max(self._budget.used - 1, 0)
                 )
+            self._settle_reply_text(session, final_payload)
             await self._store.emit_event(
                 session.id,
                 EventType.LLM_RESPONSE,
