@@ -349,10 +349,12 @@ class TrainingDataCollector:
         examples: list[TrainingExample] = []
         skipped_tainted = 0
         skipped_thumbs_down = 0
+        configs = await self._session_store.get_session_configs(list(by_session))
 
         for session_id, session_invocations in by_session.items():
-            # Test-mode and simulated chats are not real usage.
-            if is_simulated((await self._session_store.get_session(session_id)).config):
+            # A chat deleted since its invocation was found is skipped, and
+            # test-mode and simulated chats are not real usage.
+            if session_id not in configs or is_simulated(configs[session_id]):
                 continue
             if exclude_tainted:
                 if await self._session_store.session_has_taint(session_id):
