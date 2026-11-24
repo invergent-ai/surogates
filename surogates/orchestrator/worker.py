@@ -2385,6 +2385,7 @@ async def run_worker(settings: Settings) -> None:
                 enabled=settings.worker.live_deltas,
                 transport=settings.worker.delta_transport,
             ),
+            romanian_comma_below=settings.worker.romanian_comma_below,
             media_gen=media_gen_config,
             turn_summarizer=turn_summarizer,
             # Share the per-session bundle with

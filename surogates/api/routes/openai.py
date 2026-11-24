@@ -72,6 +72,7 @@ from surogates.channels.openai_shape import (
     usage_from_cost_summary,
 )
 from surogates.config import enqueue_session
+from surogates.harness.romanian_diacritics import fold_cedillas
 from surogates.runtime import (
     AgentRuntimeContext,
     agent_runtime_context_dep,
@@ -1107,12 +1108,17 @@ class _LiveText:
 
         The harness strips the stored text of a call with reasoning and keeps
         the text of one without as streamed; the frames kept their leading
-        whitespace, so either form counts.
+        whitespace, so either form counts.  The stored text of a Romanian
+        reply may also have its cedilla s/t turned comma-below after the
+        frames went out (:mod:`surogates.harness.romanian_diacritics`); that
+        swap keeps every offset, so the texts are compared with it applied
+        to both.
         """
         if not isinstance(whole, str):
             return []
+        folded = fold_cedillas(whole)
         for start in (sent, sent.lstrip()):
-            if whole.startswith(start):
+            if folded.startswith(fold_cedillas(start)):
                 break
         else:
             return []

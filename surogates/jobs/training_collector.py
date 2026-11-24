@@ -25,6 +25,7 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
+from surogates.harness.romanian_diacritics import sampled_content
 from surogates.session.events import EventType
 from surogates.simulation.side_effects import is_simulated
 
@@ -461,8 +462,13 @@ class TrainingDataCollector:
                 if msg.get("role") != "assistant":
                     continue
                 # Copy the assistant message as-is; its ``tool_calls``
-                # (if any) are already in the OpenAI-compatible shape.
-                messages.append(dict(msg))
+                # (if any) are already in the OpenAI-compatible shape.  Its
+                # content is the text the model wrote: a stored reply whose
+                # letters the harness fixed keeps that text as ``raw_content``.
+                exported = dict(msg)
+                if "content" in exported:
+                    exported["content"] = sampled_content(event.data)
+                messages.append(exported)
                 if msg.get("content"):
                     has_final_assistant_content = True
                 for call_id in dict.fromkeys(call.get("id") for call in msg.get("tool_calls") or []):

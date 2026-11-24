@@ -42,6 +42,7 @@ Surogates is configured via a YAML file merged with environment variables. Envir
 | `worker.max_iterations_ceiling` | `SUROGATES_WORKER_MAX_ITERATIONS_CEILING` | `90` | Most model calls in one wake of a session; a session's `max_iterations` may lower it, never raise it. Also the budget of sessions that name none |
 | `worker.api_base_url` | `SUROGATES_WORKER_API_BASE_URL` | -- | API server URL for harness tool calls |
 | `worker.use_api_for_harness_tools` | `SUROGATES_WORKER_USE_API_FOR_HARNESS_TOOLS` | `false` | Route skill/memory operations through API server |
+| `worker.romanian_comma_below` | `SUROGATES_WORKER_ROMANIAN_COMMA_BELOW` | `true` | A model reply recognised as Romanian gets the comma-below letters `ș ț Ș Ț` in place of the cedilla `ş ţ Ş Ţ` before its `llm.response` is stored; code, math, paths, tool arguments, reasoning and non-Romanian replies are left as they are (`surogates/harness/romanian_diacritics.py`). The model's own text stays on the event as `raw_content`. A session's config `romanian_comma_below` wins (`false` / `0` / `"off"` / `"no"`, or `true` / `1` / `"on"` / `"yes"`). Readers that need the text the model sampled (benchmark runners, RL rollout and reward readers) must read `raw_content` through `romanian_diacritics.sampled_content`, or run with it off: `message.content` holds the fixed text |
 
 ## LLM Provider (`llm`)
 
