@@ -412,6 +412,23 @@ def test_the_chosen_toolkits_claim_round_trips(monkeypatch):
     assert _claims(create_sandbox_token(ORG, USER, SESSION, test_toolkits=["one_drive"]))["test_toolkits"] == ["one_drive"]
 
 
+@pytest.mark.parametrize("claims, want", [
+    ({}, None),
+    ({"test_toolkits": None}, []),
+    ({"test_toolkits": "one_drive"}, []),
+    ({"test_toolkits": 3}, []),
+    ({"test_toolkits": ["one_drive", 7, None, {"x": 1}]}, ["one_drive"]),
+], ids=["absent", "null", "string", "number", "list with non-strings"])
+async def test_a_malformed_toolkits_claim_chooses_no_account(monkeypatch, claims, want):
+    import surogates.mcp_proxy.auth as proxy_auth
+
+    payload = {"type": "sandbox", "session_id": str(SESSION), "org_id": str(ORG),
+               "user_id": str(USER), **claims}
+    monkeypatch.setattr(proxy_auth, "decode_token", lambda _t: payload)
+    request = SimpleNamespace(headers={"Authorization": "Bearer t"})
+    assert (await get_proxy_auth(request)).test_toolkits == want
+
+
 async def test_the_proxy_refuses_an_unchosen_account_and_passes_a_chosen_read(proxy, monkeypatch):
     app, upstream = proxy
     app.state.pool = SimpleNamespace(resolve_call_target=lambda *a: ("srv", "tool", {}))

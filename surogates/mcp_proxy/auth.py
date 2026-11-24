@@ -85,5 +85,16 @@ async def get_proxy_auth(request: Request) -> ProxyAuthContext:
         agent_id=payload.get("agent_id"),
         simulated=payload.get("simulated") is True,
         simulation_read=payload.get("simulation_read"),
-        test_toolkits=payload.get("test_toolkits"),
+        test_toolkits=_test_toolkits(payload),
     )
+
+
+def _test_toolkits(payload: dict) -> list[str] | None:
+    """The chosen accounts, failing closed: an absent claim is not a test chat,
+    a claim that is not a list chooses none, and only string entries count."""
+    if "test_toolkits" not in payload:
+        return None
+    claim = payload["test_toolkits"]
+    if not isinstance(claim, list):
+        return []
+    return [t for t in claim if isinstance(t, str)]
