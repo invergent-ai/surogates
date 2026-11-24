@@ -390,3 +390,81 @@ async def test_collect_for_skill_scopes_to_org(
     assert a_examples[0].session_id == sess_a.id
     assert len(b_examples) == 1
     assert b_examples[0].session_id == sess_b.id
+
+
+@pytest.mark.parametrize(
+    "config",
+    [{"test_mode": True}, {"memory_boundary": "simulation:run-1"}],
+    ids=["test mode", "simulation"],
+)
+async def test_collect_for_skill_excludes_test_and_simulated_sessions(
+    session_store, session_factory, config,
+):
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    normal = await session_store.create_session(
+        user_id=user_id, org_id=org_id, agent_id="test-agent",
+    )
+    fake = await session_store.create_session(
+        user_id=user_id, org_id=org_id, agent_id="test-agent", config=config,
+    )
+    for s in (normal, fake):
+        await _seed_skill_invocation(session_store, s.id)
+
+    collector = TrainingDataCollector(session_store=session_store)
+    examples = await collector.collect_for_skill("sql_writer", org_id)
+
+    assert [e.session_id for e in examples] == [normal.id]
+
+
+async def test_collect_for_expert_excludes_test_and_simulated_sessions():
+    from types import SimpleNamespace
+    from uuid import uuid4
+
+    sessions = [
+        SimpleNamespace(id=uuid4(), config=c)
+        for c in ({}, {"test_mode": True}, {"memory_boundary": "simulation:r"})
+    ]
+
+    class Store:
+        async def list_sessions(self, **kw):
+            return sessions
+
+    collector = TrainingDataCollector(session_store=Store())
+    seen = []
+
+    async def fake_extract(session_id, expert_name):
+        seen.append(session_id)
+        return []
+
+    collector._extract_from_session = fake_extract
+    await collector.collect_for_expert("x", uuid4())
+
+    assert seen == [sessions[0].id]
+
+
+async def test_collect_for_skill_skips_a_session_deleted_since_its_invocation(
+    session_store, session_factory,
+):
+    from types import SimpleNamespace
+    from uuid import uuid4
+
+    org_id = await create_org(session_factory)
+    user_id = await create_user(session_factory, org_id)
+    kept = await session_store.create_session(
+        user_id=user_id, org_id=org_id, agent_id="test-agent",
+    )
+    await _seed_skill_invocation(session_store, kept.id)
+
+    class Store:  # the real store, plus an invocation whose chat is gone
+        def __getattr__(self, name):
+            return getattr(session_store, name)
+
+        async def find_skill_invocations(self, *a, **kw):
+            found = await session_store.find_skill_invocations(*a, **kw)
+            return [SimpleNamespace(id=1, session_id=uuid4()), *found]
+
+    collector = TrainingDataCollector(session_store=Store())
+    examples = await collector.collect_for_skill("sql_writer", org_id)
+
+    assert [e.session_id for e in examples] == [kept.id]

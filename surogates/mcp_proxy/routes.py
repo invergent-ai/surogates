@@ -31,7 +31,7 @@ from surogates.runtime import (
     build_agent_runtime_context,
     rate_limit_dep,
 )
-from surogates.simulation.side_effects import decide, fake_result, would_have
+from surogates.simulation.side_effects import decide, fake_result, unchosen_composio_call, would_have
 from surogates.tools.mcp.client import _sanitize_error, call_utility
 from surogates.tools.mcp.names import sanitize_mcp_name_component
 
@@ -331,6 +331,12 @@ async def call_tool(
     audit_store: AuditStore | None = getattr(
         request.app.state, "audit_store", None,
     )
+
+    if auth.test_toolkits is not None and (unchosen := unchosen_composio_call(
+        body.name, body.arguments, auth.test_toolkits,
+    )) is not None:
+        await _audit_call(audit_store, auth, ctx, server_name, original_tool, "refused", 0)
+        return ToolCallResponse(error=f"No connected account for {unchosen} in this chat.")
 
     if auth.simulated and auth.simulation_read != body.name:
         hints = next((s.get("annotations") for s in schemas if s.get("name") == body.name), None)

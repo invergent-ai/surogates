@@ -26,7 +26,7 @@ from uuid import UUID
 from surogates.governance.policy import GovernanceGate, PolicyDecision
 from surogates.sandbox.pool import SandboxPool
 from surogates.sandbox.base import default_sandbox_spec
-from surogates.simulation.side_effects import is_simulated
+from surogates.simulation.side_effects import chosen_toolkits, is_simulated
 from surogates.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -348,7 +348,9 @@ class ToolRouter:
                 )
                 if is_simulated(extra_kwargs.get("session_config")):
                     # Its token tells the MCP proxy to fake what scripts in it would change.
-                    sandbox_spec = dataclasses.replace(sandbox_spec, simulated=True)
+                    sandbox_spec = dataclasses.replace(
+                        sandbox_spec, simulated=True, test_toolkits=chosen_toolkits(extra_kwargs.get("session_config")),
+                    )
                 await self.sandbox_pool.ensure(
                     str(session_id), sandbox_spec,
                 )

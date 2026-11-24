@@ -445,6 +445,7 @@ class K8sSandbox(ImagePods):
             agent_id=spec.env.get("SUROGATES_AGENT_ID") or None,
             is_service_account=spec.env.get("SUROGATES_IS_SERVICE_ACCOUNT") == "1",
             simulated=spec.simulated,
+            test_toolkits=spec.test_toolkits,
         )
         return [
             client.V1EnvVar(name="MCP_PROXY_URL", value=self._mcp_proxy_url),

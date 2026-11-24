@@ -17,14 +17,15 @@ out of training-data exports.
 from __future__ import annotations
 
 import logging
-from uuid import UUID
+from typing import Annotated
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StringConstraints
 from sqlalchemy.exc import IntegrityError
 
 from surogates.channels.constants import API_CHANNEL, session_queue_priority
-from surogates.channels.memory_boundary import is_case_session
+from surogates.channels.memory_boundary import SKILLOPT_BOUNDARY_PREFIX, is_case_session
 from surogates.config import enqueue_session
 from surogates.runtime import (
     AgentRuntimeContext,
@@ -53,6 +54,11 @@ MAX_PROMPT_LENGTH = 200_000
 # the same per-org key space: a client's key there could replay into a
 # case's session, so no client may use one.
 _KEEL_KEY_PREFIX = "keel:"
+# Bumped when test_mode's meaning changes.  A runtime that predates test
+# mode has no capabilities route, and its PromptRequest silently drops the
+# unknown field, so a client must check this before sending a test chat.
+# 2: test_mode.toolkits enforced.
+TEST_MODE_VERSION = 2
 
 
 # ---------------------------------------------------------------------------
@@ -81,6 +87,23 @@ class SkillOverride(BaseModel):
     candidate_id: str | None = None
 
 
+class ScratchScope(BaseModel):
+    """The only OneDrive/SharePoint items a test-mode chat may change for real."""
+
+    drive_id: str
+    root_id: str
+    root_path: str
+    item_ids: list[str]
+
+
+class TestMode(BaseModel):
+    __test__ = False  # not a pytest class
+
+    scratch: ScratchScope | None = None
+    # Composio toolkits the chat may use; anything else is refused (missing = none).
+    toolkits: list[Annotated[str, StringConstraints(pattern=r"^[a-z0-9_]{1,64}$")]] | None = None
+
+
 class PromptRequest(BaseModel):
     """A single prompt submission.
 
@@ -99,6 +122,9 @@ class PromptRequest(BaseModel):
     # caller's, or a person's shared with the agent. Whose it is is checked when the
     # browser starts; one that is none of these is never loaded.
     browser_profile_id: UUID | None = None
+    # Skill-optimisation chats only: reads are real, changes outside the
+    # scratch copy are faked.  Needs metadata.skillopt_run_id.
+    test_mode: TestMode | None = None
 
 
 class PromptAccepted(BaseModel):
@@ -113,6 +139,9 @@ class PromptAccepted(BaseModel):
     event_id: int | None = None
     deduplicated: bool = False
     error: str | None = None
+    # True only when the session carries config["test_mode"]: the caller's
+    # proof that the chat really runs in test mode.
+    test_mode_applied: bool = False
 
 
 class BatchPromptRequest(BaseModel):
@@ -167,6 +196,13 @@ def _require_service_account(tenant: TenantContext) -> UUID:
     return tenant.service_account_id
 
 
+def _is_canonical_uuid(value: object) -> bool:
+    try:
+        return isinstance(value, str) and str(UUID(value)) == value
+    except ValueError:
+        return False
+
+
 def _refuse_a_case_session(existing: Session) -> None:
     """409 ``key-in-use`` for a key that names a Keel case's session.
 
@@ -181,6 +217,15 @@ def _refuse_a_case_session(existing: Session) -> None:
                 "message": "This idempotency key is in use.",
             },
         )
+
+
+def _deduplicated(existing: Session) -> PromptAccepted:
+    return PromptAccepted(
+        session_id=existing.id,
+        event_id=None,
+        deduplicated=True,
+        test_mode_applied="test_mode" in (existing.config or {}),
+    )
 
 
 async def _submit_one(
@@ -217,11 +262,7 @@ async def _submit_one(
         )
         if existing is not None:
             _refuse_a_case_session(existing)
-            return PromptAccepted(
-                session_id=existing.id,
-                event_id=None,
-                deduplicated=True,
-            )
+            return _deduplicated(existing)
 
     config: dict = {
         "service_account_id": str(service_account_id),
@@ -249,8 +290,21 @@ async def _submit_one(
                 tenant.org_id, sorted(body.skill_overrides),
             )
 
+    session_id = uuid4()
+    if body.test_mode is not None:
+        run_id = (body.metadata or {}).get("skillopt_run_id")
+        if not _is_canonical_uuid(run_id):
+            # It becomes part of the memory boundary (a storage key), so only a UUID.
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="test_mode requires metadata.skillopt_run_id to be a UUID.",
+            )
+        config["test_mode"] = body.test_mode.model_dump()
+        config["memory_boundary"] = f"{SKILLOPT_BOUNDARY_PREFIX}{run_id}:{session_id}"
+
     try:
         session = await create_agent_session(
+            session_id=session_id,
             store=store,
             storage=request.app.state.storage,
             settings=settings,
@@ -274,11 +328,7 @@ async def _submit_one(
             # Truly exceptional: constraint fired but row not visible.
             raise
         _refuse_a_case_session(existing)
-        return PromptAccepted(
-            session_id=existing.id,
-            event_id=None,
-            deduplicated=True,
-        )
+        return _deduplicated(existing)
 
     event_id = await store.emit_event(
         session.id,
@@ -294,12 +344,25 @@ async def _submit_one(
         priority=session_queue_priority(session),
     )
 
-    return PromptAccepted(session_id=session.id, event_id=event_id)
+    return PromptAccepted(
+        session_id=session.id,
+        event_id=event_id,
+        test_mode_applied="test_mode" in config,
+    )
 
 
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
+
+
+@router.get("/api/prompts/capabilities")
+async def prompt_capabilities(
+    tenant: TenantContext = Depends(get_current_tenant),
+) -> dict[str, int]:
+    """What this runtime's prompt API understands, by integer version."""
+    _require_service_account(tenant)
+    return {"test_mode": TEST_MODE_VERSION}
 
 
 @router.post(

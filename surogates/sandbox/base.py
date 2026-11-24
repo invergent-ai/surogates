@@ -123,6 +123,8 @@ class SandboxSpec:
     # with ``image_workdir`` ("" = the image's own working directory) as its workspace.  Empty: the backend's own image.
     session_image: str = ""
     image_workdir: str = ""
+    # A test chat's chosen Composio toolkits, signed into the same token; ``None`` = not a test chat.
+    test_toolkits: list[str] | None = None
 
 
 def default_sandbox_spec() -> SandboxSpec:

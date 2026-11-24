@@ -82,6 +82,7 @@ _BOUNDARY_SHARING_FIELDS = (
     "memory_boundary",
     "workspace_boundary",
     "simulation_run_id",
+    "test_mode",
 )
 
 

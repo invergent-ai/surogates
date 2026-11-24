@@ -749,6 +749,136 @@ async def test_skill_overrides_rejected_for_jwt_caller(
     assert resp.status_code == 403
 
 
+_TEST_MODE = {
+    "scratch": {"drive_id": "D1", "root_id": "R1", "root_path": "/t/R", "item_ids": ["I1"]}
+}
+
+
+async def test_test_mode_refused_without_service_account(
+    client: AsyncClient, session_factory
+):
+    _org_id, user_jwt = await _non_admin_tenant(session_factory)
+    resp = await client.post(
+        "/v1/api/prompts",
+        json={"prompt": "hi", "metadata": {"skillopt_run_id": "run-1"}, "test_mode": _TEST_MODE},
+        headers={"Authorization": f"Bearer {user_jwt}"},
+    )
+    assert resp.status_code == 403
+
+
+async def test_test_mode_refused_without_skillopt_run_id(
+    client: AsyncClient, session_factory
+):
+    org_id = await create_org(session_factory)
+    token = await _issue_token(session_factory, org_id)
+    resp = await client.post(
+        "/v1/api/prompts",
+        json={"prompt": "hi", "test_mode": _TEST_MODE},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 422
+
+
+async def test_test_mode_stored_on_session(
+    client: AsyncClient, session_factory, session_store
+):
+    org_id = await create_org(session_factory)
+    token = await _issue_token(session_factory, org_id)
+    resp = await client.post(
+        "/v1/api/prompts",
+        json={"prompt": "hi", "metadata": {"skillopt_run_id": _RUN}, "test_mode": _TEST_MODE},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 202, resp.text
+    sid = UUID(resp.json()["session_id"])
+    session = await session_store.get_session(sid)
+    assert session.config["test_mode"]["scratch"]["root_id"] == "R1"
+    assert session.config["memory_boundary"] == f"skillopt:{_RUN}:{sid}"
+
+
+_RUN = "8f1c2d3e-4b5a-4c6d-8e7f-901234567890"
+
+
+async def test_test_mode_toolkits_stored_and_validated(
+    client: AsyncClient, session_factory, session_store
+):
+    org_id = await create_org(session_factory)
+    token = await _issue_token(session_factory, org_id)
+    for toolkits, code in ((["one_drive"], 202), (["One Drive"], 422)):
+        resp = await client.post(
+            "/v1/api/prompts",
+            json={"prompt": "hi", "metadata": {"skillopt_run_id": _RUN}, "test_mode": {**_TEST_MODE, "toolkits": toolkits}},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == code, resp.text
+        if code == 202:
+            session = await session_store.get_session(UUID(resp.json()["session_id"]))
+            assert session.config["test_mode"]["toolkits"] == ["one_drive"]
+
+
+async def test_capabilities_advertise_test_mode(client: AsyncClient, session_factory):
+    org_id = await create_org(session_factory)
+    token = await _issue_token(session_factory, org_id)
+    resp = await client.get(
+        "/v1/api/prompts/capabilities", headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["test_mode"] >= 1
+
+
+async def test_capabilities_refuse_a_jwt(client: AsyncClient, session_factory):
+    _org_id, user_jwt = await _non_admin_tenant(session_factory)
+    resp = await client.get(
+        "/v1/api/prompts/capabilities", headers={"Authorization": f"Bearer {user_jwt}"},
+    )
+    assert resp.status_code == 403
+
+
+async def test_accepted_says_whether_test_mode_was_applied(client: AsyncClient, session_factory):
+    org_id = await create_org(session_factory)
+    token = await _issue_token(session_factory, org_id)
+    headers = {"Authorization": f"Bearer {token}"}
+    key = f"tm-{uuid4()}"
+    body = {"prompt": "hi", "metadata": {"skillopt_run_id": _RUN}, "test_mode": _TEST_MODE, "idempotency_key": key}
+    first = await client.post("/v1/api/prompts", json=body, headers=headers)
+    assert first.status_code == 202, first.text
+    assert first.json()["test_mode_applied"] is True
+    # A replay answers for the stored session: it was a test chat.
+    again = await client.post("/v1/api/prompts", json=body, headers=headers)
+    assert again.json()["deduplicated"] is True
+    assert again.json()["test_mode_applied"] is True
+
+    plain = await client.post("/v1/api/prompts", json={"prompt": "hi"}, headers=headers)
+    assert plain.json()["test_mode_applied"] is False
+    # A key first used by a plain chat never reports test mode for a test request.
+    plain_key = f"plain-{uuid4()}"
+    await client.post("/v1/api/prompts", json={"prompt": "hi", "idempotency_key": plain_key}, headers=headers)
+    replay = await client.post("/v1/api/prompts", json={**body, "idempotency_key": plain_key}, headers=headers)
+    assert replay.json()["deduplicated"] is True
+    assert replay.json()["test_mode_applied"] is False
+
+    batch = await client.post(
+        "/v1/api/prompts:batch",
+        json={"prompts": [{k: v for k, v in body.items() if k != "idempotency_key"}, {"prompt": "x"}]},
+        headers=headers,
+    )
+    assert [r["test_mode_applied"] for r in batch.json()["results"]] == [True, False]
+
+
+@pytest.mark.parametrize("run_id", ["run-1", "../../x", "a/b", "", 7, {"x": 1}, _RUN + "/.."])
+async def test_test_mode_refuses_a_run_id_that_is_not_a_uuid(
+    client: AsyncClient, session_factory, run_id
+):
+    org_id = await create_org(session_factory)
+    token = await _issue_token(session_factory, org_id)
+    resp = await client.post(
+        "/v1/api/prompts",
+        json={"prompt": "hi", "metadata": {"skillopt_run_id": run_id}, "test_mode": _TEST_MODE},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 422, resp.text
+
+
 async def test_submit_batch_accepts_multiple_prompts(
     client: AsyncClient, session_factory, session_store
 ):

@@ -396,3 +396,124 @@ async def test_an_experts_sandbox_in_a_simulation_gets_the_claim(monkeypatch):
         assert _claims(token).get("simulated", False) is simulated
     # The tenant's spec is shared by its real sessions: it stays unmarked.
     assert shared.simulated is False
+
+
+# --- a test chat's chosen accounts, enforced for scripts in the sandbox too ---
+
+ROUTER_EXEC = "mcp__tool_router__COMPOSIO_MULTI_EXECUTE_TOOL"
+
+
+def test_the_chosen_toolkits_claim_round_trips(monkeypatch):
+    from surogates.mcp_proxy.auth import ProxyAuthContext  # noqa: F401
+
+    monkeypatch.setenv("SUROGATES_JWT_SECRET", "test-secret")
+    assert "test_toolkits" not in _claims(create_sandbox_token(ORG, USER, SESSION))
+    assert _claims(create_sandbox_token(ORG, USER, SESSION, test_toolkits=[]))["test_toolkits"] == []
+    assert _claims(create_sandbox_token(ORG, USER, SESSION, test_toolkits=["one_drive"]))["test_toolkits"] == ["one_drive"]
+
+
+@pytest.mark.parametrize("claims, want", [
+    ({}, None),
+    ({"test_toolkits": None}, []),
+    ({"test_toolkits": "one_drive"}, []),
+    ({"test_toolkits": 3}, []),
+    ({"test_toolkits": ["one_drive", 7, None, {"x": 1}]}, ["one_drive"]),
+], ids=["absent", "null", "string", "number", "list with non-strings"])
+async def test_a_malformed_toolkits_claim_chooses_no_account(monkeypatch, claims, want):
+    import surogates.mcp_proxy.auth as proxy_auth
+
+    payload = {"type": "sandbox", "session_id": str(SESSION), "org_id": str(ORG),
+               "user_id": str(USER), **claims}
+    monkeypatch.setattr(proxy_auth, "decode_token", lambda _t: payload)
+    request = SimpleNamespace(headers={"Authorization": "Bearer t"})
+    assert (await get_proxy_auth(request)).test_toolkits == want
+
+
+async def test_the_proxy_refuses_an_unchosen_account_and_passes_a_chosen_read(proxy, monkeypatch):
+    app, upstream = proxy
+    app.state.pool = SimpleNamespace(resolve_call_target=lambda *a: ("srv", "tool", {}))
+    monkeypatch.setattr(proxy_routes, "_ensure_tenant_connected", AsyncMock(return_value=[{"name": ROUTER_EXEC}]))
+    ask = lambda slug, **c: _call_args(app, ROUTER_EXEC, {"tools": [{"tool_slug": slug, "arguments": {}}]}, **c)
+    refused = await ask("OUTLOOK_LIST_MESSAGES", test_toolkits=["one_drive"])
+    assert refused["error"] == "No connected account for OUTLOOK_LIST_MESSAGES in this chat."
+    upstream.assert_not_awaited()
+    assert app.state.audit_store.emit.await_args.kwargs["data"]["outcome"] == "refused"
+    assert (await ask("ONE_DRIVE_LIST_FOLDER_CHILDREN", test_toolkits=["one_drive"])).get("error") is None
+    upstream.assert_awaited_once()
+    # [] refuses every app call; an absent claim is not a test chat.
+    assert (await ask("ONE_DRIVE_LIST_FOLDER_CHILDREN", test_toolkits=[]))["error"]
+    assert (await ask("OUTLOOK_LIST_MESSAGES")).get("error") is None
+
+
+async def _call_args(app, name, arguments, **claims) -> dict:
+    token = create_sandbox_token(ORG, USER, SESSION, agent_id="agent-A", **claims)
+    async with _http(app) as client:
+        resp = await client.post(
+            "/mcp/v1/tools/call", json={"name": name, "arguments": arguments},
+            headers={"Authorization": f"Bearer {token}"}, params={"agent_id": "agent-A"},
+        )
+    return resp.json()
+
+
+async def test_a_test_chats_sandbox_spec_carries_its_toolkits():
+    from surogates.harness.tool_exec import _build_session_sandbox_spec
+
+    for tm, want in (({"toolkits": ["one_drive"]}, ["one_drive"]), ({"scratch": None}, []), (None, None)):
+        config = {"workspace_path": "", **({"test_mode": tm} if tm is not None else {})}
+        session = SimpleNamespace(id=uuid4(), config=config, agent_id="a")
+        tenant = SimpleNamespace(org_id=ORG, user_id=USER, asset_root="/tmp/test")
+        spec = await _build_session_sandbox_spec(session, tenant, str(session.id))
+        assert spec.test_toolkits == want
+
+
+# --- every site that mints a token for a test chat carries its toolkits ---------
+
+TEST_SPEC_TOOLKITS = ["one_drive"]
+
+
+def test_the_docker_and_k8s_mints_carry_the_toolkits(monkeypatch):
+    from surogates.sandbox.base import SandboxSpec
+    from surogates.sandbox.docker import DockerSandbox
+    from surogates.sandbox.kubernetes import K8sSandbox
+
+    monkeypatch.setenv("SUROGATES_JWT_SECRET", "test-secret")
+    spec = SandboxSpec(env={"ORG_ID": str(ORG), "USER_ID": str(USER)}, simulated=True, test_toolkits=TEST_SPEC_TOOLKITS)
+    assert _claims(DockerSandbox._mint_mcp_token(SimpleNamespace(), spec, uuid4().hex))["test_toolkits"] == TEST_SPEC_TOOLKITS
+    pod = K8sSandbox(mcp_proxy_url="http://proxy")._build_pod_manifest(uuid4().hex, "pod", "secret", spec, executor_token="t")
+    env = {e.name: e.value for e in pod.spec.containers[0].env}
+    assert _claims(env["MCP_PROXY_TOKEN"])["test_toolkits"] == TEST_SPEC_TOOLKITS
+
+
+async def test_the_worker_and_expert_mints_carry_the_toolkits(proxy, monkeypatch):
+    from surogates.governance.policy import PolicyDecision
+    from surogates.sandbox.base import SandboxSpec
+    from surogates.sandbox.docker import DockerSandbox
+    from surogates.tools.router import ToolRouter
+
+    app, _ = proxy
+    config = {"test_mode": {"scratch": None, "toolkits": TEST_SPEC_TOOLKITS}}
+    minted: list[dict] = []
+    real = create_sandbox_token
+
+    def spy(*args, **kwargs):
+        minted.append(kwargs)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr("surogates.orchestrator.mcp_client.create_sandbox_token", spy)
+    registry, mcp = _proxy_client(app)
+    try:
+        await registry.dispatch(FETCH, {}, tenant=TENANT, session_id=SESSION, session_config=config, simulation_read=True)
+    finally:
+        await mcp.close()
+    assert minted[0]["test_toolkits"] == TEST_SPEC_TOOLKITS
+
+    # The expert sandbox's spec (tools/router.py), then its token.
+    allow = SimpleNamespace(check=lambda name, *a, **k: PolicyDecision(allowed=True, reason="", tool_name=name))
+    pool = SimpleNamespace(ensure=AsyncMock(), execute=AsyncMock(return_value="{}"))
+    await ToolRouter(ToolRegistry(), pool, allow).execute(
+        name="terminal", arguments={"command": "ls"},
+        tenant=SimpleNamespace(sandbox_spec=SandboxSpec(env={"ORG_ID": str(ORG), "USER_ID": str(USER)})),
+        session_id=SESSION, session_config=config,
+    )
+    spec = pool.ensure.await_args.args[1]
+    assert _claims(DockerSandbox._mint_mcp_token(SimpleNamespace(), spec, uuid4().hex))["test_toolkits"] == TEST_SPEC_TOOLKITS

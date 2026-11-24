@@ -247,3 +247,13 @@ async def test_adding_a_titled_record_again_says_it_replaced_it():
     assert first.message == "Entry added."
     assert second.message == "Entry replaced."
     assert second.entries == ["FIȘA\nPatient: Ion\nLast contact: day 1"]
+
+
+async def test_skillopt_boundary_honoured_on_api_channel():
+    from surogates.channels.memory_boundary import session_memory_boundary
+
+    session = SimpleNamespace(
+        id=uuid4(), channel="api", agent_id="a",
+        config={"memory_boundary": "skillopt:run-1:s1"},
+    )
+    assert session_memory_boundary(session) == "skillopt:run-1:s1"

@@ -40,7 +40,7 @@ WRITE_VERBS = frozenset(
     "MARK REPLACE CLOSE RESOLVE ASSIGN APPROVE SUBMIT".split()
 )
 READ_VERBS = frozenset(
-    "GET LIST FETCH SEARCH FIND READ QUERY LOOKUP RETRIEVE DESCRIBE COUNT EXPORT".split()
+    "GET LIST FETCH SEARCH FIND READ QUERY LOOKUP RETRIEVE DESCRIBE COUNT EXPORT DOWNLOAD".split()
 )
 
 _ROUTER_PREFIXES = ("mcp__tool_router__", "mcp__composio_tool_router__")
@@ -55,10 +55,15 @@ Judge = Callable[[str, str], Awaitable[bool]]
 _decided: dict[str, tuple[bool, float]] = {}
 
 
+def is_test_mode(config: dict | None) -> bool:
+    """A skill-optimisation test chat: only scratch-copy file changes run for real."""
+    return bool((config or {}).get("test_mode"))
+
+
 def is_simulated(config: dict | None) -> bool:
     config = config or {}
     # A sub-agent made before it inherited the run id still has the run's memory boundary.
-    return bool(config.get("simulation_run_id")) or str(config.get("memory_boundary") or "").startswith(
+    return bool(config.get("simulation_run_id")) or is_test_mode(config) or str(config.get("memory_boundary") or "").startswith(
         SIMULATION_BOUNDARY_PREFIX
     )
 
@@ -84,11 +89,13 @@ async def _cached(key: str, name: str, description: str, annotations: dict | Non
     known = changes_something(name, annotations)
     if known is not None:
         return known
+    if llm is None:
+        # No judge (a test chat, or none configured): an unknown tool is faked.  The
+        # cache is not read, so an earlier LLM "read" verdict cannot make it real.
+        return True
     hit = _decided.get(key)
     if hit is not None and hit[1] > time.monotonic():
         return hit[0]
-    if llm is None:
-        return True
     try:
         verdict = bool(await asyncio.wait_for(llm(name, description), _JUDGE_TIMEOUT_S))
     except Exception:
@@ -101,8 +108,15 @@ async def _cached(key: str, name: str, description: str, annotations: dict | Non
 
 async def decide(
     name: str, annotations: dict | None, *, llm: Judge | None, args: Any = None, description: str = "",
+    scratch: dict | None = None,
 ) -> bool:
-    """Whether calling *name* would change something; any doubt counts as yes."""
+    """Whether calling *name* would change something; any doubt counts as yes.
+
+    With *scratch* (a test chat's copy), a router call's file change inside the copy counts as safe to run,
+    and no LLM is asked: a test chat fakes every tool its name does not show to be a read.
+    """
+    if scratch:
+        llm = None
     if name.startswith(_ROUTER_PREFIXES):
         tool = name.rsplit("__", 1)[-1].upper()
         # The router's executors run any app tool, or code that can: the
@@ -113,10 +127,49 @@ async def decide(
             slugs = router_slugs(args)
             if not slugs:
                 return True
+            if scratch:
+                from surogates.simulation.scratch import inside_scratch
+
+                calls = tool_args(args).get("tools")
+                if not all(
+                    isinstance(c, dict) and isinstance(c.get("tool_slug"), str) and isinstance(c.get("arguments", {}), dict)
+                    for c in calls
+                ):
+                    return True
+                verdicts = await asyncio.gather(*(_cached(f"router:{c['tool_slug']}", c["tool_slug"], "", None, llm) for c in calls))
+                return any(v and not inside_scratch(c["tool_slug"], c.get("arguments", {}), scratch) for v, c in zip(verdicts, calls))
             verdicts = await asyncio.gather(*(_cached(f"router:{s}", s, "", None, llm) for s in slugs))
             return any(verdicts)
     key = f"{name}:{hashlib.sha256(description.encode()).hexdigest()[:16]}"
     return await _cached(key, name, description, annotations, llm)
+
+
+# The router's own tools that only search, describe, plan or manage connections (debranded names).
+_ROUTER_META_TOOLS = frozenset({
+    "SEARCH_TOOLS", "GET_TOOL_SCHEMAS", "CREATE_PLAN", "MANAGE_CONNECTIONS", "WAIT_FOR_CONNECTIONS",
+})
+
+
+def chosen_toolkits(config: dict | None) -> list[str] | None:
+    """A test chat's chosen Composio toolkits (``[]`` when none were sent); ``None`` outside a test chat."""
+    if not is_test_mode(config):
+        return None
+    tm = config["test_mode"]
+    return list(tm.get("toolkits") or []) if isinstance(tm, dict) else []
+
+
+def unchosen_composio_call(name: str, args: Any, chosen: list[str] | None) -> str | None:
+    """The first Composio app call outside *chosen* (``[]`` refuses every one); ``None`` chosen = not a test chat."""
+    if chosen is None or not name.startswith(_ROUTER_PREFIXES):
+        return None
+    tool = name.rsplit("__", 1)[-1].upper().removeprefix("COMPOSIO_")  # the proxy advertises them debranded
+    if "EXECUTE" in tool:
+        slugs = router_slugs(args) or [name]
+    elif tool in _ROUTER_META_TOOLS or "WORKBENCH" in tool or "BASH" in tool:
+        return None  # not an app call; decide() fakes the workbench and bash executors
+    else:
+        slugs = [tool]  # an unknown name is treated as an app slug: fail closed
+    return next((s for s in slugs if not any(s.upper().startswith(t.upper() + "_") for t in chosen)), None)
 
 
 def router_slugs(args: Any) -> list[str]:

@@ -428,6 +428,25 @@ async def test_create_child_session_inherits_boundary_fields_from_parent():
 
 
 @pytest.mark.asyncio
+async def test_child_session_inherits_test_mode():
+    test_mode = {"scratch": {"drive_id": "D", "root_id": "R1", "root_path": "/p", "item_ids": ["a"]}}
+    parent = _make_session(
+        channel="api",
+        config={**_workspace_config(), "test_mode": test_mode,
+                "memory_boundary": "skillopt:run-1:s1"},
+    )
+    store = SimpleNamespace(create_session=AsyncMock(return_value=SimpleNamespace(id=uuid4())))
+
+    await create_child_session(
+        store=store, parent=parent, channel="worker", config={"test_mode": {"scratch": None}},
+    )
+
+    cfg = store.create_session.await_args.kwargs["config"]
+    assert cfg["test_mode"] == test_mode
+    assert cfg["memory_boundary"] == "skillopt:run-1:s1"
+
+
+@pytest.mark.asyncio
 async def test_create_child_session_drops_a_boundary_its_parent_lacks():
     parent = _make_session(
         channel="web",

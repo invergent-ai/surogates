@@ -815,6 +815,21 @@ class SessionStore:
             )
             return {row.id: str(row.agent_id) for row in result.all()}
 
+    async def get_session_configs(
+        self, session_ids: list[UUID]
+    ) -> dict[UUID, dict]:
+        """Map each existing session id to its config (one query); a deleted
+        session is simply absent."""
+        if not session_ids:
+            return {}
+        async with self._sf() as db:
+            result = await db.execute(
+                select(SessionRow.id, SessionRow.config).where(
+                    SessionRow.id.in_(session_ids)
+                )
+            )
+            return {row.id: row.config or {} for row in result.all()}
+
     async def record_session_model(self, session_id: UUID, model: str) -> None:
         """Record the model a session actually ran on.
 
