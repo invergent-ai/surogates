@@ -72,6 +72,16 @@ that message replay, training export, and cost tracking read.
 | `output_tokens` | int | Output tokens for this response. |
 | `finish_reason` | string | `stop`, `length`, `tool_calls`, `budget_exhausted`, … |
 | `cost_usd` | number | Estimated cost of this call. |
+| `raw_content` | string | Only when the harness changed the reply's text (Romanian comma-below letters, worker setting `romanian_comma_below`): the content exactly as the model wrote it. `message.content` holds the changed text. |
+| `romanian_comma_below` | int | With `raw_content`: how many letters differ between it and `message.content`. |
+
+`message.content` is the text users, channels and replay see.  A reader
+that needs the tokens the model sampled -- training export, benchmark
+runners, RL rollout and reward readers -- reads
+`surogates.harness.romanian_diacritics.sampled_content(data)` (it returns
+`raw_content` when that differs from the content only by the letter swap,
+else the content), or runs its sessions with `romanian_comma_below: false`.
+Within surogates the training collector does so.
 
 `llm.thinking` — extracted reasoning/thinking block (provider-dependent).
 

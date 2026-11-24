@@ -3756,8 +3756,10 @@ class AgentHarness(
             # Settled before the inbox rescue, which copies the reply's text
             # into an ``ask_user_question`` call or an inbox item and empties
             # its content.  ``_persist_response`` settles it again, for the
-            # recovery paths that revise it.
-            if not tool_calls_raw and finish_reason == "stop":
+            # recovery paths that revise it.  Not the last part of a reply
+            # cut at the length limit: alone it may start inside a code block
+            # an earlier part opened, so only the joined reply is settled.
+            if not tool_calls_raw and finish_reason == "stop" and not length_continuation_prefix:
                 self._settle_reply_text(session, response_data)
 
             if (

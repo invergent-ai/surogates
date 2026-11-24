@@ -180,7 +180,8 @@ _TOKEN_RE: Final = re.compile(r"\S+")
 # Punctuation around a token that is not part of the name it may hold.
 _TOKEN_EDGES: Final = "()[]{}<>\"'`„”“«»,;:!?.*_"
 _FILE_EXT_RE: Final = re.compile(r".\.[A-Za-z0-9]{2,8}$")
-_LIST_ITEM_RE: Final = re.compile(r"[ ]{0,3}(?:[-*+]|\d{1,9}[.)])(?:[ \t]|$)")
+# A list item: indent, marker, then a blank or the end of the line.
+_LIST_ITEM_RE: Final = re.compile(r"([ \t]*)([-*+]|\d{1,9}[.)])(?=[ \t]|$)")
 
 
 def _is_literal_token(token: str) -> bool:
@@ -270,23 +271,43 @@ def _indent_width(line: str) -> int:
     return width
 
 
+def _list_content_indent(line: str) -> int | None:
+    """The column a list item's text starts at, or None if *line* is no item.
+
+    CommonMark: the marker's end plus the blanks after it (1 to 4); more
+    than 4 blanks, or none before the end of the line, count as one.
+    """
+    match = _LIST_ITEM_RE.match(line)
+    if match is None:
+        return None
+    marker_end = _indent_width(match.group(1)) + len(match.group(2))
+    rest = line[match.end(2):]
+    blanks = _indent_width(rest)
+    if not rest.strip() or blanks > 4:
+        blanks = 1
+    return marker_end + blanks
+
+
 def _indented_code_spans(
     text: str, blocks: list[tuple[int, int]]
 ) -> list[tuple[int, int]]:
-    """``(start, end)`` of Markdown indented code blocks outside lists.
+    """``(start, end)`` of Markdown indented code blocks.
 
     A run of lines indented by four columns or more (a tab counts to the
-    next multiple of four) that starts after a blank line, the start of the
-    text or a block in *blocks*, and is not inside a list item (an indented
-    line under ``- item`` / ``1. item`` is the item's continuation, as in
-    Markdown).  Blank lines inside the run belong to it.
+    next multiple of four) past the text they belong to, starting after a
+    blank line, the start of the text or a block in *blocks*.  Inside a
+    list item the text belongs to the item, so code is indented four
+    columns past the item's content (``1. Rulați:`` then 7 or more); a line
+    indented less is the item's own text, as in CommonMark.  Blank lines
+    inside the run belong to it.
     """
     spans: list[tuple[int, int]] = []
     block_iter = iter(blocks)
     block = next(block_iter, None)
     prev_blank = True
-    in_list = False
+    list_indent: int | None = None  # content column of the open list item
     code_start: int | None = None
+    code_indent = 4
     code_end = 0
     pos = 0
     for line in text.splitlines(keepends=True):
@@ -305,7 +326,7 @@ def _indented_code_spans(
         blank = not body.strip()
         indent = _indent_width(body)
         if code_start is not None:
-            if blank or indent >= 4:
+            if blank or indent >= code_indent:
                 if not blank:
                     code_end = start + len(body)
                 continue
@@ -314,15 +335,19 @@ def _indented_code_spans(
         if blank:
             prev_blank = True
             continue
-        if indent >= 4:
-            if prev_blank and not in_list:
-                code_start, code_end = start, start + len(body)
+        threshold = 4 if list_indent is None else list_indent + 4
+        if indent >= threshold:
+            if prev_blank:
+                code_start, code_end, code_indent = start, start + len(body), threshold
             prev_blank = False
             continue
-        if _LIST_ITEM_RE.match(body):
-            in_list = True
-        elif prev_blank:
-            in_list = False
+        item_indent = _list_content_indent(body)
+        if item_indent is not None:
+            list_indent = item_indent
+        elif prev_blank and (list_indent is None or indent < list_indent):
+            # A paragraph after a blank line, left of the item's text: the
+            # list is over.
+            list_indent = None
         prev_blank = False
     if code_start is not None:
         spans.append((code_start, code_end))
@@ -510,14 +535,16 @@ def settle_response_payload(
       a raw text that no longer matches the content (it was replaced by
       other text) is dropped.
 
-    A content that is not a string (a reply moved into a tool call) leaves
-    the payload as it is.
+    A content that is not a string (a reply the inbox rescue moved into an
+    ``ask_user_question`` call) has no raw text: both keys are dropped.
     """
     message = payload.get("message")
     if not isinstance(message, dict):
         return
     content = message.get("content")
     if not isinstance(content, str):
+        payload.pop(RAW_CONTENT_KEY, None)
+        payload.pop(COUNT_KEY, None)
         return
     raw = payload.get(RAW_CONTENT_KEY)
     if not _same_text_but_the_swap(raw, content):

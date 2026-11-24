@@ -353,12 +353,34 @@ def test_settle_response_payload_is_idempotent_and_keeps_raw() -> None:
     settle_response_payload(payload, {})
     assert payload["raw_content"] == "Aşa este pentru voi şi pentru ei, în fine."
     assert payload["romanian_comma_below"] == 2
-    # Content moved into a tool call (None): left as it is.
+    # Content moved into a tool call (None): no raw text any more.
     payload["message"]["content"] = None
     settle_response_payload(payload, {})
-    assert payload["romanian_comma_below"] == 2
+    assert "raw_content" not in payload and "romanian_comma_below" not in payload
     assert sampled_content(payload) is None
     # Off: nothing recorded.
     off = {"message": {"role": "assistant", "content": raw}}
     settle_response_payload(off, {"romanian_comma_below": "off"})
     assert off == {"message": {"role": "assistant", "content": raw}}
+
+
+def test_indented_code_under_a_list_item_is_kept() -> None:
+    """CommonMark: inside a list item, code is indented four columns past
+    the item's text ("1. " puts the text at column 3, so code at 7+)."""
+    text = (
+        "Aceasta este soluţia pentru voi şi pentru ei:\n"
+        "\n"
+        "1. Rulaţi:\n"
+        "\n"
+        "        echo 'ş'\n"
+        "\n"
+        "   apoi verificaţi aşa.\n"
+        "- Pasul doi:\n"
+        "\n"
+        "      printf 'ţară'\n"
+    )
+    fixed, _ = normalize_reply_text(text)
+    _only_the_four_letters_changed(text, fixed)
+    assert "        echo 'ş'\n" in fixed
+    assert "      printf 'ţară'\n" in fixed
+    assert "1. Rulați:" in fixed and "   apoi verificați așa." in fixed

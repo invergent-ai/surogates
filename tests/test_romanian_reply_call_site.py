@@ -18,6 +18,7 @@ from uuid import uuid4
 import pytest
 
 from surogates.api.routes.openai import _LiveText
+from surogates.harness.romanian_diacritics import normalize_reply_text, sampled_content
 from surogates.harness.budget import IterationBudget
 from surogates.session.events import EventType
 
@@ -374,3 +375,86 @@ def test_stream_catch_up_still_refuses_a_different_text() -> None:
     live = _LiveText(start=0)
     assert live._rest("content", "Cu totul altceva", RO_FIXED) == []
     assert live._rest("content", RO_FIXED, RO_FIXED) == []
+
+
+@pytest.mark.asyncio
+async def test_last_length_part_inside_a_continued_code_block_keeps_its_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The last part of a reply cut at the length limit starts inside the
+    code block the first part opened.  Settled alone it would read that code
+    as prose; it is settled only joined, so the code keeps its letters and
+    ``raw_content`` is the joined text exactly as the model wrote it."""
+    part1 = "Am scris scriptul care şterge fişierele vechi:\n```python\nimport os\n"
+    part2 = (
+        "mesaj = 'Fişierele vechi au fost şterse şi sunt acum în coş pentru toţi'\n"
+        "print(mesaj)\n```\nLe-am corectat aşa cum aţi cerut, iar raportul este gata."
+    )
+    emits, _ = await _run(monkeypatch, [
+        ({"role": "assistant", "content": part1, "tool_calls": None},
+         {**USAGE_STOP, "finish_reason": "length"}),
+        ({"role": "assistant", "content": part2, "tool_calls": None}, USAGE_STOP),
+    ])
+    _first, final = _of(emits, EventType.LLM_RESPONSE)
+    joined = part1 + part2
+    assert final["raw_content"] == joined
+    assert sampled_content(final) == joined
+    assert final["message"]["content"] == normalize_reply_text(joined)[0]
+    assert (
+        "mesaj = 'Fişierele vechi au fost şterse şi sunt acum în coş pentru toţi'"
+        in final["message"]["content"]
+    )
+    assert final["message"]["content"].startswith("Am scris scriptul care șterge fișierele vechi:")
+    assert final["message"]["content"].endswith("Le-am corectat așa cum ați cerut, iar raportul este gata.")
+
+
+class _StopAfterPersist(Exception):
+    pass
+
+
+@pytest.mark.asyncio
+async def test_question_rescue_stores_no_raw_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    """After the rescue the stored reply has no content (its text is in the
+    ``ask_user_question`` arguments, fixed), so it carries no
+    ``raw_content`` and no count."""
+    import json
+
+    from surogates.harness.loop import AgentHarness
+
+    question = "Vreți să trimit raportul echipei?"
+    pending = iter([({"role": "assistant", "content": RO_RAW + " " + question, "tool_calls": None}, USAGE_STOP)])
+
+    async def fake_call_llm_with_retry(**_kwargs: Any) -> tuple[dict, dict]:
+        # The rescued reply is stored and its call answered before the next
+        # model call, which ends the test.
+        for reply in pending:
+            return reply
+        raise _StopAfterPersist
+
+    monkeypatch.setattr("surogates.harness.loop.call_llm_with_retry", fake_call_llm_with_retry)
+    store = AsyncMock()
+    store.emit_event = AsyncMock(side_effect=range(100, 200))
+    store.get_events = AsyncMock(return_value=[])
+    harness = _make_loop_harness(session_store=store)
+    harness._tools.tool_names = {"ask_user_question"}
+    harness._governance_gate = None
+    harness._judge_final_response_user_action = AsyncMock(return_value={
+        "action_kind": "ask_user_question", "question": question,
+    })
+    harness._maybe_route_final_response_to_inbox = (
+        AgentHarness._maybe_route_final_response_to_inbox.__get__(harness)
+    )
+
+    with pytest.raises(_StopAfterPersist):
+        await harness._run_loop(
+            _make_session(), [{"role": "user", "content": "Verifică fişierul."}], "system",
+            SimpleNamespace(lease_token=uuid4()), all_events=[],
+        )
+
+    emits = [(c.args[1], c.args[2]) for c in store.emit_event.await_args_list]
+    response = _of(emits, EventType.LLM_RESPONSE)[0]
+    assert response["message"]["tool_calls"][0]["function"]["name"] == "ask_user_question"
+    assert response["message"]["content"] is None
+    assert "raw_content" not in response and "romanian_comma_below" not in response
+    arguments = json.loads(response["message"]["tool_calls"][0]["function"]["arguments"])
+    assert arguments["context"] == RO_FIXED
