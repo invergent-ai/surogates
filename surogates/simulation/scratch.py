@@ -264,8 +264,7 @@ def inside_scratch(slug: str, args: dict, scratch: dict) -> bool:
         elif isinstance(value, str) and value:
             return False  # an unknown key holding text may be a reference ("targetFolderId": "ORIG")
     targets = [value for key, value in refs if key not in _DRIVE_KEYS]
-    if via_context:
-        return bool(targets) and all(value in known for value in targets)
     # A call that names nothing in the copy would act on a default location.
     # A path resolves in the default drive unless a drive (already checked) is named.
-    return bool(targets) and (len(targets) < len(refs) or all(value in known for value in targets))
+    return bool(targets) and (
+        (not via_context and len(targets) < len(refs)) or all(value in known for value in targets))
