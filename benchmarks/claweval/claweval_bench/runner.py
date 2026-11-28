@@ -166,8 +166,16 @@ def _spawn_adapter(
         )
 
 
+def session_config(task: Any, *, world_date: bool = False) -> dict[str, Any] | None:
+    """Session config for *task*: with *world_date*, a task that fixes its day (``environment.mock_today``, the
+    mocks' clock and the prompt's "assume today's date is" line) also gives it as the session's ``current_date``,
+    so the harness's "Current date" agrees with them instead of naming the run day."""
+    mock_today = getattr(getattr(task, "environment", None), "mock_today", None)
+    return {"current_date": str(mock_today)} if (world_date and mock_today) else None
+
+
 async def _drive_session(
-    client: Any, task: Any, wall_clock_cap_s: float,
+    client: Any, task: Any, wall_clock_cap_s: float, world_date: bool = False,
 ) -> RolloutResult:
     started = time.monotonic()
     session_id = ""
@@ -176,7 +184,7 @@ async def _drive_session(
     error: str | None = None
 
     try:
-        session_id = await client.create_session()
+        session_id = await client.create_session(session_config(task, world_date=world_date))
         await client.send_message(session_id, build_prompt(task))
 
         cursor = 0
@@ -223,6 +231,7 @@ async def run_task(
     exposure: Exposure | None = None,
     adapter_port: int = 8321,
     wall_clock_cap_s: float = 900.0,
+    world_date: bool = False,
 ) -> RolloutResult:
     """Services up -> adapter up -> MCP registered -> session -> teardown."""
     task_dir = out_dir / "tasks" / task.task_id
@@ -268,7 +277,7 @@ async def run_task(
             registrar.register(task.task_id, exposure.mcp_url(adapter_port))
             try:
                 await asyncio.sleep(ATTACH_SETTLE_S)
-                result = await _drive_session(client, task, wall_clock_cap_s)
+                result = await _drive_session(client, task, wall_clock_cap_s, world_date)
                 # Audits must be read while the services are still up.
                 result.audit_data = collect_audits(task)
             finally:

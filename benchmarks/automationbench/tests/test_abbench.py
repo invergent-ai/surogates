@@ -7,6 +7,7 @@ import re
 import pytest
 
 from abbench.cli import next_run_id
+from abbench.client import HarnessClient
 from abbench.protocol import (
     build_preamble,
     is_complete,
@@ -141,3 +142,33 @@ class TestLibrarySeams:
         assert strict in (0.0, 1.0)
         # An untouched world must not strictly pass a real task.
         assert strict == 0.0
+
+
+# -- session config ------------------------------------------------------
+
+async def test_create_session_sends_the_extra_config_and_nothing_by_default():
+    import httpx
+    import respx
+
+    with respx.mock:
+        route = respx.post("http://localhost:8000/v1/api/sessions").mock(
+            return_value=httpx.Response(200, json={"id": "sess-1"}))
+        async with HarnessClient("http://localhost:8000", "tok", "agent-1") as client:
+            assert await client.create_session() == "sess-1"
+            assert await client.create_session({"current_date": "2026-03-15"}) == "sess-1"
+    assert json.loads(route.calls[0].request.content)["config"] == {}
+    assert json.loads(route.calls[1].request.content)["config"] == {"current_date": "2026-03-15"}
+
+
+@pytest.mark.skipif(not library_present, reason="automationbench not installed")
+def test_world_date_is_the_worlds_own_day():
+    from abbench.bridge import load_domain_tasks, world_date
+
+    tasks = [t for d in ("finance", "hr") for t in load_domain_tasks(d)]
+    days = {t.task_id: world_date(t) for t in tasks}
+    dated = {k: v for k, v in days.items() if v}
+    assert dated, "some worlds set meta.current_time"
+    assert all(re.fullmatch(r"\d{4}-\d{2}-\d{2}", v) for v in dated.values())
+    task = next(t for t in tasks if days[t.task_id])
+    raw = task.info["initial_state"]["meta"]["current_time"]
+    assert str(raw).startswith(days[task.task_id])

@@ -119,7 +119,13 @@ class GymProxy:
                                 raise ValueError("Expected one JSON-RPC request")
                             method = message.get("method")
                             if method not in {"initialize", "notifications/initialized", "notifications/cancelled", "ping", "tools/list", "tools/call"}:
-                                raise ValueError("Method unavailable in this task")
+                                # JSON-RPC "method not found" (-32601), not "invalid params": the harness then
+                                # reads the server as having no resources / prompts and offers no list_resources /
+                                # list_prompts tools that could only be refused (-32602 kept them offered: 40 % of
+                                # the model's error calls on EOG, 2026-11-28).
+                                self._json({"jsonrpc": "2.0", "id": message.get("id"),
+                                            "error": {"code": -32601, "message": "Method not found"}})
+                                return
                             params = message.get("params") or {}
                             if method == "tools/call" and (not isinstance(params, dict) or params.get("name") not in allowed):
                                 raise ValueError("Tool unavailable in this task")

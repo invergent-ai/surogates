@@ -44,3 +44,13 @@ async def test_create_session_empty_exclusions_sends_no_key():
         await client.create_session()
     body = json.loads(route.calls[0].request.content)
     assert "excluded_tools" not in body["config"]
+
+
+@respx.mock
+async def test_create_session_merges_extra_config_with_the_exclusions():
+    route = _mock_create()
+    async with HarnessClient(BASE, "tok", "agent-1") as client:
+        assert await client.create_session({"current_date": "2026-03-26"}) == "sess-1"
+    body = json.loads(route.calls[0].request.content)
+    assert body["config"]["current_date"] == "2026-03-26"
+    assert body["config"]["excluded_tools"] == list(DEFAULT_EXCLUDED_TOOLS)

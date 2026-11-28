@@ -20,6 +20,7 @@ from typing import Any
 import httpx
 
 from abbench.bridge import Task, dispatch, dump_world, make_world, score, tool_catalog
+from abbench.bridge import world_date as task_world_date
 from abbench.client import Event
 from abbench.protocol import (
     build_preamble,
@@ -83,7 +84,10 @@ async def run_task(
     client: Any,
     task: Task,
     wall_clock_cap_s: float = 2400.0,
+    world_date: bool = False,
 ) -> RolloutResult:
+    """One task.  *world_date*: a world that sets its own time gets that day as the session's ``current_date``
+    (the prompt's "Current date"), not the run day."""
     started = time.monotonic()
     deadline = started + wall_clock_cap_s
     result = RolloutResult(task_id=task.task_id, session_id="")
@@ -92,7 +96,8 @@ async def run_task(
 
     try:
         world, info = make_world(task)
-        result.session_id = await client.create_session()
+        day = task_world_date(task) if world_date else None
+        result.session_id = await client.create_session({"current_date": day} if day else None)
         result.transcript.append({"role": "user", "content": task.user_prompt})
         await client.send_message(result.session_id, build_preamble(
             task.system_prompt, task.user_prompt, tool_catalog()
@@ -181,6 +186,7 @@ async def run_split(
     out_dir: str,
     concurrency: int = 2,
     wall_clock_cap_s: float = 2400.0,
+    world_date: bool = False,
 ) -> list[RolloutResult]:
     """Run tasks concurrently -- worlds are per-task and independent."""
     sem = asyncio.Semaphore(concurrency)
@@ -188,7 +194,8 @@ async def run_split(
     async def one(task: Task) -> RolloutResult:
         async with sem:
             result = await run_task(
-                client, task, wall_clock_cap_s=wall_clock_cap_s
+                client, task, wall_clock_cap_s=wall_clock_cap_s,
+                world_date=world_date,
             )
             write_trace(out_dir, result)
             return result

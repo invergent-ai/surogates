@@ -80,6 +80,26 @@ def make_world(task: Task):
     return world, info
 
 
+def world_date(task: Task) -> str | None:
+    """The world's own day ("YYYY-MM-DD", UTC) when the task sets ``initial_state.meta.current_time``, else None.
+
+    Upstream's world clock is that time: relative-date queries and the assertions' "N days" are computed from
+    it.  The harness otherwise tells the agent the day the run happens.  Read as ``make_world`` reads the state
+    (None-stripped); a time without a zone is taken as UTC, the world's own default."""
+    import datetime as dt
+
+    from automationbench.runner import strip_none_values
+
+    meta = strip_none_values((task.info or {}).get("initial_state") or {}).get("meta") or {}
+    raw = meta.get("current_time")
+    if raw is None:
+        return None
+    t = raw if isinstance(raw, dt.datetime) else dt.datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    if t.tzinfo is not None:
+        t = t.astimezone(dt.timezone.utc)
+    return t.strftime("%Y-%m-%d")
+
+
 def tool_registry() -> dict[str, Any]:
     from automationbench.tools import API_TOOLS
 

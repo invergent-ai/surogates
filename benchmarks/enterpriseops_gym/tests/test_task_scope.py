@@ -72,3 +72,40 @@ def test_identity_cannot_override_database_or_inject_headers():
     for context in ({'database_id': 'other'}, {'user_id': 'user\r\nx-other: injected'}):
         with pytest.raises(ValueError):
             context_headers(context)
+
+
+def test_methods_outside_the_task_answer_method_not_found():
+    # -32601 (method not found), as the JSON-RPC spec names it: a harness then reads the server as having no
+    # resources / prompts and offers no tool for them.  A tool outside the task stays -32602.
+    seen = []
+
+    class Gym(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            message = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+            seen.append(message['method'])
+            payload = json.dumps({'jsonrpc': '2.0', 'id': message['id'], 'result': {'tools': []}}).encode()
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Gym)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    proxy = GymProxy(f'http://127.0.0.1:{server.server_address[1]}').start()
+    try:
+        proxy.configure_task('db-a', ['find_user'])
+        with httpx.Client(base_url=proxy.local_url, timeout=5) as client:
+            for method in ('resources/list', 'resources/templates/list', 'prompts/list', 'resources/read'):
+                answer = client.post('/mcp', json={'jsonrpc': '2.0', 'id': 7, 'method': method}).json()
+                assert answer == {'jsonrpc': '2.0', 'id': 7, 'error': {'code': -32601, 'message': 'Method not found'}}
+            call = {'jsonrpc': '2.0', 'id': 8, 'method': 'tools/call', 'params': {'name': 'admin'}}
+            assert client.post('/mcp', json=call).json()['error']['code'] == -32602
+            assert seen == []
+    finally:
+        proxy.stop()
+        server.shutdown()
+        server.server_close()
