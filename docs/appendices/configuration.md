@@ -6,6 +6,8 @@ Surogates is configured via a YAML file merged with environment variables. Envir
 
 **Environment variable naming:** YAML keys are flattened with underscores and prefixed with `SUROGATES_`. For example, `db.pool_size` becomes `SUROGATES_DB_POOL_SIZE`.
 
+**Lists and mappings:** a setting whose value is a list or a mapping (for example `api.cors_origins`, `sandbox.allowed_images`, `llm.models`) is written as a YAML list or mapping in `config.yaml`, and as JSON in its environment variable (`SUROGATES_SANDBOX_ALLOWED_IMAGES='["ghcr.io/acme/tasks:*"]'`). A value no setting of its name can take (a list for a setting that takes text, a date) is left out with a warning in the log; an empty key leaves the setting at its default.
+
 ## Database (`db`)
 
 | Key | Env Var | Default | Description |
