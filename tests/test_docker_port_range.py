@@ -24,10 +24,17 @@ class PortDocker(ImageDocker):
         self.boxes: dict[str, dict] = {}
         self.ps_error = b""
         self.port_conflict = False
+        self.inspect_garbage = False
+        self.cancel_next_run = False
         self._default_runs = 0
 
     async def run(self, args: list[str]) -> tuple[int, bytes, bytes]:
         if args[:2] == ["run", "-d"]:
+            await asyncio.sleep(0)  # Docker takes a moment: other starts run meanwhile
+            if self.cancel_next_run:
+                self.cancel_next_run = False
+                self.calls.append(args)
+                raise asyncio.CancelledError
             if self.port_conflict:
                 self.calls.append(args)
                 return 125, b"", b"Bind for 127.0.0.1:20000 failed: port is already allocated"
@@ -51,16 +58,18 @@ class PortDocker(ImageDocker):
             wanted = [f.removeprefix("label=").split("=", 1) for f in _flag(args, "--filter")]
             ids = [cid for cid, box in self.boxes.items() if all(box["labels"].get(k) == v for k, v in wanted)]
             return 0, "".join(f"{cid}\n" for cid in ids).encode(), b""
-        if args[:3] == ["inspect", "--format", "{{json .HostConfig.PortBindings}}"]:
+        if args[:4] == ["inspect", "--type", "container", "--format"] and "HostConfig.PortBindings" in args[4]:
             self.calls.append(args)
             lines, missing = [], False
-            for cid in args[3:]:
+            for cid in args[5:]:
                 box = self.boxes.get(cid)
                 if box is None:
                     missing = True
                     continue
                 port = box["port"]
-                lines.append(json.dumps({"8071/tcp": [{"HostIp": box["host"], "HostPort": str(port) if port else ""}]}))
+                bindings = json.dumps({"8071/tcp": [{"HostIp": box["host"], "HostPort": str(port) if port else ""}]})
+                worker = box["labels"].get("surogates.worker", "<no value>")
+                lines.append("not json" if self.inspect_garbage else f"{worker}\t{bindings}")
             return (1 if missing else 0), "".join(f"{line}\n" for line in lines).encode(), (b"No such object" if missing else b"")
         if args[:1] == ["inspect"] and "HostConfig.PortBindings" in " ".join(args):
             self.calls.append(args)
@@ -68,8 +77,12 @@ class PortDocker(ImageDocker):
             if c is None:
                 return 1, b"", b"No such object"
             box = self.boxes[c[0]]
-            ports = {"8071/tcp": [{"HostIp": box["host"], "HostPort": str(box["port"])}]}
-            return 0, f"/{name}\n{'true' if c[1] == 'running' else 'false'}\n{json.dumps(ports)}\n".encode(), b""
+            asked = {"8071/tcp": [{"HostIp": box["host"], "HostPort": str(box["port"]) if box["port"] else ""}]}
+            # Where Docker published it: a port of its choosing for one that asked for none; none for a stopped one.
+            published = {"8071/tcp": [{"HostIp": box["host"], "HostPort": str(box["port"] or 41000)}]} \
+                if c[1] == "running" else {}
+            running = "true" if c[1] == "running" else "false"
+            return 0, f"/{name}\n{running}\n{json.dumps(asked)}\n{json.dumps(published)}\n".encode(), b""
         if args[:1] == ["rm"]:
             code, out, err = await super().run(args)
             self.boxes.pop(args[-1], None)
@@ -142,7 +155,7 @@ async def test_an_image_session_asks_for_a_fixed_port_of_the_range():
     assert any("HostConfig.PortBindings" in " ".join(c) for c in docker.calls if c[:1] == ["inspect"])
 
 
-async def test_ports_held_by_any_sandbox_container_are_skipped_default_ones_included():
+async def test_default_and_image_sandboxes_share_the_range_without_overlap():
     docker = PortDocker()
     backend = _range_backend(docker, count=4)
     await backend.provision(SandboxSpec(session_id="plain-1"))         # a default sandbox: 20000
@@ -201,10 +214,97 @@ async def test_docker_unsure_of_its_containers_is_refused_never_read_as_free():
     assert docker.published() == []
 
 
-async def test_another_workers_container_in_this_range_is_skipped():
+async def test_any_containers_port_in_this_range_is_skipped_whoever_started_it():
     docker = PortDocker()
     other = _range_backend(docker, count=3)
     await other.provision(_image_spec("root-1"))  # 20000, by another worker of the same range
     mine = _range_backend(docker, count=3)
     await mine.provision(_image_spec("root-2"))
     assert docker.published() == ["127.0.0.1:20000:8071", "127.0.0.1:20001:8071"]
+
+
+async def test_starts_in_flight_hold_their_ports_when_the_range_comes_round():
+    """Three starts at once on a range of two: the third finds both ports taken by starts Docker does not list yet
+    and is refused; without the start-in-flight set it would come round to a port being started."""
+    class Forgetful(set):
+        def add(self, item):
+            pass
+
+    for forget in (False, True):
+        docker = PortDocker()
+        backend = _range_backend(docker, count=2)
+        if forget:
+            backend._ports_starting = Forgetful()
+        results = await asyncio.gather(*(backend.provision(_image_spec(f"root-{i}")) for i in range(3)),
+                                       return_exceptions=True)
+        ports = [p.split(":")[1] for p in docker.published()]
+        if forget:
+            assert len(set(ports)) < len(ports)  # the collision the set exists to prevent
+        else:
+            assert sorted(ports) == ["20000", "20001"]
+            assert sum(isinstance(r, SandboxUnavailableError) for r in results) == 1
+
+
+async def test_a_freed_port_is_the_last_one_given_again():
+    docker = PortDocker()
+    backend = _range_backend(docker, count=3)
+    first = await backend.provision(SandboxSpec(session_id="plain-1"))   # 20000
+    await backend.destroy(first)                                        # removed: 20000 free
+    await backend.provision(SandboxSpec(session_id="plain-2"))          # 20001, not 20000 again at once
+    await backend.provision(SandboxSpec(session_id="plain-3"))          # 20002
+    await backend.provision(SandboxSpec(session_id="plain-4"))          # 20000, the range gone round
+    assert [p.split(":")[1] for p in docker.published()] == ["20000", "20001", "20002", "20000"]
+
+
+async def test_a_start_cut_off_mid_run_keeps_its_port_set_aside():
+    # Docker may still create the container of a docker run whose client was killed.
+    docker = PortDocker()
+    docker.cancel_next_run = True
+    backend = _range_backend(docker, count=3)
+    with pytest.raises(asyncio.CancelledError):
+        await backend.provision(_image_spec("root-1"))
+    assert 20000 in backend._ports_set_aside and backend._ports_starting == set()
+    await backend.provision(_image_spec("root-2"))
+    assert docker.published()[-1] == "127.0.0.1:20001:8071"
+
+
+async def test_a_port_held_outside_the_sandboxes_is_skipped_by_the_next_start():
+    docker = PortDocker()
+    docker.port_conflict = True
+    backend = _range_backend(docker, count=3)
+    with pytest.raises(SandboxUnavailableError):
+        await backend.provision(SandboxSpec(session_id="plain-1"))
+    docker.port_conflict = False
+    await backend.provision(SandboxSpec(session_id="plain-2"))
+    assert [p.split(":")[1] for p in docker.published()] == ["20000", "20001"]
+
+
+async def test_an_unreadable_binding_is_refused_never_read_as_free():
+    docker = PortDocker()
+    backend = _range_backend(docker, count=3)
+    await backend.provision(_image_spec("root-1"))
+    docker.inspect_garbage = True
+    with pytest.raises(SandboxUnavailableError, match="could not be read"):
+        await backend.provision(_image_spec("root-2"))
+
+
+async def test_a_container_made_before_range_mode_is_read_where_docker_published_it():
+    docker = PortDocker()
+    before = DockerSandbox(image="sbx-test:1", executor_port_base=20000, ready_timeout=1, network="sbx-net",
+                           executor_bundle_image=BUNDLE, image_deployment="stack-a", docker=docker,
+                           httpx_transport=_ready())
+    await before.provision(_image_spec("root-1"))      # asked for no port: Docker's choice, 41000 here
+    after = _range_backend(docker, count=3)
+    sid = await after.provision(_image_spec("root-1"))  # the same session: its running container taken over
+    assert after._entries[sid].host_port == 41000
+    assert docker.published() == ["127.0.0.1::8071"]
+
+
+async def test_a_stopped_image_container_starts_again_on_its_own_port():
+    docker = PortDocker()
+    backend = _range_backend(docker, count=3)
+    first = await backend.provision(_image_spec("root-1"))
+    await backend.destroy(first)                         # stopped, kept
+    again = await backend.provision(_image_spec("root-1"))
+    assert backend._entries[again].host_port == 20000
+    assert docker.published() == ["127.0.0.1:20000:8071"]

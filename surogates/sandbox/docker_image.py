@@ -372,9 +372,10 @@ class ImageSessions:
         *name*, no longer under the session's name (set aside: never worked in again).  Docker unsure (an inspect
         failing for another reason): :class:`SandboxUnavailableError`.  In "range" mode the port is the fixed one the
         container asked for (``HostConfig.PortBindings``): a network that publishes nothing records no other."""
-        ports = "HostConfig.PortBindings" if getattr(self, "_port_range", None) is not None else "NetworkSettings.Ports"
+        fixed = getattr(self, "_port_range", None) is not None
+        ports = "{{json .HostConfig.PortBindings}}\n{{json .NetworkSettings.Ports}}" if fixed else "{{json .NetworkSettings.Ports}}"
         code, stdout, stderr = await self._docker.run(
-            ["inspect", "--format", "{{.Name}}\n{{.State.Running}}\n{{json .%s}}" % ports, container_id],
+            ["inspect", "--format", "{{.Name}}\n{{.State.Running}}\n" + ports, container_id],
         )
         if code != 0:
             if b"No such" in stderr:
@@ -387,6 +388,15 @@ class ImageSessions:
             named, running, ports_json = stdout.decode(errors="replace").strip().split("\n", 2)
             if name and named.strip().lstrip("/") != name:
                 return None
+            if fixed:
+                # The port the container asked for; one made before "range" mode asked for none (Docker picked it):
+                # read where Docker published it.
+                asked_json, _, ports_json = ports_json.partition("\n")
+                asked = (json.loads(asked_json) or {}).get("8071/tcp") or []
+                port = next((int(b["HostPort"]) for b in asked
+                             if b.get("HostIp") in ("127.0.0.1", "", None) and b.get("HostPort")), None)
+                if port is not None:
+                    return running.strip() == "true", port
             bindings = (json.loads(ports_json) or {}).get("8071/tcp") or []
             port = next((int(b["HostPort"]) for b in bindings if b.get("HostIp") in ("127.0.0.1", "", None)), None)
         except (ValueError, KeyError, TypeError):
@@ -486,8 +496,6 @@ class ImageSessions:
                        run: ImageRun, deployment: str, bundle: str, *, main_tried: bool = False) -> str:
         """A new container of the session from *run*, with *bundle* mounted; its sandbox id once its executor
         answers.  ``_NeedsMusl`` when the main bundle cannot start in it (a musl image)."""
-        from surogates.sandbox.docker import _IN_CONTAINER_PORT, _PUBLISH_HOST
-
         env = image_env(self._build_env(spec, sandbox_id, token, "ephemeral", None), run.env, run.workdir)
         run_args = list(run.run_args)
         run_args[run_args.index("--name") + 1] = name
@@ -498,12 +506,18 @@ class ImageSessions:
         # "range" mode a fixed one of this worker's range, held by the container until it is removed (stopped, it
         # still asks for it, and no other container is given it meanwhile).
         fixed = await self._take_port() if getattr(self, "_port_range", None) is not None else None
-        try:
+        if fixed is None:
             return await self._run_new_on(spec, sandbox_id, name, token, limits, run, deployment, bundle, env, run_args,
                                           fixed, main_tried=main_tried)
-        finally:
-            if fixed is not None:
-                self._port_started(fixed)
+        try:
+            taken = await self._run_new_on(spec, sandbox_id, name, token, limits, run, deployment, bundle, env,
+                                           run_args, fixed, main_tried=main_tried)
+        except BaseException:
+            # Its container may be removed, set aside (still holding the port) or, cut off mid-run, not listed yet.
+            self._port_started(fixed, failed=True)
+            raise
+        self._port_started(fixed)
+        return taken
 
     async def _run_new_on(self, spec: SandboxSpec, sandbox_id: str, name: str, token: str, limits: list[str],
                           run: ImageRun, deployment: str, bundle: str, env: dict, run_args: list[str],
