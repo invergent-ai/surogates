@@ -110,11 +110,9 @@ async def test_an_evaluation_row_asking_for_the_background_waits_and_is_told_so(
     assert background is False and answer == f"{WAITED_NOTE}\n\nstarted"
 
 
-async def test_a_case_step_asking_for_the_background_waits_too(monkeypatch):
-    from surogates.tools.builtin.agents import WAITED_NOTE
-
+async def test_a_case_step_asking_for_the_background_is_still_refused(monkeypatch):
     answer, background = await _call_agent(monkeypatch, {CASE_STEP_KEY: CONTRACT}, {"run_in_background": True})
-    assert background is False and answer.startswith(WAITED_NOTE)
+    assert background is None and "cannot start agents in the background" in answer
 
 
 async def test_a_sub_agent_asking_for_the_background_is_still_refused(monkeypatch):
@@ -135,19 +133,55 @@ async def test_an_evaluation_row_resumes_no_agent_its_report_would_come_after_th
 
     row = a_session(channel="api", config=EVAL_ROW)
     child = SimpleNamespace(id=uuid4(), parent_id=row.id, status="completed", config={})
-    why = await agents._why_not_resume(_Store(child), row, child, None)
-    assert why is not None and "start a new agent" in why
+    assert agents._resume_past_the_turn(row, child)
+    assert await agents._why_not_resume(_Store(child), row, child, None) == agents.RESUME_PAST_THE_TURN
+    child.status = "processing"  # a running agent still takes the row's messages
+    assert not agents._resume_past_the_turn(row, child)
     chat = a_session(channel="api")
-    child.parent_id = chat.id
+    child.parent_id, child.status = chat.id, "completed"
+    assert not agents._resume_past_the_turn(chat, child)
     assert await agents._why_not_resume(_Store(child), chat, child, None) is None
 
 
-def test_only_a_main_session_that_reports_elsewhere_reads_that_its_agents_wait():
+async def test_the_refused_resume_writes_nothing(monkeypatch):
+    from surogates.tools.builtin import agents
+
+    row = a_session(channel="api", config=EVAL_ROW)
+    child = SimpleNamespace(id=uuid4(), parent_id=row.id, status="completed", config={})
+
+    class Store(_Store):
+        emitted, updated = [], []
+
+        async def get_session(self, sid):
+            return row if sid == row.id else child
+
+        async def emit_event(self, *a, **k):
+            self.emitted.append(a)
+
+        async def update_session_config_key(self, *a, **k):
+            self.updated.append(a)
+
+    async def resolve(_store, _factory, _sender, _to):
+        return child
+
+    async def may(_store, _sender, _target):
+        return True
+
+    monkeypatch.setattr(agents, "resolve_agent", resolve)
+    monkeypatch.setattr(agents, "may_message", may)
+    store = Store(row)
+    answer = await agents._send_message_handler(
+        {"to": str(child.id), "message": "Also count the totals.", "summary": "more"},
+        session_store=store, tenant=object(), session_id=row.id,
+    )
+    assert "is not resumed" in answer and store.emitted == [] and store.updated == []
+
+
+def test_only_an_evaluation_row_reads_that_its_agents_wait():
     from tests.test_agent_guidance import builder, fragment
 
     wait = fragment("guidance/agents_wait")
     assert wait in builder({"agent", "send_message"}, EVAL_ROW).build()
-    assert wait in builder({"agent", "send_message"}, {CASE_STEP_KEY: CONTRACT}).build()
     assert wait not in builder({"agent", "send_message"}, {}).build()
 
 

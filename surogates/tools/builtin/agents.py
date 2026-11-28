@@ -13,7 +13,9 @@ iteration cap and the ``delegation.*`` events.
 - Foreground (``run_in_background=false``, and the default for any session
   that reports its end elsewhere: one with a parent, a case's work, a
   routine's run, an evaluation row): the call waits for the agent and
-  returns its final report, with its ``agent_id``.
+  returns its final report, with its ``agent_id``.  An evaluation row that
+  asks for the background gets the foreground and is told so; the others
+  are refused.
 - ``fork``: the agent starts from a copy of this conversation up to the
   call, then the brief, instead of from the brief alone.
 
@@ -665,6 +667,8 @@ async def _send_message_handler(arguments: dict[str, Any], **kwargs: Any) -> str
         return _error(f"no agent {to} that you can message: only your parent, the agents you started, and the agents your parent started")
     if target.status == "archived":
         return _error(f"agent {target.id} was deleted")
+    if _resume_past_the_turn(sender, target):
+        return _error(RESUME_PAST_THE_TURN)
 
     if target.id == sender.parent_id:
         head = f"[Message from agent {sender.id}"
@@ -756,12 +760,8 @@ async def _why_not_resume(session_store: Any, sender: Any, target: Any, session_
         return "only the agent that started it resumes it"
     if getattr(sender, "channel", None) == "delegation" or is_project_thread(sender.config):
         return "a sub-agent does not resume agents: its parent does"
-    from surogates.harness.subagents import reports_elsewhere
-
-    if reports_elsewhere(sender):
-        # Resumed, it would run in the background: its report would come after this session's turn end, which is
-        # read as the session's work (a case's step, a routine's run, an evaluation row).
-        return "this session's work is read when its turn ends: start a new agent instead, which waits for its report"
+    if _resume_past_the_turn(sender, target):
+        return RESUME_PAST_THE_TURN
     if target.status == "paused":
         # Only a stop of its own: one by the user, or by another agent, is theirs to lift.
         from surogates.harness.subagents import stopped_by
@@ -775,6 +775,27 @@ async def _why_not_resume(session_store: Any, sender: Any, target: Any, session_
     if sum(mode == "background" for mode in [r[0] for r in running] + starting) >= MAX_RUNNING_IN_BACKGROUND:
         return f"{MAX_RUNNING_IN_BACKGROUND} of your agents already run in the background"
     return None
+
+
+RESUME_PAST_THE_TURN = (
+    "this session's work is read when its turn ends, so an agent of it that has finished is not resumed: its "
+    "report would come after that. Start a new agent instead, with a brief that stands alone: it waits for its report"
+)
+
+
+def _resume_past_the_turn(sender: Any, target: Any) -> bool:
+    """Whether a message from *sender*, an evaluation row, would resume *target*, an agent of it at rest.
+
+    Resumed, the agent runs in the background, and its report comes after the turn end the row is read at.
+    Checked before the message is written: nothing is left waiting for a resume that never comes."""
+    from surogates.channels.memory_boundary import is_eval_session
+
+    return (
+        getattr(sender, "parent_id", None) is None
+        and is_eval_session(sender)
+        and getattr(target, "parent_id", None) == sender.id
+        and getattr(target, "status", None) not in ("active", "processing")
+    )
 
 
 def _error(message: str) -> str:
@@ -963,9 +984,17 @@ async def _agent_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
         return _error("a sub-agent cannot start agents in the background: start it in the foreground")
     waited_here = False
     if background and parent.parent_id is None and waits:
-        # A case's step or work item reports to Keel, a routine's run where the routine says, an evaluation row to
-        # its run, as its turn ends.  The model asked for the background as a main session would: the agent runs in
-        # the foreground instead, and the answer says so (a refusal cost a call and could end the delegation).
+        from surogates.channels.memory_boundary import is_eval_session
+
+        if not is_eval_session(parent):
+            # A case's step or work item reports to Keel, a routine's run where the routine says, as its turn ends.
+            return _error(
+                "this session reports its work when its turn ends, so it cannot start agents in the background: "
+                "start it in the foreground"
+            )
+        # An evaluation row runs the agent and the prompt a person's chat would, and its model asks for the
+        # background as a chat's does: the agent runs in the foreground instead, and the answer says so (a refusal
+        # would cost a call and could end the delegation the row is measuring).
         background, waited_here = False, True
     # Its token budget: the deployment's, or its parent's key.  A sub-agent with a budget hands each agent it
     # starts at most half of what it has left, less what its agents still running were handed: the calls of
