@@ -133,6 +133,7 @@ async def _cmd_run(args: argparse.Namespace) -> int:
             terminal_status=r.terminal_status,
             error=r.error,
             score_error=r.score_error,
+            current_date=r.current_date,
         )
         for r in results
     ]

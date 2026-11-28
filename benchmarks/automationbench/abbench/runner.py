@@ -50,6 +50,8 @@ class RolloutResult:
     strict: float | None = None
     score_error: str | None = None
     final_world: dict[str, Any] = field(default_factory=dict)
+    # The session's current_date (--world-date on, a world that sets its time); None: the run day.
+    current_date: str | None = None
 
 
 async def _await_turn(client, session_id, events, cursor, deadline):
@@ -97,7 +99,8 @@ async def run_task(
     try:
         world, info = make_world(task)
         day = task_world_date(task) if world_date else None
-        result.session_id = await client.create_session({"current_date": day} if day else None)
+        result.current_date = day
+        result.session_id = await (client.create_session({"current_date": day}) if day else client.create_session())
         result.transcript.append({"role": "user", "content": task.user_prompt})
         await client.send_message(result.session_id, build_preamble(
             task.system_prompt, task.user_prompt, tool_catalog()
@@ -172,6 +175,7 @@ def write_trace(out_dir: str, result: RolloutResult) -> str:
             "completed_marker": result.completed_marker,
             "wall_clock_s": result.wall_clock_s,
             "terminal_status": result.terminal_status,
+            "current_date": result.current_date,
             "error": result.error,
             "partial_credit": result.partial_credit,
             "strict": result.strict,

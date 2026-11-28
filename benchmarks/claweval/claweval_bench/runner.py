@@ -184,7 +184,8 @@ async def _drive_session(
     error: str | None = None
 
     try:
-        session_id = await client.create_session(session_config(task, world_date=world_date))
+        config = session_config(task, world_date=world_date)
+        session_id = await (client.create_session(config) if config else client.create_session())
         await client.send_message(session_id, build_prompt(task))
 
         cursor = 0

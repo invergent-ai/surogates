@@ -172,3 +172,28 @@ def test_world_date_is_the_worlds_own_day():
     task = next(t for t in tasks if days[t.task_id])
     raw = task.info["initial_state"]["meta"]["current_time"]
     assert str(raw).startswith(days[task.task_id])
+
+
+@pytest.mark.parametrize("raw, day", [
+    ("2026-03-15T09:00:00Z", "2026-03-15"),
+    ("2026-03-15T23:30:00-05:00", "2026-03-16"),  # the world's clock in UTC, as the harness's date is
+    ("2026-03-15T09:00:00", "2026-03-15"),        # no zone: UTC, the world's own default
+    (None, None),
+    ("not a time", None),                          # never a failed task: the run day
+])
+def test_world_date_reads_the_worlds_clock_offline(raw, day):
+    from types import SimpleNamespace
+
+    from abbench.bridge import world_date
+
+    meta = {"schema_version": "0.1.0", "current_time": raw}
+    assert world_date(SimpleNamespace(info={"initial_state": {"meta": meta}})) == day
+    assert world_date(SimpleNamespace(info={"initial_state": {}})) is None
+    assert world_date(SimpleNamespace(info={})) is None
+
+
+def test_the_report_says_which_day_the_sessions_had():
+    rows = [TaskOutcome(task_id="hr/1", domain="hr", partial_credit=1.0, strict=1.0, current_date="2026-03-15"),
+            TaskOutcome(task_id="hr/2", domain="hr", partial_credit=0.0, strict=0.0)]
+    assert "the world's own day on 1 task(s)" in render(rows, run_id="r")
+    assert "Session date: the run day" in render(rows[1:], run_id="r")

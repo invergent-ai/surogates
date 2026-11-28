@@ -31,7 +31,7 @@ from typing import Any
 from claweval_bench import bridge, grade, report, runner, tunnel, vendor
 from claweval_bench.client import DEFAULT_EXCLUDED_TOOLS, HarnessClient
 from claweval_bench.registrar import Registrar
-from claweval_bench.runner import build_prompt, run_task
+from claweval_bench.runner import build_prompt, run_task, session_config
 from claweval_bench.tasks import load_tasks, select_ids
 
 RUNS_DIR = pathlib.Path(__file__).parent.parent / "runs"
@@ -252,6 +252,8 @@ async def _cmd_run(args: argparse.Namespace) -> int:
                     "terminal_status": result.terminal_status,
                     "wall_clock_s": result.wall_clock_s,
                     "error": result.error,
+                    # The session's current_date (--world-date on); None: the run day.
+                    "current_date": (session_config(task, world_date=args.world_date == "on") or {}).get("current_date"),
                     "scores": None,
                     "grader_error": None,
                 }
