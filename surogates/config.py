@@ -577,7 +577,8 @@ class SandboxSettings(BaseSettings):
     # relay of its own, which reads the port the container asked for).  In "range" mode the default sandboxes take
     # their ports from the same range, so no two containers ever ask for one port.  The ranges of the workers that
     # share a Docker host must not overlap: a worker sees another's containers, not its starts in flight.  A port is
-    # held while its container exists (one at rest, or set aside for the reaper, included): size the range for that.
+    # held while its container exists (one at rest, or set aside for the reaper, included), and for 30 s after a
+    # start that failed (60 s when Docker says something else holds it): size the range for that.
     docker_image_port_mode: Literal["docker", "range"] = "docker"
     # Docker, "range" mode: how many ports from docker_executor_port_base this worker's sandboxes may use.
     docker_executor_port_count: int = Field(0, ge=0)

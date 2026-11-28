@@ -235,6 +235,7 @@ class DockerSandbox(ImageSessions):
         #: Ports set aside after a failed start, until (time.monotonic()).
         self._ports_set_aside: dict[int, float] = {}
         self._port_cursor = 0
+        self._overlap_told: set[str] = set()
         self._port_lock = asyncio.Lock()
         self._image = image
         self._init_image_sessions(bundle_image=executor_bundle_image, pull=image_pull, pull_timeout=image_pull_timeout,
@@ -378,8 +379,9 @@ class DockerSandbox(ImageSessions):
                 except BaseException:
                     self._port_started(host_port, failed=True)
                     raise
-                self._port_started(host_port, foreign=code != 0 and bool(
-                    _PORT_CONFLICT_RE.search(stderr.decode(errors="replace"))))
+                foreign = code != 0 and bool(_PORT_CONFLICT_RE.search(stderr.decode(errors="replace")))
+                # Any failed run may still leave a container behind (a client that lost the daemon mid-create).
+                self._port_started(host_port, failed=code != 0, foreign=foreign)
             if code != 0:
                 stderr_text = stderr.decode(errors="replace")
                 if _PORT_CONFLICT_RE.search(stderr_text) and self._port_range is not None:
@@ -519,7 +521,8 @@ class DockerSandbox(ImageSessions):
                 ) from exc
             found.discard(0)
             mine = self._port_range is not None and any(p in self._port_range for p in found)
-            if mine and self._worker and worker not in (self._worker, "", "<no value>"):
+            if mine and self._worker and worker not in (self._worker, "", "<no value>", *self._overlap_told):
+                self._overlap_told.add(worker)  # once a label: a restarted worker's own older containers carry another
                 # Worker ranges must not overlap: another worker's start cannot see this one's in flight.
                 logger.warning("Sandbox port(s) %s of this worker's range are held by worker %s's container: the "
                                "workers' ranges overlap", sorted(p for p in found if p in self._port_range), worker)
