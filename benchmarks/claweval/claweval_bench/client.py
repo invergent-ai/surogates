@@ -121,11 +121,14 @@ class HarnessClient:
                 attempt += 1
                 await asyncio.sleep(min(2 ** attempt, 30))
 
-    async def create_session(self) -> str:
-        return await self._retry(self._create_session, "create_session")
+    async def create_session(self, config: dict[str, Any] | None = None) -> str:
+        """A new session; *config* is merged into its session config (e.g. ``current_date``)."""
+        if not config:
+            return await self._retry(self._create_session, "create_session")
+        return await self._retry(lambda: self._create_session(config), "create_session")
 
-    async def _create_session(self) -> str:
-        config: dict[str, Any] = {}
+    async def _create_session(self, extra: dict[str, Any] | None = None) -> str:
+        config: dict[str, Any] = dict(extra or {})
         if self._excluded_tools:
             config["excluded_tools"] = self._excluded_tools
         resp = await self._http.post(

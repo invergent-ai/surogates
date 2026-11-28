@@ -23,6 +23,8 @@ class TaskOutcome:
     terminal_status: str = ""
     error: str | None = None
     score_error: str | None = None
+    # The session's current_date (--world-date on); None: the run day.
+    current_date: str | None = None
 
 
 def summarize(outcomes: list[TaskOutcome]) -> dict[str, Any]:
@@ -68,6 +70,9 @@ def render(outcomes: list[TaskOutcome], run_id: str = "") -> str:
     out.append(f"- Tasks with zero tool calls: {s['no_tool_calls']}")
     if s["unscored"]:
         out.append(f"- Unscored (rubric error): {s['unscored']} task(s)")
+    dated = sum(1 for x in outcomes if x.current_date)
+    out.append(f"- Session date: the world's own day on {dated} task(s) (--world-date on)" if dated
+               else "- Session date: the run day")
     out.append("")
 
     out.append("| Domain | Tasks | Passed | Pass rate | Partial credit |")

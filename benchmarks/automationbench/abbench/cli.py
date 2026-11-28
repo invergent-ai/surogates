@@ -46,6 +46,10 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--concurrency", type=int, default=2)
     run.add_argument("--wall-clock-cap", type=float, default=2400.0)
     run.add_argument("--run-id", default=None)
+    run.add_argument("--world-date", choices=["on", "off"], default="off",
+                     help="on: a world that sets its own time (meta.current_time) "
+                          "gives its day as the session's current date; off "
+                          "(default): the run day, as before")
 
     report = sub.add_parser("report", help="Render a run report")
     report.add_argument("run_id")
@@ -114,6 +118,7 @@ async def _cmd_run(args: argparse.Namespace) -> int:
             client, tasks, out_dir=str(out_dir),
             concurrency=args.concurrency,
             wall_clock_cap_s=args.wall_clock_cap,
+            world_date=args.world_date == "on",
         )
 
     by_id = {t.task_id: t for t in tasks}
@@ -128,6 +133,7 @@ async def _cmd_run(args: argparse.Namespace) -> int:
             terminal_status=r.terminal_status,
             error=r.error,
             score_error=r.score_error,
+            current_date=r.current_date,
         )
         for r in results
     ]

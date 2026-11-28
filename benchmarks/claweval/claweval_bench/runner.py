@@ -67,6 +67,8 @@ class RolloutResult:
     wall_clock_s: float = 0.0
     error: str | None = None
     audit_data: dict[str, dict] = field(default_factory=dict)
+    # The session's current_date (--world-date on, a task with a fixed day); None: the run day.
+    current_date: str | None = None
 
 
 def build_prompt(task: Any) -> str:
@@ -166,17 +168,27 @@ def _spawn_adapter(
         )
 
 
+def session_config(task: Any, *, world_date: bool = False) -> dict[str, Any] | None:
+    """Session config for *task*: with *world_date*, a task that fixes its day (``environment.mock_today``, the
+    mocks' clock and the prompt's "assume today's date is" line) also gives it as the session's ``current_date``,
+    so the harness's "Current date" agrees with them instead of naming the run day."""
+    mock_today = getattr(getattr(task, "environment", None), "mock_today", None)
+    return {"current_date": str(mock_today)} if (world_date and mock_today) else None
+
+
 async def _drive_session(
-    client: Any, task: Any, wall_clock_cap_s: float,
+    client: Any, task: Any, wall_clock_cap_s: float, world_date: bool = False,
 ) -> RolloutResult:
     started = time.monotonic()
     session_id = ""
     events: list[Event] = []
     status = ""
     error: str | None = None
+    config = session_config(task, world_date=world_date)
+    current_date = (config or {}).get("current_date")
 
     try:
-        session_id = await client.create_session()
+        session_id = await (client.create_session(config) if config else client.create_session())
         await client.send_message(session_id, build_prompt(task))
 
         cursor = 0
@@ -210,6 +222,7 @@ async def _drive_session(
         terminal_status=status,
         wall_clock_s=time.monotonic() - started,
         error=error,
+        current_date=current_date,
     )
 
 
@@ -223,6 +236,7 @@ async def run_task(
     exposure: Exposure | None = None,
     adapter_port: int = 8321,
     wall_clock_cap_s: float = 900.0,
+    world_date: bool = False,
 ) -> RolloutResult:
     """Services up -> adapter up -> MCP registered -> session -> teardown."""
     task_dir = out_dir / "tasks" / task.task_id
@@ -268,7 +282,7 @@ async def run_task(
             registrar.register(task.task_id, exposure.mcp_url(adapter_port))
             try:
                 await asyncio.sleep(ATTACH_SETTLE_S)
-                result = await _drive_session(client, task, wall_clock_cap_s)
+                result = await _drive_session(client, task, wall_clock_cap_s, world_date)
                 # Audits must be read while the services are still up.
                 result.audit_data = collect_audits(task)
             finally:
@@ -305,6 +319,7 @@ def _persist(task_dir: pathlib.Path, result: RolloutResult) -> None:
             "terminal_status": result.terminal_status,
             "wall_clock_s": result.wall_clock_s,
             "error": result.error,
+            "current_date": result.current_date,
         }, fh, indent=2)
     with open(task_dir / "audit.json", "w", encoding="utf-8") as fh:
         json.dump(result.audit_data, fh, ensure_ascii=False, indent=2)

@@ -87,6 +87,7 @@ def _resume_outcome(out_dir: pathlib.Path, task: Any) -> dict | None:
         "terminal_status": meta.get("terminal_status"),
         "wall_clock_s": meta.get("wall_clock_s"),
         "error": meta.get("error"),
+        "current_date": meta.get("current_date"),
         "scores": None,
         "grader_error": None,
     }
@@ -162,6 +163,10 @@ def build_parser() -> argparse.ArgumentParser:
                      help="Longer pause after a task that died to a provider "
                           "rate-limit, to let the tier's window clear before "
                           "the next task starts (default 300s)")
+    run.add_argument("--world-date", choices=["on", "off"], default="off",
+                     help="on: a task with a fixed day (environment.mock_today) "
+                          "gives it as the session's current date; off (default): "
+                          "the run day, as before")
     run.add_argument("--no-grade", action="store_true",
                      help="Collect traces only; grade later via report")
     run.add_argument("--resume", action="store_true",
@@ -240,6 +245,7 @@ async def _cmd_run(args: argparse.Namespace) -> int:
                     exposure=exposure,
                     adapter_port=args.adapter_port,
                     wall_clock_cap_s=args.wall_clock_cap,
+                    world_date=args.world_date == "on",
                 )
                 outcome: dict = {
                     "task_id": task.task_id,
@@ -247,6 +253,8 @@ async def _cmd_run(args: argparse.Namespace) -> int:
                     "terminal_status": result.terminal_status,
                     "wall_clock_s": result.wall_clock_s,
                     "error": result.error,
+                    # The session's current_date (--world-date on); None: the run day.
+                    "current_date": result.current_date,
                     "scores": None,
                     "grader_error": None,
                 }
