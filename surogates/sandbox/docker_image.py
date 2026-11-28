@@ -370,9 +370,11 @@ class ImageSessions:
     async def _port_of(self, container_id: str, name: str = "") -> tuple[bool, int | None] | None:
         """(running, its host port) of *container_id* (Docker picks the port at each start); ``None``: gone, or, with
         *name*, no longer under the session's name (set aside: never worked in again).  Docker unsure (an inspect
-        failing for another reason): :class:`SandboxUnavailableError`."""
+        failing for another reason): :class:`SandboxUnavailableError`.  In "range" mode the port is the fixed one the
+        container asked for (``HostConfig.PortBindings``): a network that publishes nothing records no other."""
+        ports = "HostConfig.PortBindings" if getattr(self, "_port_range", None) is not None else "NetworkSettings.Ports"
         code, stdout, stderr = await self._docker.run(
-            ["inspect", "--format", "{{.Name}}\n{{.State.Running}}\n{{json .NetworkSettings.Ports}}", container_id],
+            ["inspect", "--format", "{{.Name}}\n{{.State.Running}}\n{{json .%s}}" % ports, container_id],
         )
         if code != 0:
             if b"No such" in stderr:
@@ -492,8 +494,23 @@ class ImageSessions:
         run_args += ["--label", f"surogates.executor_bundle={bundle}",
                      "--mount", f"type=image,source={bundle},target={BUNDLE_MOUNT},"
                                 f"image-subpath={BUNDLE_MOUNT.lstrip('/')}"]
-        # Docker picks the host port, at every start: a fixed one could be taken while the container is stopped.
-        args = ["run", "-d", "-p", f"{_PUBLISH_HOST}::{_IN_CONTAINER_PORT}"]
+        # Docker picks the host port, at every start: a fixed one could be taken while the container is stopped.  In
+        # "range" mode a fixed one of this worker's range, held by the container until it is removed (stopped, it
+        # still asks for it, and no other container is given it meanwhile).
+        fixed = await self._take_port() if getattr(self, "_port_range", None) is not None else None
+        try:
+            return await self._run_new_on(spec, sandbox_id, name, token, limits, run, deployment, bundle, env, run_args,
+                                          fixed, main_tried=main_tried)
+        finally:
+            if fixed is not None:
+                self._port_started(fixed)
+
+    async def _run_new_on(self, spec: SandboxSpec, sandbox_id: str, name: str, token: str, limits: list[str],
+                          run: ImageRun, deployment: str, bundle: str, env: dict, run_args: list[str],
+                          fixed: int | None, *, main_tried: bool = False) -> str:
+        from surogates.sandbox.docker import _IN_CONTAINER_PORT, _PUBLISH_HOST
+
+        args = ["run", "-d", "-p", f"{_PUBLISH_HOST}:{fixed if fixed is not None else ''}:{_IN_CONTAINER_PORT}"]
         if self._network:
             args += ["--network", self._network]
         args += ["--add-host", "host.docker.internal:host-gateway", "--label", f"app={IMAGE_APP}",

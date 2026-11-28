@@ -570,6 +570,15 @@ class SandboxSettings(BaseSettings):
     # Host port base for the published executor port (host_port = base + offset).
     # Chosen to avoid the browser backend's 30000/31000/32000 bases.
     docker_executor_port_base: int = 33000
+    # Docker: how a session's own image (session config ``sandbox_image``) publishes its executor.  "docker" (default):
+    # Docker picks a free loopback port at every start and the worker reads it back.  "range": a fixed loopback port
+    # from this worker's range (docker_executor_port_base, docker_executor_port_count ports), held while the container
+    # exists, for a deployment whose sandbox network records no published port (an internal network reached through a
+    # relay of its own, which reads the port the container asked for).  In "range" mode the default sandboxes take
+    # their ports from the same range, so no two containers ever ask for one port.
+    docker_image_port_mode: Literal["docker", "range"] = "docker"
+    # Docker, "range" mode: how many ports from docker_executor_port_base this worker's sandboxes may use.
+    docker_executor_port_count: int = Field(0, ge=0)
     # Seconds to wait for /healthz after docker run (matches k8s_pod_ready_timeout).
     docker_ready_timeout: int = 60
     docker_network: str = "bridge"
