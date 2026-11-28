@@ -146,14 +146,23 @@ def parent_only(config: dict | None, *, kept_only: bool = False) -> bool:
 
 def reports_elsewhere(session: Any) -> bool:
     """Whether *session*'s end is reported somewhere other than to a person in it: a session with a parent to
-    its parent, a Keel case's step or work item to Keel, a routine's run where the routine says.  Work it left
-    running past its turn, an agent in the background or a monitor, would end after that report and wake a
-    turn that is no step's, no item's, or announce a second time: such a session's agents run in the
-    foreground, and it runs no monitor."""
+    its parent, a Keel case's step or work item to Keel, a routine's run where the routine says, an evaluation
+    row to the run that scores it.  Work it left running past its turn, an agent in the background or a
+    monitor, would end after that report and wake a turn that is no step's, no item's, no score's, or announce
+    a second time: such a session's agents run in the foreground, and it runs no monitor."""
+    from surogates.channels.memory_boundary import is_eval_session
     from surogates.keel.steps import is_case_work
     from surogates.session.execution_context import is_scheduled_run
 
-    return getattr(session, "parent_id", None) is not None or is_case_work(session) or is_scheduled_run(session)
+    return (
+        getattr(session, "parent_id", None) is not None
+        or is_case_work(session)
+        or is_scheduled_run(session)
+        # An evaluation row is read as its turn ends: a background agent's report would reach a turn nobody
+        # scores, and the row would be scored without the work the agent was given.  The server stamps the
+        # row's boundary, so a client cannot claim this by naming an eval partition alone.
+        or is_eval_session(session)
+    )
 
 
 async def agents_run_in_its_sandbox(session_factory: Any, session: Any) -> bool:

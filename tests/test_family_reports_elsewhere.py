@@ -29,3 +29,75 @@ def test_a_sub_agent_a_case_step_and_a_routine_run_report_elsewhere():
     assert reports_elsewhere(a_session(channel="api", config={CASE_STEP_KEY: CONTRACT}))
     assert reports_elsewhere(a_session(channel="scheduled"))
     assert reports_elsewhere(a_session(config={"scheduled_session_id": str(uuid4())}))
+
+
+# An evaluation row is read as its turn ends, by the run that scores it: a background agent's report would
+# wake a turn nobody scores, and the row would be scored without the agent's work.
+
+EVAL_ROW = {"memory_boundary": "eval:run-1", "eval_partition_id": "run-1"}
+
+
+def test_an_evaluation_row_reports_to_the_run_that_scores_it():
+    assert reports_elsewhere(a_session(channel="api", config=EVAL_ROW))
+
+
+def test_naming_an_eval_partition_alone_makes_no_evaluation_row():
+    # Only the server stamps the row's boundary; a client's own key changes nothing.
+    assert not reports_elsewhere(a_session(channel="api", config={"eval_partition_id": "run-1"}))
+
+
+def test_an_api_session_that_is_no_evaluation_row_reports_to_nobody_else():
+    assert not reports_elsewhere(a_session(channel="api"))
+
+
+def test_an_evaluation_row_is_offered_no_monitor():
+    from surogates.harness.subagents import MONITOR_TOOL, offer_family
+
+    session = a_session(channel="api", config=EVAL_ROW)
+    offered = offer_family({"agent", "terminal", "read_file"}, session.config, root=not reports_elsewhere(session))
+    assert "agent" in offered and MONITOR_TOOL not in offered
+    chat = a_session(channel="api")
+    assert MONITOR_TOOL in offer_family({"agent", "terminal", "read_file"}, chat.config, root=not reports_elsewhere(chat))
+
+
+class _Store:
+    def __init__(self, session):
+        self.session = session
+
+    async def get_session(self, _id):
+        return self.session
+
+
+async def _call_agent(monkeypatch, config, arguments):
+    """The agent tool's answer and the mode it chose, for a main session with *config*."""
+    from surogates.tools.builtin import agents
+
+    chosen = {}
+
+    async def start(_kwargs, **kw):
+        chosen["background"] = kw["background"]
+        return "started"
+
+    monkeypatch.setattr(agents, "_start_agent", start)
+    monkeypatch.setattr(agents, "budget_for_children", lambda _config: 0)
+    session = a_session(channel="api", config=config)
+    answer = await agents._agent_handler(
+        {"description": "read the report", "prompt": "Read report.txt and give its total.", **arguments},
+        session_store=_Store(session), tenant=object(), session_id=session.id,
+    )
+    return answer, chosen.get("background")
+
+
+async def test_an_evaluation_rows_agent_waits_for_its_report(monkeypatch):
+    answer, background = await _call_agent(monkeypatch, EVAL_ROW, {})
+    assert answer == "started" and background is False
+
+
+async def test_an_evaluation_row_asking_for_the_background_is_told_to_wait(monkeypatch):
+    answer, background = await _call_agent(monkeypatch, EVAL_ROW, {"run_in_background": True})
+    assert background is None and "cannot start agents in the background" in answer
+
+
+async def test_an_api_chats_agent_still_runs_in_the_background(monkeypatch):
+    answer, background = await _call_agent(monkeypatch, {}, {})
+    assert answer == "started" and background is True
