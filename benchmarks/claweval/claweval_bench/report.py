@@ -47,6 +47,9 @@ def render(outcomes: list[dict[str, Any]], run_id: str,
     lines = [f"# Claw-Eval run {run_id}", ""]
     pct = (100 * len(ok) / total) if total else 0.0
     lines += [f"## Score", "", f"- Strict: **{len(ok)}/{total}** ({pct:.1f}%)"]
+    dated = sum(1 for o in outcomes if o.get("current_date"))
+    lines += [f"- Session date: the task's own day on {dated} task(s) (--world-date on)" if dated
+              else "- Session date: the run day"]
     graded = [o for o in outcomes if o.get("scores")]
     if graded:
         avg_c = sum(o["scores"].get("completion", 0.0) for o in graded) / len(graded)

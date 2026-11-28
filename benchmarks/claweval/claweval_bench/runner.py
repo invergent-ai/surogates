@@ -67,6 +67,8 @@ class RolloutResult:
     wall_clock_s: float = 0.0
     error: str | None = None
     audit_data: dict[str, dict] = field(default_factory=dict)
+    # The session's current_date (--world-date on, a task with a fixed day); None: the run day.
+    current_date: str | None = None
 
 
 def build_prompt(task: Any) -> str:
@@ -182,9 +184,10 @@ async def _drive_session(
     events: list[Event] = []
     status = ""
     error: str | None = None
+    config = session_config(task, world_date=world_date)
+    current_date = (config or {}).get("current_date")
 
     try:
-        config = session_config(task, world_date=world_date)
         session_id = await (client.create_session(config) if config else client.create_session())
         await client.send_message(session_id, build_prompt(task))
 
@@ -219,6 +222,7 @@ async def _drive_session(
         terminal_status=status,
         wall_clock_s=time.monotonic() - started,
         error=error,
+        current_date=current_date,
     )
 
 
@@ -315,6 +319,7 @@ def _persist(task_dir: pathlib.Path, result: RolloutResult) -> None:
             "terminal_status": result.terminal_status,
             "wall_clock_s": result.wall_clock_s,
             "error": result.error,
+            "current_date": result.current_date,
         }, fh, indent=2)
     with open(task_dir / "audit.json", "w", encoding="utf-8") as fh:
         json.dump(result.audit_data, fh, ensure_ascii=False, indent=2)
