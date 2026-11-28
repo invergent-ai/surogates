@@ -44,12 +44,51 @@ def test_parse_maps_all_fields(tmp_path):
     assert task.reset_database is True
 
 
-def test_parse_rejects_multi_gym_tasks(tmp_path):
-    path = tmp_path / "task_h.json"
+def _hybrid_json(**overrides):
     multi = _task_json()
-    multi["gym_servers_config"].append(dict(multi["gym_servers_config"][0]))
-    path.write_text(json.dumps(multi))
-    with pytest.raises(ValueError, match="exactly one gym server"):
+    multi["gym_servers_config"].append({
+        "mcp_server_name": "gym-calendar",
+        "mcp_server_url": "http://localhost:8003",
+        "seed_database_file": "dbs/hybrid/db_2.sql",
+        "context": {"x-access-token": "tok"},
+    })
+    multi["verifiers"].append({
+        "verifier_type": "database_state", "name": "event", "gym_name": "gym-calendar",
+        "validation_config": {"query": "SELECT ..."},
+    })
+    multi.update(overrides)
+    return multi
+
+
+def test_parse_multi_gym_tasks(tmp_path):
+    path = tmp_path / "task_h.json"
+    path.write_text(json.dumps(_hybrid_json()))
+    task = _parse(path, "hybrid")
+    assert [g.name for g in task.gyms] == ["sn-csm-server", "gym-calendar"]
+    assert task.gyms[1].context == {"x-access-token": "tok"}
+    assert task.gyms[1].seed_database_file == "dbs/hybrid/db_2.sql"
+    # the single-gym fields repeat the first gym
+    assert (task.gym_name, task.gym_url) == ("sn-csm-server", "http://localhost:8001")
+
+
+def test_single_gym_tasks_have_no_gym_list(tmp_path):
+    path = tmp_path / "task_x.json"
+    path.write_text(json.dumps(_task_json()))
+    assert _parse(path, "csm").gyms == ()
+
+
+@pytest.mark.parametrize("change, message", [
+    (lambda t: t["verifiers"][1].update(gym_name="gym-email-mcp"), "outside the task"),
+    (lambda t: t["verifiers"][1].pop("gym_name"), "outside the task"),
+    (lambda t: t["gym_servers_config"][1].update(mcp_server_name="sn-csm-server"), "distinct"),
+    (lambda t: t["gym_servers_config"][1].update(seed_database_file="../x.sql"), "relative path"),
+])
+def test_parse_rejects_bad_multi_gym_tasks(tmp_path, change, message):
+    task = _hybrid_json()
+    change(task)
+    path = tmp_path / "task_h.json"
+    path.write_text(json.dumps(task))
+    with pytest.raises(ValueError, match=message):
         _parse(path, "hybrid")
 
 
@@ -69,3 +108,13 @@ def test_load_tasks_empty_dir_is_actionable(tmp_path, monkeypatch):
     monkeypatch.setenv("EOG_TASKS_DIR", str(tmp_path))
     with pytest.raises(SystemExit, match="no task_"):
         load_tasks()
+
+
+def test_an_empty_user_info_string_is_absent():
+    # Rows of the public dataset carry user_info == "" (JSON-encoded columns): absent, not a parse error.
+    raw = _task_json()
+    raw["gym_servers_config"][0]["user_info"] = ""
+    raw["gym_servers_config"] = json.dumps(raw["gym_servers_config"])
+    from eogbench.dataset import parse_record
+
+    assert parse_record(raw, "csm", "task_a").user_info == {}
