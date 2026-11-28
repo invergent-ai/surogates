@@ -56,16 +56,30 @@ _TERMINAL_STATUSES = {"completed", "archived", "failed"}
 
 SCORING_RULES = ("upstream", "all-verifiers")
 
-# The gym answered the verifier's SQL with HTTP 400 and an SQL error: a fault of the task's query (no such table /
-# column, syntax), the same in every attempt. Transport faults (timeouts, refused connections, 5xx) do not match and
-# stay infra (re-run), where upstream would record a fail.
+# The gym answered the verifier's SQL with HTTP 400 and an error in the query itself (no such table / column, a
+# syntax error, an ambiguous column): a fault of the task's query, the same in every attempt. Anything else stays
+# infra (re-run): transport faults (timeouts, refused connections, 5xx) and the database's own faults (locked,
+# unable to open, I/O), where upstream records any verifier error as a fail.
 _QUERY_REJECTED = re.compile(
     r"^SQL query failed: SQL API call failed \(HTTP 400\):.*"
-    r"(no such table|no such column|syntax error|OperationalError|SQL execution error)", re.S)
+    r"(no such table|no such column|syntax error|ambiguous column name)", re.S)
 
 
 def query_rejected(outcome: dict[str, Any]) -> bool:
     return bool(_QUERY_REJECTED.search(str(outcome.get("error") or "")))
+
+
+def kept_results(verifier_results: list[dict[str, Any]], scoring: str = "upstream") -> list[dict[str, Any]]:
+    """The results a verdict reads: upstream keeps one per verifier NAME (or ``verifier_<i+1>``), the last of a
+    repeated name; all-verifiers keeps every result."""
+    if scoring == "all-verifiers":
+        return list(verifier_results)
+    if scoring != "upstream":
+        raise ValueError(f"unknown scoring rule {scoring!r}")
+    by_name: dict[str, dict[str, Any]] = {}
+    for i, v in enumerate(verifier_results):
+        by_name[v.get("name") or f"verifier_{i + 1}"] = v
+    return list(by_name.values())
 
 
 def verdict(verifier_results: list[dict[str, Any]], scoring: str = "upstream") -> bool | None:
@@ -76,14 +90,7 @@ def verdict(verifier_results: list[dict[str, Any]], scoring: str = "upstream") -
     only its LAST result. all-verifiers: every verifier passed (eogbench's earlier rule)."""
     if not verifier_results:
         return None
-    if scoring == "all-verifiers":
-        return all(bool(v.get("passed")) for v in verifier_results)
-    if scoring != "upstream":
-        raise ValueError(f"unknown scoring rule {scoring!r}")
-    by_name: dict[str, bool] = {}
-    for i, v in enumerate(verifier_results):
-        by_name[v.get("name") or f"verifier_{i + 1}"] = bool(v.get("passed"))
-    return all(by_name.values())
+    return all(bool(v.get("passed")) for v in kept_results(verifier_results, scoring))
 
 
 PROMPT_TEMPLATE = """{system_prompt}
@@ -339,6 +346,10 @@ async def run_task(
     if task.gyms:
         if not gym_proxies or any(g.name not in gym_proxies for g in task.gyms):
             raise ValueError(f"{task.task_id}: a multi-gym task needs one proxy per gym (gym_proxies)")
+        if len({id(gym_proxies[g.name][1]) for g in task.gyms}) != len(task.gyms):
+            # A proxy holds one task scope (database, tools, context, credentials): a second gym's
+            # configure_task would overwrite the first's, and one gym's registration would serve the other.
+            raise ValueError(f"{task.task_id}: each gym of a multi-gym task needs a proxy of its own")
         return await _run_multi_gym(client, registrar, gym_proxies, task, wall_clock_cap_s, scoring)
     if scoring not in SCORING_RULES:
         raise ValueError(f"unknown scoring rule {scoring!r}")

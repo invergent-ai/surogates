@@ -34,7 +34,7 @@ from eogbench.dataset import Task, load_tasks
 from eogbench.proxy import GymProxy
 from eogbench.registrar import Registrar
 from eogbench.report import TaskOutcome, render
-from eogbench.runner import SCORING_RULES, RolloutResult, run_task, write_trace
+from eogbench.runner import RolloutResult, kept_results, run_task, write_trace
 from eogbench.tunnel import expose_adapter
 
 RUNS_DIR = pathlib.Path(__file__).parent.parent / "runs"
@@ -52,11 +52,13 @@ def build_parser() -> argparse.ArgumentParser:
                      help="Comma-separated task ids (domain/stem)")
     run.add_argument("--wall-clock-cap", type=float, default=1800.0)
     run.add_argument("--run-id", default=None)
-    run.add_argument("--scoring", choices=SCORING_RULES, default="upstream",
+    run.add_argument("--scoring", choices=["upstream", "all-verifiers"], default="upstream",  # = runner.SCORING_RULES
                      help="upstream (default): upstream's verdict (one result per verifier name, "
-                          "the last wins; a verifier query the gym rejects is a fail); "
-                          "all-verifiers: every verifier passed, a rejected query is an "
-                          "infrastructure error (this adapter's earlier rule)")
+                          "the last wins; a verifier query the gym rejects as a query error is a "
+                          "fail; upstream also fails a verifier on a transport or database fault, "
+                          "which stays an infrastructure error here); all-verifiers: every "
+                          "verifier passed, a rejected query is an infrastructure error (this "
+                          "adapter's earlier rule)")
 
     report = sub.add_parser("report", help="Render a run report")
     report.add_argument("run_id")
@@ -120,7 +122,9 @@ def select_tasks(tasks: list[Task], spec: str | None) -> list[Task]:
 
 
 def _outcome(meta: dict, domain: str) -> TaskOutcome:
-    results = list(meta.get("verifier_results") or [])
+    # The results the verdict read (upstream: the last of a repeated verifier name), so that passed agrees with
+    # verifiers_passed == verifiers_total.
+    results = kept_results(list(meta.get("verifier_results") or []), meta.get("scoring") or "upstream")
     return TaskOutcome(
         task_id=meta["task_id"],
         domain=domain,
@@ -147,17 +151,23 @@ async def _run_multi_gym_task(client, registrar, harness_base: str, task: Task,
             error="multi-gym task: EOG_ADAPTER_PUBLIC_URL fronts one gym proxy, "
                   "and this task needs one per gym",
         )
+    # One proxy per GYM, never per URL: a proxy holds one task scope (database, tools, context,
+    # credentials), so two gyms sharing a URL still get one each.
     proxies: dict[str, GymProxy] = {}
     exposures = []
     try:
-        for url in dict.fromkeys(g.url for g in task.gyms):
-            proxies[url] = GymProxy(url).start()
-        bases: dict[str, str] = {}
-        for url, proxy in proxies.items():
-            exposure = expose_adapter(harness_base, proxy.port)
-            exposures.append(exposure)
-            bases[url] = exposure.public_base or proxy.local_url
-        gym_proxies = {g.name: (bases[g.url], proxies[g.url]) for g in task.gyms}
+        try:
+            gym_proxies = {}
+            for gym in task.gyms:
+                proxy = proxies[gym.name] = GymProxy(gym.url).start()
+                exposure = expose_adapter(harness_base, proxy.port)
+                exposures.append(exposure)
+                gym_proxies[gym.name] = (exposure.public_base or proxy.local_url, proxy)
+        except Exception as exc:  # noqa: BLE001 - setup failure: this task's infrastructure row, the run goes on
+            return RolloutResult(
+                task_id=task.task_id, session_id="", terminal_status="env_error",
+                scoring=args.scoring, error=f"multi-gym setup: {type(exc).__name__}: {exc}",
+            )
         return await run_task(
             client, registrar, "", None, task,
             wall_clock_cap_s=args.wall_clock_cap,
@@ -165,9 +175,15 @@ async def _run_multi_gym_task(client, registrar, harness_base: str, task: Task,
         )
     finally:
         for exposure in exposures:
-            exposure.close()
+            try:
+                exposure.close()
+            except Exception:  # noqa: BLE001 - every proxy below is still stopped
+                pass
         for proxy in proxies.values():
-            proxy.stop()
+            try:
+                proxy.stop()
+            except Exception:  # noqa: BLE001
+                pass
 
 
 async def _cmd_run(args: argparse.Namespace) -> int:
@@ -220,6 +236,7 @@ async def _cmd_run(args: argparse.Namespace) -> int:
                         "task_id": result.task_id,
                         "passed": result.passed,
                         "verifier_results": result.verifier_results,
+                        "scoring": result.scoring,
                         "terminal_status": result.terminal_status,
                         "error": result.error,
                         "verify_error": result.verify_error,
@@ -250,6 +267,7 @@ async def _cmd_run(args: argparse.Namespace) -> int:
                     "task_id": result.task_id,
                     "passed": result.passed,
                     "verifier_results": result.verifier_results,
+                    "scoring": result.scoring,
                     "terminal_status": result.terminal_status,
                     "error": result.error,
                     "verify_error": result.verify_error,

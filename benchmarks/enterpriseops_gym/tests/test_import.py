@@ -45,3 +45,16 @@ def test_selected_tasks_do_not_parse_unrequested_unsupported_rows(tmp_path, monk
     assert [t.task_id for t in load_tasks(task_ids=('csm/a',))] == ['csm/a']
     with pytest.raises(ValueError, match='database_state'):
         parse_record(_task_json(verifiers=[]), 'csm', 'b')
+
+
+def test_a_multi_gym_task_is_imported_but_kept_out_of_the_catalog(tmp_path):
+    # harness_evolution evaluates single-gym tasks only, and builds its split from catalog.json.
+    from test_dataset import _hybrid_json
+
+    single = _task_json(domain='csm', task_id='task_a')
+    hybrid = _hybrid_json(domain='hybrid', task_id='task_h')
+    output = tmp_path / 'imported'
+    manifest = import_rows([single, hybrid], output, revision='a' * 40, mode='oracle')
+    assert {e['task_id']: e['gyms'] for e in manifest['accepted']} == {'csm/a': 1, 'hybrid/h': 2}
+    assert [e['task_id'] for e in json.loads((output / 'catalog.json').read_text())] == ['csm/a']
+    assert 'gyms' not in json.loads((output / 'catalog.json').read_text())[0]

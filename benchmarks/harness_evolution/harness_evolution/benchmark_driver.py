@@ -101,7 +101,8 @@ def run(request: dict) -> list[dict]:
         ])
         if asyncio.run(cli._cmd_run(args)):
             raise InvalidEvaluation("EnterpriseOps runner failed")
-        write_json(out / "run-config.json", {"mode": split, "dataset_revision": revision})
+        recorded = read_json(out / "run-config.json") if (out / "run-config.json").exists() else {}
+        write_json(out / "run-config.json", {**recorded, "mode": split, "dataset_revision": revision})
     else:
         if name == "dabstep":
             from dabbench import cli
