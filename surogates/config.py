@@ -19,6 +19,7 @@ import logging
 import os
 import threading
 import typing
+from collections import abc
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
@@ -85,15 +86,15 @@ logger = logging.getLogger(__name__)
 #: Settings whose value is a mapping: ``_flatten_yaml`` passes them on whole.
 _JSON_VALUED_KEYS = frozenset({"SUROGATES_LLM_CHAT_TEMPLATE_KWARGS"})
 
-_COLLECTION_TYPES = (list, tuple, set, frozenset, dict)
+_COLLECTION_TYPES = (abc.Sequence, abc.Set, abc.Mapping)
 
 
 def _is_collection(annotation: Any) -> bool:
     """Whether a setting of type *annotation* takes a list, tuple, set or mapping (``X | None`` included)."""
-    origin = typing.get_origin(annotation)
-    if origin in _COLLECTION_TYPES or annotation in _COLLECTION_TYPES:
+    kind = typing.get_origin(annotation) or annotation
+    if isinstance(kind, type) and issubclass(kind, _COLLECTION_TYPES) and not issubclass(kind, (str, bytes)):
         return True
-    return any(_is_collection(arg) for arg in typing.get_args(annotation)) if origin is not None else False
+    return any(_is_collection(arg) for arg in typing.get_args(annotation))
 
 
 @lru_cache(maxsize=1)
@@ -105,7 +106,7 @@ def _collection_setting_keys() -> frozenset[str]:
     while pending:
         cls = pending.pop()
         pending.extend(cls.__subclasses__())
-        if cls.__module__ != __name__:
+        if cls.__module__.partition(".")[0] != "surogates":
             continue
         prefix = str(cls.model_config.get("env_prefix") or "")
         for name, field in cls.model_fields.items():
@@ -126,19 +127,23 @@ def _flatten_yaml(data: dict[str, Any], prefix: str = "") -> dict[str, str]:
     is a list or a mapping (``sandbox.allowed_images``, ``llm.models``,
     ``llm.chat_template_kwargs``, ...) goes in whole as one JSON value, as
     such a setting is written in the environment.  An empty key (``null``)
-    leaves the setting at its default.  Anything else (a list where no
-    setting takes one, a date, ...) is left out with a warning naming it:
-    never dropped without a word.
+    leaves the setting at its default, with a warning for such a setting (an
+    empty ``api.cors_origins`` is not "no origin" but its default ``*``).
+    Anything else (a list where no setting takes one, a date, ...) is left
+    out with a warning naming it: never dropped without a word.
     """
     collections = _collection_setting_keys()
     result: dict[str, str] = {}
     for key, value in data.items():
         env_key = f"{prefix}{key}".upper()
         full_key = f"SUROGATES_{env_key}" if not prefix else env_key
-        if isinstance(value, (dict, list, tuple)) and full_key in collections:
+        if isinstance(value, (dict, list, tuple, set, frozenset)) and full_key in collections:
             # A setting that is itself a list or a mapping: one JSON value,
             # which pydantic-settings parses, not keys no setting reads.
-            result[full_key] = json.dumps(value, default=str)
+            result[full_key] = json.dumps(sorted(value, key=str) if isinstance(value, (set, frozenset)) else value,
+                                          default=str)
+        elif value is None and full_key in collections:
+            logger.warning("config file: %s is empty: its default is used (write [] or {} for an empty one)", full_key)
         elif isinstance(value, dict):
             child_prefix = f"SUROGATES_{key}_" if not prefix else f"{prefix}{key}_"
             result.update(_flatten_yaml(value, child_prefix))
