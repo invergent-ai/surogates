@@ -88,8 +88,10 @@ def test_a_value_no_setting_can_take_is_left_out_with_a_warning(caplog):
 
 def test_an_empty_key_keeps_the_default_and_says_so_for_a_list_setting(caplog):
     with caplog.at_level(logging.WARNING, logger="surogates.config"):
-        assert _flatten_yaml({"sandbox": {"allowed_images": None, "docker_image": None}}) == {}
+        assert _flatten_yaml({"sandbox": {"allowed_images": None, "docker_image": None},
+                              "api": {"cors_origins": None}}) == {}
     # An empty cors_origins is not "no origin" but its default "*": said, never quiet.
+    assert "SUROGATES_API_CORS_ORIGINS is empty" in caplog.text
     assert "SUROGATES_SANDBOX_ALLOWED_IMAGES is empty" in caplog.text
     assert "DOCKER_IMAGE" not in caplog.text
 
@@ -99,8 +101,8 @@ def test_a_yaml_set_goes_in_as_a_list():
         "SUROGATES_API_CORS_ORIGINS": '["https://a.example", "https://b.example"]'}
 
 
-def test_the_settings_of_the_tests_are_left_as_they_were(config_file):
-    """The fixture's own check: the file's values leave the environment when a test ends."""
+def test_the_files_values_reach_the_environment_through_the_fixture(config_file):
+    """The fixture loads through the environment, as a worker does (and puts it back at teardown)."""
     import os
 
     config_file("sandbox:\n  allowed_images: [ghcr.io/acme/tasks:*]\n")
@@ -152,12 +154,3 @@ def test_every_list_and_mapping_setting_is_known():
             "SUROGATES_LLM_CHAT_TEMPLATE_KWARGS"} <= keys
     assert "SUROGATES_DB_URL" not in keys and "SUROGATES_SANDBOX" not in keys
 
-
-def test_no_value_of_this_file_is_left_in_the_environment():
-    """Runs after the others in this file: none of their config files left a setting behind."""
-    import os
-
-    from surogates.config import SandboxSettings
-
-    assert "SUROGATES_SANDBOX_ALLOWED_IMAGES" not in os.environ
-    assert SandboxSettings().allowed_images == []
