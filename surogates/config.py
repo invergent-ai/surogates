@@ -15,8 +15,11 @@ individually configurable — there is no single "home directory".
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
+import typing
+from collections import abc
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
@@ -78,8 +81,38 @@ def _parse_yaml_config(content: bytes | None) -> dict[str, Any]:
         return {}
 
 
+logger = logging.getLogger(__name__)
+
 #: Settings whose value is a mapping: ``_flatten_yaml`` passes them on whole.
 _JSON_VALUED_KEYS = frozenset({"SUROGATES_LLM_CHAT_TEMPLATE_KWARGS"})
+
+_COLLECTION_TYPES = (abc.Sequence, abc.Set, abc.Mapping)
+
+
+def _is_collection(annotation: Any) -> bool:
+    """Whether a setting of type *annotation* takes a list, tuple, set or mapping (``X | None`` included)."""
+    kind = typing.get_origin(annotation) or annotation
+    if isinstance(kind, type) and issubclass(kind, _COLLECTION_TYPES) and not issubclass(kind, (str, bytes)):
+        return True
+    return any(_is_collection(arg) for arg in typing.get_args(annotation))
+
+
+@lru_cache(maxsize=1)
+def _collection_setting_keys() -> frozenset[str]:
+    """The ``SUROGATES_*`` names of the settings whose value is a list, tuple, set or mapping: from config.yaml they
+    go in whole, as one JSON value, which pydantic-settings parses as it parses that variable from the environment."""
+    keys = set(_JSON_VALUED_KEYS)
+    pending = list(BaseSettings.__subclasses__())
+    while pending:
+        cls = pending.pop()
+        pending.extend(cls.__subclasses__())
+        if cls.__module__.partition(".")[0] != "surogates":
+            continue
+        prefix = str(cls.model_config.get("env_prefix") or "")
+        for name, field in cls.model_fields.items():
+            if _is_collection(field.annotation):
+                keys.add(f"{prefix}{name}".upper())
+    return frozenset(keys)
 
 
 def _flatten_yaml(data: dict[str, Any], prefix: str = "") -> dict[str, str]:
@@ -90,23 +123,37 @@ def _flatten_yaml(data: dict[str, Any], prefix: str = "") -> dict[str, str]:
         {"db": {"url": "postgres://..."}}
         → {"SUROGATES_DB_URL": "postgres://..."}
 
-    Only leaf string/int/float/bool values are included, except a setting
-    whose value is itself a mapping (``_JSON_VALUED_KEYS``), which goes in
-    whole as one JSON value.
+    String/int/float/bool leaves go in as their text.  A setting whose value
+    is a list or a mapping (``sandbox.allowed_images``, ``llm.models``,
+    ``llm.chat_template_kwargs``, ...) goes in whole as one JSON value, as
+    such a setting is written in the environment.  An empty key (``null``)
+    leaves the setting at its default, with a warning for such a setting (an
+    empty ``api.cors_origins`` is not "no origin" but its default ``*``).
+    Anything else (a list where no setting takes one, a date, ...) is left
+    out with a warning naming it: never dropped without a word.
     """
+    collections = _collection_setting_keys()
     result: dict[str, str] = {}
     for key, value in data.items():
         env_key = f"{prefix}{key}".upper()
         full_key = f"SUROGATES_{env_key}" if not prefix else env_key
-        if isinstance(value, dict) and full_key in _JSON_VALUED_KEYS:
-            # A setting that is itself a mapping: one JSON value, which
-            # pydantic-settings parses, not keys no setting reads.
-            result[full_key] = json.dumps(value, default=str)
+        if isinstance(value, (dict, list, tuple, set, frozenset)) and full_key in collections:
+            # A setting that is itself a list or a mapping: one JSON value,
+            # which pydantic-settings parses, not keys no setting reads.
+            result[full_key] = json.dumps(sorted(value, key=str) if isinstance(value, (set, frozenset)) else value,
+                                          default=str)
+        elif value is None and full_key in collections:
+            logger.warning("config file: %s is empty: its default is used (write [] or {} for an empty one)", full_key)
         elif isinstance(value, dict):
             child_prefix = f"SUROGATES_{key}_" if not prefix else f"{prefix}{key}_"
             result.update(_flatten_yaml(value, child_prefix))
         elif isinstance(value, (str, int, float, bool)):
             result[full_key] = str(value)
+        elif value is not None:
+            logger.warning(
+                "config file: %s is a %s, which no setting of that name takes: ignored",
+                full_key, type(value).__name__,
+            )
     return result
 
 
