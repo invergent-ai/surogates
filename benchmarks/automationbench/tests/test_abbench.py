@@ -143,6 +143,21 @@ class TestLibrarySeams:
         # An untouched world must not strictly pass a real task.
         assert strict == 0.0
 
+    def test_score_matches_upstream_setup_state(self):
+        """score() == upstream's rubric over the state upstream's setup_state builds (free assertions excluded)."""
+        import copy
+
+        from automationbench import rubric
+        from automationbench.runner import strip_none_values
+        from abbench.bridge import load_domain_tasks, make_world, score
+
+        for task in load_domain_tasks("sales")[:20]:
+            world, info = make_world(task)
+            up = {"world": world, "info": info,
+                  "initial_state": copy.deepcopy(strip_none_values(task.info.get("initial_state") or {}))}
+            want = (float(rubric.partial_credit(up)), float(rubric.task_completed_correctly(up)))
+            assert score(world, info) == want
+
 
 # -- session config ------------------------------------------------------
 
@@ -197,3 +212,30 @@ def test_the_report_says_which_day_the_sessions_had():
             TaskOutcome(task_id="hr/2", domain="hr", partial_credit=0.0, strict=0.0)]
     assert "the world's own day on 1 task(s)" in render(rows, run_id="r")
     assert "Session date: the run day" in render(rows[1:], run_id="r")
+
+
+def test_score_gives_the_rubric_the_initial_state(monkeypatch):
+    """Offline: score() hands upstream's rubric the state upstream's setup_state builds, initial_state included
+    (None-stripped, a copy), so assertions already true before the agent acts are not counted as passed."""
+    import sys
+    import types
+
+    from abbench.bridge import score
+
+    seen = {}
+    rubric = types.SimpleNamespace(
+        partial_credit=lambda state: seen.setdefault("state", state) and 0.5,
+        task_completed_correctly=lambda state: 0.0,
+    )
+    runner = types.SimpleNamespace(strip_none_values=lambda d: {k: v for k, v in d.items() if v is not None})
+    package = types.ModuleType("automationbench")
+    package.rubric, package.runner = rubric, runner
+    monkeypatch.setitem(sys.modules, "automationbench", package)
+    monkeypatch.setitem(sys.modules, "automationbench.rubric", rubric)
+    monkeypatch.setitem(sys.modules, "automationbench.runner", runner)
+    initial = {"gmail": {"messages": []}, "slack": None}
+    world, info = object(), {"assertions": [], "initial_state": initial}
+    assert score(world, info) == (0.5, 0.0)
+    assert seen["state"]["initial_state"] == {"gmail": {"messages": []}}
+    assert seen["state"]["initial_state"] is not initial
+    assert seen["state"]["world"] is world and seen["state"]["info"] is info
