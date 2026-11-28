@@ -11,8 +11,9 @@ iteration cap and the ``delegation.*`` events.
   input of a new turn when it rests.  Over the background limit, a call that
   did not ask for the background waits instead.
 - Foreground (``run_in_background=false``, and the default for any session
-  with a parent, which reports its own end once): the call waits for the
-  agent and returns its final report, with its ``agent_id``.
+  that reports its end elsewhere: one with a parent, a case's work, a
+  routine's run, an evaluation row): the call waits for the agent and
+  returns its final report, with its ``agent_id``.
 - ``fork``: the agent starts from a copy of this conversation up to the
   call, then the brief, instead of from the brief alone.
 
@@ -61,6 +62,12 @@ STARTED_NOTE = (
     "It works in the background. Its report reaches you as a notification when it ends. Until then, "
     "do not do its task yourself, and never state or guess its result. Do not sleep or poll list_agents "
     "to wait for it: when you have nothing else to do, end your turn."
+)
+
+#: What an agent that was asked for the background but ran in the foreground returns, before its report.
+WAITED_NOTE = (
+    "[This agent ran in the foreground, not the background: this session's work is read when its turn ends, "
+    "so the agents it starts wait for their reports. Its report follows.]"
 )
 
 _AGENT_DESCRIPTION = (
@@ -749,6 +756,12 @@ async def _why_not_resume(session_store: Any, sender: Any, target: Any, session_
         return "only the agent that started it resumes it"
     if getattr(sender, "channel", None) == "delegation" or is_project_thread(sender.config):
         return "a sub-agent does not resume agents: its parent does"
+    from surogates.harness.subagents import reports_elsewhere
+
+    if reports_elsewhere(sender):
+        # Resumed, it would run in the background: its report would come after this session's turn end, which is
+        # read as the session's work (a case's step, a routine's run, an evaluation row).
+        return "this session's work is read when its turn ends: start a new agent instead, which waits for its report"
     if target.status == "paused":
         # Only a stop of its own: one by the user, or by another agent, is theirs to lift.
         from surogates.harness.subagents import stopped_by
@@ -930,7 +943,8 @@ async def _agent_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
 
     parent_config = parent.config or {}
     # Omitted, an agent runs in the background for a main session; a session that reports its end elsewhere
-    # (to its parent, to Keel, where its routine says) would hear of it only after that report: its agents wait.
+    # (to its parent, to Keel, where its routine says, to the run scoring an evaluation row) would hear of it only
+    # after that report: its agents wait.
     from surogates.harness.subagents import reports_elsewhere
 
     implicit = not isinstance(asked, bool)
@@ -947,12 +961,12 @@ async def _agent_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
     if background and getattr(parent, "channel", None) == "delegation":
         # A helper's parent hears of its end once: work it left running would end after that.
         return _error("a sub-agent cannot start agents in the background: start it in the foreground")
+    waited_here = False
     if background and parent.parent_id is None and waits:
-        # A case's step or work item reports to Keel, a routine's run where the routine says, as its turn ends.
-        return _error(
-            "this session reports its work when its turn ends, so it cannot start agents in the background: "
-            "start it in the foreground"
-        )
+        # A case's step or work item reports to Keel, a routine's run where the routine says, an evaluation row to
+        # its run, as its turn ends.  The model asked for the background as a main session would: the agent runs in
+        # the foreground instead, and the answer says so (a refusal cost a call and could end the delegation).
+        background, waited_here = False, True
     # Its token budget: the deployment's, or its parent's key.  A sub-agent with a budget hands each agent it
     # starts at most half of what it has left, less what its agents still running were handed: the calls of
     # one response run at once, and it needs tokens of its own to read their reports.
@@ -966,11 +980,14 @@ async def _agent_handler(arguments: dict[str, Any], **kwargs: Any) -> str:
         child_tokens = handed = min(child_tokens, share) if child_tokens else share
         _BUDGET_HANDED[parent.id] = _BUDGET_HANDED.get(parent.id, 0) + handed
     try:
-        return await _start_agent(
+        result = await _start_agent(
             kwargs, parent=parent, prompt=prompt, description=description, background=background,
             fork=fork, agent_type=agent_type, model=model, depth=depth, budget=budget, child_tokens=child_tokens,
             name=name, implicit=implicit,
         )
+        if waited_here and not result.startswith('{"error"'):
+            result = f"{WAITED_NOTE}\n\n{result}"
+        return result
     finally:
         if handed:
             _BUDGET_HANDED[parent.id] -= handed

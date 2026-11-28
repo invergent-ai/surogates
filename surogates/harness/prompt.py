@@ -327,6 +327,11 @@ class PromptBuilder:
         # A project's master starts threads with it, which its own guidance covers.
         if "agent" in self._available_tools and not is_project_master(getattr(self._session, "config", None)):
             parts.append(self._prompts.get("guidance/agents"))
+            from surogates.harness.subagents import reports_elsewhere
+
+            if getattr(self._session, "parent_id", None) is None and reports_elsewhere(self._session):
+                # A case's step, a routine's run, an evaluation row: read as its turn ends, so its agents wait.
+                parts.append(self._prompts.get("guidance/agents_wait"))
         if isinstance((getattr(self._session, "config", None) or {}).get("agent_dispatch"), dict):
             parts.append(self._prompts.get("guidance/sub_agent"))
         if "session_search" in self._available_tools:

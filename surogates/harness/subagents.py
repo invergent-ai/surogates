@@ -159,8 +159,8 @@ def reports_elsewhere(session: Any) -> bool:
         or is_case_work(session)
         or is_scheduled_run(session)
         # An evaluation row is read as its turn ends: a background agent's report would reach a turn nobody
-        # scores, and the row would be scored without the work the agent was given.  The server stamps the
-        # row's boundary, so a client cannot claim this by naming an eval partition alone.
+        # scores, and the row would be scored without the work the agent was given.  Keyed on the boundary the
+        # server stamps (apply_eval_isolation: an api session naming eval_partition_id), never on one a client sends.
         or is_eval_session(session)
     )
 
