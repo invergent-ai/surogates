@@ -82,14 +82,26 @@ uv pip install --python .venv/bin/python -e '.[dev,data]'
 Set `EOG_TASKS_DIR` to the imported directory and `EOG_SEED_ROOT` to the root
 containing the referenced seed SQL paths (defaults to `EOG_HOME`). Import
 outputs include a hashed manifest, an identifier-only catalog and reasons for
-unsupported rows. Multi-gym tasks, empty tool allowlists and non-database
-verifiers are excluded explicitly. Imports refuse to overwrite existing data.
+unsupported rows. Empty tool allowlists and non-database verifiers are
+excluded explicitly. Multi-gym (hybrid) tasks are imported and run with one
+gym proxy, one database and one MCP registration per gym; each verifier runs
+against the database of the gym it names. A run needs an address the harness
+can reach for each gym's proxy: with `EOG_ADAPTER_PUBLIC_URL` (one address)
+such a task is recorded as an infrastructure row. An empty `user_info` is an
+absent one. An import made before multi-gym support holds fewer tasks: the
+task set defines the benchmark, so re-import before comparing. Imports refuse
+to overwrite existing data.
 The `plus_5_tools`, `plus_10_tools` and `plus_15_tools` configurations are
 related task variants, not independent additions to the evaluation pool.
 
-`run-config.json` records the imported mode and dataset revision. Verifier
-errors and unsuccessful database deletion remain explicit infrastructure
-errors. Offline fixture tests cover discovery/call restrictions, identity
+`run-config.json` records the scoring rule and the imported mode and dataset
+revision. Scoring (`run --scoring`): `upstream` (default) is the verdict of
+upstream's executor: one result per verifier name, the last result of a
+repeated name kept, and a verifier whose SQL the gym rejects (HTTP 400 with an
+SQL error) recorded as a failed verifier. `all-verifiers` is this adapter's
+earlier rule (every verifier passed; a rejected query is an infrastructure
+error), kept to reproduce older runs. Transport faults of a verifier and
+unsuccessful database deletion remain explicit infrastructure errors. Offline fixture tests cover discovery/call restrictions, identity
 forwarding, task switches and cancellation cleanup; a live deployment still
 needs its own fidelity check.
 

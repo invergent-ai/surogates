@@ -44,7 +44,8 @@ def import_rows(rows, output: pathlib.Path, *, revision: str, mode: str) -> dict
         accepted.append({"benchmark": "enterpriseops_gym", "task_id": task.task_id,
                          "family": domain, "upstream_split": mode,
                          "group": f"enterpriseops_gym:{key}",
-                         "file": name, "sha256": hashlib.sha256(encoded.encode()).hexdigest()})
+                         "file": name, "sha256": hashlib.sha256(encoded.encode()).hexdigest(),
+                         "gyms": len(task.gyms) or 1})
     if not accepted:
         raise ValueError("Release has no supported tasks")
     output.mkdir(parents=True, exist_ok=False)
@@ -56,7 +57,9 @@ def import_rows(rows, output: pathlib.Path, *, revision: str, mode: str) -> dict
                 "accepted": accepted, "rejected": rejected, "rows": len(seen)}
     (output / "import.json").write_text(json.dumps(manifest, indent=2) + "\n")
     # Identifiers/descriptors only: this is safe input to harness-evolve split.
-    catalog = [{k: v for k, v in task.items() if k not in ("file", "sha256")} for task in accepted]
+    # harness_evolution evaluates single-gym tasks only (its freeze refuses the others), so they alone go in.
+    catalog = [{k: v for k, v in task.items() if k not in ("file", "sha256", "gyms")}
+               for task in accepted if task["gyms"] == 1]
     (output / "catalog.json").write_text(json.dumps(catalog, indent=2) + "\n")
     return manifest
 

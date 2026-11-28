@@ -13,7 +13,8 @@ Environment:
     EOG_OPS_USER / EOG_OPS_PASSWORD / EOG_OPS_TOKEN   ops login
     EOG_ADAPTER_PUBLIC_URL   optional: your own tunnel to the gym proxy
     EOG_TASKS_DIR        task JSONs (default: vendored data/revised)
-    EOG_GYM_URL          override the gym server URL for every task
+    EOG_GYM_URL          override the gym server URL for every single-gym task
+                         (a multi-gym task keeps each gym's own URL)
                          (default: each task's own, i.e. localhost ports)
 
 Scoring is deterministic (upstream's SQL verifiers) -- no judge.
@@ -33,7 +34,7 @@ from eogbench.dataset import Task, load_tasks
 from eogbench.proxy import GymProxy
 from eogbench.registrar import Registrar
 from eogbench.report import TaskOutcome, render
-from eogbench.runner import run_task, write_trace
+from eogbench.runner import RolloutResult, kept_results, run_task, write_trace
 from eogbench.tunnel import expose_adapter
 
 RUNS_DIR = pathlib.Path(__file__).parent.parent / "runs"
@@ -51,6 +52,13 @@ def build_parser() -> argparse.ArgumentParser:
                      help="Comma-separated task ids (domain/stem)")
     run.add_argument("--wall-clock-cap", type=float, default=1800.0)
     run.add_argument("--run-id", default=None)
+    run.add_argument("--scoring", choices=["upstream", "all-verifiers"], default="upstream",  # = runner.SCORING_RULES
+                     help="upstream (default): upstream's verdict (one result per verifier name, "
+                          "the last wins; a verifier query the gym rejects as a query error is a "
+                          "fail; upstream also fails a verifier on a transport or database fault, "
+                          "which stays an infrastructure error here); all-verifiers: every "
+                          "verifier passed, a rejected query is an infrastructure error (this "
+                          "adapter's earlier rule)")
 
     report = sub.add_parser("report", help="Render a run report")
     report.add_argument("run_id")
@@ -114,7 +122,9 @@ def select_tasks(tasks: list[Task], spec: str | None) -> list[Task]:
 
 
 def _outcome(meta: dict, domain: str) -> TaskOutcome:
-    results = list(meta.get("verifier_results") or [])
+    # The results the verdict read (upstream: the last of a repeated verifier name), so that passed agrees with
+    # verifiers_passed == verifiers_total.
+    results = kept_results(list(meta.get("verifier_results") or []), meta.get("scoring") or "upstream")
     return TaskOutcome(
         task_id=meta["task_id"],
         domain=domain,
@@ -127,6 +137,53 @@ def _outcome(meta: dict, domain: str) -> TaskOutcome:
         failed_verifiers=[str(v.get("name")) for v in results
                           if not v.get("passed")],
     )
+
+
+async def _run_multi_gym_task(client, registrar, harness_base: str, task: Task,
+                              args: argparse.Namespace) -> RolloutResult:
+    """A multi-gym (hybrid) task: one proxy, and one address the harness can
+    reach, per gym, for this task only. EOG_ADAPTER_PUBLIC_URL fronts one
+    proxy, so such a task is recorded as not run (an infrastructure row)."""
+    if os.environ.get("EOG_ADAPTER_PUBLIC_URL"):
+        return RolloutResult(
+            task_id=task.task_id, session_id="", terminal_status="env_error",
+            scoring=args.scoring,
+            error="multi-gym task: EOG_ADAPTER_PUBLIC_URL fronts one gym proxy, "
+                  "and this task needs one per gym",
+        )
+    # One proxy per GYM, never per URL: a proxy holds one task scope (database, tools, context,
+    # credentials), so two gyms sharing a URL still get one each.
+    proxies: dict[str, GymProxy] = {}
+    exposures = []
+    try:
+        try:
+            gym_proxies = {}
+            for gym in task.gyms:
+                proxy = proxies[gym.name] = GymProxy(gym.url).start()
+                exposure = expose_adapter(harness_base, proxy.port)
+                exposures.append(exposure)
+                gym_proxies[gym.name] = (exposure.public_base or proxy.local_url, proxy)
+        except Exception as exc:  # noqa: BLE001 - setup failure: this task's infrastructure row, the run goes on
+            return RolloutResult(
+                task_id=task.task_id, session_id="", terminal_status="env_error",
+                scoring=args.scoring, error=f"multi-gym setup: {type(exc).__name__}: {exc}",
+            )
+        return await run_task(
+            client, registrar, "", None, task,
+            wall_clock_cap_s=args.wall_clock_cap,
+            gym_proxies=gym_proxies, scoring=args.scoring,
+        )
+    finally:
+        for exposure in exposures:
+            try:
+                exposure.close()
+            except Exception:  # noqa: BLE001 - every proxy below is still stopped
+                pass
+        for proxy in proxies.values():
+            try:
+                proxy.stop()
+            except Exception:  # noqa: BLE001
+                pass
 
 
 async def _cmd_run(args: argparse.Namespace) -> int:
@@ -144,9 +201,11 @@ async def _cmd_run(args: argparse.Namespace) -> int:
     )
     out_dir = _run_dir(run_id)
     imported = pathlib.Path(os.environ.get("EOG_TASKS_DIR", "")) / "import.json"
+    run_config: dict = {"scoring": args.scoring}
     if imported.is_file():
         metadata = json.loads(imported.read_text())
-        (out_dir / "run-config.json").write_text(json.dumps({"mode": metadata["mode"], "dataset_revision": metadata["revision"]}) + "\n")
+        run_config.update({"mode": metadata["mode"], "dataset_revision": metadata["revision"]})
+    (out_dir / "run-config.json").write_text(json.dumps(run_config) + "\n")
     print(f"run {run_id}: {len(tasks)} task(s), pin {commit[:12]}, sequential")
 
     gym_override = os.environ.get("EOG_GYM_URL")
@@ -170,6 +229,22 @@ async def _cmd_run(args: argparse.Namespace) -> int:
         exposure = None
         try:
             for task in tasks:
+                if task.gyms:
+                    result = await _run_multi_gym_task(client, registrar, harness_base, task, args)
+                    write_trace(str(out_dir), result)
+                    outcomes.append(_outcome({
+                        "task_id": result.task_id,
+                        "passed": result.passed,
+                        "verifier_results": result.verifier_results,
+                        "scoring": result.scoring,
+                        "terminal_status": result.terminal_status,
+                        "error": result.error,
+                        "verify_error": result.verify_error,
+                    }, task.domain))
+                    mark = {True: "PASS", False: "FAIL", None: "??"}[result.passed]
+                    print(f"  {result.task_id}: {mark} ({result.terminal_status}, "
+                          f"{result.wall_clock_s:.0f}s, {len(task.gyms)} gyms)")
+                    continue
                 if task.gym_url != current_url:
                     if exposure is not None:
                         exposure.close()
@@ -185,12 +260,14 @@ async def _cmd_run(args: argparse.Namespace) -> int:
                 result = await run_task(
                     client, registrar, registered_base, proxy, task,
                     wall_clock_cap_s=args.wall_clock_cap,
+                    scoring=args.scoring,
                 )
                 write_trace(str(out_dir), result)
                 outcomes.append(_outcome({
                     "task_id": result.task_id,
                     "passed": result.passed,
                     "verifier_results": result.verifier_results,
+                    "scoring": result.scoring,
                     "terminal_status": result.terminal_status,
                     "error": result.error,
                     "verify_error": result.verify_error,

@@ -19,6 +19,17 @@ from eogbench import vendor
 
 
 @dataclass(frozen=True)
+class Gym:
+    """One entry of a multi-gym (hybrid) task's ``gym_servers_config``."""
+    name: str  # mcp_server_name: the key verifiers name in ``gym_name``
+    url: str
+    seed_database_file: str
+    context: dict[str, Any] = field(default_factory=dict)
+    auth_config: dict[str, Any] = field(default_factory=dict)
+    user_info: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class Task:
     task_id: str  # "<domain>/<filename stem>"
     domain: str
@@ -35,6 +46,10 @@ class Task:
     context: dict[str, Any] = field(default_factory=dict)
     auth_config: dict[str, Any] = field(default_factory=dict)
     user_info: dict[str, Any] = field(default_factory=dict)
+    # Multi-gym (hybrid) tasks only: every gym in upstream's order (the
+    # gym_* fields above then repeat the first one). Empty for a single-gym
+    # task, whose one gym is the gym_* fields -- that path is unchanged.
+    gyms: tuple[Gym, ...] = ()
 
 
 def tasks_dir() -> pathlib.Path:
@@ -47,7 +62,9 @@ def tasks_dir() -> pathlib.Path:
 def structured(value, kind):
     """HF columns may contain JSON strings, lists, or Arrow/numpy arrays."""
     if isinstance(value, str):
-        value = json.loads(value)
+        # An empty string is an absent value: 102 oracle rows carry user_info == "" (they were rejected as
+        # "Expecting value", 28 of them dev-split ids).
+        value = json.loads(value) if value.strip() else None
     if hasattr(value, "tolist"):
         value = value.tolist()
     if value is None:
@@ -57,15 +74,48 @@ def structured(value, kind):
     return value
 
 
+def _seed_path(gym: dict) -> pathlib.PurePosixPath:
+    seed = pathlib.PurePosixPath(str(gym.get("seed_database_file") or ""))
+    if str(seed) == "." or seed.is_absolute() or ".." in seed.parts or "\\" in str(seed):
+        raise ValueError("Seed database must be a nonempty relative path")
+    return seed
+
+
+def _parse_gyms(gyms: list, verifiers: list) -> tuple[Gym, ...]:
+    """A hybrid task's gyms, upstream's ``gym_servers_config`` semantics
+    (benchmark/executor.py): every gym is seeded and connected; a tool name
+    belongs to the first gym listing it; each verifier runs against the
+    database of the gym its ``gym_name`` names."""
+    if any(not isinstance(g, dict) for g in gyms):
+        raise ValueError("Gym configuration must be an object")
+    names = [str(g.get("mcp_server_name") or "") for g in gyms]
+    if not all(names) or len(set(names)) != len(names):
+        raise ValueError("Multi-gym task needs distinct, nonempty gym names")
+    # Upstream skips a verifier whose gym_name is absent from the config and
+    # sends one without gym_name to the first gym's client with no database
+    # id; neither occurs in the public data, so both are refused here.
+    if any(v.get("gym_name") not in names for v in verifiers):
+        raise ValueError("Verifier refers to a gym outside the task's gym_servers_config")
+    out = []
+    for g in gyms:
+        _seed_path(g)
+        out.append(Gym(
+            name=str(g.get("mcp_server_name") or ""),
+            url=str(g.get("mcp_server_url") or ""),
+            seed_database_file=str(g.get("seed_database_file") or ""),
+            context=structured(g.get("context"), dict),
+            auth_config=structured(g.get("auth_config"), dict),
+            user_info=structured(g.get("user_info"), dict),
+        ))
+    return tuple(out)
+
+
 def parse_record(raw: dict, domain: str, stem: str) -> Task:
     if not all(re.fullmatch(r"[A-Za-z0-9_-]+", v) for v in (domain, stem)):
         raise ValueError("Task domain and ID must be path-safe")
     gyms = structured(raw.get("gym_servers_config"), list)
-    if len(gyms) != 1:
-        raise ValueError(
-            f"{domain}/{stem}: expected exactly one gym server, got {len(gyms)} "
-            "(multi-gym hybrid tasks are out of scope for now)"
-        )
+    if not gyms:
+        raise ValueError(f"{domain}/{stem}: expected at least one gym server, got 0")
     gym = gyms[0]
     if not isinstance(gym, dict):
         raise ValueError("Gym configuration must be an object")
@@ -78,11 +128,10 @@ def parse_record(raw: dict, domain: str, stem: str) -> Task:
     verifiers = structured(raw.get("verifiers"), list)
     if not verifiers or any(not isinstance(v, dict) or v.get("verifier_type") != "database_state" for v in verifiers):
         raise ValueError("Only nonempty database_state verifier sets are supported")
-    if any(v.get("gym_name") not in (None, "", gym.get("mcp_server_name")) for v in verifiers):
+    multi = _parse_gyms(gyms, verifiers) if len(gyms) > 1 else ()
+    if not multi and any(v.get("gym_name") not in (None, "", gym.get("mcp_server_name")) for v in verifiers):
         raise ValueError("Verifier refers to a different gym")
-    seed = pathlib.PurePosixPath(str(gym.get("seed_database_file") or ""))
-    if str(seed) == "." or seed.is_absolute() or ".." in seed.parts or "\\" in str(seed):
-        raise ValueError("Seed database must be a nonempty relative path")
+    _seed_path(gym)
     return Task(
         task_id=f"{domain}/{stem.removeprefix('task_')}",
         domain=domain,
@@ -99,6 +148,7 @@ def parse_record(raw: dict, domain: str, stem: str) -> Task:
         context=structured(gym.get("context"), dict),
         auth_config=structured(gym.get("auth_config"), dict),
         user_info=structured(gym.get("user_info"), dict),
+        gyms=multi,
     )
 
 
