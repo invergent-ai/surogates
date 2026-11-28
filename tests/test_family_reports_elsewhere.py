@@ -150,7 +150,9 @@ async def test_the_refused_resume_writes_nothing(monkeypatch):
     child = SimpleNamespace(id=uuid4(), parent_id=row.id, status="completed", config={})
 
     class Store(_Store):
-        emitted, updated = [], []
+        def __init__(self, session):
+            super().__init__(session)
+            self.emitted, self.updated = [], []
 
         async def get_session(self, sid):
             return row if sid == row.id else child
