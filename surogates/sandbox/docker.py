@@ -11,10 +11,12 @@ isolation remains the Kubernetes backend's job.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
 import secrets
+import time
 import uuid
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
@@ -45,6 +47,10 @@ _PORT_CONFLICT_RE = re.compile(
     r"(port is already allocated|Bind for .* failed|failed to bind host port .*address already in use)", re.IGNORECASE,
 )
 _MAX_PORT_ATTEMPTS = 25
+# "range" mode: how long a port stays set aside after a start that failed (Docker may still create its container)
+# and after Docker said something outside the sandboxes holds it.
+_FAILED_START_PORT_S = 30.0
+_FOREIGN_PORT_S = 60.0
 #: The most processes and threads a sandbox container may hold at once (``--pids-limit``), unless configured.
 DEFAULT_PIDS_LIMIT = 4096
 # Docker refuses a memory limit under 6 MiB, and --cpus under 0.01; it takes --cpus in nanoCPUs.
@@ -205,9 +211,32 @@ class DockerSandbox(ImageSessions):
         image_pull: str = "missing",
         image_pull_timeout: float = 900,
         image_deployment: str = "",
+        image_port_mode: str = "docker",
+        executor_port_count: int = 0,
         docker: _DockerDriver | None = None,
         httpx_transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
+        if image_port_mode not in ("docker", "range"):
+            raise ValueError(f"sandbox.docker_image_port_mode must be 'docker' or 'range', not {image_port_mode!r}")
+        if image_port_mode == "range" and not (
+            executor_port_count > 0 and 0 < executor_port_base and executor_port_base + executor_port_count - 1 <= 65535
+        ):
+            raise ValueError(
+                "sandbox.docker_image_port_mode 'range' needs docker_executor_port_count > 0, its ports within 1-65535 "
+                f"(base {executor_port_base}, count {executor_port_count})"
+            )
+        #: "range": every sandbox of this worker, a session's own image's included, asks for a port of the range
+        #: [executor_port_base, executor_port_base + executor_port_count), free once its container is gone.
+        self._port_range = (
+            range(executor_port_base, executor_port_base + executor_port_count) if image_port_mode == "range" else None
+        )
+        #: Ports of the range a start of this worker chose and Docker does not list yet.
+        self._ports_starting: set[int] = set()
+        #: Ports set aside after a failed start, until (time.monotonic()).
+        self._ports_set_aside: dict[int, float] = {}
+        self._port_cursor = 0
+        self._overlap_told: set[str] = set()
+        self._port_lock = asyncio.Lock()
         self._image = image
         self._init_image_sessions(bundle_image=executor_bundle_image, pull=image_pull, pull_timeout=image_pull_timeout,
                                   deployment=image_deployment, bundle_image_musl=executor_bundle_image_musl)
@@ -248,6 +277,8 @@ class DockerSandbox(ImageSessions):
             image_pull=sandbox.docker_image_pull,
             image_pull_timeout=sandbox.docker_image_pull_timeout,
             image_deployment=sandbox.image_deployment,
+            image_port_mode=sandbox.docker_image_port_mode,
+            executor_port_count=sandbox.docker_executor_port_count,
         )
 
     # ------------------------------------------------------------------
@@ -304,10 +335,13 @@ class DockerSandbox(ImageSessions):
 
         container_id = ""
         for _attempt in range(_MAX_PORT_ATTEMPTS):
-            async with self._lock:
-                offset = self._next_offset
-                self._next_offset += 1
-            host_port = self._port_base + offset
+            if self._port_range is not None:
+                host_port = await self._take_port()
+            else:
+                async with self._lock:
+                    offset = self._next_offset
+                    self._next_offset += 1
+                host_port = self._port_base + offset
 
             # Published on the loopback only, where the worker calls it: on every interface, the host's
             # network, and any container through the gateway, could reach the daemon (its token aside).
@@ -337,9 +371,26 @@ class DockerSandbox(ImageSessions):
                 args += ["-e", f"{key}={value}"]
             args.append(image)
 
-            code, stdout, stderr = await self._docker.run(args)
+            if self._port_range is None:
+                code, stdout, stderr = await self._docker.run(args)
+            else:
+                try:
+                    code, stdout, stderr = await self._docker.run(args)
+                except BaseException:
+                    self._port_started(host_port, failed=True)
+                    raise
+                foreign = code != 0 and bool(_PORT_CONFLICT_RE.search(stderr.decode(errors="replace")))
+                # Any failed run may still leave a container behind (a client that lost the daemon mid-create).
+                self._port_started(host_port, failed=code != 0, foreign=foreign)
             if code != 0:
                 stderr_text = stderr.decode(errors="replace")
+                if _PORT_CONFLICT_RE.search(stderr_text) and self._port_range is not None:
+                    # Held by something that is no sandbox of this host: an error, never a port shared or skipped.
+                    raise SandboxUnavailableError(
+                        f"docker run failed: port {host_port} of this worker's sandbox port range is held outside the "
+                        f"sandboxes: {stderr_text.strip()[:300]}",
+                        classification="docker",
+                    )
                 if _PORT_CONFLICT_RE.search(stderr_text):
                     logger.warning(
                         "Sandbox port %d unavailable; trying next offset", host_port,
@@ -394,6 +445,89 @@ class DockerSandbox(ImageSessions):
             sandbox_id, container_id, host_port,
         )
         return sandbox_id
+
+    # -- "range" mode: a fixed port of this worker's range per sandbox container -------------------------------------
+
+    async def _take_port(self) -> int:
+        """A port of this worker's range that no sandbox container of the host asks for (in any state: one stopped
+        keeps its port, and a session's own image's starts again on it), that no start of this worker is taking and
+        that is not set aside after a failed start; the next such one after the last handed out, so that a port just
+        freed is the last one given again.  Held for the caller's ``docker run`` until :meth:`_port_started`.  None
+        free: refused."""
+        assert self._port_range is not None
+        async with self._port_lock:
+            now = time.monotonic()
+            for p in [p for p, until in self._ports_set_aside.items() if until <= now]:
+                del self._ports_set_aside[p]
+            held = await self._held_ports() | self._ports_starting | set(self._ports_set_aside)
+            size = len(self._port_range)
+            port = next((self._port_range[(self._port_cursor + k) % size] for k in range(size)
+                         if self._port_range[(self._port_cursor + k) % size] not in held), None)
+            if port is None:
+                taken = sum(1 for p in held if p in self._port_range)
+                raise SandboxUnavailableError(
+                    f"no free sandbox port in this worker's range {self._port_range.start}-{self._port_range.stop - 1}: "
+                    f"{taken} held by sandbox containers or starts (a port is free once its container is removed)",
+                    classification="docker",
+                )
+            self._port_cursor = (self._port_range.index(port) + 1) % size
+            self._ports_starting.add(port)
+            return port
+
+    def _port_started(self, port: int, *, failed: bool = False, foreign: bool = False) -> None:
+        """The ``docker run`` that asked for *port* returned: its container, if any, now holds it in Docker's list.
+        *failed* (it raised, a cancel included): Docker may still create the container, so the port stays set aside
+        a while.  *foreign*: Docker said something else holds it; set aside longer, so starts after this one try
+        another port."""
+        self._ports_starting.discard(port)
+        if failed or foreign:
+            self._ports_set_aside[port] = time.monotonic() + (_FOREIGN_PORT_S if foreign else _FAILED_START_PORT_S)
+
+    async def _held_ports(self) -> set[int]:
+        """The loopback ports the host's sandbox containers ask for (their ``HostConfig.PortBindings``): what Docker
+        records whether or not the network published them.  Docker unsure: refused, never read as free."""
+        from surogates.sandbox.docker_image import IMAGE_APP
+
+        ids: list[str] = []
+        for app in ("surogates-sandbox", IMAGE_APP):
+            code, stdout, stderr = await self._docker.run(["ps", "-aq", "--no-trunc", "--filter", f"label=app={app}"])
+            if code != 0:
+                raise SandboxUnavailableError(
+                    f"docker ps failed: {stderr.decode(errors='replace').strip()[:300]}", classification="docker",
+                )
+            ids += stdout.decode(errors="replace").split()
+        if not ids:
+            return set()
+        code, stdout, stderr = await self._docker.run(
+            ["inspect", "--type", "container", "--format",
+             '{{index .Config.Labels "surogates.worker"}}\t{{json .HostConfig.PortBindings}}', *dict.fromkeys(ids)],
+        )
+        if code != 0 and b"No such" not in stderr:  # one removed since the list is gone, its port free
+            raise SandboxUnavailableError(
+                f"docker inspect failed: {stderr.decode(errors='replace').strip()[:300]}", classification="docker",
+            )
+        held: set[int] = set()
+        for line in stdout.decode(errors="replace").splitlines():
+            if not line.strip():
+                continue
+            worker, _, ports = line.partition("\t")
+            try:
+                bindings = json.loads(ports) or {}
+                found = {int(b.get("HostPort") or 0) for b in bindings.get(f"{_IN_CONTAINER_PORT}/tcp") or []}
+            except (ValueError, TypeError, AttributeError) as exc:
+                raise SandboxUnavailableError(  # unsure of a container's port: never read as free
+                    f"docker inspect gave a port binding that could not be read: {line[:200]!r}",
+                    classification="docker",
+                ) from exc
+            found.discard(0)
+            mine = self._port_range is not None and any(p in self._port_range for p in found)
+            if mine and self._worker and worker not in (self._worker, "", "<no value>", *self._overlap_told):
+                self._overlap_told.add(worker)  # once a label: a restarted worker's own older containers carry another
+                # Worker ranges must not overlap: another worker's start cannot see this one's in flight.
+                logger.warning("Sandbox port(s) %s of this worker's range are held by worker %s's container: the "
+                               "workers' ranges overlap", sorted(p for p in found if p in self._port_range), worker)
+            held |= found
+        return held
 
     async def execute(self, sandbox_id: str, name: str, input: str, *, timeout: float | None = None) -> str:
         entry = self._entries.get(sandbox_id)
