@@ -177,8 +177,15 @@ class TestLibrarySeams:
         from automationbench.schema.world import WorldState
         from abbench.bridge import score
 
-        AssertionRegistry.register("_abbench_test_meta_equals")(
-            lambda world, a: str(getattr(world.meta, a["field"])) == a["value"])
+        name = "_abbench_test_meta_equals"  # a test assertion type, removed from upstream's registry below
+        AssertionRegistry._handlers[name] = lambda world, a: str(getattr(world.meta, a["field"])) == a["value"]
+        try:
+            self._free_guard_cases(score, WorldState, dt)
+        finally:
+            AssertionRegistry._handlers.pop(name, None)
+
+    @staticmethod
+    def _free_guard_cases(score, WorldState, dt):
         t0, t1 = "2026-03-15 09:00:00+00:00", "2026-03-16 09:00:00+00:00"
         initial = {"meta": {"schema_version": "0.1.0", "current_time": t0}}
         guard = {"type": "_abbench_test_meta_equals", "field": "schema_version", "value": "0.1.0"}
